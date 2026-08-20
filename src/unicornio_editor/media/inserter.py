@@ -61,7 +61,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
         if not credit.startswith("Crédito da imagem:"):
             raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
         figure = (
-            f'<figure><img src="{escape(url, quote=True)}" alt="{escape(alt, quote=True)}" />'
+            f'<figure class="aligncenter"><img src="{escape(url, quote=True)}" alt="{escape(alt, quote=True)}" />'
             f"<figcaption>{escape(credit)}</figcaption></figure>"
         )
         placements.append((index, figure))

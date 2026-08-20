@@ -46,6 +46,13 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Preserve fatos, datas, numeros, nomes, plataformas e incertezas.
 - Nunca invente fatos.
 - Evite repeticoes e frases genericas de IA.
+- Antes de processar, confirme correspondência entre o assunto, os temas/categorias/tipos de conteúdo aceitos pelo site e os tópicos já publicados; em caso de dúvida, pule sem alterar.
+- Até 600 palavras: pelo menos 2 imagens relevantes; de 601 a 1.000: pelo menos 4; de 1.001 a 1.500: pelo menos 6. Para textos maiores, mantenha pelo menos 6 e aumente conforme a densidade do conteúdo.
+- A quantidade é um mínimo editorial, não motivo para inserir imagens sem relação direta. Cada imagem deve contextualizar o trecho e passar pela licença.
+- Imagens inline devem ser centralizadas (`figure.aligncenter` ou equivalente); a featured image deve seguir o wrapper visual do tema sem duplicar a imagem no conteúdo.
+- Revise semanticamente título, subtítulos, palavra-chave, entidades e termos relacionados; evite keyword stuffing e exija que o foco apareça naturalmente no título e no corpo.
+- Organize textos longos com subtítulos descritivos e parágrafos curtos; o resultado deve ser interessante para uma pessoa, não apenas para um crawler.
+- Remova sinais de texto automatizado: travessões recorrentes (`—`/`–`), frases genéricas, repetições, conclusões óbvias e construções mecânicas.
 - SEO title <= 65 caracteres.
 - Meta description entre 120 e 160 caracteres.
 - Keyword deve aparecer naturalmente; sem stuffing.

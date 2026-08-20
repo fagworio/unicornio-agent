@@ -18,9 +18,9 @@ class MediaInserterTests(unittest.TestCase):
             "alt_text": "Imagem de jogo",
             "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
         }])
-        self.assertIn('<figure><img src="http://wordpress.local/image.webp" alt="Imagem de jogo" />', result)
+        self.assertIn('<figure class="aligncenter"><img src="http://wordpress.local/image.webp" alt="Imagem de jogo" />', result)
         self.assertIn("<figcaption>Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).</figcaption>", result)
-        self.assertLess(result.index("</p><figure>"), result.index("<p>Três."))
+        self.assertLess(result.index('</p><figure class="aligncenter">'), result.index("<p>Três."))
 
     def test_rejects_insertion_inside_paragraph(self):
         with self.assertRaises(MediaInsertionError):
