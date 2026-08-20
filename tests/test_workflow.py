@@ -208,16 +208,17 @@ class WorkflowTests(unittest.TestCase):
             def get_media(self, media_id):
                 return media
 
+            def upload_media(self, path, *, filename, alt_text, title, caption=None):
+                self.uploads = getattr(self, "uploads", 0) + 1
+                return {"id": 88, "source_url": "https://wp.test/uploads/featured-1200x720.webp"}
+
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
             "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
-        ), mock.patch(
-            "unicornio_editor.workflow.upload_image",
-            return_value={"id": 88, "source_url": "https://wp.test/uploads/featured-1200x720.webp"},
-        ) as upload:
+        ):
             with tempfile.TemporaryDirectory() as directory:
                 client = MediaClient(post)
                 report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
-        upload.assert_called_once()
+        self.assertEqual(client.uploads, 1)
         self.assertEqual(client.updated[0][1]["featured_media"], 88)
         self.assertEqual(report["featured_media"], 88)
 
