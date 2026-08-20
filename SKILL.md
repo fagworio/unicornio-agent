@@ -47,6 +47,9 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
     checklist completo e so publica com `PUBLISH_ENABLED=true` (gate duplo: o script do cron de
     publicacao liga PUBLISH_ENABLED e EDITOR_DRY_RUN=false; o .env permanece dry-run). NUNCA publique
     manualmente por fora do fluxo.
+    Plano de publicacao (cron diario, America/Sao_Paulo): 00h=5, 08h=2, 12h=2, 18h=3, 21h=3
+    (15/dia). Backlog novo chega entre 03:30 e 05:00; `PUBLISH_LIMIT` define a cota da janela e
+    conta apenas posts publicados de fato.
 15. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
 
 ## Texto e SEO

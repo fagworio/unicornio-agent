@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest import mock
 
 from unicornio_editor.config import Config
-from unicornio_editor.workflow import apply_editorial, prepare_post, publish_post
+from unicornio_editor.workflow import (
+    apply_editorial,
+    prepare_post,
+    publish_post,
+    publish_ready_posts,
+)
 
 
 def editorial_payload(decision="process"):
@@ -349,6 +354,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.updated[0][0], 42)
         self.assertEqual(client.updated[0][1]["status"], "publish")
         self.assertIn("_ai_editor_published_at", client.updated[0][1]["meta"])
+
+    def test_publish_ready_respects_window_limit(self):
+        class QueueClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def get_post(self, post_id):
+                return next(p for p in self.posts if p["id"] == post_id)
+
+            def list_pending(self, per_page=50):
+                return self.posts
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for post_id in (1, 2, 3):
+                (root / "backups" / str(post_id)).mkdir(parents=True)
+                (root / "backups" / str(post_id) / "editorial.latest.json").write_text(
+                    json.dumps(editorial_payload()), encoding="utf-8"
+                )
+            queue = [
+                {**self.checklist_pass_post(), "id": 1},
+                {**self.checklist_pass_post(), "id": 2},
+                {**self.checklist_pass_post(), "id": 3},
+            ]
+            client = QueueClient(queue)
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True, publish_limit=2,
+            )
+            outcomes = publish_ready_posts(client, config, root, limit=config.publish_limit)
+        published = [o for o in outcomes if o.get("wordpress_changed")]
+        self.assertEqual(len(published), 2)
+        self.assertEqual([o["post_id"] for o in published], [1, 2])
+        self.assertEqual(len(client.updated), 2)
 
 
 if __name__ == "__main__":

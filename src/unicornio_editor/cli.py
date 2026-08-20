@@ -19,6 +19,7 @@ from .workflow import (
     original_link_of,
     prepare_post,
     publish_post,
+    publish_ready_posts,
 )
 from .wordpress import WordPressClient, WordPressError
 
@@ -56,10 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_parser.add_argument("post_id", type=int)
     publish_parser.add_argument("--root", type=Path, default=Path("."))
-    subparsers.add_parser(
+    publish_ready_parser = subparsers.add_parser(
         "publish-ready",
-        help="publica todos os pending prontos (checklist ok); silencioso quando nao ha nada",
+        help="publica os pending prontos ate a cota da janela (PUBLISH_LIMIT); silencioso quando nao ha nada",
     )
+    publish_ready_parser.add_argument("--root", type=Path, default=Path("."))
 
     report_parser = subparsers.add_parser("maintenance-report", help="gera diagnóstico sem escrever")
     report_parser.add_argument("report_file", type=Path)
@@ -108,22 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "publish":
             result = publish_post(client, config, args.root, args.post_id)
         elif args.command == "publish-ready":
-            posts = client.list_pending(per_page=50)
-            outcomes = []
-            for candidate in posts:
-                candidate_id = candidate.get("id")
-                if not isinstance(candidate_id, int):
-                    continue
-                try:
-                    outcome = publish_post(client, config, args.root, candidate_id)
-                except Exception as exc:  # noqa: BLE001 - report per post, keep the loop alive
-                    outcome = {
-                        "post_id": candidate_id,
-                        "wordpress_changed": False,
-                        "status": "error",
-                        "reason": str(exc),
-                    }
-                outcomes.append(outcome)
+            outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             if any(outcome.get("wordpress_changed") for outcome in outcomes):
                 published = [o for o in outcomes if o.get("wordpress_changed")]
                 result = {

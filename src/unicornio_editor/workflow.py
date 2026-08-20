@@ -346,6 +346,39 @@ def publish_post(
     }
 
 
+def publish_ready_posts(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Publish pending posts that pass the checklist, up to ``limit`` per window.
+
+    ``limit`` counts only successfully published posts; skipped/blocked posts
+    do not consume the window quota. ``limit=0`` means no cap.
+    """
+    outcomes: list[dict[str, Any]] = []
+    posts = client.list_pending(per_page=50)
+    for candidate in posts:
+        candidate_id = candidate.get("id")
+        if not isinstance(candidate_id, int):
+            continue
+        published = sum(1 for outcome in outcomes if outcome.get("wordpress_changed"))
+        if limit and published >= limit:
+            break
+        try:
+            outcome = publish_post(client, config, root, candidate_id)
+        except Exception as exc:  # noqa: BLE001 - report per post, keep the loop alive
+            outcome = {
+                "post_id": candidate_id,
+                "wordpress_changed": False,
+                "status": "error",
+                "reason": str(exc),
+            }
+        outcomes.append(outcome)
+    return outcomes
+
+
 def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:
     """Discover a YouTube trailer for game content; fail-closed to None."""
     game_name = editorial.get("game_name")
