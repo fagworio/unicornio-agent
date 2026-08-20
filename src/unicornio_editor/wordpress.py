@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
+import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.error import URLError
@@ -53,6 +56,70 @@ class WordPressClient:
         return self._expect_object(
             self._request("POST", f"/posts/{self._id(post_id)}", body=dict(payload))
         )
+
+    def upload_media(
+        self,
+        path: str,
+        *,
+        filename: str,
+        alt_text: str,
+        title: str,
+    ) -> dict[str, Any]:
+        if self.config.dry_run:
+            raise SafetyError("dry-run blocks WordPress media uploads")
+        media_path = Path(path)
+        if not media_path.is_file() or media_path.suffix.lower() != ".webp":
+            raise SafetyError("media upload requires an existing WebP file")
+        content = media_path.read_bytes()
+        if len(content) > 8 * 1024 * 1024:
+            raise SafetyError("media upload exceeds the 8 MiB limit")
+        boundary = uuid.uuid4().hex.encode("ascii")
+        chunks: list[bytes] = []
+
+        def field(name: str, value: str) -> None:
+            chunks.extend(
+                [
+                    b"--" + boundary + b"\\r\\n",
+                    f'Content-Disposition: form-data; name="{name}"\\r\\n\\r\\n'.encode(),
+                    value.encode("utf-8"),
+                    b"\\r\\n",
+                ]
+            )
+
+        field("alt_text", alt_text)
+        field("title", title)
+        mime = mimetypes.guess_type(filename)[0] or "image/webp"
+        chunks.extend(
+            [
+                b"--" + boundary + b"\\r\\n",
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\\r\\n'.encode(),
+                f"Content-Type: {mime}\\r\\n\\r\\n".encode(),
+                content,
+                b"\\r\\n--" + boundary + b"--\\r\\n",
+            ]
+        )
+        request = Request(
+            f"{self.base_url}/media",
+            data=b"".join(chunks),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
+                **self._auth_header(),
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.config.http_timeout) as response:
+                value = json.loads(response.read())
+        except (UrlHTTPError, URLError, json.JSONDecodeError) as exc:
+            raise WordPressError("WordPress media upload failed") from exc
+        return self._expect_object(value)
+
+    def _auth_header(self) -> dict[str, str]:
+        if not self.config.app_user or not self.config.app_password:
+            return {}
+        token = f"{self.config.app_user}:{self.config.app_password}".encode()
+        return {"Authorization": f"Basic {base64.b64encode(token).decode()}"}
 
     def _request(
         self,
