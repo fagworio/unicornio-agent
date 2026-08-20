@@ -10,6 +10,7 @@ from .builder import append_canonical_footer
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
+from .list_quality import validate_list_content
 from .observability import build_processing_markers
 from .seo.rank_math import build_meta
 from .wordpress import WordPressClient
@@ -55,6 +56,7 @@ def apply_editorial(
         }
 
     content = append_canonical_footer(editorial["cleaned_html"], _original_link(post))
+    validate_list_content(_post_title(post) or editorial["seo"]["title"], content)
     if config.dry_run:
         return {
             "post_id": post_id,
@@ -98,6 +100,15 @@ def _raw_content(post: dict[str, Any]) -> str:
     if not isinstance(content, dict) or not isinstance(content.get("raw"), str):
         raise WorkflowError("post content.raw is missing")
     return content["raw"]
+
+
+def _post_title(post: dict[str, Any]) -> str | None:
+    title = post.get("title")
+    if isinstance(title, dict) and isinstance(title.get("raw"), str):
+        return title["raw"].strip() or None
+    if isinstance(title, str):
+        return title.strip() or None
+    return None
 
 
 def _original_link(post: dict[str, Any]) -> str | None:

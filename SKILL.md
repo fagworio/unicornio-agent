@@ -57,5 +57,14 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Meta description entre 120 e 160 caracteres.
 - Keyword deve aparecer naturalmente; sem stuffing.
 
+## Listas e rankings
+- Detecte listas, rankings, tops, seleções e recomendações numeradas pelo número no título e pelos termos do formato.
+- A quantidade prometida no título deve ser exatamente a quantidade de itens principais.
+- Cada item deve seguir `H2 numerado -> imagem relacionada centralizada -> descrição`, sem texto entre o H2 e a imagem.
+- O H2 deve conter número, nome identificável do item e complemento descritivo; a sequência deve ser crescente ou decrescente, sem duplicatas ou lacunas.
+- Imagens genéricas ou de outro item não servem para cumprir a métrica. O crédito e a licença continuam obrigatórios.
+- Remova sempre a tag `<article>` do conteúdo; o tema é responsável pelos wrappers externos.
+- Antes de publicar, valide quantidade, numeração, presença de H2, imagem imediatamente posterior, descrição posterior e consistência estrutural entre todos os itens.
+
 ## Evolucao
 Rotinas de manutencao futura ficam separadas do pipeline `pending`: imagens quebradas, posts antigos, refresh SEO, links quebrados e midia orfa. Inicialmente devem rodar apenas em modo report.
