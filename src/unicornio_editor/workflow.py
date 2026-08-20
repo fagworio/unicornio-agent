@@ -10,6 +10,7 @@ from .builder import append_canonical_footer
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
+from .seo.rank_math import build_meta
 from .wordpress import WordPressClient
 
 
@@ -64,7 +65,13 @@ def apply_editorial(
 
     latest = client.get_post(post_id)
     _require_pending(latest)
-    result = client.update_post(post_id, {"content": {"raw": content}})
+    result = client.update_post(
+        post_id,
+        {
+            "content": {"raw": content},
+            "meta": build_meta(editorial["seo"], latest.get("meta", {})),
+        },
+    )
     return {
         "post_id": post_id,
         "wordpress_changed": True,
