@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .config import ConfigError, load_config
+from .maintenance import generate_report
 from .workflow import apply_editorial, prepare_post
 from .wordpress import WordPressClient, WordPressError
 
@@ -32,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("post_id", type=int)
     apply_parser.add_argument("editorial_file", type=Path)
     apply_parser.add_argument("--root", type=Path, default=Path("."))
+
+    report_parser = subparsers.add_parser("maintenance-report", help="gera diagnóstico sem escrever")
+    report_parser.add_argument("report_file", type=Path)
+    report_parser.add_argument("--broken-url", action="append", default=[])
+    report_parser.add_argument("--min-inline-images", type=int, default=1)
     return parser
 
 
@@ -41,6 +47,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_parser().print_help()
         return 0
     try:
+        if args.command == "maintenance-report":
+            data = json.loads(args.report_file.read_text(encoding="utf-8"))
+            posts = data.get("posts", []) if isinstance(data, dict) else data
+            result = generate_report(
+                posts,
+                broken_urls=args.broken_url,
+                min_inline_images=args.min_inline_images,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         config = load_config()
         client = WordPressClient(config)
         if args.command == "list-pending":

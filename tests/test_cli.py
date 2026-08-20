@@ -28,6 +28,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(main(["list-pending"]), 0)
         self.assertEqual(json.loads(output.getvalue())[0]["id"], 42)
 
+    def test_maintenance_report_does_not_require_wordpress_credentials(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            report_file = Path(directory) / "posts.json"
+            report_file.write_text(json.dumps([{"id": 1, "content": {"raw": "<p>x</p>"}, "meta": {}}]))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["maintenance-report", str(report_file)]), 0)
+            self.assertIn("missing_cta_source", output.getvalue())
+
+
 
 if __name__ == "__main__":
     unittest.main()
