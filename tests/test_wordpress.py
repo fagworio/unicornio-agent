@@ -1,8 +1,10 @@
 import base64
 import json
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from unicornio_editor.config import Config
@@ -103,6 +105,48 @@ class WordPressClientTests(unittest.TestCase):
         result = WordPressClient(self.config).update_post(42, {"content": "new"})
         self.assertEqual(result["content"], "new")
         self.assertEqual(ApiHandler.requests[-1][2], {"content": "new"})
+
+    def test_upload_media_builds_valid_multipart_with_real_crlf(self):
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as tmp:
+            tmp.write(b"RIFFWEBPfake")
+            tmp_path = tmp.name
+        try:
+            fake_response = mock.Mock()
+            fake_response.read.return_value = b'{"id": 9, "source_url": "https://wp.test/9.webp"}'
+            fake_response.__enter__.return_value = fake_response
+            fake_response.__exit__.return_value = False
+            with mock.patch("unicornio_editor.wordpress.urlopen", return_value=fake_response) as opener:
+                result = WordPressClient(self.config).upload_media(
+                    tmp_path, filename="x.webp", alt_text="alt", title="t", caption="c"
+                )
+            request = opener.call_args[0][0]
+            body = request.data
+            # CRLF line endings, never literal backslash sequences.
+            self.assertIn(b"\r\n", body)
+            self.assertNotIn(b"\\r\\n", body)
+            content_type = request.headers["Content-Type"]
+            self.assertTrue(content_type.startswith("multipart/form-data; boundary="), content_type)
+            boundary = content_type.split("boundary=", 1)[1].encode()
+            self.assertIn(b"--" + boundary + b"\r\n", body)
+            self.assertIn(b"--" + boundary + b"--\r\n", body)
+            self.assertIn(b'name="alt_text"\r\n\r\nalt', body)
+            self.assertIn(b'name="file"; filename="x.webp"', body)
+            self.assertEqual(result["id"], 9)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+    def test_upload_media_blocked_in_dry_run(self):
+        config = Config(
+            content_source="wordpress",
+            wordpress_url=self.base,
+            wordpress_api_base="/wp-json/wp/v2",
+            app_user="bot",
+            app_password="secret",
+            dry_run=True,
+        )
+        with self.assertRaises(SafetyError):
+            WordPressClient(config).upload_media("x.webp", filename="x.webp", alt_text="a", title="t")
 
 
 if __name__ == "__main__":

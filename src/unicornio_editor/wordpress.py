@@ -101,10 +101,10 @@ class WordPressClient:
         def field(name: str, value: str) -> None:
             chunks.extend(
                 [
-                    b"--" + boundary + b"\\r\\n",
-                    f'Content-Disposition: form-data; name="{name}"\\r\\n\\r\\n'.encode(),
+                    b"--" + boundary + b"\r\n",
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
                     value.encode("utf-8"),
-                    b"\\r\\n",
+                    b"\r\n",
                 ]
             )
 
@@ -115,11 +115,11 @@ class WordPressClient:
         mime = mimetypes.guess_type(filename)[0] or "image/webp"
         chunks.extend(
             [
-                b"--" + boundary + b"\\r\\n",
-                f'Content-Disposition: form-data; name="file"; filename="{filename}"\\r\\n'.encode(),
-                f"Content-Type: {mime}\\r\\n\\r\\n".encode(),
+                b"--" + boundary + b"\r\n",
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+                f"Content-Type: {mime}\r\n\r\n".encode(),
                 content,
-                b"\\r\\n--" + boundary + b"--\\r\\n",
+                b"\r\n--" + boundary + b"--\r\n",
             ]
         )
         request = Request(
