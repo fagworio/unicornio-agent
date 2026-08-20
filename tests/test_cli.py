@@ -41,6 +41,43 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["maintenance-report", str(report_file)]), 0)
             self.assertIn("missing_cta_source", output.getvalue())
 
+    def test_publish_ready_reports_quality_blocks(self):
+        output = io.StringIO()
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=True)
+        outcomes = [
+            {
+                "post_id": 1,
+                "wordpress_changed": False,
+                "status": "blocked",
+                "reason": "checklist pre-publicacao com falhas",
+            }
+        ]
+        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
+            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
+        ), patch("unicornio_editor.cli.publish_ready_posts", return_value=outcomes), redirect_stdout(output):
+            self.assertEqual(main(["publish-ready"]), 0)
+        data = json.loads(output.getvalue())
+        self.assertEqual(data["published"], 0)
+        self.assertEqual(data["quality_blocked"], 1)
+        self.assertEqual(data["blocked_posts"][0]["post_id"], 1)
+
+    def test_publish_ready_stays_silent_when_all_cleanly_skipped(self):
+        output = io.StringIO()
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        outcomes = [
+            {
+                "post_id": 1,
+                "wordpress_changed": False,
+                "status": "skipped",
+                "reason": "sem editorial.latest.json",
+            }
+        ]
+        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
+            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
+        ), patch("unicornio_editor.cli.publish_ready_posts", return_value=outcomes), redirect_stdout(output):
+            self.assertEqual(main(["publish-ready"]), 0)
+        self.assertEqual(output.getvalue(), "")
+
 
 
 if __name__ == "__main__":

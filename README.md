@@ -113,6 +113,12 @@ Hermes cron
      + gate PUBLISH_ENABLED + cota PUBLISH_LIMIT por janela)
   -> cron de publicacao diario: 00h=5, 08h=7, 12h=8, 18h=10, 21h=10
      (~40/dia; America/Sao_Paulo; backlog novo entre 03:30 e 05:00)
+  -> qualidade garantida por codigo, nao por diligencia do LLM: schema
+     estrito, checklist 100% obrigatorio no apply E no publish (qualquer
+     fail = blocked, reportado no cron), PUBLISH_ENABLED como gate duplo
+  -> custo de API reduzido: toolsets do cron editorial restritos
+     (terminal+file+web) e EDITOR_BATCH_LIMIT=5 amortizam o prompt fixo
+     (~US$ 0,004-0,008/post em deepseek-v4-flash; publish roda sem LLM)
 ```
 
 ## Instalacao

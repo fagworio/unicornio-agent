@@ -111,15 +111,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = publish_post(client, config, args.root, args.post_id)
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
-            if any(outcome.get("wordpress_changed") for outcome in outcomes):
-                published = [o for o in outcomes if o.get("wordpress_changed")]
+            published = [o for o in outcomes if o.get("wordpress_changed")]
+            blocked = [o for o in outcomes if o.get("status") in ("blocked", "error")]
+            if published or blocked:
                 result = {
                     "published": len(published),
                     "posts": published,
                     "blocked_or_skipped": len(outcomes) - len(published),
+                    "quality_blocked": len(blocked),
+                    "blocked_posts": [
+                        {
+                            "post_id": outcome.get("post_id"),
+                            "status": outcome.get("status"),
+                            "reason": outcome.get("reason"),
+                        }
+                        for outcome in blocked
+                    ],
                 }
             else:
-                # Watchdog pattern: stay completely silent when nothing happened.
+                # Watchdog pattern: silent when nothing was published and no
+                # quality gate fired (everything cleanly skipped).
                 return 0
         else:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
