@@ -111,7 +111,7 @@ Hermes cron
 cd /opt/unicorniohater-editorial-agent
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 cp .env.example .env
 ```
 
@@ -128,7 +128,10 @@ Teste:
 ```bash
 unicornio-editor list-pending
 unicornio-editor prepare 12345
+unicornio-editor maintenance-report posts.json
 ```
+
+A manutenção é somente relatório e nunca atualiza o WordPress. Para testes locais do Devilbox, consulte `tests/wordpress/README.md`.
 
 ## Hermes
 

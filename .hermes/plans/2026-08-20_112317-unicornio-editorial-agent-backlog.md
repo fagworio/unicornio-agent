@@ -137,4 +137,4 @@ O primeiro milestone concluível é o pipeline textual em dry-run (`1–10`). M�
 - Não haverá bucket/CDN externo; a mídia será armazenada localmente na Media Library do WordPress.
 - Ainda não há definição de provedor de LLM ou da política operacional para fontes públicas/Creative Commons; isso deve ser fechado antes da automação de mídia.
 - É necessário decidir se os metadados `_ai_editor_*` serão expostos via código existente do WordPress ou por configuração/integração já disponível, evitando criar plugin auxiliar sem necessidade.
-- O projeto não possui Git no momento; antes de desenvolvimento contínuo, deve ser inicializado um repositório e estabelecida política de exclusão de segredos.
+- O repositório Git foi inicializado e possui política de exclusão de segredos; mudanças futuras devem preservar essa proteção.
