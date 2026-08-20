@@ -111,8 +111,8 @@ Hermes cron
   -> salva backups/<ID>/editorial.latest.json
   -> publicacao: somente via `publish`/`publish-ready` (checklist revalidado
      + gate PUBLISH_ENABLED + cota PUBLISH_LIMIT por janela)
-  -> cron de publicacao diario: 00h=5, 08h=2, 12h=2, 18h=3, 21h=3
-     (America/Sao_Paulo; backlog novo entre 03:30 e 05:00)
+  -> cron de publicacao diario: 00h=5, 08h=7, 12h=8, 18h=10, 21h=10
+     (~40/dia; America/Sao_Paulo; backlog novo entre 03:30 e 05:00)
 ```
 
 ## Instalacao

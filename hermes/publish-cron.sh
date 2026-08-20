@@ -5,8 +5,8 @@
 # continua dry-run para o pipeline editorial). Silencioso quando nao ha
 # nada a publicar (padrao watchdog).
 #
-# Plano de publicacao (America/Sao_Paulo):
-#   00:00 -> 5 posts | 08:00 -> 2 | 12:00 -> 2 | 18:00 -> 3 | 21:00 -> 3
+# Plano de publicacao (America/Sao_Paulo): ~40 posts/dia
+#   00:00 -> 5 | 08:00 -> 7 | 12:00 -> 8 | 18:00 -> 10 | 21:00 -> 10
 # (backlog novo chega entre 03:30 e 05:00; as janelas da manha/noite
 #  publicam o lote fresco, e 00:00 drena o resto do dia anterior)
 set -euo pipefail
@@ -21,10 +21,10 @@ export PUBLISH_ENABLED=true
 HOUR="$(date +%H)"
 case "$HOUR" in
   00) PUBLISH_LIMIT=5 ;;
-  08) PUBLISH_LIMIT=2 ;;
-  12) PUBLISH_LIMIT=2 ;;
-  18) PUBLISH_LIMIT=3 ;;
-  21) PUBLISH_LIMIT=3 ;;
+  08) PUBLISH_LIMIT=7 ;;
+  12) PUBLISH_LIMIT=8 ;;
+  18) PUBLISH_LIMIT=10 ;;
+  21) PUBLISH_LIMIT=10 ;;
   *)  PUBLISH_LIMIT=0 ;;
 esac
 export PUBLISH_LIMIT
