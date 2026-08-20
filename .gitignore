@@ -47,3 +47,6 @@ Thumbs.db
 .hermes/runtime/
 .hermes/sessions/
 .hermes/logs/
+
+# Runtime artifacts created by the cron agent
+work/
