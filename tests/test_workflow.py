@@ -78,6 +78,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(
                 client.updated[0][1]["meta"]["rank_math_focus_keyword"], "videogame"
             )
+            self.assertEqual(client.updated[0][1]["meta"]["_ai_editor_decision"], "process")
     def test_apply_dry_run_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

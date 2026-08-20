@@ -10,6 +10,7 @@ from .builder import append_canonical_footer
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
+from .observability import build_processing_markers
 from .seo.rank_math import build_meta
 from .wordpress import WordPressClient
 
@@ -69,7 +70,13 @@ def apply_editorial(
         post_id,
         {
             "content": {"raw": content},
-            "meta": build_meta(editorial["seo"], latest.get("meta", {})),
+            "meta": {
+                **build_meta(editorial["seo"], latest.get("meta", {})),
+                **build_processing_markers(
+                    editorial["site_relevance"]["decision"],
+                    editorial["site_relevance"]["confidence"],
+                ),
+            },
         },
     )
     return {
