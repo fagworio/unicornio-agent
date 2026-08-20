@@ -33,9 +33,26 @@ class WordPressClient:
     def list_pending(self, *, page: int = 1, per_page: int = 10) -> list[dict[str, Any]]:
         if not 1 <= page <= 10000 or not 1 <= per_page <= 100:
             raise ValueError("page and per_page are outside safe limits")
-        # Some production installations reject even a read query containing
-        # `status`; fetch a bounded page and filter locally instead.
-        data = self._request("GET", "/posts", {"context": "edit", "page": page, "per_page": per_page})
+        # Query `status=pending` server-side: some installations (including
+        # production) hide non-published statuses from the unfiltered listing,
+        # so a local filter can never discover pending posts. The local filter
+        # below remains as defense in depth.
+        query: dict[str, Any] = {
+            "context": "edit",
+            "status": "pending",
+            "page": page,
+            "per_page": per_page,
+        }
+        try:
+            data = self._request("GET", "/posts", query)
+        except WordPressError as exc:
+            # Some installations reject even a read query containing `status`
+            # (HTTP 4xx). Fall back to an unfiltered page and filter locally.
+            if not str(exc).startswith("WordPress HTTP"):
+                raise
+            data = self._request(
+                "GET", "/posts", {"context": "edit", "page": page, "per_page": per_page}
+            )
         if not isinstance(data, list):
             raise WordPressError("WordPress returned an invalid posts collection")
         return [post for post in data if isinstance(post, dict) and post.get("status") == "pending"]

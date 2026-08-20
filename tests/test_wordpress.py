@@ -11,13 +11,21 @@ from unicornio_editor.wordpress import SafetyError, WordPressClient
 
 class ApiHandler(BaseHTTPRequestHandler):
     requests = []
+    # When False, requests carrying a `status` query parameter are rejected
+    # with HTTP 400 (simulates installs that refuse status in read queries).
+    allow_status_query = True
 
     def do_GET(self):
         self.__class__.requests.append(("GET", self.path, dict(self.headers)))
         if self.path.startswith("/wp-json/wp/v2/posts/42"):
             self._send(200, {"id": 42, "status": "pending", "content": {"raw": "x"}})
         elif self.path.startswith("/wp-json/wp/v2/posts"):
-            self._send(200, [{"id": 42, "status": "pending"}])
+            if not self.__class__.allow_status_query and "status" in parse_qs(
+                urlparse(self.path).query
+            ):
+                self._send(400, {"code": "rest_invalid_param", "message": "invalid status"})
+            else:
+                self._send(200, [{"id": 42, "status": "pending"}])
         else:
             self._send(404, {"message": "not found"})
 
@@ -64,13 +72,25 @@ class WordPressClientTests(unittest.TestCase):
             http_timeout=5,
         )
 
-    def test_list_pending_filters_status_locally_without_query_status(self):
+    def test_list_pending_queries_status_server_side(self):
         posts = WordPressClient(self.config).list_pending(per_page=2)
         self.assertEqual(posts[0]["id"], 42)
         query = parse_qs(urlparse(ApiHandler.requests[0][1]).query)
-        self.assertNotIn("status", query)
+        self.assertEqual(query["status"], ["pending"])
         self.assertEqual(query["context"], ["edit"])
         self.assertEqual(query["per_page"], ["2"])
+
+    def test_list_pending_falls_back_to_local_filter_when_status_rejected(self):
+        ApiHandler.allow_status_query = False
+        try:
+            posts = WordPressClient(self.config).list_pending(per_page=2)
+        finally:
+            ApiHandler.allow_status_query = True
+        self.assertEqual(posts[0]["id"], 42)
+        queries = [parse_qs(urlparse(path).query) for _, path, _ in ApiHandler.requests]
+        self.assertEqual(queries[0]["status"], ["pending"])  # primary attempt
+        self.assertNotIn("status", queries[1])  # fallback retry without status
+        self.assertEqual(len(queries), 2)
 
     def test_get_post(self):
         self.assertEqual(WordPressClient(self.config).get_post(42)["status"], "pending")

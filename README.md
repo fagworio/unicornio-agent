@@ -100,7 +100,8 @@ Hermes cron
   -> crédito obrigatório no conteúdo/metadados
   -> featured image: legenda + crédito visível no conteúdo quando necessário
   -> imagem destacada se ausente
-  -> trailer oficial se relevante
+  -> trailer oficial se relevante: busca determinística no YouTube
+     (<game_name> trailer), validação via oEmbed, embed antes do CTA
   -> monta CTA + Fonte
   -> valida
   -> atualiza mantendo pending
@@ -217,6 +218,5 @@ Jobs separados e inicialmente somente `report` para:
 1. Adaptador do plugin SEO em uso (Yoast, Rank Math etc.) para gravar title/description/keyword nos metas corretos.
 2. Adaptador de pesquisa de imagens com fontes permitidas.
 3. Insercao automatica de imagens conforme `media_plan`.
-4. Pesquisa/validacao de trailer oficial.
-5. Registro e validação da licença/crédito de cada mídia, sem declarar que “Google Images” garante direitos.
-6. Marcadores de processamento (`_ai_editor_*`) registrados/expostos na REST API do WordPress.
+4. Registro e validação da licença/crédito de cada mídia, sem declarar que “Google Images” garante direitos.
+5. Marcadores de processamento (`_ai_editor_*`) registrados/expostos na REST API do WordPress.

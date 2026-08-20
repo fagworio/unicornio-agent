@@ -31,7 +31,7 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 4. Se relevante, edite apenas o `cleaned_html` conforme `src/unicornio_editor/prompts.py`.
 5. Retorne/produza JSON estrito no formato exigido pelo prompt editorial.
 6. Pesquise imagens apenas quando o `media_plan` indicar ganho real de leitura. Use Google Images para descoberta, mas abra a página original e confirme licença pública, Creative Commons compatível ou permissão explícita.
-7. Pesquise trailer somente quando `needs_trailer=true`; prefira canal oficial.
+7. Quando o conteúdo for sobre um jogo, preencha `game_name` no JSON editorial com o nome exato do jogo; a descoberta e a validação do trailer são determinísticas (o código busca no YouTube `<game_name> trailer`, valida via oEmbed e insere o embed antes do CTA) — nunca invente URLs de trailer. Conteúdo que não seja de jogo usa `game_name: null`.
 8. Registre para cada imagem a origem, autor, licença, URL da licença, data da captura e texto de crédito. Se não for possível confirmar, descarte.
 9. Baixe imagens escolhidas para área temporária, valide MIME/tamanho/resolução, converta para WebP e faça upload pela REST API da Media Library local. Não use bucket ou CDN externo.
 10. Insira cada nova imagem entre parágrafos, nunca dentro de parágrafo, imediatamente após H2, antes do CTA ou da fonte. Mantenha ao menos 3 parágrafos de distância quando possível e inclua crédito visível.

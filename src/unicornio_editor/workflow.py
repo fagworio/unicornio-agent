@@ -13,6 +13,7 @@ from .html_cleaner import clean_html
 from .list_quality import validate_list_content
 from .observability import build_processing_markers
 from .seo.rank_math import build_meta
+from .trailer import TrailerError, build_trailer_html, find_game_trailer
 from .wordpress import WordPressClient
 
 
@@ -55,7 +56,11 @@ def apply_editorial(
             "backup": str(backup),
         }
 
-    content = append_canonical_footer(editorial["cleaned_html"], _original_link(post))
+    html = editorial["cleaned_html"]
+    trailer = _discover_trailer(editorial, config)
+    if trailer is not None:
+        html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
+    content = append_canonical_footer(html, _original_link(post))
     validate_list_content(_post_title(post) or editorial["seo"]["title"], content)
     if config.dry_run:
         return {
@@ -64,6 +69,7 @@ def apply_editorial(
             "dry_run": True,
             "backup": str(backup),
             "content_preview": content,
+            "trailer": trailer,
         }
 
     latest = client.get_post(post_id)
@@ -87,7 +93,19 @@ def apply_editorial(
         "dry_run": False,
         "backup": str(backup),
         "status_after": result.get("status"),
+        "trailer": trailer,
     }
+
+
+def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:
+    """Discover a YouTube trailer for game content; fail-closed to None."""
+    game_name = editorial.get("game_name")
+    if not isinstance(game_name, str) or not game_name.strip():
+        return None
+    try:
+        return find_game_trailer(game_name, timeout=config.http_timeout)
+    except TrailerError:
+        return None
 
 
 def _require_pending(post: dict[str, Any]) -> None:

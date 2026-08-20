@@ -20,6 +20,7 @@ def valid_payload():
         "media_plan": [],
         "needs_trailer": False,
         "trailer_url": None,
+        "game_name": None,
     }
 
 
@@ -69,6 +70,26 @@ class EditorialSchemaTests(unittest.TestCase):
             "credit_text": "Imagem: Autor / Source",
             "alt_text": "Imagem ilustrativa",
         }]
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
+    def test_accepts_game_name_string(self):
+        payload = valid_payload()
+        payload["game_name"] = "Clive Barker's Hellraiser: Revival"
+        self.assertEqual(
+            validate_editorial(payload)["game_name"],
+            "Clive Barker's Hellraiser: Revival",
+        )
+
+    def test_rejects_game_name_non_string(self):
+        payload = valid_payload()
+        payload["game_name"] = 123
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
+    def test_rejects_blank_game_name(self):
+        payload = valid_payload()
+        payload["game_name"] = "   "
         with self.assertRaises(EditorialValidationError):
             validate_editorial(payload)
 

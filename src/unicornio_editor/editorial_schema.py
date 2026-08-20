@@ -11,7 +11,15 @@ class EditorialValidationError(ValueError):
     """Raised when an editorial result cannot be safely applied."""
 
 
-_TOP_LEVEL = {"site_relevance", "cleaned_html", "seo", "media_plan", "needs_trailer", "trailer_url"}
+_TOP_LEVEL = {
+    "site_relevance",
+    "cleaned_html",
+    "seo",
+    "media_plan",
+    "needs_trailer",
+    "trailer_url",
+    "game_name",
+}
 _RELEVANCE = {"decision", "confidence", "reason", "matched_topics"}
 _SEO = {"title", "meta_description", "focus_keyword"}
 _MEDIA = {
@@ -87,6 +95,10 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
         _http_url(trailer_url, "trailer_url")
     elif trailer_url is not None:
         raise EditorialValidationError("trailer_url must be null when needs_trailer is false")
+
+    game_name = payload["game_name"]
+    if game_name is not None and (not isinstance(game_name, str) or not game_name.strip()):
+        raise EditorialValidationError("game_name must be null or a non-empty string")
 
     result = dict(payload)
     result["media_plan"] = normalized_media
