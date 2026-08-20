@@ -1,6 +1,6 @@
 # UnicornioHater Editorial Agent — Backlog de Implementação
 
-> Documento criado após inspeção da estrutura atual. O repositório ainda não contém código executável; as tarefas abaixo formam a fundação do produto.
+> Diagnóstico histórico registrado antes da implementação. O estado atual e os comandos executáveis estão documentados no README, CONTRIBUTING e nos testes.
 
 **Objetivo:** construir um agente editorial seguro para processar somente posts WordPress `pending`, gerar revisão/SEO/mídia em modo dry-run e, depois de validado, atualizar o post mantendo o status `pending`.
 
@@ -10,14 +10,9 @@
 
 ---
 
-## Diagnóstico da estrutura atual
+## Diagnóstico histórico da estrutura inicial
 
-- Existem somente seis documentos: `README.md`, `IDEA.md`, `ARCHITECTURE.md`, `OPERATIONS.md`, `EDITORIAL_POLICY.md` e `SKILL.md`.
-- Não existem `pyproject.toml`, pacote `src/`, testes, `.env.example`, scripts Hermes, diretório `backups/` ou configuração de CI.
-- A raiz não é um repositório Git (`git rev-parse --show-toplevel` falhou).
-- O WordPress local possui Rank Math (free/pro), WP Offload Media (`amazon-s3-and-cloudfront`) e um plugin local `wp-static-engine`; isso confirma as integrações descritas, mas não prova que estejam ativas/configuradas.
-- Há inconsistência de manutenção documental: `README.md` e `IDEA.md` são essencialmente duplicados, e comandos/paths documentados ainda não existem.
-
+No momento da criação deste backlog, a raiz continha somente documentação e não possuía código executável. As tarefas abaixo registram a sequência original; o estado implementado deve ser verificado pelo Git, pelo `README.md` e pela suíte de testes.
 ## Tarefas priorizadas
 
 ### P0 — Fundação executável

@@ -40,7 +40,7 @@ Todas as alterações relacionadas ao WordPress devem ser testadas nessa instala
 Para cada modificação realizada:
 
 1. Identifique quais tipos de posts e quais estados de dados são afetados pela mudança.
-2. Crie ou ajuste **posts locais de teste** dentro dessa instalação do WordPress com o status *Peding* para reproduzir os cenários necessários.
+2. Crie ou ajuste **posts locais de teste** dentro dessa instalação do WordPress com o status *pending* para reproduzir os cenários necessários.
 3. Utilize esses posts locais para testar o comportamento antes e depois da alteração.
 4. Inclua cenários positivos, negativos e casos de borda relevantes.
 5. Quando a lógica depender de campos, taxonomias, metadados, conteúdo, status ou outras características do post, configure os posts locais com combinações representativas desses dados.

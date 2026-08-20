@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject tracked local secret files and non-empty credential env assignments."""
+"""Scan the staged Git tree for protected files and credential assignments."""
 
 from __future__ import annotations
 
@@ -12,29 +12,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 _PROTECTED_NAMES = {".env", ".env.local", ".env.production"}
 _SECRET_ASSIGNMENT = re.compile(
-    r"^(?:WORDPRESS_APP_PASSWORD|UH_WEBHOOK_SECRET|OPENAI_API_KEY)\s*=\s*(?!$).+",
-    re.IGNORECASE,
+    r"^\s*[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY)\s*[:=]\s*(.*?)\s*$",
 )
+_PLACEHOLDERS = {"", "...", "changeme", "change-me", "example", "your-value"}
 
 
 def main() -> int:
-    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+    tracked = subprocess.check_output(["git", "ls-files", "--cached", "-z"], cwd=ROOT).decode().split("\0")
     violations: list[str] = []
     for name in tracked:
         if not name:
             continue
-        path = ROOT / name
+        path = Path(name)
         if path.name in _PROTECTED_NAMES:
             violations.append(f"tracked secret file: {name}")
             continue
-        if path.suffix not in {".env", ".example", ".md", ".toml", ".yml", ".yaml", ".py", ".sh"}:
-            continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw = subprocess.check_output(["git", "show", f":{name}"], cwd=ROOT)
+        except subprocess.CalledProcessError:
             continue
+        if b"\0" in raw:
+            continue
+        text = raw.decode("utf-8", errors="replace")
         for line_no, line in enumerate(text.splitlines(), 1):
-            if _SECRET_ASSIGNMENT.match(line.strip()):
+            match = _SECRET_ASSIGNMENT.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip().strip("'\"").strip()
+            if value and value.lower() not in _PLACEHOLDERS and not value.startswith(("${", "<")):
                 violations.append(f"non-empty credential assignment: {name}:{line_no}")
     if violations:
         print("SECRET_SCAN_FAILED")

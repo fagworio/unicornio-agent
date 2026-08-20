@@ -11,7 +11,7 @@
 python -m unittest discover -s tests -q
 python -m compileall -q src tests scripts
 python scripts/check_repository.py
- git diff --check
+git diff --check
 ```
 
 5. Faça commits pequenos e descritivos.
