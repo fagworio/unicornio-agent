@@ -192,6 +192,56 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(report["wordpress_changed"])
         self.assertEqual(client.updated, [])
 
+    def test_apply_normalizes_existing_featured_to_1200x720(self):
+        post = self.post()
+        post["featured_media"] = 7
+        media = {
+            "id": 7,
+            "source_url": "https://wp.test/uploads/old-featured.jpg",
+            "media_details": {"width": 2560, "height": 1916},
+            "alt_text": "Capa antiga",
+            "title": {"raw": "Capa"},
+            "caption": {"raw": "Crédito da imagem: Autor."},
+        }
+
+        class MediaClient(FakeClient):
+            def get_media(self, media_id):
+                return media
+
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            return_value={"id": 88, "source_url": "https://wp.test/uploads/featured-1200x720.webp"},
+        ) as upload:
+            with tempfile.TemporaryDirectory() as directory:
+                client = MediaClient(post)
+                report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
+        upload.assert_called_once()
+        self.assertEqual(client.updated[0][1]["featured_media"], 88)
+        self.assertEqual(report["featured_media"], 88)
+
+    def test_apply_keeps_compliant_featured_image(self):
+        post = self.post()
+        post["featured_media"] = 7
+        media = {
+            "id": 7,
+            "source_url": "https://wp.test/uploads/featured.webp",
+            "media_details": {"width": 1200, "height": 720},
+        }
+
+        class MediaClient(FakeClient):
+            def get_media(self, media_id):
+                return media
+
+        with mock.patch("unicornio_editor.workflow.upload_image") as upload:
+            with tempfile.TemporaryDirectory() as directory:
+                client = MediaClient(post)
+                report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
+        upload.assert_not_called()
+        self.assertEqual(client.updated[0][1]["featured_media"], 7)
+        self.assertEqual(report["featured_media"], 7)
+
     def test_apply_dry_run_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

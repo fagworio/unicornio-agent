@@ -63,6 +63,8 @@ def apply_editorial(
         }
 
     media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
+    if featured_id is None and not config.dry_run:
+        featured_id = _normalize_existing_featured(client, post)
     html = editorial["cleaned_html"]
     if media_results and not config.dry_run:
         plan = [
@@ -200,6 +202,46 @@ def _execute_media_plan(
                 featured_id = media_id
                 featured_credit = item["credit_text"]
     return results, featured_id, featured_credit
+
+
+def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) -> int | None:
+    """Re-prepare an existing featured image at exactly 1200x720 WebP.
+
+    Posts imported with a featured image may carry any size/format; the
+    portal rule requires 1200x720 WebP, so the source is re-downloaded and
+    re-uploaded through the same conversion path when it does not comply.
+    Returns the (new) attachment id, or None when there is nothing to do.
+    """
+    featured = post.get("featured_media")
+    if not isinstance(featured, int) or featured <= 0:
+        return None
+    try:
+        media = client.get_media(featured)
+    except Exception:
+        return None
+    details = media.get("media_details") or {}
+    width, height = details.get("width"), details.get("height")
+    source_url = (media.get("source_url") or "").strip()
+    if width == 1200 and height == 720 and source_url.lower().endswith(".webp"):
+        return featured
+    if not source_url:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
+            tmp = Path(directory)
+            source = download_image(source_url, tmp / "featured_source.jpg")
+            webp = prepare_featured_webp(source, tmp / "featured_1200x720.webp")
+            new_media = client.upload_media(
+                str(webp),
+                filename="featured-1200x720.webp",
+                alt_text=str(media.get("alt_text") or ""),
+                title=str(media.get("title") or {}).strip() or "Imagem de destaque",
+                caption=str(media.get("caption") or ""),
+            )
+    except Exception:
+        return None
+    new_id = new_media.get("id")
+    return new_id if isinstance(new_id, int) else None
 
 
 def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:
