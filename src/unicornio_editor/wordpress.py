@@ -41,7 +41,11 @@ class WordPressClient:
         return [post for post in data if isinstance(post, dict) and post.get("status") == "pending"]
 
     def get_post(self, post_id: int) -> dict[str, Any]:
-        return self._expect_object(self._request("GET", f"/posts/{self._id(post_id)}"))
+        # context=edit e obrigatorio: sem ele a REST nao expoe content.raw,
+        # title.raw nem os custom fields (meta) que o pipeline consome.
+        return self._expect_object(
+            self._request("GET", f"/posts/{self._id(post_id)}", {"context": "edit"})
+        )
 
     def get_media(self, media_id: int) -> dict[str, Any]:
         return self._expect_object(self._request("GET", f"/media/{self._id(media_id)}"))
