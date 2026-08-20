@@ -64,11 +64,12 @@ class WordPressClientTests(unittest.TestCase):
             http_timeout=5,
         )
 
-    def test_list_pending_adds_status_filter(self):
+    def test_list_pending_filters_status_locally_without_query_status(self):
         posts = WordPressClient(self.config).list_pending(per_page=2)
         self.assertEqual(posts[0]["id"], 42)
         query = parse_qs(urlparse(ApiHandler.requests[0][1]).query)
-        self.assertEqual(query["status"], ["pending"])
+        self.assertNotIn("status", query)
+        self.assertEqual(query["context"], ["edit"])
         self.assertEqual(query["per_page"], ["2"])
 
     def test_get_post(self):

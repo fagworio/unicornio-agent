@@ -33,12 +33,12 @@ class WordPressClient:
     def list_pending(self, *, page: int = 1, per_page: int = 10) -> list[dict[str, Any]]:
         if not 1 <= page <= 10000 or not 1 <= per_page <= 100:
             raise ValueError("page and per_page are outside safe limits")
-        data = self._request(
-            "GET", "/posts", {"status": "pending", "page": page, "per_page": per_page}
-        )
+        # Some production installations reject even a read query containing
+        # `status`; fetch a bounded page and filter locally instead.
+        data = self._request("GET", "/posts", {"context": "edit", "page": page, "per_page": per_page})
         if not isinstance(data, list):
             raise WordPressError("WordPress returned an invalid posts collection")
-        return data
+        return [post for post in data if isinstance(post, dict) and post.get("status") == "pending"]
 
     def get_post(self, post_id: int) -> dict[str, Any]:
         return self._expect_object(self._request("GET", f"/posts/{self._id(post_id)}"))
