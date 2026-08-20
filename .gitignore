@@ -1,0 +1,48 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*token*
+*secret*
+*password*
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime artifacts
+backups/
+reports/
+tmp/
+tmp-media/
+*.log
+*.sqlite3
+
+# Downloaded/generated media and WordPress artifacts
+media-cache/
+downloads/
+_site/
+.cache/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Hermes local/runtime state
+.hermes/runtime/
+.hermes/sessions/
+.hermes/logs/
