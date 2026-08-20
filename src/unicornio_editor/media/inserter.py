@@ -13,6 +13,22 @@ class MediaInsertionError(ValueError):
     """Raised when a media plan cannot be safely placed."""
 
 
+def append_featured_credit(html: str, credit_text: str) -> str:
+    """Add one visible featured-image credit without duplicating it."""
+    if not isinstance(html, str):
+        raise MediaInsertionError("HTML must be a string")
+    credit = _text(credit_text, "credit_text")
+    if not credit.startswith("Crédito da imagem:"):
+        raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
+    if credit in html:
+        return html
+    match = re.search(r"</p>\s*", html, flags=re.IGNORECASE)
+    figure = f'<p class="image-credit">{escape(credit)}</p>'
+    if not match:
+        return f"{figure}{html}"
+    return html[: match.end()] + figure + html[match.end() :]
+
+
 def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
     if not isinstance(html, str) or not isinstance(plan, list):
         raise MediaInsertionError("HTML and media plan have invalid types")

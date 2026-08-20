@@ -17,6 +17,8 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Cada imagem deve ter URL da página original, autor, licença, URL da licença e crédito registrado.
 - Baixar para área temporária, validar, converter para WebP e enviar pela Media Library REST local; não usar bucket/CDN externo.
 - Crédito visível é obrigatório em toda imagem e deve seguir o formato `Crédito da imagem: Autor/Empresa. Descrição da imagem. Informação de licença ou direitos autorais, quando aplicável.`; crédito não substitui licença.
+- Para featured images, salvar o crédito também na legenda do attachment e no conteúdo visível quando o tema não renderizar a legenda.
+- URLs locais legadas em `/wp-content/uploads/2019/06/` devem usar o fallback de reupload para uma fonte efetiva e WebP; uploads atuais em `/wp-content/uploads/2025/03/` não precisam desse fallback no ambiente local.
 - Sem licença verificável, não usar a imagem.
 - A fonte vem exclusivamente do custom field `original_link`.
 - Fonte só é adicionada quando `original_link` existe; deve usar target="_blank", rel="nofollow noopener" e ponto antes de `</em>`.

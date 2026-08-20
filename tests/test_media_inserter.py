@@ -1,9 +1,15 @@
 import unittest
 
-from unicornio_editor.media.inserter import MediaInsertionError, insert_media
+from unicornio_editor.media.inserter import MediaInsertionError, append_featured_credit, insert_media
 
 
 class MediaInserterTests(unittest.TestCase):
+    def test_adds_one_visible_featured_credit(self):
+        credit = "Crédito da imagem: Omelete. Imagem promocional do trailer. Direitos autorais dos detentores."
+        result = append_featured_credit("<p>Texto.</p><p>Continuação.</p>", credit)
+        self.assertIn('<p class="image-credit">' + credit + "</p>", result)
+        self.assertEqual(append_featured_credit(result, credit), result)
+
     def test_inserts_figure_between_paragraphs_with_credit(self):
         html = "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>"
         result = insert_media(html, [{

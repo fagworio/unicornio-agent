@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from unicornio_editor.media.converter import convert_to_webp
-from unicornio_editor.media.downloader import MediaDownloadError, download_image
+from unicornio_editor.media.downloader import MediaDownloadError, download_image, select_reupload_source
 from unicornio_editor.media.wordpress_media import upload_image
 
 
@@ -61,6 +61,17 @@ class MediaPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(MediaDownloadError):
                 download_image(self.url, Path(directory) / "source.png", max_bytes=2)
+
+    def test_legacy_local_upload_uses_effective_source_for_fallback(self):
+        local = "http://wordpress.dvl.to:8080/wp-content/uploads/2019/06/old.jpg"
+        effective = "https://cdn.example/current.webp"
+        self.assertEqual(select_reupload_source(local, effective), effective)
+        with self.assertRaises(MediaDownloadError):
+            select_reupload_source(local)
+
+    def test_current_local_upload_does_not_require_fallback(self):
+        current = "http://wordpress.dvl.to:8080/wp-content/uploads/2025/03/current.webp"
+        self.assertEqual(select_reupload_source(current), current)
 
     def test_converts_to_webp(self):
         with tempfile.TemporaryDirectory() as directory:

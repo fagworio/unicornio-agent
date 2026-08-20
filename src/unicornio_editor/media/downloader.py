@@ -5,11 +5,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
 class MediaDownloadError(RuntimeError):
     """Raised when a remote image cannot be safely downloaded."""
+
+
+LEGACY_LOCAL_UPLOAD_PATH = "/wp-content/uploads/2019/06/"
+
+
+def select_reupload_source(local_url: str, effective_url: str | None = None) -> str:
+    """Choose a safe source when a legacy local upload needs re-importing."""
+    parsed = urlparse(local_url)
+    if parsed.path.startswith(LEGACY_LOCAL_UPLOAD_PATH):
+        if not effective_url or not effective_url.startswith(("http://", "https://")):
+            raise MediaDownloadError("legacy local upload requires an effective source URL")
+        return effective_url
+    return local_url
 
 
 def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1024) -> Path:

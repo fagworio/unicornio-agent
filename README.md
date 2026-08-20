@@ -98,6 +98,7 @@ Hermes cron
   -> baixa para área temporária -> valida -> WebP
   -> WordPress Media REST local (sem bucket/CDN externo)
   -> crédito obrigatório no conteúdo/metadados
+  -> featured image: legenda + crédito visível no conteúdo quando necessário
   -> imagem destacada se ausente
   -> trailer oficial se relevante
   -> monta CTA + Fonte
