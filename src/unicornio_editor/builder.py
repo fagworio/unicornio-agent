@@ -19,16 +19,11 @@ _CTA = (
 )
 
 
-def append_canonical_footer(html: str, original_link: str) -> str:
+def append_canonical_footer(html: str, original_link: str | None) -> str:
     """Replace old generated footer and append exactly one canonical footer."""
     if not isinstance(html, str):
         raise TypeError("html must be a string")
-    url = _validate_link(original_link)
-    label = _source_label(url)
-    source = (
-        f'<em>Fonte: <a href="{escape(url, quote=True)}" target="_blank" '
-        f'rel="nofollow noopener">{escape(label)}</a></em>'
-    )
+    url = _validate_link(original_link) if original_link else None
     if _has_current_footer(html, url):
         return html
     cleaned = re.sub(
@@ -38,8 +33,27 @@ def append_canonical_footer(html: str, original_link: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     cleaned = re.sub(r'<em>\s*Fonte:\s*.*?</em>', "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = cleaned.rstrip()
-    return f"{cleaned}\n\n{_CTA}\n\n{source}" if cleaned else f"{_CTA}\n\n{source}"
+    cleaned = re.sub(
+        r'<a\b[^>]*>\s*(?:<strong>\s*)?<em>\s*Fonte\s*</em>\s*(?:</strong>\s*)?</a>',
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"(?:\s*<hr\s*/?>\s*)+$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).rstrip()
+    footer = _CTA
+    if url:
+        label = _source_label(url)
+        footer += (
+            "\n\n"
+            f'<em>Fonte: <a href="{escape(url, quote=True)}" target="_blank" '
+            f'rel="nofollow noopener">{escape(label)}</a>.</em>'
+        )
+    return f"{cleaned}\n\n{footer}" if cleaned else footer
 
 
 def _validate_link(value: str) -> str:
@@ -54,12 +68,13 @@ def _validate_link(value: str) -> str:
 
 def _source_label(value: str) -> str:
     hostname = urlparse(value).hostname or "Fonte original"
-    hostname = hostname.removeprefix("www.")
+    hostname = hostname.removeprefix("www.").split(".", 1)[0]
     return hostname[:1].upper() + hostname[1:]
 
 
-def _has_current_footer(html: str, original_link: str) -> bool:
-    return (
-        "Confira mais novidades em nosso Portal de " in html
-        and f'href="{escape(original_link, quote=True)}" target="_blank" rel="nofollow noopener"' in html
-    )
+def _has_current_footer(html: str, original_link: str | None) -> bool:
+    if "Confira mais novidades em nosso Portal de " not in html:
+        return False
+    if original_link is None:
+        return "Fonte:" not in html
+    return f'href="{escape(original_link, quote=True)}" target="_blank" rel="nofollow noopener"' in html

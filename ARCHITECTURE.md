@@ -23,7 +23,7 @@ Hermes cron (fresh session)
        -> insere imagens por paragrafo
        -> insere trailer
        -> CTA canonico
-       -> Fonte de original_link
+       -> Fonte de original_link, somente quando preenchido
   -> validator
        -> HTML
        -> CTA/Fonte

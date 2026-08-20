@@ -19,7 +19,7 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Crédito visível é obrigatório e deve seguir a licença; crédito não substitui licença.
 - Sem licença verificável, não usar a imagem.
 - A fonte vem exclusivamente do custom field `original_link`.
-- Fonte deve usar target="_blank" e rel="nofollow noopener".
+- Fonte só é adicionada quando `original_link` existe; deve usar target="_blank", rel="nofollow noopener" e ponto antes de `</em>`.
 - CTA canonico e inserido pelo codigo, nao pelo modelo.
 
 ## Fluxo por execucao

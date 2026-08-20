@@ -186,7 +186,7 @@ Formato final:
 
 <hr />
 
-<em>Fonte: <a href="URL_ORIGINAL" target="_blank" rel="nofollow noopener">Nome do Site</a></em>
+<em>Fonte: <a href="URL_ORIGINAL" target="_blank" rel="nofollow noopener">Nome do Site</a>.</em>
 ```
 
 ## Fases de implantacao

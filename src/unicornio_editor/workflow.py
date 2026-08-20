@@ -100,8 +100,9 @@ def _raw_content(post: dict[str, Any]) -> str:
     return content["raw"]
 
 
-def _original_link(post: dict[str, Any]) -> str:
+def _original_link(post: dict[str, Any]) -> str | None:
     meta = post.get("meta")
-    if not isinstance(meta, dict) or not isinstance(meta.get("original_link"), str):
-        raise WorkflowError("post meta.original_link is missing")
-    return meta["original_link"]
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("original_link")
+    return value.strip() if isinstance(value, str) and value.strip() else None

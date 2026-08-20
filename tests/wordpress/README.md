@@ -38,7 +38,7 @@ O script recusa hosts fora da allowlist local, exige credenciais apenas com `--a
 - `local-relevant`: conteúdo relevante; deve poder seguir para processamento.
 - `local-irrelevant`: conteúdo fora da linha editorial; deve gerar `skip` sem update.
 - `local-legacy-html`: wrappers, imagem inline e CTA antigo; deve ser limpo.
-- `local-missing-source`: sem `original_link`; deve ser rejeitado sem update.
+- `local-missing-source`: sem `original_link`; deve receber o CTA sem adicionar fonte.
 - `local-concurrency`: simula reclassificação durante o processamento; o update deve abortar se o status deixar de ser `pending`.
 
 Após os testes, remova os posts criados pela API do ambiente local. Não use esta rotina contra produção.
