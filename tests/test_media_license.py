@@ -11,7 +11,7 @@ def candidate():
         "license": "CC BY-SA 4.0",
         "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
         "captured_at": "2026-08-20T12:00:00Z",
-        "credit_text": "Author Name, CC BY-SA 4.0",
+        "credit_text": "Crédito da imagem: Author Name. Imagem do jogo. Licença CC BY-SA 4.0.",
         "alt_text": "Imagem de um videogame",
     }
 

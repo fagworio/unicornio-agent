@@ -30,8 +30,8 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def upload_media(self, path, *, filename, alt_text, title):
-        self.calls.append((Path(path), filename, alt_text, title))
+    def upload_media(self, path, *, filename, alt_text, title, caption=None):
+        self.calls.append((Path(path), filename, alt_text, title, caption))
         return {"id": 7, "source_url": "http://wordpress.local/media/image.webp"}
 
 
@@ -84,7 +84,7 @@ class MediaPipelineTests(unittest.TestCase):
                     "license": "CC0",
                     "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
                     "captured_at": "2026-08-20T12:00:00Z",
-                    "credit_text": "Autor / CC0",
+                    "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
                     "alt_text": "Imagem de jogo",
                 },
             )

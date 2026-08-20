@@ -64,6 +64,7 @@ class WordPressClient:
         filename: str,
         alt_text: str,
         title: str,
+        caption: str | None = None,
     ) -> dict[str, Any]:
         if self.config.dry_run:
             raise SafetyError("dry-run blocks WordPress media uploads")
@@ -88,6 +89,8 @@ class WordPressClient:
 
         field("alt_text", alt_text)
         field("title", title)
+        if caption:
+            field("caption", caption)
         mime = mimetypes.guess_type(filename)[0] or "image/webp"
         chunks.extend(
             [

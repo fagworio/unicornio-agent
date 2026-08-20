@@ -30,6 +30,8 @@ def validate_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     for name in ("author", "license", "captured_at", "credit_text", "alt_text"):
         if not isinstance(candidate[name], str) or not candidate[name].strip():
             raise LicenseError(f"media candidate {name} is required")
+    if not candidate["credit_text"].strip().startswith("Crédito da imagem:"):
+        raise LicenseError("credit_text must use the visible image-credit format")
     source = _url(candidate["source_page_url"], "source_page_url")
     direct = _url(candidate["direct_image_url"], "direct_image_url")
     license_url = _url(candidate["license_url"], "license_url")

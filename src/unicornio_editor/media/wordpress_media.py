@@ -20,4 +20,5 @@ def upload_image(client: Any, path: Path, candidate: dict[str, Any]) -> dict[str
         filename=path.name,
         alt_text=evidence["alt_text"],
         title=evidence["credit_text"],
+        caption=evidence["credit_text"],
     )

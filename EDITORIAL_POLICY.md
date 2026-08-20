@@ -51,7 +51,7 @@ O Google Images será usado somente como ferramenta de descoberta. Uma imagem ap
 3. Recusar a imagem se a licença não puder ser confirmada ou se os termos proibirem o uso pretendido.
 4. Baixar uma cópia temporária, validar origem/MIME/tamanho, converter para WebP e enviar à Media Library local do WordPress.
 5. Não usar bucket, CDN externo ou hotlink da imagem original.
-6. Exibir crédito visível conforme exigido pela licença, com link para a origem/licença quando possível.
+6. Exibir crédito visível em toda imagem no formato `Crédito da imagem: Autor/Empresa. Descrição da imagem. Informação de licença ou direitos autorais, quando aplicável.`, com link para a origem/licença quando possível.
 7. Entender que crédito não substitui licença nem transforma material protegido em público.
 8. Remover a imagem do plano e procurar outra fonte quando houver dúvida.
 

@@ -42,6 +42,8 @@ def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
             raise MediaInsertionError("media_url must be an absolute HTTP(S) URL")
         alt = _text(item["alt_text"], "alt_text")
         credit = _text(item["credit_text"], "credit_text")
+        if not credit.startswith("Crédito da imagem:"):
+            raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
         figure = (
             f'<figure><img src="{escape(url, quote=True)}" alt="{escape(alt, quote=True)}" />'
             f"<figcaption>{escape(credit)}</figcaption></figure>"

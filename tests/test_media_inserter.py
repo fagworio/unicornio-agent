@@ -10,10 +10,10 @@ class MediaInserterTests(unittest.TestCase):
             "paragraph_index": 1,
             "media_url": "http://wordpress.local/image.webp",
             "alt_text": "Imagem de jogo",
-            "credit_text": "Autor / CC0",
+            "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
         }])
         self.assertIn('<figure><img src="http://wordpress.local/image.webp" alt="Imagem de jogo" />', result)
-        self.assertIn("<figcaption>Autor / CC0</figcaption>", result)
+        self.assertIn("<figcaption>Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).</figcaption>", result)
         self.assertLess(result.index("</p><figure>"), result.index("<p>Três."))
 
     def test_rejects_insertion_inside_paragraph(self):
@@ -22,7 +22,7 @@ class MediaInserterTests(unittest.TestCase):
                 "paragraph_index": 0,
                 "media_url": "https://media.example/image.webp",
                 "alt_text": "Imagem",
-                "credit_text": "Autor / CC0",
+                "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
             }])
 
     def test_enforces_maximum_four_images(self):
@@ -30,7 +30,7 @@ class MediaInserterTests(unittest.TestCase):
             "paragraph_index": i * 3 + 1,
             "media_url": f"https://media.example/{i}.webp",
             "alt_text": "Imagem",
-            "credit_text": "Autor / CC0",
+            "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
         } for i in range(5)]
         with self.assertRaises(MediaInsertionError):
             insert_media("".join("<p>Texto.</p>" for _ in range(20)), plan)

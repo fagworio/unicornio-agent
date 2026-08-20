@@ -16,7 +16,7 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Novas imagens só podem vir de candidatos descobertos pelo Google Images cuja licença pública/permissão foi confirmada na página original.
 - Cada imagem deve ter URL da página original, autor, licença, URL da licença e crédito registrado.
 - Baixar para área temporária, validar, converter para WebP e enviar pela Media Library REST local; não usar bucket/CDN externo.
-- Crédito visível é obrigatório e deve seguir a licença; crédito não substitui licença.
+- Crédito visível é obrigatório em toda imagem e deve seguir o formato `Crédito da imagem: Autor/Empresa. Descrição da imagem. Informação de licença ou direitos autorais, quando aplicável.`; crédito não substitui licença.
 - Sem licença verificável, não usar a imagem.
 - A fonte vem exclusivamente do custom field `original_link`.
 - Fonte só é adicionada quando `original_link` existe; deve usar target="_blank", rel="nofollow noopener" e ponto antes de `</em>`.

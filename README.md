@@ -4,7 +4,7 @@ Automacao editorial para WordPress acionada pelo cron do Hermes Agent.
 
 ## Objetivo
 
-Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, remover imagens inline importadas, descobrir imagens públicas/licenciadas via Google Images, baixar e publicar cópia local em WebP com crédito obrigatório, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
+Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, remover imagens inline importadas, descobrir imagens públicas/licenciadas via Google Images, baixar e publicar cópia local em WebP com crédito obrigatório em toda imagem, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
 
 O sistema usa duas camadas:
 
