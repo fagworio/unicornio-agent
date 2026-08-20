@@ -1,0 +1,80 @@
+{
+  "post_id": 109226,
+  "items": [
+    {
+      "name": "backup",
+      "status": "pass",
+      "detail": "snapshot: backups/109226/1787267316728211802.json"
+    },
+    {
+      "name": "status_pending",
+      "status": "pass",
+      "detail": "status atual: pending"
+    },
+    {
+      "name": "relevancia",
+      "status": "pass",
+      "detail": "decision=process, confidence=0.96 (minimo 0.80)"
+    },
+    {
+      "name": "conteudo_nao_vazio",
+      "status": "pass",
+      "detail": "cleaned_html preenchido"
+    },
+    {
+      "name": "fonte_original_link",
+      "status": "pass",
+      "detail": "original_link presente; bloco Fonte ok"
+    },
+    {
+      "name": "imagens_no_corpo",
+      "status": "fail",
+      "detail": "1698 palavras exigem >= 6 imagens; conteudo tem 0"
+    },
+    {
+      "name": "imagem_destaque",
+      "status": "pass",
+      "detail": "featured_media=109227 — obrigatoria para publicar"
+    },
+    {
+      "name": "destaque_1200x720",
+      "status": "fail",
+      "detail": "dimensoes atuais: 1600x900 (exigido 1200x720)"
+    },
+    {
+      "name": "imagens_webp",
+      "status": "fail",
+      "detail": "1 imagem(ns); nao-webp: 1"
+    },
+    {
+      "name": "trailer_youtube",
+      "status": "skip",
+      "detail": "conteudo nao e de jogo; trailer nao exigido"
+    },
+    {
+      "name": "cta_canonico",
+      "status": "pass",
+      "detail": "CTA canonico presente"
+    },
+    {
+      "name": "qualidade_texto",
+      "status": "fail",
+      "detail": "content with 1698 words requires at least 6 relevant images"
+    },
+    {
+      "name": "estrutura_lista",
+      "status": "fail",
+      "detail": "item 1 must have its image immediately after H2"
+    },
+    {
+      "name": "schema_editorial",
+      "status": "pass",
+      "detail": "JSON editorial valido no schema estrito"
+    }
+  ],
+  "passed": 8,
+  "skipped": 1,
+  "failed": 5,
+  "all_passed": false,
+  "trailer": null
+}

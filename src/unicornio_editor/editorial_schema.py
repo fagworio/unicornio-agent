@@ -73,8 +73,8 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     _nonempty_string(seo["focus_keyword"], "seo.focus_keyword")
 
     media_plan = payload["media_plan"]
-    if not isinstance(media_plan, list) or len(media_plan) > 4:
-        raise EditorialValidationError("media_plan must contain between 0 and 4 items")
+    if not isinstance(media_plan, list) or len(media_plan) > 12:
+        raise EditorialValidationError("media_plan must contain between 0 and 12 items")
     normalized_media = []
     featured_count = 0
     for index, item in enumerate(media_plan):

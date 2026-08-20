@@ -14,7 +14,7 @@ from .checklist import run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
-from .list_quality import validate_list_content
+from .list_quality import detect_list_format, validate_list_content
 from .media.converter import convert_to_webp, prepare_featured_webp
 from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
@@ -81,7 +81,12 @@ def apply_editorial(
             if not result.get("featured")
         ]
         if plan:
-            html = insert_media(html, plan)
+            is_list = bool(
+                detect_list_format(
+                    _post_title(post) or editorial["seo"]["title"], html
+                )
+            )
+            html = insert_media(html, plan, listicle=is_list)
     editorial_with_media = {**editorial, "cleaned_html": html}
     content, trailer = compose_final_content(editorial_with_media, config, original_link_of(post))
     if featured_credit and not config.dry_run:

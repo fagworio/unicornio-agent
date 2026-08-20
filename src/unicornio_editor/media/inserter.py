@@ -29,11 +29,18 @@ def append_featured_credit(html: str, credit_text: str) -> str:
     return html[: match.end()] + figure + html[match.end() :]
 
 
-def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
+def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = False) -> str:
+    """Insert uploaded figures at safe block boundaries.
+
+    Normal articles: figures go after the paragraph at ``paragraph_index``,
+    kept at least three paragraphs apart. Listicles (numbered H2 items):
+    each figure goes immediately after the numbered H2 preceding the
+    targeted paragraph, as required by ``validate_list_content``.
+    """
     if not isinstance(html, str) or not isinstance(plan, list):
         raise MediaInsertionError("HTML and media plan have invalid types")
-    if len(plan) > 4:
-        raise MediaInsertionError("at most four inline images are allowed")
+    if len(plan) > 12:
+        raise MediaInsertionError("at most twelve images are allowed")
     paragraph_ends = [match.end() for match in re.finditer(r"</p>\s*", html, flags=re.IGNORECASE)]
     placements: list[tuple[int, str]] = []
     indexes: list[int] = []
@@ -46,10 +53,11 @@ def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
         index = item["paragraph_index"]
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise MediaInsertionError("paragraph_index must be non-negative")
-        if index >= len(paragraph_ends) - 1:
+        if index >= len(paragraph_ends) - (1 if not listicle else 0):
             raise MediaInsertionError("media must be inserted between paragraphs")
-        if index in indexes or any(abs(index - other) < 3 for other in indexes):
-            raise MediaInsertionError("images must be at least three paragraphs apart")
+        if not listicle:
+            if index in indexes or any(abs(index - other) < 3 for other in indexes):
+                raise MediaInsertionError("images must be at least three paragraphs apart")
         url = item["media_url"]
         if not isinstance(url, str) or url.lower().split("?", 1)[0].rsplit("/", 1)[-1].endswith(".webp") is False:
             raise MediaInsertionError("media_url must point to a WebP file")
@@ -66,6 +74,18 @@ def insert_media(html: str, plan: list[Mapping[str, Any]]) -> str:
         )
         placements.append((index, figure))
         indexes.append(index)
+    if listicle:
+        for index, figure in sorted(placements, reverse=True):
+            start = paragraph_ends[index - 1] if index > 0 else 0
+            end = paragraph_ends[index]
+            heading = re.search(r"<h2[^>]*>.*?</h2>", html[start:end], re.IGNORECASE | re.DOTALL)
+            if not heading:
+                raise MediaInsertionError(
+                    f"list item at paragraph {index} has no numbered H2 before it"
+                )
+            position = start + heading.end()
+            html = html[:position] + figure + html[position:]
+        return html
     for index, figure in sorted(placements, reverse=True):
         position = paragraph_ends[index]
         html = html[:position] + figure + html[position:]

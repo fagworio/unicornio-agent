@@ -127,6 +127,31 @@ class MediaPipelineTests(unittest.TestCase):
             with Image.open(output) as image:
                 self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
 
+    def test_download_retries_on_rate_limit_then_succeeds(self):
+        responses = [429, 200]
+
+        class FlakyHandler(ImageHandler):
+            def do_GET(self):
+                code = responses.pop(0)
+                if code != 200:
+                    self.send_response(code)
+                    self.end_headers()
+                    return
+                super().do_GET()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FlakyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/image.png"
+            with tempfile.TemporaryDirectory() as directory:
+                path = download_image(url, Path(directory) / "source.png")
+                self.assertGreater(path.stat().st_size, 0)
+        finally:
+            server.shutdown()
+            thread.join()
+        self.assertEqual(responses, [])  # both attempts were consumed
+
 
 if __name__ == "__main__":
     unittest.main()
