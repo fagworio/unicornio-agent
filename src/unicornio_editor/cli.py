@@ -8,9 +8,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .backup import SnapshotStore
+from .checklist import run_pre_publish_checklist
 from .config import ConfigError, load_config
+from .editorial_schema import validate_editorial
 from .maintenance import generate_report
-from .workflow import apply_editorial, prepare_post
+from .workflow import apply_editorial, compose_final_content, original_link_of, prepare_post
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -33,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("post_id", type=int)
     apply_parser.add_argument("editorial_file", type=Path)
     apply_parser.add_argument("--root", type=Path, default=Path("."))
+
+    checklist_parser = subparsers.add_parser(
+        "checklist", help="roda o checklist pre-publicacao (somente leitura)"
+    )
+    checklist_parser.add_argument("post_id", type=int)
+    checklist_parser.add_argument("editorial_file", type=Path)
+    checklist_parser.add_argument("--root", type=Path, default=Path("."))
 
     report_parser = subparsers.add_parser("maintenance-report", help="gera diagnóstico sem escrever")
     report_parser.add_argument("report_file", type=Path)
@@ -63,6 +73,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
+        elif args.command == "checklist":
+            payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
+            editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+            post = client.get_post(args.post_id)
+            backup = SnapshotStore(args.root).save(args.post_id, post)
+            content, trailer = compose_final_content(editorial, config, original_link_of(post))
+            result = run_pre_publish_checklist(
+                post=post,
+                editorial=editorial,
+                content=content,
+                backup_path=backup,
+                config=config,
+                client=client,
+            )
+            result["trailer"] = trailer
         else:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = apply_editorial(client, config, args.root, args.post_id, payload)

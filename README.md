@@ -103,6 +103,10 @@ Hermes cron
   -> trailer oficial se relevante: busca determinística no YouTube
      (<game_name> trailer), validação via oEmbed, embed antes do CTA
   -> monta CTA + Fonte
+  -> checklist pre-publicacao (somente leitura): backup, pending,
+     relevancia, conteudo, Fonte/original_link, imagens por tamanho
+     (2/4/6), imagem de destaque obrigatoria, WebP, trailer, CTA,
+     qualidade de texto, estrutura e schema — publicar so com all_passed
   -> valida
   -> atualiza mantendo pending
 ```

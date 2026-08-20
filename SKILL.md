@@ -37,7 +37,12 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 10. Insira cada nova imagem entre parágrafos, nunca dentro de parágrafo, imediatamente após H2, antes do CTA ou da fonte. Mantenha ao menos 3 parágrafos de distância quando possível e inclua crédito visível.
 11. Defina imagem destacada se `featured_media` estiver vazio, usando imagem diferente ou apropriada para capa e com crédito.
 12. Salve o JSON editorial em arquivo e rode `unicornio-editor apply ID arquivo.json`.
-13. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
+13. Antes de qualquer publicacao, rode o checklist sequencial e so publique se TODOS os itens passarem:
+    `unicornio-editor checklist ID arquivo.json` — verifica na ordem: backup, status pending,
+    relevancia, conteudo, Fonte (original_link), imagens no corpo (2/4/6 por tamanho), imagem
+    de destaque (obrigatoria), WebP, trailer (se jogo), CTA, qualidade de texto, estrutura e
+    schema. O resultado `checklist` tambem vem no JSON do `apply`.
+14. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
 
 ## Texto e SEO
 - Escreva em portugues brasileiro natural.

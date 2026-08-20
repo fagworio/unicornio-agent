@@ -30,7 +30,8 @@ Process only WordPress posts with status `pending`.
 5. Record source page, author, license, license URL, capture time, and visible credit. Reject uncertain images.
 6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks.
 7. Run `unicornio-editor apply POST_ID editorial.json`.
-8. Inspect the JSON result and backup path. A `skip` or dry-run result must have `wordpress_changed=false`.
+8. Run `unicornio-editor checklist POST_ID editorial.json` (read-only) and only publish when every item passes — backup, pending status, relevance, content, Fonte (original_link), body images per length (2/4/6), mandatory featured image, WebP, trailer (if game), CTA, text quality, structure, schema.
+9. Inspect the JSON result and backup path. A `skip` or dry-run result must have `wordpress_changed=false`.
 
 The agent never changes a post to a publishing status. All media credits must remain visible and traceable to the license evidence.
 

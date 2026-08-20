@@ -7,6 +7,7 @@ from typing import Any
 
 from .backup import SnapshotStore
 from .builder import append_canonical_footer
+from .checklist import run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
@@ -56,11 +57,15 @@ def apply_editorial(
             "backup": str(backup),
         }
 
-    html = editorial["cleaned_html"]
-    trailer = _discover_trailer(editorial, config)
-    if trailer is not None:
-        html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
-    content = append_canonical_footer(html, _original_link(post))
+    content, trailer = compose_final_content(editorial, config, original_link_of(post))
+    checklist = run_pre_publish_checklist(
+        post=post,
+        editorial=editorial,
+        content=content,
+        backup_path=backup,
+        config=config,
+        client=client,
+    )
     validate_list_content(_post_title(post) or editorial["seo"]["title"], content)
     if config.dry_run:
         return {
@@ -70,6 +75,7 @@ def apply_editorial(
             "backup": str(backup),
             "content_preview": content,
             "trailer": trailer,
+            "checklist": checklist,
         }
 
     latest = client.get_post(post_id)
@@ -94,6 +100,7 @@ def apply_editorial(
         "backup": str(backup),
         "status_after": result.get("status"),
         "trailer": trailer,
+        "checklist": checklist,
     }
 
 
@@ -106,6 +113,27 @@ def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, st
         return find_game_trailer(game_name, timeout=config.http_timeout)
     except TrailerError:
         return None
+
+
+def compose_final_content(
+    editorial: dict[str, Any],
+    config: Config,
+    original_link: str | None,
+) -> tuple[str, dict[str, str] | None]:
+    """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
+
+    Returns ``(content, trailer)`` so callers can report what was embedded.
+    """
+    html = editorial["cleaned_html"]
+    trailer = _discover_trailer(editorial, config)
+    if trailer is not None:
+        html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
+    return append_canonical_footer(html, original_link), trailer
+
+
+def original_link_of(post: dict[str, Any]) -> str | None:
+    """Read the ``original_link`` custom field from the post meta (REST edit context)."""
+    return _original_link(post)
 
 
 def _require_pending(post: dict[str, Any]) -> None:
