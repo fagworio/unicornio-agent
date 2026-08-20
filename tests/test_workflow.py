@@ -135,6 +135,63 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["trailer"]["video_id"], "abcDEF12345")
         self.assertEqual(client.updated, [])
 
+    @staticmethod
+    def media_item(paragraph_index=0, is_featured=False):
+        return {
+            "paragraph_index": paragraph_index,
+            "source_page_url": "https://source.example/page",
+            "direct_image_url": "https://source.example/image.jpg",
+            "author": "Autor",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "credit_text": "Crédito da imagem: Autor. Imagem do jogo. CC BY 4.0.",
+            "alt_text": "Imagem do jogo",
+            "is_featured": is_featured,
+        }
+
+    def test_apply_executes_media_plan_and_sets_featured(self):
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        payload["media_plan"] = [
+            self.media_item(paragraph_index=1),
+            self.media_item(paragraph_index=4, is_featured=True),
+        ]
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), mock.patch(
+            "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/featured.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            side_effect=[
+                {"id": 50, "source_url": "https://wp.test/50.webp"},
+                {"id": 51, "source_url": "https://wp.test/51.webp"},
+            ],
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = FakeClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        payload_sent = client.updated[0][1]
+        self.assertEqual(payload_sent["featured_media"], 51)
+        raw = payload_sent["content"]["raw"]
+        self.assertIn("https://wp.test/50.webp", raw)
+        self.assertIn("Crédito da imagem", raw)
+        self.assertEqual(report["featured_media"], 51)
+        self.assertEqual(len(report["media_plan_results"]), 2)
+        self.assertTrue(report["media_plan_results"][1]["featured"])
+
+    def test_apply_dry_run_blocks_media_plan(self):
+        payload = editorial_payload()
+        payload["media_plan"] = [self.media_item(paragraph_index=1, is_featured=True)]
+        with mock.patch("unicornio_editor.workflow.download_image") as download:
+            with tempfile.TemporaryDirectory() as directory:
+                client = FakeClient(self.post())
+                report = apply_editorial(client, self.config(True), Path(directory), 42, payload)
+        download.assert_not_called()
+        self.assertEqual(report["media_plan_results"][0]["status"], "blocked")
+        self.assertFalse(report["wordpress_changed"])
+        self.assertEqual(client.updated, [])
+
     def test_apply_dry_run_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

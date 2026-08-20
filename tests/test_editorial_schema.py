@@ -69,7 +69,28 @@ class EditorialSchemaTests(unittest.TestCase):
             "captured_at": "2026-08-20T12:00:00Z",
             "credit_text": "Imagem: Autor / Source",
             "alt_text": "Imagem ilustrativa",
+            "is_featured": False,
         }]
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
+    def test_rejects_more_than_one_featured_image(self):
+        payload = valid_payload()
+        base = {
+            "paragraph_index": 0,
+            "source_page_url": "https://source.example/page",
+            "direct_image_url": "https://source.example/image.jpg",
+            "author": "Autor",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "credit_text": "Crédito da imagem: Autor. Imagem. CC BY 4.0.",
+            "alt_text": "Imagem",
+        }
+        payload["media_plan"] = [
+            {**base, "paragraph_index": 0, "is_featured": True},
+            {**base, "paragraph_index": 3, "is_featured": True},
+        ]
         with self.assertRaises(EditorialValidationError):
             validate_editorial(payload)
 

@@ -31,7 +31,11 @@ def editorial_payload(**overrides):
 
 class FakeClient:
     def get_media(self, media_id):
-        return {"id": media_id, "source_url": "https://media.example/featured.webp"}
+        return {
+            "id": media_id,
+            "source_url": "https://media.example/featured.webp",
+            "media_details": {"width": 1200, "height": 720},
+        }
 
 
 def make_post(**overrides):

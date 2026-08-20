@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,10 @@ from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
 from .list_quality import validate_list_content
+from .media.converter import convert_to_webp, prepare_featured_webp
+from .media.downloader import download_image
+from .media.inserter import append_featured_credit, insert_media
+from .media.wordpress_media import upload_image
 from .observability import build_processing_markers
 from .seo.rank_math import build_meta
 from .trailer import TrailerError, build_trailer_html, find_game_trailer
@@ -57,10 +62,28 @@ def apply_editorial(
             "backup": str(backup),
         }
 
-    content, trailer = compose_final_content(editorial, config, original_link_of(post))
+    media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
+    html = editorial["cleaned_html"]
+    if media_results and not config.dry_run:
+        plan = [
+            {
+                "paragraph_index": result["paragraph_index"],
+                "media_url": result["media_url"],
+                "alt_text": result["alt_text"],
+                "credit_text": result["credit_text"],
+            }
+            for result in media_results
+            if not result.get("featured")
+        ]
+        if plan:
+            html = insert_media(html, plan)
+    editorial_with_media = {**editorial, "cleaned_html": html}
+    content, trailer = compose_final_content(editorial_with_media, config, original_link_of(post))
+    if featured_credit and not config.dry_run:
+        content = append_featured_credit(content, featured_credit)
     checklist = run_pre_publish_checklist(
-        post=post,
-        editorial=editorial,
+        post={**post, "featured_media": featured_id or post.get("featured_media")},
+        editorial=editorial_with_media,
         content=content,
         backup_path=backup,
         config=config,
@@ -75,24 +98,25 @@ def apply_editorial(
             "backup": str(backup),
             "content_preview": content,
             "trailer": trailer,
+            "media_plan_results": media_results,
             "checklist": checklist,
         }
 
     latest = client.get_post(post_id)
     _require_pending(latest)
-    result = client.update_post(
-        post_id,
-        {
-            "content": {"raw": content},
-            "meta": {
-                **build_meta(editorial["seo"], latest.get("meta", {})),
-                **build_processing_markers(
-                    editorial["site_relevance"]["decision"],
-                    editorial["site_relevance"]["confidence"],
-                ),
-            },
+    update_payload: dict[str, Any] = {
+        "content": {"raw": content},
+        "meta": {
+            **build_meta(editorial["seo"], latest.get("meta", {})),
+            **build_processing_markers(
+                editorial["site_relevance"]["decision"],
+                editorial["site_relevance"]["confidence"],
+            ),
         },
-    )
+    }
+    if featured_id:
+        update_payload["featured_media"] = featured_id
+    result = client.update_post(post_id, update_payload)
     return {
         "post_id": post_id,
         "wordpress_changed": True,
@@ -100,8 +124,82 @@ def apply_editorial(
         "backup": str(backup),
         "status_after": result.get("status"),
         "trailer": trailer,
+        "media_plan_results": media_results,
+        "featured_media": result.get("featured_media"),
         "checklist": checklist,
     }
+
+
+def _execute_media_plan(
+    editorial: dict[str, Any],
+    config: Config,
+    client: WordPressClient,
+) -> tuple[list[dict[str, Any]], int | None, str | None]:
+    """Download, convert to WebP, upload and report the editorial media plan.
+
+    Featured candidates are prepared at exactly 1200x720. In dry-run the plan
+    is reported but never executed (uploads are write operations).
+    """
+    plan = editorial.get("media_plan") or []
+    if not plan:
+        return [], None, None
+    if config.dry_run:
+        return (
+            [
+                {
+                    "paragraph_index": item.get("paragraph_index"),
+                    "status": "blocked",
+                    "detail": "dry-run nao executa download/upload de midia",
+                }
+                for item in plan
+            ],
+            None,
+            None,
+        )
+    results: list[dict[str, Any]] = []
+    featured_id: int | None = None
+    featured_credit: str | None = None
+    with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
+        tmp = Path(directory)
+        for position, item in enumerate(plan):
+            evidence = {
+                name: item[name]
+                for name in (
+                    "source_page_url",
+                    "direct_image_url",
+                    "author",
+                    "license",
+                    "license_url",
+                    "captured_at",
+                    "credit_text",
+                    "alt_text",
+                )
+            }
+            suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
+            source = download_image(item["direct_image_url"], tmp / f"source_{position}{suffix}")
+            is_featured = bool(item.get("is_featured"))
+            if is_featured:
+                webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
+            else:
+                webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+            media = upload_image(client, webp, evidence)
+            media_id = media.get("id")
+            media_url = media.get("source_url")
+            if not media_id or not media_url:
+                raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+            result: dict[str, Any] = {
+                "paragraph_index": item["paragraph_index"],
+                "media_id": media_id,
+                "media_url": media_url,
+                "alt_text": item["alt_text"],
+                "credit_text": item["credit_text"],
+                "featured": is_featured,
+            }
+            results.append(result)
+            if is_featured:
+                featured_id = media_id
+                featured_credit = item["credit_text"]
+    return results, featured_id, featured_credit
 
 
 def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:

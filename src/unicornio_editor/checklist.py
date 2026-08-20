@@ -116,6 +116,28 @@ def run_pre_publish_checklist(
         f"featured_media={featured_raw or 'vazio'} — obrigatoria para publicar",
     )
 
+    # 7b. Featured image must obey the portal ratio: exactly 1200x720.
+    featured_details: dict[str, Any] = {}
+    if featured_ok and client is not None:
+        try:
+            media = client.get_media(featured)
+            details = media.get("media_details") or {}
+            if isinstance(details, dict):
+                featured_details = details
+        except Exception:
+            pass
+    if featured_ok:
+        width = featured_details.get("width")
+        height = featured_details.get("height")
+        proportion_ok = width == 1200 and height == 720
+        check(
+            "destaque_1200x720",
+            proportion_ok,
+            f"dimensoes atuais: {width or 'desconhecida'}x{height or 'desconhecida'} (exigido 1200x720)",
+        )
+    else:
+        check("destaque_1200x720", True, "sem destaque para verificar", skipped=True)
+
     # 8. Every published image must be WebP.
     image_urls = list(inline_images)
     if featured_ok and client is not None:

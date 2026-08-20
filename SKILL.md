@@ -35,7 +35,7 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 8. Registre para cada imagem a origem, autor, licença, URL da licença, data da captura e texto de crédito. Se não for possível confirmar, descarte.
 9. Baixe imagens escolhidas para área temporária, valide MIME/tamanho/resolução, converta para WebP e faça upload pela REST API da Media Library local. Não use bucket ou CDN externo.
 10. Insira cada nova imagem entre parágrafos, nunca dentro de parágrafo, imediatamente após H2, antes do CTA ou da fonte. Mantenha ao menos 3 parágrafos de distância quando possível e inclua crédito visível.
-11. Defina imagem destacada se `featured_media` estiver vazio, usando imagem diferente ou apropriada para capa e com crédito.
+11. Imagem de destaque é OBRIGATÓRIA para publicar: marque no `media_plan` o item com `is_featured: true` (no máximo 1). O código garante 1200x720 (cover-crop 5:3) e WebP automaticamente; nunca use thumbnail do YouTube (licença não verificável).
 12. Salve o JSON editorial em arquivo e rode `unicornio-editor apply ID arquivo.json`.
 13. Antes de qualquer publicacao, rode o checklist sequencial e so publique se TODOS os itens passarem:
     `unicornio-editor checklist ID arquivo.json` — verifica na ordem: backup, status pending,

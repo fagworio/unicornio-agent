@@ -7,7 +7,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from unicornio_editor.media.converter import convert_to_webp
+from unicornio_editor.media.converter import (
+    FEATURED_HEIGHT,
+    FEATURED_WIDTH,
+    convert_to_webp,
+    prepare_featured_webp,
+)
 from unicornio_editor.media.downloader import MediaDownloadError, download_image, select_reupload_source
 from unicornio_editor.media.wordpress_media import upload_image
 
@@ -100,6 +105,27 @@ class MediaPipelineTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result["id"], 7)
+
+    def test_prepare_featured_webp_guarantees_1200x720(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            # 1920x1080 (16:9) source must be center-cropped to 5:3.
+            source = directory / "source.png"
+            Image.new("RGB", (1920, 1080), "blue").save(source, format="PNG")
+            output = prepare_featured_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "WEBP")
+                self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
+
+    def test_prepare_featured_webp_pads_narrow_sources_to_target_ratio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            # 500x1000 (portrait) source gets cover-cropped to 5:3 then upscaled.
+            source = directory / "portrait.png"
+            Image.new("RGB", (500, 1000), "green").save(source, format="PNG")
+            output = prepare_featured_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
 
 
 if __name__ == "__main__":

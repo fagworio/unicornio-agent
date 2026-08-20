@@ -32,6 +32,7 @@ _MEDIA = {
     "captured_at",
     "credit_text",
     "alt_text",
+    "is_featured",
 }
 
 
@@ -75,6 +76,7 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     if not isinstance(media_plan, list) or len(media_plan) > 4:
         raise EditorialValidationError("media_plan must contain between 0 and 4 items")
     normalized_media = []
+    featured_count = 0
     for index, item in enumerate(media_plan):
         media = _object(item, f"media_plan[{index}]")
         _keys(media, _MEDIA, f"media_plan[{index}]")
@@ -85,7 +87,14 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
             _nonempty_string(media[name], f"media_plan[{index}].{name}")
         for name in ("source_page_url", "direct_image_url", "license_url"):
             _http_url(media[name], f"media_plan[{index}].{name}")
+        is_featured = media["is_featured"]
+        if not isinstance(is_featured, bool):
+            raise EditorialValidationError(f"media_plan[{index}].is_featured must be boolean")
+        if is_featured:
+            featured_count += 1
         normalized_media.append(dict(media))
+    if featured_count > 1:
+        raise EditorialValidationError("media_plan must contain at most one featured image")
 
     needs_trailer = payload["needs_trailer"]
     if not isinstance(needs_trailer, bool):
