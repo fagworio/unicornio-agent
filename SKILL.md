@@ -44,13 +44,14 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
     resultado `checklist` tambem vem no JSON do `apply`.
 14. Fluxo de publicacao: o `apply` salva `backups/<ID>/editorial.latest.json`; publique somente via
     `unicornio-editor publish ID` ou `publish-ready` (todos os pending prontos). O comando revalida o
-    checklist completo e so publica com `PUBLISH_ENABLED=true` (gate duplo: o script do cron de
-    publicacao liga PUBLISH_ENABLED e EDITOR_DRY_RUN=false; o .env permanece dry-run). NUNCA publique
-    manualmente por fora do fluxo.
+    checklist completo e so publica com `PUBLISH_ENABLED=true` (o script do cron de
+    publicacao liga PUBLISH_ENABLED; o .env roda com EDITOR_DRY_RUN=false em producao).
+    NUNCA publique manualmente por fora do fluxo.
     Plano de publicacao (cron diario, America/Sao_Paulo): 00h=5, 08h=7, 12h=8,
     18h=10, 21h=10 (~40/dia). Backlog novo chega entre 03:30 e 05:00;
     `PUBLISH_LIMIT` define a cota da janela e conta apenas posts publicados de fato.
-15. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
+15. Em producao o projeto roda em write mode (EDITOR_DRY_RUN=false): o `apply` grava de verdade
+    (conteudo + meta), sempre forcando status `pending` — a publicacao so acontece via `publish-ready`.
 
 ## Texto e SEO
 - Escreva em portugues brasileiro natural.

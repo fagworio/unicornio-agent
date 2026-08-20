@@ -1,6 +1,6 @@
 ---
 name: unicorniohater-editor
-description: Process WordPress pending posts safely in dry-run-first mode.
+description: Process WordPress pending posts in write mode, gated by the pre-publish checklist.
 version: 0.1.0
 metadata:
   hermes:
@@ -13,7 +13,7 @@ Process only WordPress posts with status `pending`.
 
 ## Non-negotiable safety
 
-- Start and remain in `EDITOR_DRY_RUN=true` until multiple local runs are reviewed.
+- Production runs in write mode (`EDITOR_DRY_RUN=false` in the .env): `apply` really writes the editorial content and meta, always keeping status `pending`. Publishing happens ONLY through the publish cron (`publish-ready`), gated by `PUBLISH_ENABLED=true` and a fully passing checklist.
 - Never send `status` in an update payload.
 - Re-fetch the post immediately before any write and abort if its status is not `pending`.
 - Skip irrelevant or uncertain content without changing WordPress.

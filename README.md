@@ -133,10 +133,12 @@ cp .env.example .env
 
 Preencha `.env` com um usuario WordPress de automacao e Application Password.
 
-Comece obrigatoriamente com:
+Producao opera em write mode (o `apply` grava de verdade, sempre mantendo
+status `pending`; a publicacao so acontece via `publish-ready` com gate
+`PUBLISH_ENABLED`):
 
 ```env
-EDITOR_DRY_RUN=true
+EDITOR_DRY_RUN=false
 ```
 
 Teste:
