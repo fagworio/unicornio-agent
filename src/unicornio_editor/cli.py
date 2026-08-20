@@ -13,7 +13,13 @@ from .checklist import run_pre_publish_checklist
 from .config import ConfigError, load_config
 from .editorial_schema import validate_editorial
 from .maintenance import generate_report
-from .workflow import apply_editorial, compose_final_content, original_link_of, prepare_post
+from .workflow import (
+    apply_editorial,
+    compose_final_content,
+    original_link_of,
+    prepare_post,
+    publish_post,
+)
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -43,6 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
     checklist_parser.add_argument("post_id", type=int)
     checklist_parser.add_argument("editorial_file", type=Path)
     checklist_parser.add_argument("--root", type=Path, default=Path("."))
+
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="publica um post somente se o checklist pre-publicacao passar (gate PUBLISH_ENABLED)",
+    )
+    publish_parser.add_argument("post_id", type=int)
+    publish_parser.add_argument("--root", type=Path, default=Path("."))
+    subparsers.add_parser(
+        "publish-ready",
+        help="publica todos os pending prontos (checklist ok); silencioso quando nao ha nada",
+    )
 
     report_parser = subparsers.add_parser("maintenance-report", help="gera diagnóstico sem escrever")
     report_parser.add_argument("report_file", type=Path)
@@ -88,6 +105,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client=client,
             )
             result["trailer"] = trailer
+        elif args.command == "publish":
+            result = publish_post(client, config, args.root, args.post_id)
+        elif args.command == "publish-ready":
+            posts = client.list_pending(per_page=50)
+            outcomes = []
+            for candidate in posts:
+                candidate_id = candidate.get("id")
+                if not isinstance(candidate_id, int):
+                    continue
+                try:
+                    outcome = publish_post(client, config, args.root, candidate_id)
+                except Exception as exc:  # noqa: BLE001 - report per post, keep the loop alive
+                    outcome = {
+                        "post_id": candidate_id,
+                        "wordpress_changed": False,
+                        "status": "error",
+                        "reason": str(exc),
+                    }
+                outcomes.append(outcome)
+            if any(outcome.get("wordpress_changed") for outcome in outcomes):
+                published = [o for o in outcomes if o.get("wordpress_changed")]
+                result = {
+                    "published": len(published),
+                    "posts": published,
+                    "blocked_or_skipped": len(outcomes) - len(published),
+                }
+            else:
+                # Watchdog pattern: stay completely silent when nothing happened.
+                return 0
         else:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = apply_editorial(client, config, args.root, args.post_id, payload)

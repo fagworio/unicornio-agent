@@ -23,6 +23,7 @@ class Config:
     http_timeout: float = 15.0
     lock_ttl: int = 900
     min_relevance_confidence: float = 0.80
+    publish_enabled: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -33,7 +34,8 @@ class Config:
             f"app_user={self.app_user!r}, dry_run={self.dry_run!r}, "
             f"batch_limit={self.batch_limit!r}, http_timeout={self.http_timeout!r}, "
             f"lock_ttl={self.lock_ttl!r}, "
-            f"min_relevance_confidence={self.min_relevance_confidence!r})"
+            f"min_relevance_confidence={self.min_relevance_confidence!r}, "
+            f"publish_enabled={self.publish_enabled!r})"
         )
 
 
@@ -113,4 +115,5 @@ def load_config() -> Config:
         min_relevance_confidence=_float(
             "EDITOR_MIN_RELEVANCE_CONFIDENCE", 0.80, 0.0, 1.0
         ),
+        publish_enabled=_bool("PUBLISH_ENABLED", False),
     )

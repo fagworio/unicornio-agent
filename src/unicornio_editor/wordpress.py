@@ -67,6 +67,21 @@ class WordPressClient:
     def get_media(self, media_id: int) -> dict[str, Any]:
         return self._expect_object(self._request("GET", f"/media/{self._id(media_id)}"))
 
+    def publish(self, post_id: int, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Deliberately publish a post (status=publish).
+
+        This is an explicit, separate operation on purpose: ``update_post``
+        refuses to touch ``status`` for pipeline safety. Callers MUST gate
+        this behind the pre-publish checklist — the method itself performs
+        no safety checks by design.
+        """
+        if self.config.dry_run:
+            raise SafetyError("dry-run blocks WordPress writes")
+        payload: dict[str, Any] = {"status": "publish"}
+        if meta:
+            payload["meta"] = meta
+        return self._expect_object(self._request("POST", f"/posts/{self._id(post_id)}", body=payload))
+
     def update_post(self, post_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.config.dry_run:
             raise SafetyError("dry-run blocks WordPress writes")

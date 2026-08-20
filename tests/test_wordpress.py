@@ -106,6 +106,29 @@ class WordPressClientTests(unittest.TestCase):
         self.assertEqual(result["content"], "new")
         self.assertEqual(ApiHandler.requests[-1][2], {"content": "new"})
 
+    def test_publish_sends_status_publish(self):
+        result = WordPressClient(self.config).publish(42)
+        self.assertEqual(result["status"], "publish")
+        self.assertEqual(ApiHandler.requests[-1][2], {"status": "publish"})
+
+    def test_publish_sends_published_at_meta(self):
+        WordPressClient(self.config).publish(42, meta={"_ai_editor_published_at": "2026-08-20T00:00:00Z"})
+        self.assertEqual(
+            ApiHandler.requests[-1][2]["meta"]["_ai_editor_published_at"], "2026-08-20T00:00:00Z"
+        )
+
+    def test_publish_blocked_in_dry_run(self):
+        config = Config(
+            content_source="wordpress",
+            wordpress_url=self.base,
+            wordpress_api_base="/wp-json/wp/v2",
+            app_user="bot",
+            app_password="secret",
+            dry_run=True,
+        )
+        with self.assertRaises(SafetyError):
+            WordPressClient(config).publish(42)
+
     def test_upload_media_builds_valid_multipart_with_real_crlf(self):
         with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as tmp:
             tmp.write(b"RIFFWEBPfake")

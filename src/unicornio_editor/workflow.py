@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,7 @@ def apply_editorial(
     _require_pending(post)
     backup = SnapshotStore(root).save(post_id, post)
     editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+    _save_editorial_latest(root, post_id, editorial)
     if editorial["site_relevance"]["decision"] == "skip":
         return {
             "post_id": post_id,
@@ -242,6 +245,105 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
         return None
     new_id = new_media.get("id")
     return new_id if isinstance(new_id, int) else None
+
+
+def _save_editorial_latest(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
+    """Persist the validated editorial so the publish flow can re-check it."""
+    try:
+        directory = root / "backups" / str(post_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "editorial.latest.json").write_text(
+            json.dumps(editorial, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def publish_post(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+) -> dict[str, Any]:
+    """Publish a single post gated by the full pre-publish checklist.
+
+    Sequence: pending check -> editorial.latest.json -> relevance -> snapshot
+    -> checklist (all items must pass) -> PUBLISH_ENABLED gate -> publish.
+    Every failure returns a ``status`` of skipped/blocked with the reason;
+    the post is only ever published when every gate passes.
+    """
+    post = client.get_post(post_id)
+    if post.get("status") != "pending":
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "skipped",
+            "reason": f"post status is {post.get('status')}, expected pending",
+        }
+    editorial_path = root / "backups" / str(post_id) / "editorial.latest.json"
+    if not editorial_path.is_file():
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "skipped",
+            "reason": "sem editorial.latest.json (post ainda nao passou pelo pipeline)",
+        }
+    try:
+        editorial = validate_editorial(
+            json.loads(editorial_path.read_text(encoding="utf-8")),
+            min_confidence=config.min_relevance_confidence,
+        )
+    except (ValueError, OSError) as exc:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "skipped",
+            "reason": f"editorial.latest.json invalido: {exc}",
+        }
+    if editorial["site_relevance"]["decision"] != "process":
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "skipped",
+            "reason": editorial["site_relevance"]["reason"],
+        }
+    backup = SnapshotStore(root).save(post_id, post)
+    checklist = run_pre_publish_checklist(
+        post=post,
+        editorial=editorial,
+        content=_raw_content(post),
+        backup_path=backup,
+        config=config,
+        client=client,
+    )
+    if checklist["failed"]:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "blocked",
+            "reason": "checklist pre-publicacao com falhas",
+            "checklist": checklist,
+        }
+    if not config.publish_enabled:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "blocked",
+            "reason": "PUBLISH_ENABLED=false (gate de publicacao desligado)",
+            "checklist": checklist,
+        }
+    published_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    result = client.publish(post_id, meta={"_ai_editor_published_at": published_at})
+    return {
+        "post_id": post_id,
+        "wordpress_changed": True,
+        "status": "published",
+        "status_after": result.get("status"),
+        "link": result.get("link"),
+        "published_at": published_at,
+        "checklist": checklist,
+    }
 
 
 def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:

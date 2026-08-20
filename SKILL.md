@@ -39,10 +39,15 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 12. Salve o JSON editorial em arquivo e rode `unicornio-editor apply ID arquivo.json`.
 13. Antes de qualquer publicacao, rode o checklist sequencial e so publique se TODOS os itens passarem:
     `unicornio-editor checklist ID arquivo.json` — verifica na ordem: backup, status pending,
-    relevancia, conteudo, Fonte (original_link), imagens no corpo (2/4/6 por tamanho), imagem
-    de destaque (obrigatoria), WebP, trailer (se jogo), CTA, qualidade de texto, estrutura e
-    schema. O resultado `checklist` tambem vem no JSON do `apply`.
-14. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
+    relevancia, conteudo, Fonte (original_link), imagens por tamanho (2/4/6), imagem de destaque
+    obrigatoria 1200x720, WebP, trailer (se jogo), CTA, qualidade de texto, estrutura, schema. O
+    resultado `checklist` tambem vem no JSON do `apply`.
+14. Fluxo de publicacao: o `apply` salva `backups/<ID>/editorial.latest.json`; publique somente via
+    `unicornio-editor publish ID` ou `publish-ready` (todos os pending prontos). O comando revalida o
+    checklist completo e so publica com `PUBLISH_ENABLED=true` (gate duplo: o script do cron de
+    publicacao liga PUBLISH_ENABLED e EDITOR_DRY_RUN=false; o .env permanece dry-run). NUNCA publique
+    manualmente por fora do fluxo.
+15. Se o projeto estiver em dry-run, apenas reporte. Se não estiver, o script ainda força status `pending`.
 
 ## Texto e SEO
 - Escreva em portugues brasileiro natural.

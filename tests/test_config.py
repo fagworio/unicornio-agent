@@ -10,7 +10,16 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
             config = load_config()
         self.assertTrue(config.dry_run)
+        self.assertFalse(config.publish_enabled)
         self.assertEqual(config.batch_limit, 3)
+
+    def test_publish_enabled_parses_env(self):
+        with patch.dict(
+            os.environ,
+            {"WORDPRESS_URL": "http://wp.test", "PUBLISH_ENABLED": "true"},
+            clear=True,
+        ):
+            self.assertTrue(load_config().publish_enabled)
 
     def test_rejects_invalid_boolean(self):
         with patch.dict(os.environ, {"EDITOR_DRY_RUN": "maybe"}, clear=True):

@@ -108,7 +108,9 @@ Hermes cron
      (2/4/6), imagem de destaque obrigatoria, WebP, trailer, CTA,
      qualidade de texto, estrutura e schema — publicar so com all_passed
   -> valida
-  -> atualiza mantendo pending
+  -> salva backups/<ID>/editorial.latest.json
+  -> publicacao: somente via `publish`/`publish-ready` (checklist revalidado
+     + gate PUBLISH_ENABLED); cron diario 08h/12h/18h/21h (America/Sao_Paulo)
 ```
 
 ## Instalacao

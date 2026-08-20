@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from unicornio_editor.config import Config
-from unicornio_editor.workflow import apply_editorial, prepare_post
+from unicornio_editor.workflow import apply_editorial, prepare_post, publish_post
 
 
 def editorial_payload(decision="process"):
@@ -37,9 +37,28 @@ class FakeClient:
     def get_post(self, post_id):
         return self.post
 
+    def get_media(self, media_id):
+        return {
+            "id": media_id,
+            "source_url": "https://wp.test/uploads/featured.webp",
+            "media_details": {"width": 1200, "height": 720},
+        }
+
     def update_post(self, post_id, payload):
         self.updated.append((post_id, payload))
         return {"id": post_id, "status": "pending", **payload}
+
+    def publish(self, post_id, meta=None):
+        payload = {"status": "publish"}
+        if meta:
+            payload["meta"] = meta
+        self.updated.append((post_id, payload))
+        return {
+            "id": post_id,
+            "status": "publish",
+            "link": f"https://wp.test/?p={post_id}",
+            **payload,
+        }
 
 
 class WorkflowTests(unittest.TestCase):
@@ -250,6 +269,86 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(report["wordpress_changed"])
             self.assertEqual(report["dry_run"], True)
             self.assertEqual(client.updated, [])
+
+    def test_apply_saves_editorial_latest_for_publish_flow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
+            saved = Path(directory) / "backups" / "42" / "editorial.latest.json"
+            self.assertTrue(saved.is_file())
+            self.assertIn("cleaned_html", json.loads(saved.read_text(encoding="utf-8")))
+
+    def test_publish_skips_without_editorial_latest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            report = publish_post(client, self.config(False), Path(directory), 42)
+        self.assertFalse(report["wordpress_changed"])
+        self.assertEqual(report["status"], "skipped")
+        self.assertIn("editorial.latest.json", report["reason"])
+        self.assertEqual(client.updated, [])
+
+    def test_publish_blocks_when_checklist_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(editorial_payload()), encoding="utf-8"
+            )
+            client = FakeClient(self.post())
+            report = publish_post(client, self.config(False), root, 42)
+        self.assertFalse(report["wordpress_changed"])
+        self.assertEqual(report["status"], "blocked")
+        self.assertGreater(report["checklist"]["failed"], 0)
+        self.assertEqual(client.updated, [])
+
+    def checklist_pass_post(self):
+        post = self.post()
+        post["content"] = {
+            "raw": (
+                "<p>Texto revisado sobre videogame.</p>"
+                '<figure class="aligncenter"><img src="https://wp.test/1.webp" alt="a" /></figure>'
+                "<p>Mais texto sobre videogame e jogos.</p>"
+                '<figure class="aligncenter"><img src="https://wp.test/2.webp" alt="b" /></figure>'
+                '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+                "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+            )
+        }
+        post["featured_media"] = 7
+        return post
+
+    def test_publish_blocks_without_publish_enabled_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(editorial_payload()), encoding="utf-8"
+            )
+            client = FakeClient(self.checklist_pass_post())
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            report = publish_post(client, config, root, 42)
+        self.assertFalse(report["wordpress_changed"])
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn("PUBLISH_ENABLED", report["reason"])
+        self.assertEqual(client.updated, [])
+
+    def test_publish_publishes_when_all_gates_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(editorial_payload()), encoding="utf-8"
+            )
+            client = FakeClient(self.checklist_pass_post())
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False, publish_enabled=True
+            )
+            report = publish_post(client, config, root, 42)
+        self.assertTrue(report["wordpress_changed"])
+        self.assertEqual(report["status"], "published")
+        self.assertEqual(report["status_after"], "publish")
+        self.assertEqual(client.updated[0][0], 42)
+        self.assertEqual(client.updated[0][1]["status"], "publish")
+        self.assertIn("_ai_editor_published_at", client.updated[0][1]["meta"])
 
 
 if __name__ == "__main__":
