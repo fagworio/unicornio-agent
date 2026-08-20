@@ -1,0 +1,7 @@
+{
+  "title": "Post sem fonte original",
+  "status": "pending",
+  "content": {"raw": "<p>Conteúdo que não pode ser aplicado sem origem.</p>"},
+  "meta": {},
+  "expected": "reject"
+}

@@ -1,0 +1,7 @@
+{
+  "title": "Post com HTML legado",
+  "status": "pending",
+  "content": {"raw": "<article><div><p>Texto antigo<img src=\"old.jpg\"></p><h3>Confira mais novidades em nosso Portal de Notícias!</h3></div></article>"},
+  "meta": {"original_link": "https://example.com/games/legacy"},
+  "expected": "clean"
+}

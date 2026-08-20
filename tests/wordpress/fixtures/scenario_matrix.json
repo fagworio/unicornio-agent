@@ -1,0 +1,7 @@
+[
+  {"name": "local-relevant", "fixture": "local-relevant.json", "status": "pending"},
+  {"name": "local-irrelevant", "fixture": "local-irrelevant.json", "status": "pending"},
+  {"name": "local-legacy-html", "fixture": "local-legacy-html.json", "status": "pending"},
+  {"name": "local-missing-source", "fixture": "local-missing-source.json", "status": "pending"},
+  {"name": "local-concurrency", "fixture": "local-concurrency.json", "status": "pending"}
+]

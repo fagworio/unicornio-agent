@@ -1,0 +1,7 @@
+{
+  "title": "Post para teste de concorrência",
+  "status": "pending",
+  "content": {"raw": "<p>Outro editor pode alterar o status durante o processamento.</p>"},
+  "meta": {"original_link": "https://example.com/games/concurrency"},
+  "expected": "abort_if_status_changes"
+}
