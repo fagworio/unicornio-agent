@@ -124,7 +124,10 @@ class WordPressClientTests(unittest.TestCase):
             # CRLF line endings, never literal backslash sequences.
             self.assertIn(b"\r\n", body)
             self.assertNotIn(b"\\r\\n", body)
-            content_type = request.headers["Content-Type"]
+            content_type = next(
+                (v for k, v in request.headers.items() if k.lower() == "content-type"),
+                "",
+            )
             self.assertTrue(content_type.startswith("multipart/form-data; boundary="), content_type)
             boundary = content_type.split("boundary=", 1)[1].encode()
             self.assertIn(b"--" + boundary + b"\r\n", body)
