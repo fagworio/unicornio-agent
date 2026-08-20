@@ -111,7 +111,7 @@ class WordPressClientTests(unittest.TestCase):
             tmp.write(b"RIFFWEBPfake")
             tmp_path = tmp.name
         try:
-            fake_response = mock.Mock()
+            fake_response = mock.MagicMock()
             fake_response.read.return_value = b'{"id": 9, "source_url": "https://wp.test/9.webp"}'
             fake_response.__enter__.return_value = fake_response
             fake_response.__exit__.return_value = False
