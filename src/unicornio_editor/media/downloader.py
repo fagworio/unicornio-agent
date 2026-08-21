@@ -16,7 +16,19 @@ class MediaDownloadError(RuntimeError):
 
 LEGACY_LOCAL_UPLOAD_PATH = "/wp-content/uploads/2019/06/"
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 4
+_MAX_ATTEMPTS = 6
+
+
+def _retry_delay(attempt: int, response_headers=None) -> float:
+    """Backoff that honors the server's Retry-After signal (e.g. Wikimedia 429s)."""
+    base = 2.0 * attempt
+    if response_headers is not None:
+        try:
+            retry_after = float(response_headers.get("Retry-After", ""))
+            return max(base, retry_after + 1.0)
+        except (TypeError, ValueError):
+            pass
+    return base
 
 
 def select_reupload_source(local_url: str, effective_url: str | None = None) -> str:
@@ -60,7 +72,7 @@ def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1
         except HTTPError as exc:
             destination.unlink(missing_ok=True)
             if exc.code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS:
-                time.sleep(2.0 * attempt)
+                time.sleep(_retry_delay(attempt, exc.headers))
                 continue
             raise MediaDownloadError(f"image download failed (HTTP {exc.code})") from exc
         except (URLError, OSError, ValueError) as exc:
@@ -69,7 +81,7 @@ def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1
                 raise
             last_error = exc
             if attempt < _MAX_ATTEMPTS:
-                time.sleep(2.0 * attempt)
+                time.sleep(_retry_delay(attempt))
                 continue
             raise MediaDownloadError("image download failed") from exc
         if written == 0:
