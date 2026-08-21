@@ -107,16 +107,36 @@ class MediaPipelineTests(unittest.TestCase):
             )
             self.assertEqual(result["id"], 7)
 
-    def test_prepare_featured_webp_guarantees_1200x720(self):
+    def test_prepare_featured_webp_guarantees_1280x720(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            # 1920x1080 (16:9) source must be center-cropped to 5:3.
+            # 1920x1080 (16:9) source must be center-cropped to 16:9.
             source = directory / "source.png"
             Image.new("RGB", (1920, 1080), "blue").save(source, format="PNG")
             output = prepare_featured_webp(source)
             with Image.open(output) as image:
                 self.assertEqual(image.format, "WEBP")
                 self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
+
+    def test_inline_width_capped_at_1280(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            # Posters wider than 1280px are scaled down to 1280px wide
+            # (aspect kept) so pages do not ship oversized images.
+            source = directory / "poster.png"
+            Image.new("RGB", (4000, 2000), "red").save(source, format="PNG")
+            output = convert_to_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (1280, 640))
+
+    def test_inline_smaller_than_1280_is_never_upscaled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source = directory / "small.png"
+            Image.new("RGB", (800, 600), "red").save(source, format="PNG")
+            output = convert_to_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (800, 600))
 
     def test_prepare_featured_webp_rejects_portrait_sources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -145,7 +165,9 @@ class MediaPipelineTests(unittest.TestCase):
             output = convert_to_webp(source)
             with Image.open(output) as image:
                 self.assertEqual(image.format, "WEBP")
-                self.assertEqual(image.size, (3000, 4000))  # transposed
+                # Transposed to portrait (3000x4000), then inline width capped
+                # at 1280px: still portrait, never lying down.
+                self.assertEqual(image.size, (1280, 1707))
 
     def test_prepare_featured_webp_applies_exif_then_keeps_landscape(self):
         with tempfile.TemporaryDirectory() as directory:

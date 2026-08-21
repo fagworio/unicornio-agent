@@ -34,7 +34,7 @@ class FakeClient:
         return {
             "id": media_id,
             "source_url": "https://media.example/featured.webp",
-            "media_details": {"width": 1200, "height": 720},
+            "media_details": {"width": 1280, "height": 720},
         }
 
 

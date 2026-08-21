@@ -33,6 +33,10 @@ _MEDIA = {
     "credit_text",
     "alt_text",
     "is_featured",
+    # Reuse of an existing Media Library attachment: the image is downloaded
+    # from this attachment and re-uploaded as a NEW attachment (the original
+    # title/alt/caption are never overwritten).
+    "media_library_id",
 }
 
 
@@ -88,7 +92,7 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     featured_count = 0
     for index, item in enumerate(media_plan):
         media = _object(item, f"media_plan[{index}]")
-        _keys(media, _MEDIA, f"media_plan[{index}]")
+        _keys(media, _MEDIA, f"media_plan[{index}]", optional={"media_library_id"})
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
             raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")

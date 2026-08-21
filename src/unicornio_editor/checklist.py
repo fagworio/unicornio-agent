@@ -158,7 +158,7 @@ def run_pre_publish_checklist(
         f"featured_media={featured_raw or 'vazio'} — obrigatoria para publicar",
     )
 
-    # 7b. Featured image must obey the portal ratio: exactly 1200x720.
+    # 7b. Featured image must obey the portal ratio: exactly 1280x720.
     featured_details: dict[str, Any] = {}
     if featured_ok and client is not None:
         try:
@@ -171,14 +171,14 @@ def run_pre_publish_checklist(
     if featured_ok:
         width = featured_details.get("width")
         height = featured_details.get("height")
-        proportion_ok = width == 1200 and height == 720
+        proportion_ok = width == 1280 and height == 720
         check(
-            "destaque_1200x720",
+            "destaque_1280x720",
             proportion_ok,
-            f"dimensoes atuais: {width or 'desconhecida'}x{height or 'desconhecida'} (exigido 1200x720)",
+            f"dimensoes atuais: {width or 'desconhecida'}x{height or 'desconhecida'} (exigido 1280x720)",
         )
     else:
-        check("destaque_1200x720", True, "sem destaque para verificar", skipped=True)
+        check("destaque_1280x720", True, "sem destaque para verificar", skipped=True)
 
     # 7c. Featured must depict the cited subject itself (source-only gate):
     #     the agent-written alt/credit can decorate a wrong image (e.g. a

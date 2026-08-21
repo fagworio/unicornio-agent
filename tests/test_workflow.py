@@ -51,7 +51,7 @@ class FakeClient:
         return {
             "id": media_id,
             "source_url": "https://wp.test/uploads/featured.webp",
-            "media_details": {"width": 1200, "height": 720},
+            "media_details": {"width": 1280, "height": 720},
         }
 
     def update_post(self, post_id, payload):
@@ -346,7 +346,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(report["wordpress_changed"])
         self.assertEqual(client.updated, [])
 
-    def test_apply_normalizes_existing_featured_to_1200x720(self):
+    def test_apply_normalizes_existing_featured_to_1280x720(self):
         post = self.post()
         post["featured_media"] = 7
         media = {
@@ -364,7 +364,7 @@ class WorkflowTests(unittest.TestCase):
 
             def upload_media(self, path, *, filename, alt_text, title, caption=None):
                 self.uploads = getattr(self, "uploads", 0) + 1
-                return {"id": 88, "source_url": "https://wp.test/uploads/featured-1200x720.webp"}
+                return {"id": 88, "source_url": "https://wp.test/uploads/featured-1280x720.webp"}
 
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
             "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
@@ -376,13 +376,78 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.updated[0][1]["featured_media"], 88)
         self.assertEqual(report["featured_media"], 88)
 
+    def test_apply_reuses_media_library_attachment_as_new_upload(self):
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        # Reuse item: media_library_id references an existing attachment whose
+        # title carries the credit block. The apply must download from the
+        # attachment URL and upload a NEW attachment (original untouched).
+        item = self.media_item(paragraph_index=1, is_featured=True)
+        item["media_library_id"] = 500
+        payload["media_plan"] = [item]
+        attachment = {
+            "id": 500,
+            "source_url": "https://wp.test/uploads/reuse-source.webp",
+            "media_details": {"width": 1920, "height": 1080},
+            "alt_text": "Titulo sobre videogame",
+            "title": {"rendered": "Crédito da imagem: Autor Original. Titulo sobre videogame. CC BY 4.0."},
+            "caption": {"rendered": ""},
+        }
+
+        class ReuseClient(FakeClient):
+            def get_media(self, media_id):
+                if media_id == 500:
+                    return attachment
+                return super().get_media(media_id)
+
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/reuse.webp")) as dl, mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/reuse_featured.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            return_value={"id": 77, "source_url": "https://wp.test/uploads/reuse-featured-1280x720.webp"},
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = ReuseClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        dl.assert_called_once_with("https://wp.test/uploads/reuse-source.webp", mock.ANY)
+        self.assertEqual(report["featured_media"], 77)
+        self.assertEqual(client.updated[0][1]["featured_media"], 77)
+
+    def test_apply_rejects_media_library_reuse_without_credit(self):
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        item = self.media_item(paragraph_index=1, is_featured=True)
+        item["media_library_id"] = 501
+        payload["media_plan"] = [item]
+        attachment = {
+            "id": 501,
+            "source_url": "https://wp.test/uploads/no-credit.jpg",
+            "media_details": {"width": 1920, "height": 1080},
+            "alt_text": "",
+            "title": {"rendered": "Foto sem credito"},
+            "caption": {"rendered": ""},
+        }
+
+        class NoCreditClient(FakeClient):
+            def get_media(self, media_id):
+                if media_id == 501:
+                    return attachment
+                return super().get_media(media_id)
+
+        with mock.patch("unicornio_editor.workflow.download_image") as dl:
+            with tempfile.TemporaryDirectory() as directory:
+                client = NoCreditClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        dl.assert_not_called()
+        self.assertEqual(report["media_plan_results"][0]["status"], "rejected")
+
     def test_apply_keeps_compliant_featured_image(self):
         post = self.post()
         post["featured_media"] = 7
         media = {
             "id": 7,
             "source_url": "https://wp.test/uploads/featured.webp",
-            "media_details": {"width": 1200, "height": 720},
+            "media_details": {"width": 1280, "height": 720},
         }
 
         class MediaClient(FakeClient):

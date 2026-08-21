@@ -109,6 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("report_file", type=Path)
     report_parser.add_argument("--broken-url", action="append", default=[])
     report_parser.add_argument("--min-inline-images", type=int, default=1)
+
+    media_search_parser = subparsers.add_parser(
+        "media-search",
+        help="busca imagens na Media Library local para reuso (somente leitura; "
+        "nunca edita o attachment original)",
+    )
+    media_search_parser.add_argument("termo", type=str, help="termo de busca (title/alt/caption)")
+    media_search_parser.add_argument(
+        "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
+    )
     return parser
 
 
@@ -135,6 +145,27 @@ def _compact_listing(posts: list[dict]) -> list[dict]:
             }
         )
     return compact
+
+
+def _media_search_item(item: dict) -> dict:
+    """Projecao compacta de um candidato da Media Library (economia de tokens).
+
+    ``tem_credito`` informa se o attachment carrega o bloco 'Crédito da
+    imagem' no title/caption — sem isso a imagem NAO pode ser reutilizada
+    (falta evidencia de licenca). O reuso nunca edita o attachment original.
+    """
+    title = str((item.get("title") or {}).get("rendered") or "")
+    caption = str((item.get("caption") or {}).get("rendered") or "")
+    details = item.get("media_details") or {}
+    width, height = details.get("width"), details.get("height")
+    return {
+        "id": item.get("id"),
+        "title": title[:120],
+        "alt": str(item.get("alt_text") or "")[:120],
+        "dimensoes": f"{width or '?'}x{height or '?'}",
+        "tem_credito": "crédito da imagem" in f"{title} {caption}".lower(),
+        "url": str(item.get("source_url") or ""),
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -206,6 +237,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result["trailer"] = trailer
         elif args.command == "publish":
             result = publish_post(client, config, args.root, args.post_id)
+        elif args.command == "media-search":
+            items = client.search_media(args.termo, per_page=args.limit)
+            result = [_media_search_item(item) for item in items]
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]

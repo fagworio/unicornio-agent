@@ -99,7 +99,7 @@ def apply_editorial(
                 "credit_text": result["credit_text"],
             }
             for result in media_results
-            if not result.get("featured")
+            if result.get("media_url") and not result.get("featured")
         ]
         if plan:
             is_list = bool(
@@ -186,8 +186,57 @@ def _execute_media_plan(
         game_name=editorial.get("game_name"),
     )
 
+    attachment_cache: dict[int, dict[str, Any]] = {}
+
+    def _attachment_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve a Media Library attachment referenced by ``media_library_id``.
+
+        Reused images are validated against the REAL attachment metadata
+        (title/alt/caption/url), never against agent-written text, and are
+        re-uploaded as a NEW attachment so the original descriptions are
+        never overwritten. Returns None when the item is not a reuse.
+        """
+        media_id = item.get("media_library_id")
+        if not media_id:
+            return None
+        if media_id not in attachment_cache:
+            attachment_cache[media_id] = client.get_media(media_id)
+        return attachment_cache[media_id]
+
     def _rejection_reason(item: dict[str, Any]) -> str | None:
         is_featured = bool(item.get("is_featured"))
+        attachment = _attachment_evidence(item)
+        if attachment is not None:
+            title = str((attachment.get("title") or {}).get("rendered") or "")
+            alt = str(attachment.get("alt_text") or "")
+            caption = str((attachment.get("caption") or {}).get("rendered") or "")
+            url = str(attachment.get("source_url") or "")
+            credit = title or caption
+            if "crédito da imagem" not in credit.lower():
+                return (
+                    "reuso da midia library exige credito visivel no attachment original "
+                    "(title/caption sem 'Crédito da imagem'); nao usar como fonte"
+                )
+            source = " ".join(part for part in (url, title, alt, caption) if part)
+            if is_featured:
+                if not image_is_relevant(
+                    alt_text="", credit_text="", source_url=source, entities=entities, source_only=True
+                ):
+                    listed = ", ".join(sorted(entities)) or "nenhuma"
+                    return (
+                        "featured reusada deve retratar o assunto citado "
+                        f"(attachment sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
+                    )
+                return None
+            if not image_is_relevant(
+                alt_text=str(item.get("alt_text") or ""),
+                credit_text=str(item.get("credit_text") or ""),
+                source_url=source,
+                entities=entities,
+            ):
+                listed = ", ".join(sorted(entities)) or "nenhuma"
+                return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
+            return None
         if is_featured:
             # Featured must depict the cited subject itself: only the real
             # source file/page name counts as evidence. The agent-written
@@ -263,7 +312,11 @@ def _execute_media_plan(
                 )
             }
             suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
-            source = download_image(item["direct_image_url"], tmp / f"source_{position}{suffix}")
+            attachment = _attachment_evidence(item)
+            download_url = (
+                attachment.get("source_url") if attachment is not None else item["direct_image_url"]
+            )
+            source = download_image(str(download_url), tmp / f"source_{position}{suffix}")
             is_featured = bool(item.get("is_featured"))
             if is_featured:
                 webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
@@ -290,10 +343,10 @@ def _execute_media_plan(
 
 
 def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) -> int | None:
-    """Re-prepare an existing featured image at exactly 1200x720 WebP.
+    """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
     Posts imported with a featured image may carry any size/format; the
-    portal rule requires 1200x720 WebP, so the source is re-downloaded and
+    portal rule requires 1280x720 WebP, so the source is re-downloaded and
     re-uploaded through the same conversion path when it does not comply.
     Returns the (new) attachment id, or None when there is nothing to do.
     """
@@ -307,7 +360,7 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
     details = media.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
     source_url = (media.get("source_url") or "").strip()
-    if width == 1200 and height == 720 and source_url.lower().endswith(".webp"):
+    if width == 1280 and height == 720 and source_url.lower().endswith(".webp"):
         return featured
     if not source_url:
         return None
@@ -315,10 +368,10 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
         with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
             tmp = Path(directory)
             source = download_image(source_url, tmp / "featured_source.jpg")
-            webp = prepare_featured_webp(source, tmp / "featured_1200x720.webp")
+            webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
             new_media = client.upload_media(
                 str(webp),
-                filename="featured-1200x720.webp",
+                filename="featured-1280x720.webp",
                 alt_text=str(media.get("alt_text") or ""),
                 title=str(media.get("title") or {}).strip() or "Imagem de destaque",
                 caption=str(media.get("caption") or ""),

@@ -6,8 +6,9 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-FEATURED_WIDTH = 1200
+FEATURED_WIDTH = 1280
 FEATURED_HEIGHT = 720
+MAX_INLINE_WIDTH = 1280
 
 
 class MediaConversionError(RuntimeError):
@@ -28,6 +29,21 @@ def _open_authoritative(source: Path) -> Image.Image:
     return ImageOps.exif_transpose(image)
 
 
+def _cap_inline_width(image: Image.Image) -> Image.Image:
+    """Downscale inline images wider than MAX_INLINE_WIDTH (1280px).
+
+    Posters and full-bleed art often arrive at 2000-5000px wide; publishing
+    them at full size bloats the page and hurts performance for no visible
+    gain. Images are only ever scaled DOWN to at most 1280px wide (aspect
+    ratio kept) — smaller sources are never upscaled. The 64px minimum check
+    still applies before this call.
+    """
+    if image.width <= MAX_INLINE_WIDTH:
+        return image
+    height = max(1, round(image.height * MAX_INLINE_WIDTH / image.width))
+    return image.resize((MAX_INLINE_WIDTH, height), Image.Resampling.LANCZOS)
+
+
 def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
     source = Path(source)
     destination = destination or source.with_suffix(".webp")
@@ -38,6 +54,7 @@ def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
                 raise MediaConversionError("image resolution is below 64x64")
             if image.mode not in {"RGB", "RGBA"}:
                 image = image.convert("RGBA")
+            image = _cap_inline_width(image)
             destination.parent.mkdir(parents=True, exist_ok=True)
             image.save(destination, format="WEBP", quality=85, method=6)
     except MediaConversionError:
@@ -50,15 +67,15 @@ def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
 
 
 def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path:
-    """Center-crop and resize to exactly 1200x720 (5:3) and save as WebP.
+    """Center-crop and resize to exactly 1280x720 (16:9) and save as WebP.
 
-    Featured images must always obey the portal's 1200x720 ratio, so the
+    Featured images must always obey the portal's 1280x720 ratio, so the
     source is cover-cropped from its center and resized to the exact target
     (upscaling allowed so the guaranteed size holds for small sources).
 
     The EXIF orientation is applied first (a photo stored sideways would
     otherwise be published lying down) and PORTRAIT sources are rejected:
-    cover-cropping a portrait into 5:3 destroys more than half the frame, so
+    cover-cropping a portrait into 16:9 destroys more than half the frame, so
     a portrait featured image is a wrong image — the agent must pick a
     landscape key art instead (fail-closed policy).
     """
@@ -72,7 +89,7 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
             if image.width < image.height:
                 raise MediaConversionError(
                     f"featured source is portrait ({image.width}x{image.height} after EXIF transpose); "
-                    "a 1200x720 featured image requires a landscape source — pick landscape key art"
+                    "a 1280x720 featured image requires a landscape source — pick landscape key art"
                 )
             work = image.convert("RGBA") if image.mode not in {"RGB", "RGBA"} else image
             target_ratio = FEATURED_WIDTH / FEATURED_HEIGHT

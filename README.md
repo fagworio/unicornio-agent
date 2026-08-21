@@ -99,7 +99,7 @@ Hermes cron
   -> WordPress Media REST local (sem bucket/CDN externo)
   -> crédito obrigatório no conteúdo/metadados
   -> featured image: legenda + crédito visível no conteúdo quando necessário
-  -> imagem destacada se ausente: obrigatoria, 1200x720 (cover-crop 5:3) WebP
+  -> imagem destacada se ausente: obrigatoria, 1280x720 (16:9) WebP
   -> trailer oficial se relevante: busca determinística no YouTube
      (<game_name> trailer), validação via oEmbed, embed antes do CTA
   -> monta CTA + Fonte

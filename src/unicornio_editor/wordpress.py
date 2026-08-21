@@ -67,6 +67,29 @@ class WordPressClient:
     def get_media(self, media_id: int) -> dict[str, Any]:
         return self._expect_object(self._request("GET", f"/media/{self._id(media_id)}"))
 
+    def search_media(self, query: str, *, per_page: int = 10) -> list[dict[str, Any]]:
+        """Search the local Media Library by title/alt/caption/description.
+
+        Reuse candidates for the editorial pipeline: images already uploaded
+        by previous runs carry their full credit block in the attachment
+        title/caption, which is the license evidence required for reuse. The
+        caller must NEVER edit the original attachment — a reused image is
+        downloaded and re-uploaded as a NEW attachment.
+        """
+        query = str(query or "").strip()
+        if not query:
+            raise ValueError("search query must not be empty")
+        if not 1 <= per_page <= 100:
+            raise ValueError("per_page must be in [1, 100]")
+        data = self._request(
+            "GET",
+            "/media",
+            {"search": query, "per_page": per_page, "orderby": "date", "order": "desc"},
+        )
+        if not isinstance(data, list):
+            raise WordPressError("WordPress returned an invalid media collection")
+        return [item for item in data if isinstance(item, dict)]
+
     def publish(self, post_id: int, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         """Deliberately publish a post (status=publish).
 
