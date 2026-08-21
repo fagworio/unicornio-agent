@@ -25,7 +25,8 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - CTA canonico e inserido pelo codigo, nao pelo modelo.
 
 ## Fluxo por execucao
-1. Rode `unicornio-editor list-pending`.
+1. Rode `unicornio-editor list-pending --compact` (nunca o modo completo: ele despeja ~120 KB de
+   conteudo por batch no contexto; o compacto imprime so id/titulo/palavras/link).
 2. Para cada post retornado, rode `unicornio-editor prepare ID`.
 3. Classifique a relevancia antes de qualquer reescrita. Se `site_relevance.decision=skip`, gere o JSON de skip, rode `apply` apenas para registrar o resultado local/saida (ele nao altera o WordPress) e passe imediatamente ao proximo post.
 4. Se relevante, edite apenas o `cleaned_html` conforme `src/unicornio_editor/prompts.py`.
@@ -52,6 +53,17 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
     `PUBLISH_LIMIT` define a cota da janela e conta apenas posts publicados de fato.
 15. Em producao o projeto roda em write mode (EDITOR_DRY_RUN=false): o `apply` grava de verdade
     (conteudo + meta), sempre forcando status `pending` — a publicacao so acontece via `publish-ready`.
+
+## Economia de tokens (obrigatorio em toda execucao paga)
+
+- `list-pending --compact` e `prepare ID --compact` sempre (o `prepare --compact` grava o JSON
+  completo em `backups/<ID>/prepared.json`; leia esse arquivo quando precisar do cleaned_html).
+- Nunca leia `src/**` para entender o fluxo; o CLI e a interface. So leia codigo se um erro do CLI
+  nao for auto-explicativo.
+- Nunca despeje HTML baixado no terminal: salve em `/tmp` e extraia so o trecho (licenca/autor).
+- Nao repita comandos; se `list-pending` voltar vazio, encerre imediatamente.
+- Escreva o JSON editorial em arquivo e passe o caminho ao `apply`/`checklist`; nao cole o corpo
+  do JSON mais de uma vez na conversa.
 
 ## Texto e SEO
 - Escreva em portugues brasileiro natural.

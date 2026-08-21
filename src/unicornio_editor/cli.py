@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,10 +35,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser("list-pending", help="lista posts pending")
     list_parser.add_argument("--page", type=int, default=1)
+    list_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="imprime apenas id/titulo/contagem de palavras (economia de tokens); "
+        "o conteudo completo nao e necessario para escolher o proximo post",
+    )
 
     prepare_parser = subparsers.add_parser("prepare", help="cria snapshot e relatório")
     prepare_parser.add_argument("post_id", type=int)
     prepare_parser.add_argument("--root", type=Path, default=Path("."))
+    prepare_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="grava o JSON completo em backups/<id>/prepared.json e imprime apenas "
+        "o resumo (economia de tokens); leia o arquivo para obter o cleaned_html",
+    )
 
     apply_parser = subparsers.add_parser("apply", help="valida e aplica JSON editorial")
     apply_parser.add_argument("post_id", type=int)
@@ -70,6 +83,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _html_word_count(html: str) -> int:
+    """Conta palavras do texto de um HTML, ignorando tags."""
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    return len(text.split())
+
+
+def _compact_listing(posts: list[dict]) -> list[dict]:
+    """Projecao enxuta para list-pending --compact (economia de tokens)."""
+    compact: list[dict] = []
+    for post in posts:
+        title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
+        rendered = (post.get("content") or {}).get("rendered") or ""
+        compact.append(
+            {
+                "id": post.get("id"),
+                "status": post.get("status"),
+                "date": post.get("date"),
+                "title": title,
+                "word_count": _html_word_count(rendered),
+                "link": post.get("link"),
+            }
+        )
+    return compact
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
@@ -90,8 +128,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         client = WordPressClient(config)
         if args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
+            if args.compact:
+                result = _compact_listing(result)
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
+            if args.compact:
+                prepared_file = args.root / "backups" / str(args.post_id) / "prepared.json"
+                prepared_file.parent.mkdir(parents=True, exist_ok=True)
+                prepared_file.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                result = {
+                    "post_id": result["post_id"],
+                    "status": result["status"],
+                    "backup": result["backup"],
+                    "prepared": str(prepared_file),
+                    "word_count": _html_word_count(result.get("cleaned_html", "")),
+                    "original_link": result.get("original_link"),
+                    "wordpress_changed": False,
+                }
         elif args.command == "checklist":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)

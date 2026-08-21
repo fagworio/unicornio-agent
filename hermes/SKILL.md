@@ -23,8 +23,8 @@ Process only WordPress posts with status `pending`.
 
 ## Editorial flow
 
-1. Run `unicornio-editor list-pending`.
-2. Run `unicornio-editor prepare POST_ID`.
+1. Run `unicornio-editor list-pending --compact` (economy mode; see below).
+2. Run `unicornio-editor prepare POST_ID --compact`.
 3. Produce strict editorial JSON with `site_relevance`, `cleaned_html`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`.
 4. Google Images is only discovery. Verify the original page and a public-domain, compatible Creative Commons, or explicit permission license.
 5. Record source page, author, license, license URL, capture time, and visible credit. Reject uncertain images.
@@ -37,6 +37,34 @@ Process only WordPress posts with status `pending`.
     may publish, after re-running the full checklist. Never publish manually outside this flow.
 
 The agent never changes a post to a publishing status. All media credits must remain visible and traceable to the license evidence.
+
+## Token economy (cron runs — every token costs money)
+
+These rules exist because every execution runs against a paid API. Following them cuts per-run cost
+several-fold. They are mandatory, not style advice.
+
+- Use `list-pending --compact` ALWAYS. The full mode dumps the entire content of every post
+  (~120 KB for a batch of 5) into the conversation; the compact mode prints only id, title, date,
+  word_count and link (~1.3 KB). You never need the full post to choose the next post.
+- Use `prepare POST_ID --compact` ALWAYS. It writes the full prepared JSON to
+  `backups/<ID>/prepared.json` and prints a short summary. When you need the `cleaned_html` to
+  rewrite the text, read the file with `read_file` (it is ~6 KB, read it ONCE). Do not re-run
+  `prepare` to recover content you already saw.
+- NEVER read project source files (`src/**`, `pyproject.toml`, `.env`, tests) to "understand" the
+  flow. The CLI is the interface and this skill documents the flow. Reading the source once costs
+  thousands of tokens per run for zero decision value. The only exception: a CLI error that is not
+  self-explanatory — then read ONLY the function mentioned in the traceback.
+- NEVER dump downloaded HTML into the terminal. Save pages to `/tmp` (`curl -s URL -o /tmp/p.html`)
+  and extract only the needed fragment (license, author, date) with `grep`/`search_files`.
+  A single full-page dump (e.g. 350 KB) can exceed the entire rest of the run.
+- Do not run the same CLI command twice. Keep one result per command in the conversation and reuse
+  it. Each run of `list-pending` costs ~1.3 KB compact (vs ~120 KB full).
+- If `list-pending` returns an empty list, stop immediately — do not explore, do not re-check.
+- Process posts one at a time: `prepare` -> editorial JSON (write it to a file) -> `apply` -> next.
+  Never revisit a post that already has `backups/<ID>/editorial.latest.json` unless asked.
+- Write the editorial JSON to a file with `write_file` and pass the path to `apply`/`checklist`;
+  never paste the JSON body into the conversation more than once.
+- When the media plan does not add real reading value, do not search for images at all.
 
 ## Operational pitfalls (learned in production)
 
