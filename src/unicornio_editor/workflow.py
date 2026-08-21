@@ -348,6 +348,11 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
     Posts imported with a featured image may carry any size/format; the
     portal rule requires 1280x720 WebP, so the source is re-downloaded and
     re-uploaded through the same conversion path when it does not comply.
+    The new attachment KEEPS the original provenance: its file name is
+    derived from the source file name and the title/alt are copied as-is
+    (fixed bug: the title was serialized as ``str(dict)``), so the
+    deterministic featured-relevance gate can still match the work from
+    real evidence instead of a generic ``featured-1280x720.webp`` name.
     Returns the (new) attachment id, or None when there is nothing to do.
     """
     featured = post.get("featured_media")
@@ -364,6 +369,10 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
         return featured
     if not source_url:
         return None
+    title = str((media.get("title") or {}).get("rendered") or "").strip() or "Imagem de destaque"
+    alt = str(media.get("alt_text") or "").strip()
+    caption = str((media.get("caption") or {}).get("rendered") or "").strip()
+    filename = _featured_filename_from_source(source_url)
     try:
         with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
             tmp = Path(directory)
@@ -371,15 +380,31 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
             webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
             new_media = client.upload_media(
                 str(webp),
-                filename="featured-1280x720.webp",
-                alt_text=str(media.get("alt_text") or ""),
-                title=str(media.get("title") or {}).strip() or "Imagem de destaque",
-                caption=str(media.get("caption") or ""),
+                filename=filename,
+                alt_text=alt,
+                title=title,
+                caption=caption,
             )
     except Exception:
         return None
     new_id = new_media.get("id")
     return new_id if isinstance(new_id, int) else None
+
+
+def _featured_filename_from_source(source_url: str) -> str:
+    """Derive a provenance-carrying filename from the original source URL.
+
+    The re-uploaded featured image must keep the source's evidence in its
+    own file name (e.g. ``remothered-red-nuns-legacy-...-1280x720.webp``)
+    so the deterministic relevance gate can still match the work. Falls
+    back to the generic ``featured-1280x720.webp`` when the source name is
+    not usable (non-ascii-only or too short).
+    """
+    stem = Path(source_url.split("?", 1)[0]).stem or ""
+    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+    if len(slug) < 5:
+        return "featured-1280x720.webp"
+    return f"{slug[:80].strip('-')}-1280x720.webp"
 
 
 def resolve_editorial_defaults(editorial: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:

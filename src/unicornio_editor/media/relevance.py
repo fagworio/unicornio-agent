@@ -104,6 +104,7 @@ STOPWORDS = frozenset(
 
 _QUOTE_RE = re.compile(r"[“”\"'«»]([^“”\"'«»]{2,80})[“”\"'«»]")
 _TAG_RE = re.compile(r"<[^>]+>")
+_H2_RE = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.IGNORECASE | re.DOTALL)
 _FIGURE_RE = re.compile(r"<figure\b[^>]*>(.*?)</figure>", re.IGNORECASE | re.DOTALL)
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _IMG_ATTR_RE = re.compile(r'\b(src|alt)="([^"]*)"', re.IGNORECASE)
@@ -172,6 +173,17 @@ def extract_entities(
     # entities (e.g. ' alt=', ' target=').
     quote_source = _TAG_RE.sub(" ", content_html or "")
     raw_phrases.extend(phrase for phrase in _QUOTE_RE.findall(quote_source) if "=" not in phrase)
+    # Listicle H2s name the cited works ("1. Tokyo Ghoul: ...", "3. The
+    # Sinking City 2: ..."); without them a list post with a generic title
+    # ("7 novos jogos chegam esta semana...") could never match ANY image,
+    # because the works only appear in the section headings. Keep the head
+    # of each H2 (up to the first separator) and strip leading numbers, so
+    # "3. The Sinking City 2: terror em Arkham" yields "the sinking city 2".
+    for h2 in _H2_RE.findall(content_html or ""):
+        head = re.split(r"[:—–|]", _TAG_RE.sub(" ", h2), maxsplit=1)[0]
+        head = re.sub(r"^\s*\d+[.)]?\s*", "", head).strip()
+        if head:
+            raw_phrases.append(head)
 
     for phrase in raw_phrases:
         normalized = normalize(phrase)

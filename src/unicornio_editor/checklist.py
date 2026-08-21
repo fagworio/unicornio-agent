@@ -184,12 +184,34 @@ def run_pre_publish_checklist(
     #     the agent-written alt/credit can decorate a wrong image (e.g. a
     #     Disney castle captioned as Kingdom Hearts), but the real source
     #     file/page name of a true key art carries the game/work name.
+    #     The REAL featured attachment is validated when the post already has
+    #     one: url + title + alt of the attachment are evidence from the
+    #     actual source (a normalized/reused featured keeps the original
+    #     provenance), never agent-written text. The media_plan item is only
+    #     consulted as intent before any media was uploaded (standalone
+    #     checklist runs, dry-run).
     featured_plan_items = [
         item
         for item in (editorial.get("media_plan") or [])
         if isinstance(item, Mapping) and bool(item.get("is_featured"))
     ]
-    if featured_plan_items:
+    featured_source_relevant: bool | None = None
+    if featured_ok and client is not None:
+        try:
+            media = client.get_media(featured)
+            mtitle = str((media.get("title") or {}).get("rendered") or "")
+            malt = str(media.get("alt_text") or "")
+            murl = str(media.get("source_url") or "")
+            featured_source_relevant = image_is_relevant(
+                alt_text="",
+                credit_text="",
+                source_url=" ".join(part for part in (murl, mtitle, malt) if part),
+                entities=image_entities,
+                source_only=True,
+            )
+        except Exception:
+            featured_source_relevant = None
+    if featured_source_relevant is None and featured_plan_items:
         featured_item = featured_plan_items[0]
         featured_source_relevant = image_is_relevant(
             alt_text="",
@@ -201,6 +223,9 @@ def run_pre_publish_checklist(
             entities=image_entities,
             source_only=True,
         )
+    if featured_source_relevant is None:
+        check("destaque_relevancia", True, "sem destaque para verificar", skipped=True)
+    else:
         listed = ", ".join(sorted(image_entities)) or "nenhuma"
         check(
             "destaque_relevancia",
@@ -213,8 +238,6 @@ def run_pre_publish_checklist(
                 "troque por key art/imagem do jogo/obra"
             ),
         )
-    else:
-        check("destaque_relevancia", True, "sem item featured no media_plan; nao verificavel", skipped=True)
 
     # 8. Every published image must be WebP.
     image_urls = list(inline_images)

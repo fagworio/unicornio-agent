@@ -31,9 +31,14 @@ def editorial_payload(**overrides):
 
 class FakeClient:
     def get_media(self, media_id):
+        # Simulates the post-fix normalize behavior: the re-uploaded featured
+        # keeps provenance evidence in its filename/title/alt, so the
+        # featured relevance gate can match the work from real evidence.
         return {
             "id": media_id,
-            "source_url": "https://media.example/featured.webp",
+            "source_url": "https://media.example/redfall-1280x720.webp",
+            "title": {"rendered": "Redfall key art"},
+            "alt_text": "Redfall key art",
             "media_details": {"width": 1280, "height": 720},
         }
 
@@ -185,6 +190,48 @@ class ChecklistTests(unittest.TestCase):
         editorial["seo"] = {"title": "x" * 66, "meta_description": "curta", "focus_keyword": "jogo"}
         result = self._run_checklist(editorial=editorial)
         self.assertEqual(self.statuses(result)["schema_editorial"], "fail")
+
+    def test_featured_relevance_validates_real_attachment_evidence(self):
+        # The gate must validate the REAL featured attachment (url+title+alt,
+        # source-only) — an attachment whose filename/title carry no entity of
+        # the post fails even when the media_plan has a featured item with a
+        # decorated source (the exact "Disney castle captioned as Kingdom
+        # Hearts" case).
+        class GenericFeaturedClient(FakeClient):
+            def get_media(self, media_id):
+                return {
+                    "id": media_id,
+                    "source_url": "https://media.example/featured-1280x720.webp",
+                    "title": {"rendered": "Imagem de destaque"},
+                    "alt_text": "Imagem de destaque",
+                    "media_details": {"width": 1280, "height": 720},
+                }
+
+        editorial = editorial_payload(
+            media_plan=[
+                {
+                    "paragraph_index": 0,
+                    "source_page_url": "https://example.com/redfall-keyart",
+                    "direct_image_url": "https://media.example/redfall.webp",
+                    "author": "Autor",
+                    "license": "CC BY 4.0",
+                    "license_url": "https://creativecommons.org/licenses/by/4.0",
+                    "captured_at": "2026-08-01",
+                    "credit_text": "Crédito da imagem: Autor. Redfall. CC BY 4.0.",
+                    "alt_text": "Redfall key art",
+                    "is_featured": True,
+                }
+            ],
+            game_name="Redfall",
+        )
+        post = make_post(
+            meta={"original_link": "https://source.example/noticia"},
+            content={"raw": "<p>Redfall.</p>"},
+        )
+        result = self._run_checklist(
+            post=post, editorial=editorial, client=GenericFeaturedClient()
+        )
+        self.assertEqual(self.statuses(result)["destaque_relevancia"], "fail")
 
     def test_topic_gate_fails_when_no_overlap_with_site_topics(self):
         # matched_topics fora da lista do site -> qualidade_texto reprova.

@@ -48,9 +48,15 @@ class FakeClient:
         return [self.post]
 
     def get_media(self, media_id):
+        # Post-fix behavior: re-uploaded featured keeps provenance evidence
+        # in its filename/title/alt (no more generic "featured.webp"). The
+        # slug derives from the ORIGINAL source file name, which carries a
+        # distinctive entity of the post ("importante" here).
         return {
             "id": media_id,
-            "source_url": "https://wp.test/uploads/featured.webp",
+            "source_url": "https://wp.test/uploads/noticia-sobre-videogame-e-lancamento-importante-1280x720.webp",
+            "title": {"rendered": "Notícia sobre videogame e lançamento importante"},
+            "alt_text": "Notícia sobre videogame e lançamento importante",
             "media_details": {"width": 1280, "height": 720},
         }
 
@@ -517,6 +523,25 @@ class WorkflowTests(unittest.TestCase):
         }
         post["featured_media"] = 7
         return post
+
+    def test_featured_filename_from_source_keeps_provenance(self):
+        from unicornio_editor.workflow import _featured_filename_from_source
+
+        self.assertEqual(
+            _featured_filename_from_source(
+                "https://s3.example/uploads/2026/08/Remothered-Red-Nuns-Legacy-Launches.jpg"
+            ),
+            "remothered-red-nuns-legacy-launches-1280x720.webp",
+        )
+        # Generic/short or non-ascii stems fall back to the generic name.
+        self.assertEqual(
+            _featured_filename_from_source("https://s3.example/uploads/2026/08/x.jpg"),
+            "featured-1280x720.webp",
+        )
+        self.assertEqual(
+            _featured_filename_from_source("https://s3.example/foto-çã.jpg"),
+            "featured-1280x720.webp",
+        )
 
     def test_publish_blocks_without_publish_enabled_gate(self):
         with tempfile.TemporaryDirectory() as directory:
