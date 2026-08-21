@@ -36,8 +36,22 @@ Process only WordPress posts with status `pending`.
    monitored so stale content never floods the publish flow.
 2. Run `unicornio-editor prepare POST_ID --compact`.
 3. Produce strict editorial JSON with `site_relevance`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`. `cleaned_html` is OPTIONAL: omit it (or set null) when the prepared text is already good — `apply` then reuses the deterministic cleaned content (no-rewrite path); include it ONLY when you actually rewrite the text.
-4. Google Images is only discovery. Verify the original page and a public-domain, compatible Creative Commons, or explicit permission license.
-5. Record source page, author, license, license URL, capture time, and visible credit. Reject uncertain images.
+4. Google Images is only discovery. Verify the original page hosting the image (a Google Images
+ preview URL is never a source). IMAGE POLICY (2026-08): any web image may be used as long as a
+ VISIBLE CREDIT is attached — the credit block is the evidence. Free licenses (CC0, CC BY,
+ public domain, permission granted) remain preferred and are accepted as before; for every
+ SEARCH ORDER (editor rule 2026-08-21): start with the WEB — Google/web_search to find the
+ key art on news sites, official pages, stores (Steam CDN header.jpg, etc.) — extract the
+ DIRECT image URL from the original page and use `license: "Uso com crédito"` with
+ `license_url` = the original page. Wikimedia Commons is a FALLBACK, not the default: it has
+ little official key art and rate-limits aggressively (HTTP 429). Do NOT get stuck retrying
+ Wikimedia — switch to web sources immediately.
+   other image mark the candidate `license: "Uso com crédito"` and `license_url` as the original
+   image page (empty license_url falls back to the source page automatically). Do NOT write
+   "All Rights Reserved" as the license — use the use-with-credit marker.
+5. Record source page, author, license, license URL (optional for use-with-credit), capture time,
+   and the visible credit. Every image must carry `Crédito da imagem: ...` (work/author +
+   description + license note) — the credit IS the policy guarantee.
    IMPORTED IMAGES: inline images already in the post that carry a complete credit block inside the
    figure (`Crédito da imagem: <autor>. <descrição>. Licença <CC|CC0|domínio público> (<url da licença>)`)
    are PRESERVED automatically by `clean_html` — deterministic code validation, no AI and no web
@@ -52,7 +66,59 @@ Process only WordPress posts with status `pending`.
    `media_plan` — no image beats a wrong image. The checklist item `relevancia_imagens` blocks
    publication when any inline image is unrelated, and the 2/4/6 minimum is waived for posts with
    zero images (relevance-first policy).
-6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks. Featured images are mandatory and are prepared at exactly 1200x720 WebP (`is_featured: true` on at most one media_plan item).
+   FEATURED IMAGE = THE SUBJECT ITSELF (mandatory): the featured image must be key art / an
+   official image OF the game or work cited — never a tangential symbol (a Disney castle is NOT
+   a Kingdom Hearts featured image, even if the castle appears in the game). The code gate runs
+   the featured candidate through `image_is_relevant(..., source_only=True)`: only the real
+   source file/page name counts as evidence, so pick images whose FILE NAME carries the
+   game/work name (e.g. `Kingdom_Hearts_wordmark_....png`), not a generic caption the agent
+   could write over a wrong image. Checklist item `destaque_relevancia` re-validates this at
+   publish time.
+   EXISTING FEATURED IS REUSED (2026-08-21): when the post ALREADY has a
+   featured image and the `media_plan` has no approved featured item, the
+   apply REUSES the existing one via `_normalize_existing_featured` — it
+   re-downloads the source, converts to exactly 1280x720 WebP and uploads a
+   NEW attachment whose FILE NAME derives from the original source (e.g.
+   `remothered-red-nuns-legacy-...-1280x720.webp`), preserving provenance so
+   the relevance gate still matches. Therefore: if the post's current
+   featured is the correct key art (file/page name carries the work), OMIT
+   `is_featured` from the `media_plan` and let the code normalize it. Only
+   provide a new featured item when the existing one is wrong or missing.
+   The checklist `destaque_relevancia` now validates the REAL attachment
+   (url+title+alt), not the media_plan intent.
+   LISTICLE H2s NAME THE WORKS: the entity extractor reads the H2 headings
+   ("1. Tokyo Ghoul: ...", "3. The Sinking City 2: ..."), so a list post
+   with a generic title still matches images of the cited works. Inline
+   alts/credits for list items MUST carry the exact work name from the H2.
+   FEATURED = KEY ART OF A CITED WORK, NEVER ARTICLE ART (editor rule
+   2026-08-21): the model CANNOT see the image — a filename can pass the
+   text gate while the file is actually an article header/wordmark (e.g. a
+   "5 Classic Anime That Deserve Remakes" banner). The featured image must
+   depict ONE OF THE WORKS CITED IN THE POST (key art/logo/official art of
+   a game/anime/film named in the title or in an H2). For lists without a
+   good existing featured, use the key art of the LAST listed work. Never
+   reuse an existing featured that is generic article art; the code now
+   refuses to re-normalize a featured whose real evidence (url/title/alt)
+   matches no cited work, so provide a new `is_featured` media item with
+   real key art (file name carrying the work) whenever the existing one is
+   not a cited-work image.
+   FEATURED MUST BE LANDSCAPE (mandatory): the converter applies EXIF orientation (photos stored
+   sideways are transposed, never published lying down) and REJECTS portrait sources with
+   `MediaConversionError` — a 1280x720 featured image cannot come from a portrait photo. Always
+   choose landscape key art/wordmarks (w >= h) for `is_featured: true`.
+   SIZE RULES (portal definition): featured images are prepared at exactly 1280x720 WebP (16:9).
+   INLINE images are capped at 1280px WIDE — posters/art wider than 1280 are scaled down (aspect
+   kept), smaller sources are never upscaled. Oversized images hurt page performance; never
+   request or accept a source that would force a huge upload.
+   MEDIA LIBRARY REUSE (preferred before external discovery): run
+   `unicornio-editor media-search TERMO --limit N` (read-only) to find images already in the
+   local Media Library that fit the post. A candidate is reusable ONLY when `tem_credito: true`
+   (its title/caption carries the `Crédito da imagem:` block = license evidence). Reference it in
+   the media_plan item as `media_library_id: <id>` (plus the normal author/license/credit fields
+   copied from its title/caption). The apply downloads the attachment file and uploads a NEW
+   attachment — the original title/alt/caption are NEVER overwritten. External discovery
+   (Google Images/Wikimedia) remains the fallback when the library has nothing fitting.
+6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks. Featured images are mandatory and are prepared at exactly 1280x720 WebP (`is_featured: true` on at most one media_plan item).
 7. Run `unicornio-editor apply POST_ID editorial.json`.
 8. Run `unicornio-editor checklist POST_ID editorial.json` (read-only) and only publish when every item passes — backup, pending status, relevance, content, Fonte (original_link), body images per length (2/4/6), mandatory featured image, WebP, trailer (if game), CTA, text quality, structure, schema.
 9. Inspect the JSON result and backup path. A `skip` or dry-run result must have `wordpress_changed=false`.
