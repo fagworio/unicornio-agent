@@ -28,6 +28,11 @@ Process only WordPress posts with status `pending`.
 3. Produce strict editorial JSON with `site_relevance`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`. `cleaned_html` is OPTIONAL: omit it (or set null) when the prepared text is already good — `apply` then reuses the deterministic cleaned content (no-rewrite path); include it ONLY when you actually rewrite the text.
 4. Google Images is only discovery. Verify the original page and a public-domain, compatible Creative Commons, or explicit permission license.
 5. Record source page, author, license, license URL, capture time, and visible credit. Reject uncertain images.
+   IMPORTED IMAGES: inline images already in the post that carry a complete credit block inside the
+   figure (`Crédito da imagem: <autor>. <descrição>. Licença <CC|CC0|domínio público> (<url da licença>)`)
+   are PRESERVED automatically by `clean_html` — deterministic code validation, no AI and no web
+   work. Do NOT re-discover or re-upload them, and do NOT include them in `media_plan`. Only images
+   whose credit is missing/incomplete are removed and require `media_plan` rediscovery.
 6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks. Featured images are mandatory and are prepared at exactly 1200x720 WebP (`is_featured: true` on at most one media_plan item).
 7. Run `unicornio-editor apply POST_ID editorial.json`.
 8. Run `unicornio-editor checklist POST_ID editorial.json` (read-only) and only publish when every item passes — backup, pending status, relevance, content, Fonte (original_link), body images per length (2/4/6), mandatory featured image, WebP, trailer (if game), CTA, text quality, structure, schema.

@@ -32,6 +32,48 @@ class HtmlCleanerTests(unittest.TestCase):
         )
         self.assertEqual(result, "<p>Notícia.</p>")
 
+    def test_keeps_image_inside_figure_with_complete_credit(self):
+        result = clean_html(
+            '<figure class="aligncenter"><img src="https://s3.example/img.webp" alt="Cena" />'
+            "<figcaption>Crédito da imagem: Autor (via Wikimedia Commons). Cena do jogo. "
+            "Licença CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0).</figcaption>"
+            "</figure>"
+        )
+        self.assertIn('<img src="https://s3.example/img.webp" alt="Cena" />', result)
+        self.assertIn("Crédito da imagem: Autor", result)
+
+    def test_keeps_image_with_cc0_license(self):
+        result = clean_html(
+            '<figure><img src="https://s3.example/foto.webp" alt="Foto" />'
+            "<figcaption>Crédito da imagem: Foto. Licença CC0 "
+            "(http://creativecommons.org/publicdomain/zero/1.0/deed.en).</figcaption></figure>"
+        )
+        self.assertIn('<img src="https://s3.example/foto.webp" alt="Foto" />', result)
+
+    def test_drops_image_when_credit_has_no_license(self):
+        result = clean_html(
+            '<figure><img src="https://s3.example/sem.webp" alt="Sem licença" />'
+            "<figcaption>Crédito da imagem: Autor. Sem informação de licença.</figcaption></figure>"
+        )
+        self.assertNotIn("<img", result)
+        self.assertIn("Crédito da imagem: Autor", result)
+
+    def test_drops_image_when_figure_has_no_figcaption(self):
+        result = clean_html(
+            '<figure class="aligncenter"><img src="https://s3.example/x.webp" alt="x" /></figure>'
+        )
+        self.assertNotIn("<img", result)
+        self.assertEqual(result, '<figure class="aligncenter"></figure>')
+
+    def test_strips_event_attributes_from_kept_image(self):
+        result = clean_html(
+            '<figure><img src="https://s3.example/s.webp" alt="a" onclick="bad()" />'
+            "<figcaption>Crédito da imagem: Autor. Licença CC BY 4.0 "
+            "(https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+        )
+        self.assertNotIn("onclick", result)
+        self.assertIn('<img src="https://s3.example/s.webp" alt="a" />', result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,8 +12,8 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 - Processar no maximo o batch configurado.
 - Fazer backup antes de editar.
 - Se qualquer validacao falhar, nao gravar alteracoes.
-- Imagens inline importadas existentes devem ser removidas; não reutilizá-las.
-- Novas imagens só podem vir de candidatos descobertos pelo Google Images cuja licença pública/permissão foi confirmada na página original.
+- Imagens inline importadas com bloco de crédito COMPLETO na figura (Crédito da imagem: autor. descrição. Licença <CC/CC0/domínio público> + URL da licença) são PRESERVADAS pelo código (clean_html valida deterministicamente) — não redescobrir nem re-uploadar; não entram no media_plan.
+- Imagens inline importadas sem crédito completo são removidas; novas imagens só podem vir de candidatos descobertos pelo Google Images cuja licença pública/permissão foi confirmada na página original.
 - Cada imagem deve ter URL da página original, autor, licença, URL da licença e crédito registrado.
 - Baixar para área temporária, validar, converter para WebP e enviar pela Media Library REST local; não usar bucket/CDN externo.
 - Crédito visível é obrigatório em toda imagem e deve seguir o formato `Crédito da imagem: Autor/Empresa. Descrição da imagem. Informação de licença ou direitos autorais, quando aplicável.`; crédito não substitui licença.
