@@ -24,6 +24,12 @@ Process only WordPress posts with status `pending`.
 ## Editorial flow
 
 1. Run `unicornio-editor list-pending --compact` (economy mode; see below).
+   For the overall queue state (pending x already-edited x old backlog), run
+   `unicornio-editor queue` — read-only, deterministic. The cron monitor
+   (`hermes` monitor_script -> `queue --monitor`) only wakes this agent when a
+   NEW recent pending post appears or one is processed; idle ticks cost zero
+   tokens. Old pending posts (outside the 7-day window) are intentionally NOT
+   monitored so stale content never floods the publish flow.
 2. Run `unicornio-editor prepare POST_ID --compact`.
 3. Produce strict editorial JSON with `site_relevance`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`. `cleaned_html` is OPTIONAL: omit it (or set null) when the prepared text is already good — `apply` then reuses the deterministic cleaned content (no-rewrite path); include it ONLY when you actually rewrite the text.
 4. Google Images is only discovery. Verify the original page and a public-domain, compatible Creative Commons, or explicit permission license.

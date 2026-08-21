@@ -442,6 +442,79 @@ def _post_title(post: dict[str, Any]) -> str | None:
     return None
 
 
+def build_queue_report(
+    client: WordPressClient,
+    root: Path,
+    *,
+    per_page: int = 50,
+    recent_days: int = 7,
+) -> dict[str, Any]:
+    """Deterministic queue status: pending posts x already-processed ones.
+
+    Read-only. ``edited`` means ``backups/<id>/editorial.latest.json`` exists
+    (the post went through the pipeline and waits for the publish cron).
+    ``recent_unprocessed_ids`` is the stable line the cron monitor script
+    hashes to decide whether an agent run is needed (token economy: no LLM on
+    idle). Only posts with ``date_gmt`` inside the last ``recent_days`` are
+    monitored, so a months-old pending backlog never wakes the agent and never
+    floods the publish flow; the full report still lists every pending post.
+    """
+    from .content_quality import word_count
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)
+    posts = client.list_pending(per_page=per_page)
+    rows: list[dict[str, Any]] = []
+    unprocessed: list[int] = []
+    recent_unprocessed: list[int] = []
+    for post in posts:
+        post_id = post.get("id")
+        if not isinstance(post_id, int):
+            continue
+        backups_dir = root / "backups" / str(post_id)
+        edited = (backups_dir / "editorial.latest.json").is_file()
+        prepared = (backups_dir / "prepared.json").is_file()
+        if not edited:
+            unprocessed.append(post_id)
+            if _is_recent(post, cutoff):
+                recent_unprocessed.append(post_id)
+        title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
+        rows.append(
+            {
+                "id": post_id,
+                "date": post.get("date"),
+                "date_gmt": post.get("date_gmt"),
+                "word_count": word_count((post.get("content") or {}).get("rendered") or ""),
+                "prepared": prepared,
+                "edited": edited,
+                "title": title,
+            }
+        )
+    rows.sort(key=lambda row: int(row["id"] or 0))
+    unprocessed.sort()
+    recent_unprocessed.sort()
+    return {
+        "pending": len(rows),
+        "edited": sum(1 for row in rows if row["edited"]),
+        "unprocessed_ids": unprocessed,
+        "recent_unprocessed_ids": recent_unprocessed,
+        "recent_days": recent_days,
+        "posts": rows,
+    }
+
+
+def _is_recent(post: dict[str, Any], cutoff: datetime.datetime) -> bool:
+    value = post.get("date_gmt") or post.get("date")
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed >= cutoff
+
+
 def _original_link(post: dict[str, Any]) -> str | None:
     meta = post.get("meta")
     if not isinstance(meta, dict):

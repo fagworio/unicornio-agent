@@ -17,6 +17,7 @@ from .html_cleaner import clean_html
 from .maintenance import generate_report
 from .workflow import (
     apply_editorial,
+    build_queue_report,
     compose_final_content,
     original_link_of,
     prepare_post,
@@ -41,6 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="imprime apenas id/titulo/contagem de palavras (economia de tokens); "
         "o conteudo completo nao e necessario para escolher o proximo post",
+    )
+
+    queue_parser = subparsers.add_parser(
+        "queue",
+        help="estado deterministico da fila: pending x ja editados (somente leitura)",
+    )
+    queue_parser.add_argument("--root", type=Path, default=Path("."))
+    queue_parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="imprime apenas a linha estavel (ids pending NAO processados, ou '0'); "
+        "usada pelo monitor_script do cron para nao acordar o LLM em ticks ociosos",
     )
 
     prepare_parser = subparsers.add_parser("prepare", help="cria snapshot e relatório")
@@ -131,6 +144,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
             if args.compact:
                 result = _compact_listing(result)
+        elif args.command == "queue":
+            report = build_queue_report(client, args.root)
+            if args.monitor:
+                line = " ".join(str(pid) for pid in report["recent_unprocessed_ids"]) or "0"
+                print(line)
+                return 0
+            result = report
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
             if args.compact:

@@ -7,6 +7,7 @@ from unittest import mock
 from unicornio_editor.config import Config
 from unicornio_editor.workflow import (
     apply_editorial,
+    build_queue_report,
     prepare_post,
     publish_post,
     publish_ready_posts,
@@ -42,6 +43,9 @@ class FakeClient:
     def get_post(self, post_id):
         return self.post
 
+    def list_pending(self, **kwargs):
+        return [self.post]
+
     def get_media(self, media_id):
         return {
             "id": media_id,
@@ -74,6 +78,8 @@ class WorkflowTests(unittest.TestCase):
         return {
             "id": 42,
             "status": "pending",
+            "date": "2026-08-21T03:00:00",
+            "date_gmt": "2026-08-21T06:00:00",
             "content": {"raw": "<article><p>Original.</p></article>"},
             "meta": {"original_link": "https://source.example/news"},
         }
@@ -100,6 +106,32 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("Confira mais novidades", report["content_preview"])
             self.assertIn('Fonte: <a href="https://source.example/news"', report["content_preview"])
             self.assertEqual(report["wordpress_changed"], False)
+
+    def test_queue_reports_pending_and_edited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            report = build_queue_report(client, root)
+            self.assertEqual(report["pending"], 1)
+            self.assertEqual(report["edited"], 0)
+            self.assertEqual(report["unprocessed_ids"], [42])
+            self.assertEqual(report["recent_unprocessed_ids"], [42])
+            # After apply, the post counts as edited and leaves the monitor line.
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            report = build_queue_report(client, root)
+            self.assertEqual(report["edited"], 1)
+            self.assertEqual(report["unprocessed_ids"], [])
+            self.assertEqual(report["recent_unprocessed_ids"], [])
+
+    def test_queue_monitor_excludes_old_backlog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = self.post()
+            old["date"] = "2026-05-06T10:00:00"
+            old["date_gmt"] = "2026-05-06T13:00:00"
+            report = build_queue_report(FakeClient(old), root)
+            self.assertEqual(report["unprocessed_ids"], [42])
+            self.assertEqual(report["recent_unprocessed_ids"], [])
 
     def test_apply_skip_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:

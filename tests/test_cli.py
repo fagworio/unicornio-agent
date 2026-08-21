@@ -11,12 +11,25 @@ from unicornio_editor.config import Config
 
 class FakeCliClient:
     def list_pending(self, **_kwargs):
-        return [{"id": 42, "status": "pending"}]
+        return [
+            {
+                "id": 42,
+                "status": "pending",
+                "date": "2026-08-21T03:00:00",
+                "date_gmt": "2026-08-21T06:00:00",
+                "title": {"raw": "Titulo de teste", "rendered": "Titulo de teste"},
+                "content": {"raw": "<p>ola</p>", "rendered": "<p>ola</p>"},
+                "meta": {},
+                "link": "https://wp.test/?p=42",
+            }
+        ]
 
     def get_post(self, post_id):
         return {
             "id": post_id,
             "status": "pending",
+            "date": "2026-08-21T03:00:00",
+            "date_gmt": "2026-08-21T06:00:00",
             "title": {"raw": "Titulo de teste", "rendered": "Titulo de teste"},
             "content": {"raw": "<p>ola</p>", "rendered": "<p>ola</p>"},
             "meta": {},
@@ -51,6 +64,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("content", data[0])
         self.assertIn("title", data[0])
         self.assertIn("word_count", data[0])
+
+    def test_queue_monitor_prints_stable_line(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
+                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
+            ), redirect_stdout(output):
+                self.assertEqual(main(["queue", "--monitor", "--root", directory]), 0)
+            self.assertEqual(output.getvalue().strip(), "42")
 
     def test_prepare_compact_writes_file_and_prints_summary(self):
         import tempfile
