@@ -18,6 +18,7 @@ from .list_quality import detect_list_format, validate_list_content
 from .media.converter import convert_to_webp, prepare_featured_webp
 from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
+from .media.relevance import extract_entities, image_is_relevant
 from .media.wordpress_media import upload_image
 from .observability import build_processing_markers
 from .seo.rank_math import build_meta
@@ -154,29 +155,63 @@ def _execute_media_plan(
 
     Featured candidates are prepared at exactly 1200x720. In dry-run the plan
     is reported but never executed (uploads are write operations).
+
+    Relevance gate: every candidate must reference a distinctive entity of the
+    post (title/keyword/game name). Generic concept matches (e.g. a real bat
+    for a game vampire) are rejected before any download/insert — the
+    editorial rule is "no image beats a wrong image".
     """
     plan = editorial.get("media_plan") or []
     if not plan:
         return [], None, None
+    entities = extract_entities(
+        title=str((editorial.get("seo") or {}).get("title") or ""),
+        content_html=str(editorial.get("cleaned_html") or ""),
+        focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),
+    )
+
+    def _rejection_reason(item: dict[str, Any]) -> str | None:
+        if not image_is_relevant(
+            alt_text=str(item.get("alt_text") or ""),
+            credit_text=str(item.get("credit_text") or ""),
+            source_url=" ".join(
+                str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
+            ),
+            entities=entities,
+        ):
+            listed = ", ".join(sorted(entities)) or "nenhuma"
+            return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
+        return None
+
     if config.dry_run:
-        return (
-            [
+        results: list[dict[str, Any]] = []
+        for item in plan:
+            reason = _rejection_reason(item)
+            results.append(
                 {
                     "paragraph_index": item.get("paragraph_index"),
-                    "status": "blocked",
-                    "detail": "dry-run nao executa download/upload de midia",
+                    "status": "rejected" if reason else "blocked",
+                    "detail": reason or "dry-run nao executa download/upload de midia",
                 }
-                for item in plan
-            ],
-            None,
-            None,
-        )
-    results: list[dict[str, Any]] = []
+            )
+        return results, None, None
+    results = []
     featured_id: int | None = None
     featured_credit: str | None = None
     with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
         tmp = Path(directory)
         for position, item in enumerate(plan):
+            reason = _rejection_reason(item)
+            if reason:
+                results.append(
+                    {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": reason,
+                    }
+                )
+                continue
             evidence = {
                 name: item[name]
                 for name in (

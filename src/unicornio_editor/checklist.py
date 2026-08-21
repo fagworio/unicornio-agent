@@ -95,16 +95,58 @@ def run_pre_publish_checklist(
         check("fonte_original_link", True, "sem original_link; bloco Fonte nao exigido", skipped=True)
 
     # 6. Body images per content length (SEO rule: 2/4/6 minimum).
+    #    Relevance-first policy: images must represent the exact cited
+    #    subject; when no relevant image exists, absence beats a wrong image,
+    #    so the minimum is waived for posts with zero images.
     words = word_count(content)
     required = minimum_image_count(words)
     inline_images = _IMG_RE.findall(content)
     image_count = len(inline_images)
-    images_ok = image_count >= required
-    check(
-        "imagens_no_corpo",
-        images_ok,
-        f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
+    if image_count == 0:
+        check(
+            "imagens_no_corpo",
+            True,
+            f"{words} palavras exigem >= {required} imagens; nenhuma imagem relevante "
+            "disponivel — minimo dispensado (politica: preferir ausencia a imagem fora de contexto)",
+        )
+    else:
+        check(
+            "imagens_no_corpo",
+            image_count >= required,
+            f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
+        )
+
+    # 6b. Every inline image must be semantically related to the cited subject
+    #     (deterministic entity-overlap gate; generic concept matches fail).
+    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+
+    content_images = iter_content_images(content)
+    image_entities = extract_entities(
+        title=str(editorial.get("seo", {}).get("title") or ""),
+        content_html=str(editorial.get("cleaned_html") or ""),
+        focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),
     )
+    irrelevant_images = [
+        item
+        for item in content_images
+        if not image_is_relevant(
+            alt_text=str(item.get("alt") or ""),
+            credit_text=str(item.get("caption") or ""),
+            source_url=str(item.get("src") or ""),
+            entities=image_entities,
+        )
+    ]
+    if content_images:
+        check(
+            "relevancia_imagens",
+            not irrelevant_images,
+            f"{len(content_images) - len(irrelevant_images)} relevante(s) de "
+            f"{len(content_images)} imagem(ns); irrelevantes: "
+            f"{', '.join(item.get('alt') or item.get('src') or '?' for item in irrelevant_images) or 'nenhuma'}",
+        )
+    else:
+        check("relevancia_imagens", True, "sem imagens para validar", skipped=True)
 
     # 7. Featured image is mandatory before publishing.
     featured_raw = post.get("featured_media")

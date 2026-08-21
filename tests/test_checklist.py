@@ -74,19 +74,23 @@ class ChecklistTests(unittest.TestCase):
 
     def test_all_pass_when_every_rule_is_satisfied(self):
         content = (
-            '<figure class="aligncenter"><img src="https://media.example/a.webp" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Texto revisado sobre o jogo videogame.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/b.webp" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Mais texto sobre videogame e o lançamento.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/c.webp" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/c.webp" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Fechando o texto sobre videogame.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/d.webp" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/d.webp" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Último parágrafo com videogame.</p>"
             "<hr /><h3>Confira mais novidades em nosso Portal de Notícias!</h3><hr />"
         )
         editorial = editorial_payload(
             game_name="Meu Jogo",
-            **{"seo": {"title": "Notícia sobre videogame", "meta_description": "x" * 130, "focus_keyword": "videogame"}},
+            **{"seo": {"title": "Redfall ganha data de lançamento", "meta_description": "x" * 130, "focus_keyword": "Redfall"}},
         )
         post = make_post(meta={"original_link": "https://source.example/noticia"})
         content = content + (
@@ -113,12 +117,42 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.statuses(result)["imagem_destaque"], "fail")
 
     def test_body_images_fail_below_word_count_rule(self):
-        # Short content requires 2 images; none present.
-        result = self._run_checklist()
+        # Short content requires 2 images; only 1 present.
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Notícia sobre videogame" /></figure>'
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+        )
+        result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
 
+    def test_body_images_waived_when_no_image_available(self):
+        # Policy: absence beats a wrong image — 0 images does not block.
+        result = self._run_checklist()
+        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "pass")
+
+    def test_irrelevant_image_fails_relevance_gate(self):
+        # A real bat is NOT a valid image for a videogame news post.
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/morcego.webp" alt="Morcego real em voo" />'
+            "<figcaption>Crédito da imagem: Fotógrafo. Morcego real. CC0.</figcaption></figure>"
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            "<hr /><h3>Confira mais novidades em nosso Portal de Notícias!</h3><hr />"
+        )
+        result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["relevancia_imagens"], "fail")
+
+    def test_relevant_image_passes_relevance_gate(self):
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Cena importante do jogo" />'
+            "<figcaption>Crédito da imagem: Autor. Cena importante do jogo. CC BY 4.0.</figcaption></figure>"
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            "<hr /><h3>Confira mais novidades em nosso Portal de Notícias!</h3><hr />"
+        )
+        result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["relevancia_imagens"], "pass")
+
     def test_webp_fails_for_inline_jpg(self):
-        content = '<figure class="aligncenter"><img src="https://media.example/foto.jpg" /></figure><p>Texto videogame.</p>'
+        content = '<figure class="aligncenter"><img src="https://media.example/foto.jpg" alt="Notícia sobre videogame" /></figure><p>Texto videogame.</p>'
         result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["imagens_webp"], "fail")
 

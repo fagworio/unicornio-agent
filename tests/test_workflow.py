@@ -215,8 +215,8 @@ class WorkflowTests(unittest.TestCase):
             "license": "CC BY 4.0",
             "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-08-20T12:00:00Z",
-            "credit_text": "Crédito da imagem: Autor. Imagem do jogo. CC BY 4.0.",
-            "alt_text": "Imagem do jogo",
+            "credit_text": "Crédito da imagem: Autor. Imagem do titulo do jogo. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).",
+            "alt_text": "Imagem do titulo do jogo",
             "is_featured": is_featured,
         }
 
@@ -357,9 +357,11 @@ class WorkflowTests(unittest.TestCase):
         post["content"] = {
             "raw": (
                 "<p>Texto revisado sobre videogame.</p>"
-                '<figure class="aligncenter"><img src="https://wp.test/1.webp" alt="a" /></figure>'
+                '<figure class="aligncenter"><img src="https://wp.test/1.webp" alt="Imagem do titulo do jogo" />'
+                "<figcaption>Crédito da imagem: Autor. Imagem do titulo do jogo. CC BY 4.0.</figcaption></figure>"
                 "<p>Mais texto sobre videogame e jogos.</p>"
-                '<figure class="aligncenter"><img src="https://wp.test/2.webp" alt="b" /></figure>'
+                '<figure class="aligncenter"><img src="https://wp.test/2.webp" alt="Imagem do titulo do jogo" />'
+                "<figcaption>Crédito da imagem: Autor. Imagem do titulo do jogo. CC BY 4.0.</figcaption></figure>"
                 '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
                 "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
             )

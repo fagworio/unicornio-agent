@@ -39,6 +39,15 @@ Process only WordPress posts with status `pending`.
    are PRESERVED automatically by `clean_html` — deterministic code validation, no AI and no web
    work. Do NOT re-discover or re-upload them, and do NOT include them in `media_plan`. Only images
    whose credit is missing/incomplete are removed and require `media_plan` rediscovery.
+   IMAGE RELEVANCE (mandatory): every image must depict the EXACT subject cited — the work,
+   character, object or person — never a generic concept that merely shares a keyword. A post
+   about the game Redfall (vampires) must use Redfall key art/screenshots; a real bat photo is
+   REJECTED. The code gate (`media/relevance.py`) rejects any candidate whose alt/credit/source
+   URL has zero overlap with the post's distinctive entities (concept words like vampiro, jogo,
+   anime, convencao never count). If no truly related image can be found, leave the slot out of
+   `media_plan` — no image beats a wrong image. The checklist item `relevancia_imagens` blocks
+   publication when any inline image is unrelated, and the 2/4/6 minimum is waived for posts with
+   zero images (relevance-first policy).
 6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks. Featured images are mandatory and are prepared at exactly 1200x720 WebP (`is_featured: true` on at most one media_plan item).
 7. Run `unicornio-editor apply POST_ID editorial.json`.
 8. Run `unicornio-editor checklist POST_ID editorial.json` (read-only) and only publish when every item passes — backup, pending status, relevance, content, Fonte (original_link), body images per length (2/4/6), mandatory featured image, WebP, trailer (if game), CTA, text quality, structure, schema.
