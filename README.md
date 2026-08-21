@@ -187,12 +187,12 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Video conta como quebra visual.
 - Maximo padrao de 4 imagens inline.
 - Converter para WebP antes do upload.
-- Google Images é somente índice de descoberta; nunca é prova de licença.
-- Usar apenas imagens com domínio público, licença Creative Commons compatível ou permissão explícita verificável.
-- Não usar imagem apenas porque aparece como “pública” no Google; registrar URL da página original, autor, licença, termos e data da captura.
+- Google Images é somente índice de descoberta; a fonte é a página ORIGINAL da imagem (preview do Google não é fonte).
+- Política de imagens (2026-08): qualquer imagem da web pode ser usada com CRÉDITO VISÍVEL — o crédito é a evidência. Licenças livres (CC0, CC BY, domínio público, permissão) são preferidas; para as demais, usar o marcador "Uso com crédito".
+- Não usar imagem apenas porque aparece como “pública” no Google; registrar URL da página original, autor, licença (ou "Uso com crédito"), termos e data da captura.
 - Baixar e hospedar a cópia na Media Library do WordPress, sem bucket/CDN externo.
-- Inserir crédito visível com autor, origem e licença conforme os termos; crédito não substitui autorização.
-- Se a licença não puder ser comprovada, descartar a imagem e procurar outra.
+- Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
+- Sem crédito visível, descartar a imagem e procurar outra.
 
 ### Fonte
 Formato final:

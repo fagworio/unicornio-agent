@@ -33,11 +33,33 @@ class LicenseTests(unittest.TestCase):
         with self.assertRaises(LicenseError):
             validate_candidate(value)
 
-    def test_rejects_unverified_all_rights_reserved(self):
+    def test_rejects_all_rights_reserved_without_credit_marker(self):
         value = candidate()
         value["license"] = "All Rights Reserved"
         with self.assertRaises(LicenseError):
             validate_candidate(value)
+
+    def test_accepts_google_image_with_use_with_credit_marker(self):
+        # Policy 2026-08: any web image is usable with a visible credit —
+        # the credit block is the evidence, no free license required.
+        value = candidate()
+        value["source_page_url"] = "https://blog.example/noticia/one-piece-artigo"
+        value["direct_image_url"] = "https://blog.example/media/one-piece-capa.jpg"
+        value["license"] = "Uso com crédito"
+        value["license_url"] = ""
+        value["credit_text"] = "Crédito da imagem: One Piece (arte de divulgação). Uso com crédito."
+        result = validate_candidate(value)
+        self.assertEqual(result["license"], "Uso com crédito")
+        # Sem pagina de licenca, a pagina original da imagem vira a referencia.
+        self.assertEqual(result["license_url"], value["source_page_url"])
+
+    def test_accepts_use_with_credit_with_explicit_license_url(self):
+        value = candidate()
+        value["license"] = "Uso com crédito"
+        value["license_url"] = "https://blog.example/sobre/uso-de-imagens"
+        value["credit_text"] = "Crédito da imagem: One Piece. Uso com crédito (https://blog.example/sobre/uso-de-imagens)."
+        result = validate_candidate(value)
+        self.assertEqual(result["license_url"], "https://blog.example/sobre/uso-de-imagens")
 
 
 if __name__ == "__main__":
