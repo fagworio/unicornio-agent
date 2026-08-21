@@ -167,7 +167,11 @@ def extract_entities(
         raw_phrases.append(focus_keyword.strip())
     if title and title.strip():
         raw_phrases.append(title.strip())
-    raw_phrases.extend(_QUOTE_RE.findall(content_html or ""))
+    # Search quoted names only in the visible TEXT (tags removed) — HTML
+    # attributes like alt="..." or href="..." would otherwise leak as fake
+    # entities (e.g. ' alt=', ' target=').
+    quote_source = _TAG_RE.sub(" ", content_html or "")
+    raw_phrases.extend(phrase for phrase in _QUOTE_RE.findall(quote_source) if "=" not in phrase)
 
     for phrase in raw_phrases:
         normalized = normalize(phrase)

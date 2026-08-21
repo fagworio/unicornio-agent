@@ -182,9 +182,66 @@ class ChecklistTests(unittest.TestCase):
 
     def test_schema_fails_on_invalid_editorial(self):
         editorial = editorial_payload()
-        del editorial["seo"]
+        editorial["seo"] = {"title": "x" * 66, "meta_description": "curta", "focus_keyword": "jogo"}
         result = self._run_checklist(editorial=editorial)
         self.assertEqual(self.statuses(result)["schema_editorial"], "fail")
+
+    def test_topic_gate_fails_when_no_overlap_with_site_topics(self):
+        # matched_topics fora da lista do site -> qualidade_texto reprova.
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            site_topics=("games", "anime"),
+        )
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Cena importante do jogo" /></figure>'
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Cena importante do jogo" /></figure>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            backup_path = Path(directory) / "snapshot.json"
+            backup_path.write_text("{}")
+            editorial = editorial_payload()
+            editorial["site_relevance"]["matched_topics"] = ["economia"]
+            result = run_pre_publish_checklist(
+                post=make_post(),
+                editorial=editorial,
+                content=content,
+                backup_path=backup_path,
+                config=config,
+                client=FakeClient(),
+            )
+        self.assertEqual(self.statuses(result)["qualidade_texto"], "fail")
+
+    def test_topic_gate_passes_with_overlap(self):
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            site_topics=("games", "anime"),
+        )
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Cena importante do jogo" /></figure>'
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Cena importante do jogo" /></figure>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            backup_path = Path(directory) / "snapshot.json"
+            backup_path.write_text("{}")
+            editorial = editorial_payload()
+            editorial["site_relevance"]["matched_topics"] = ["games"]
+            result = run_pre_publish_checklist(
+                post=make_post(),
+                editorial=editorial,
+                content=content,
+                backup_path=backup_path,
+                config=config,
+                client=FakeClient(),
+            )
+        self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,11 @@ Process only WordPress posts with status `pending`.
 
 ## Editorial flow
 
-1. Run `unicornio-editor list-pending --compact` (economy mode; see below).
+1. Run `unicornio-editor cards` — ONE call returns the compact cards of the
+   pending batch (title, word count, distinctive entities, original link,
+   featured/seo/image gaps, preserved-image count, game hint, state). It
+   replaces list-pending + prepare + file reads; write the editorial JSONs
+   straight from the cards. `list-pending --compact` remains for quick peeks.
    For the overall queue state (pending x already-edited x old backlog), run
    `unicornio-editor queue` — read-only, deterministic. The cron monitor
    (`hermes` monitor_script -> `queue --monitor`) only wakes this agent when a
@@ -87,9 +91,22 @@ several-fold. They are mandatory, not style advice.
 - OMIT `cleaned_html` from the editorial JSON unless you actually rewrote the text (no-rewrite
   default). The model re-emitting an unchanged article is pure output-token waste; the code reuses
   the prepared content deterministically.
+- OMIT `seo` from the editorial JSON when the post already has valid Rank Math meta (the card's
+  `seo_exists` is true): the code inherits it. Only provide `seo` when `seo_exists` is false.
 - NEVER include the CTA, the Fonte or any footer in `cleaned_html` — `append_canonical_footer`
   inserts exactly one canonical CTA + Fonte and strips any duplicates. Writing them costs tokens
   and risks duplication.
+- Conservative skip (irreversible-loss protection): skip ONLY with confidence >= 0.9 (the card
+  shows nothing; apply refuses low-confidence skips and writes `backups/<id>/uncertain.json`
+  instead — the post stays pending, out of the queue, for later review). Uncertain content:
+  do NOT apply it as a final skip.
+- Topic gate: `matched_topics` must intersect the site topics (`SITE_TOPICS`); the checklist
+  fails otherwise. Pick topics from the site list (games, xbox, playstation, nintendo, anime,
+  cultura geek, streaming, series, cinema, filmes, tecnologia, ...).
+- Image alt texts MUST name the subject/work (e.g. "Redfall key art"), never generic labels
+  like "Imagem do jogo" — the relevance gate rejects generic alts anyway.
+- Validate before writing: `unicornio-editor apply POST_ID editorial.json --dry-run` runs the
+  full checklist + preview without touching WordPress; use it to fix gaps before the real apply.
 - When the media plan does not add real reading value, do not search for images at all.
 
 ## Operational pitfalls (learned in production)

@@ -23,6 +23,8 @@ class Config:
     http_timeout: float = 15.0
     lock_ttl: int = 900
     min_relevance_confidence: float = 0.80
+    min_skip_confidence: float = 0.90
+    site_topics: tuple[str, ...] = ()
     publish_enabled: bool = False
     publish_limit: int = 0
 
@@ -36,6 +38,8 @@ class Config:
             f"batch_limit={self.batch_limit!r}, http_timeout={self.http_timeout!r}, "
             f"lock_ttl={self.lock_ttl!r}, "
             f"min_relevance_confidence={self.min_relevance_confidence!r}, "
+            f"min_skip_confidence={self.min_skip_confidence!r}, "
+            f"site_topics={len(self.site_topics)} tópicos, "
             f"publish_enabled={self.publish_enabled!r}, "
             f"publish_limit={self.publish_limit!r})"
         )
@@ -117,6 +121,17 @@ def load_config() -> Config:
         min_relevance_confidence=_float(
             "EDITOR_MIN_RELEVANCE_CONFIDENCE", 0.80, 0.0, 1.0
         ),
+        min_skip_confidence=_float("EDITOR_MIN_SKIP_CONFIDENCE", 0.90, 0.0, 1.0),
+        site_topics=_topics("SITE_TOPICS"),
         publish_enabled=_bool("PUBLISH_ENABLED", False),
         publish_limit=_int("PUBLISH_LIMIT", 0, 0, 100),
+    )
+
+
+def _topics(name: str) -> tuple[str, ...]:
+    """Comma-separated editorial topics; empty when unset (gate off)."""
+    return tuple(
+        topic.strip()
+        for topic in _env(name).split(",")
+        if topic.strip()
     )

@@ -215,6 +215,7 @@ def run_pre_publish_checklist(
             focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
             image_count=image_count,
             matched_topics=relevance.get("matched_topics") or [],
+            allowed_topics=config.site_topics,
         )
         check("qualidade_texto", True, f"{quality['words']} palavras, qualidade ok")
     except ContentQualityError as exc:

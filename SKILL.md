@@ -60,12 +60,25 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
 
 ## Economia de tokens (obrigatorio em toda execucao paga)
 
-- `list-pending --compact` e `prepare ID --compact` sempre (o `prepare --compact` grava o JSON
-  completo em `backups/<ID>/prepared.json`; leia esse arquivo quando precisar do cleaned_html).
+- `unicornio-editor cards` primeiro: UMA chamada traz os cartoes de todos os posts da fila
+  (entidades, gaps, SEO existente, imagens, dica de jogo). Escreva os JSONs direto dos cartoes.
+- `list-pending --compact` e `prepare ID --compact` para consultas pontuais (o `prepare --compact`
+  grava o JSON completo em `backups/<ID>/prepared.json`; leia esse arquivo quando precisar do cleaned_html).
+- `cleaned_html` e `seo` sao OPCIONAIS no JSON: omita quando nao reescrever (o codigo reusa o
+  conteudo preparado) e quando a meta Rank Math existente for valida (seo_exists no cartao; o
+  codigo herda). So forneca seo quando seo_exists=false.
+- Skip conservador: so aplicar skip com confidence >= 0.9; abaixo disso o apply grava
+  `backups/<ID>/uncertain.json` e o post fica pending (fora da fila, para revisao) — nunca final.
+- `matched_topics` precisa intersectar SITE_TOPICS (gate do checklist); escolha topicos da lista
+  do site (games, xbox, playstation, nintendo, anime, cultura geek, streaming, series, cinema,
+  filmes, tecnologia, ...).
+- Alt das imagens DEVE nomear a obra/assunto (ex.: "Redfall key art"), nunca "Imagem do jogo".
+- Valide antes de escrever: `unicornio-editor apply ID arquivo.json --dry-run` roda o checklist
+  completo sem tocar no WordPress.
 - Nunca leia `src/**` para entender o fluxo; o CLI e a interface. So leia codigo se um erro do CLI
   nao for auto-explicativo.
 - Nunca despeje HTML baixado no terminal: salve em `/tmp` e extraia so o trecho (licenca/autor).
-- Nao repita comandos; se `list-pending` voltar vazio, encerre imediatamente.
+- Nao repita comandos; se a fila voltar vazia, encerre imediatamente.
 - Escreva o JSON editorial em arquivo e passe o caminho ao `apply`/`checklist`; nao cole o corpo
   do JSON mais de uma vez na conversa.
 

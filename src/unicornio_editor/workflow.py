@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -56,13 +57,27 @@ def apply_editorial(
     _require_pending(post)
     backup = SnapshotStore(root).save(post_id, post)
     editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
-    if editorial["site_relevance"]["decision"] == "process" and editorial.get("cleaned_html") is None:
-        # No-rewrite path (token economy): reuse the deterministic cleaned
-        # content of the prepared post instead of asking the model to re-emit
-        # text it did not change. CTA/Fonte/rodape are added by the builder.
-        editorial = {**editorial, "cleaned_html": clean_html(_raw_content(post))}
+    decision = editorial["site_relevance"]["decision"]
+    confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
+    if decision == "skip" and confidence < config.min_skip_confidence:
+        # Conservative skip (token + accuracy policy): a low-confidence skip is
+        # NOT final — record it as uncertain so the post stays pending (out of
+        # the processing queue, visible for review) instead of being dropped
+        # forever via editorial.latest.json.
+        _save_uncertain(root, post_id, editorial)
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "dry_run": config.dry_run,
+            "status": "uncertain",
+            "skip_reason": editorial["site_relevance"]["reason"],
+            "confidence": confidence,
+            "backup": str(backup),
+        }
+    if decision == "process":
+        editorial = resolve_editorial_defaults(editorial, post)
     _save_editorial_latest(root, post_id, editorial)
-    if editorial["site_relevance"]["decision"] == "skip":
+    if decision == "skip":
         return {
             "post_id": post_id,
             "wordpress_changed": False,
@@ -292,6 +307,73 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
     return new_id if isinstance(new_id, int) else None
 
 
+def resolve_editorial_defaults(editorial: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:
+    """Fill optional editorial fields (seo, cleaned_html) from the post.
+
+    Token-economy defaults: the model must not re-emit content/SEO the post
+    already has. ``seo`` is inherited from a valid existing Rank Math meta;
+    ``cleaned_html`` reuses the deterministic cleaned content (no-rewrite).
+    Raises EditorialValidationError when seo is missing AND the post has no
+    valid meta — the model must provide it in that case.
+    """
+    resolved = dict(editorial)
+    if resolved.get("seo") is None:
+        resolved["seo"] = _resolve_seo_from_post(post)
+    if resolved.get("cleaned_html") is None:
+        resolved["cleaned_html"] = clean_html(_raw_content(post))
+    return resolved
+
+
+def _resolve_seo_from_post(post: dict[str, Any]) -> dict[str, Any]:
+    from .editorial_schema import EditorialValidationError
+
+    meta = post.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    title = meta.get("rank_math_title")
+    description = meta.get("rank_math_description")
+    keyword = meta.get("rank_math_focus_keyword")
+    if (
+        isinstance(title, str)
+        and title.strip()
+        and 0 < len(title.strip()) <= 65
+        and isinstance(description, str)
+        and 120 <= len(description.strip()) <= 160
+        and isinstance(keyword, str)
+        and keyword.strip()
+    ):
+        return {
+            "title": title.strip(),
+            "meta_description": description.strip(),
+            "focus_keyword": keyword.strip(),
+        }
+    raise EditorialValidationError(
+        "seo ausente no JSON e meta Rank Math existente invalida ou inexistente — "
+        "o modelo deve fornecer seo (title <= 65, meta_description 120-160, focus_keyword)"
+    )
+
+
+def _save_uncertain(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
+    """Record a non-final skip: the post stays pending, out of the queue."""
+    try:
+        directory = root / "backups" / str(post_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "uncertain.json").write_text(
+            json.dumps(
+                {
+                    "post_id": post_id,
+                    "status": "uncertain",
+                    "site_relevance": editorial.get("site_relevance"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _save_editorial_latest(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
     """Persist the validated editorial so the publish flow can re-check it."""
     try:
@@ -508,7 +590,8 @@ def build_queue_report(
         backups_dir = root / "backups" / str(post_id)
         edited = (backups_dir / "editorial.latest.json").is_file()
         prepared = (backups_dir / "prepared.json").is_file()
-        if not edited:
+        uncertain = (backups_dir / "uncertain.json").is_file()
+        if not edited and not uncertain:
             unprocessed.append(post_id)
             if _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
@@ -521,6 +604,7 @@ def build_queue_report(
                 "word_count": word_count((post.get("content") or {}).get("rendered") or ""),
                 "prepared": prepared,
                 "edited": edited,
+                "uncertain": uncertain,
                 "title": title,
             }
         )
@@ -530,11 +614,115 @@ def build_queue_report(
     return {
         "pending": len(rows),
         "edited": sum(1 for row in rows if row["edited"]),
+        "uncertain": sum(1 for row in rows if row["uncertain"]),
         "unprocessed_ids": unprocessed,
         "recent_unprocessed_ids": recent_unprocessed,
         "recent_days": recent_days,
         "posts": rows,
     }
+
+
+_GAME_HINT_WORDS = frozenset(
+    {
+        "jogo", "jogos", "game", "games", "gameplay", "demo", "remake",
+        "remaster", "dlc", "expansao", "expansão", "expansion", "console",
+        "playstation", "ps5", "ps4", "ps3", "xbox", "switch", "nintendo",
+        "steam", "gaming", "gameboy", "game boy", "emulador", "emuladores",
+        "plataforma", "plataformas", "videogame", "gamepass", "game pass",
+    }
+)
+
+
+def _game_hint(title: str) -> bool:
+    """Cheap deterministic hint that the post is about a game (LLM confirms)."""
+    from .media.relevance import normalize
+
+    tokens = set(re.findall(r"[a-z0-9]+", normalize(title or "")))
+    return bool(tokens & _GAME_HINT_WORDS)
+
+
+def build_cards(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    *,
+    per_page: int | None = None,
+) -> dict[str, Any]:
+    """Compact per-post cards for the agent (token economy: ONE call).
+
+    Each card carries everything the model needs to write the editorial JSON
+    without touching the terminal: title, word count, distinctive entities,
+    original link, featured/seo/image gaps, preserved-image count, game hint
+    and processing state. Deterministic and read-only.
+    """
+    from .content_quality import word_count
+    from .html_cleaner import clean_html
+    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+
+    per_page = per_page or config.batch_limit
+    posts = client.list_pending(per_page=per_page)
+    cards: list[dict[str, Any]] = []
+    for post in posts:
+        post_id = post.get("id")
+        if not isinstance(post_id, int):
+            continue
+        title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
+        raw = (post.get("content") or {}).get("raw") or ""
+        rendered = (post.get("content") or {}).get("rendered") or ""
+        meta = post.get("meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        entities = extract_entities(title=title, content_html=raw)
+        images = iter_content_images(raw)
+        relevant_images = [
+            item
+            for item in images
+            if image_is_relevant(
+                alt_text=str(item.get("alt") or ""),
+                credit_text=str(item.get("caption") or ""),
+                source_url=str(item.get("src") or ""),
+                entities=entities,
+            )
+        ]
+        preserved = len(re.findall(r"<img\b", clean_html(raw)))
+        backups_dir = root / "backups" / str(post_id)
+        cards.append(
+            {
+                "id": post_id,
+                "date": post.get("date"),
+                "title": title,
+                "word_count": word_count(rendered or raw),
+                "entities": sorted(entities),
+                "original_link": meta.get("original_link"),
+                "featured": isinstance(post.get("featured_media"), int) and post["featured_media"] > 0,
+                "seo_exists": _seo_is_valid(meta),
+                "images": {
+                    "total": len(images),
+                    "relevantes": len(relevant_images),
+                    "preservadas": preserved,
+                },
+                "game_hint": _game_hint(title),
+                "edited": (backups_dir / "editorial.latest.json").is_file(),
+                "uncertain": (backups_dir / "uncertain.json").is_file(),
+                "prepared": (backups_dir / "prepared.json").is_file(),
+            }
+        )
+    return {"count": len(cards), "cards": cards}
+
+
+def _seo_is_valid(meta: dict[str, Any]) -> bool:
+    title = meta.get("rank_math_title")
+    description = meta.get("rank_math_description")
+    keyword = meta.get("rank_math_focus_keyword")
+    return bool(
+        isinstance(title, str)
+        and title.strip()
+        and len(title.strip()) <= 65
+        and isinstance(description, str)
+        and 120 <= len(description.strip()) <= 160
+        and isinstance(keyword, str)
+        and keyword.strip()
+    )
 
 
 def _is_recent(post: dict[str, Any], cutoff: datetime.datetime) -> bool:

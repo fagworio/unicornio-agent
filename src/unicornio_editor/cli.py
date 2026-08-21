@@ -7,22 +7,24 @@ import json
 import re
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from .backup import SnapshotStore
 from .checklist import run_pre_publish_checklist
 from .config import ConfigError, load_config
 from .editorial_schema import validate_editorial
-from .html_cleaner import clean_html
 from .maintenance import generate_report
 from .workflow import (
     apply_editorial,
+    build_cards,
     build_queue_report,
     compose_final_content,
     original_link_of,
     prepare_post,
     publish_post,
     publish_ready_posts,
+    resolve_editorial_defaults,
 )
 from .wordpress import WordPressClient, WordPressError
 
@@ -52,9 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     queue_parser.add_argument(
         "--monitor",
         action="store_true",
-        help="imprime apenas a linha estavel (ids pending NAO processados, ou '0'); "
+        help="imprime apenas a linha estavel (ids pending recentes NAO processados, ou '0'); "
         "usada pelo monitor_script do cron para nao acordar o LLM em ticks ociosos",
     )
+
+    cards_parser = subparsers.add_parser(
+        "cards",
+        help="cartoes compactos dos posts pending (entidades, gaps, SEO, imagens, dica de jogo) — "
+        "economia de tokens: UMA chamada substitui list-pending+prepare+leituras",
+    )
+    cards_parser.add_argument("--root", type=Path, default=Path("."))
+    cards_parser.add_argument("--limit", type=int, default=None, help="maximo de cartoes (default: EDITOR_BATCH_LIMIT)")
 
     prepare_parser = subparsers.add_parser("prepare", help="cria snapshot e relatório")
     prepare_parser.add_argument("post_id", type=int)
@@ -70,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("post_id", type=int)
     apply_parser.add_argument("editorial_file", type=Path)
     apply_parser.add_argument("--root", type=Path, default=Path("."))
+    apply_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="valida e mostra o resultado (checklist + preview) sem escrever no WordPress",
+    )
 
     checklist_parser = subparsers.add_parser(
         "checklist", help="roda o checklist pre-publicacao (somente leitura)"
@@ -139,6 +154,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         config = load_config()
+        if args.command == "apply" and getattr(args, "dry_run", False):
+            config = replace(config, dry_run=True)
         client = WordPressClient(config)
         if args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
@@ -151,6 +168,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(line)
                 return 0
             result = report
+        elif args.command == "cards":
+            result = build_cards(client, config, args.root, per_page=args.limit)
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
             if args.compact:
@@ -172,11 +191,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
             post = client.get_post(args.post_id)
-            if editorial.get("cleaned_html") is None and editorial["site_relevance"]["decision"] == "process":
-                raw = (post.get("content") or {}).get("raw")
-                if not isinstance(raw, str):
-                    raise WordPressError("post content.raw is missing")
-                editorial = {**editorial, "cleaned_html": clean_html(raw)}
+            if editorial["site_relevance"]["decision"] == "process":
+                editorial = resolve_editorial_defaults(editorial, post)
             backup = SnapshotStore(args.root).save(args.post_id, post)
             content, trailer = compose_final_content(editorial, config, original_link_of(post))
             result = run_pre_publish_checklist(

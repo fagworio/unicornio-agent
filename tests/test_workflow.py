@@ -7,6 +7,7 @@ from unittest import mock
 from unicornio_editor.config import Config
 from unicornio_editor.workflow import (
     apply_editorial,
+    build_cards,
     build_queue_report,
     prepare_post,
     publish_post,
@@ -132,6 +133,89 @@ class WorkflowTests(unittest.TestCase):
             report = build_queue_report(FakeClient(old), root)
             self.assertEqual(report["unprocessed_ids"], [42])
             self.assertEqual(report["recent_unprocessed_ids"], [])
+
+    def test_apply_inherits_valid_seo_from_post_meta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload()
+            del payload["seo"]
+            post = self.post()
+            post["meta"] = {
+                "original_link": "https://source.example/news",
+                "rank_math_title": "Titulo herdado do post",
+                "rank_math_description": "Uma descricao suficientemente longa e detalhada para o SEO herdado do post de videogame, valida dentro dos limites exigidos pelo portal editorial.",
+                "rank_math_focus_keyword": "videogame",
+            }
+            client = FakeClient(post)
+            report = apply_editorial(client, self.config(True), Path(directory), 42, payload)
+            saved = json.loads(
+                Path(directory, "backups/42/editorial.latest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["seo"]["title"], "Titulo herdado do post")
+            self.assertIn("<p>Texto revisado.</p>", report["content_preview"])
+
+    def test_apply_requires_seo_when_post_meta_invalid(self):
+        from unicornio_editor.editorial_schema import EditorialValidationError
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload()
+            del payload["seo"]
+            client = FakeClient(self.post())  # meta sem rank_math
+            with self.assertRaises(EditorialValidationError):
+                apply_editorial(client, self.config(True), Path(directory), 42, payload)
+
+    def test_apply_low_confidence_skip_marks_uncertain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload("skip")
+            payload["site_relevance"]["confidence"] = 0.70
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+            self.assertEqual(report["status"], "uncertain")
+            self.assertFalse(report["wordpress_changed"])
+            self.assertTrue(Path(directory, "backups/42/uncertain.json").is_file())
+            self.assertFalse(Path(directory, "backups/42/editorial.latest.json").exists())
+
+    def test_apply_confident_skip_is_final(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload("skip")
+            payload["site_relevance"]["confidence"] = 0.99
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+            self.assertFalse(report["wordpress_changed"])
+            self.assertIn("skip_reason", report)
+            self.assertFalse(Path(directory, "backups/42/uncertain.json").exists())
+            self.assertTrue(Path(directory, "backups/42/editorial.latest.json").is_file())
+
+    def test_build_cards_reports_gaps_and_entities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["title"] = {"raw": "Redfall ganha novo gameplay"}
+            post["content"] = {
+                "raw": (
+                    '<figure><img src="https://s3.example/r.webp" alt="Redfall key art" />'
+                    "<figcaption>Crédito da imagem: Autor. Redfall. Licença CC BY 4.0 "
+                    "(https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+                    "<p>Redfall chega com vampiros.</p>"
+                )
+            }
+            post["featured_media"] = 7
+            post["meta"] = {
+                "original_link": "https://source.example/news",
+                "rank_math_title": "Redfall ganha gameplay",
+                "rank_math_description": "Uma descricao suficientemente longa e detalhada para o SEO do post sobre o jogo Redfall, valida dentro dos limites exigidos pelo portal editorial.",
+                "rank_math_focus_keyword": "redfall",
+            }
+            client = FakeClient(post)
+            report = build_cards(client, self.config(True), Path(directory))
+            card = report["cards"][0]
+            self.assertEqual(card["id"], 42)
+            self.assertIn("redfall", card["entities"])
+            self.assertTrue(card["featured"])
+            self.assertTrue(card["seo_exists"])
+            self.assertTrue(card["game_hint"])
+            self.assertEqual(card["images"]["total"], 1)
+            self.assertEqual(card["images"]["relevantes"], 1)
+            self.assertEqual(card["images"]["preservadas"], 1)
+            self.assertEqual(card["original_link"], "https://source.example/news")
 
     def test_apply_skip_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -77,6 +77,64 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["queue", "--monitor", "--root", directory]), 0)
             self.assertEqual(output.getvalue().strip(), "42")
 
+    def test_cards_prints_compact_cards(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
+                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
+            ), redirect_stdout(output):
+                self.assertEqual(main(["cards", "--root", directory]), 0)
+            data = json.loads(output.getvalue())
+            self.assertEqual(data["count"], 1)
+            card = data["cards"][0]
+            self.assertEqual(card["id"], 42)
+            self.assertIn("titulo", card["entities"])
+            self.assertFalse(card["seo_exists"])
+            self.assertFalse(card["featured"])
+
+    def test_apply_dry_run_flag_does_not_write(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            editorial_file = Path(directory) / "editorial.json"
+            editorial_file.write_text(
+                json.dumps(
+                    {
+                        "site_relevance": {
+                            "decision": "process",
+                            "confidence": 0.99,
+                            "reason": "Teste",
+                            "matched_topics": ["games"],
+                        },
+                        "cleaned_html": "<p>Texto revisado.</p>",
+                        "seo": {
+                            "title": "Título sobre videogame e lançamento importante",
+                            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+                            "focus_keyword": "videogame",
+                        },
+                        "media_plan": [],
+                        "needs_trailer": False,
+                        "trailer_url": None,
+                        "game_name": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
+                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
+            ), redirect_stdout(output):
+                self.assertEqual(
+                    main(["apply", "42", str(editorial_file), "--dry-run", "--root", directory]), 0
+                )
+            data = json.loads(output.getvalue())
+            self.assertEqual(data["dry_run"], True)
+            self.assertEqual(data["wordpress_changed"], False)
+
     def test_prepare_compact_writes_file_and_prints_summary(self):
         import tempfile
 

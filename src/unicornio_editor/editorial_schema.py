@@ -39,7 +39,7 @@ _MEDIA = {
 def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.8) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise EditorialValidationError("editorial result must be an object")
-    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html"})
+    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html", "seo"})
     relevance = _object(payload["site_relevance"], "site_relevance")
     _keys(relevance, _RELEVANCE, "site_relevance")
     decision = relevance["decision"]
@@ -66,15 +66,20 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     if decision == "process" and isinstance(cleaned_html, str) and not cleaned_html.strip():
         raise EditorialValidationError("cleaned_html cannot be empty when processing")
 
-    seo = _object(payload["seo"], "seo")
-    _keys(seo, _SEO, "seo")
-    title = _nonempty_string(seo["title"], "seo.title")
-    if len(title) > 65:
-        raise EditorialValidationError("seo.title must contain at most 65 characters")
-    description = _nonempty_string(seo["meta_description"], "seo.meta_description")
-    if not 120 <= len(description) <= 160:
-        raise EditorialValidationError("seo.meta_description must contain 120 to 160 characters")
-    _nonempty_string(seo["focus_keyword"], "seo.focus_keyword")
+    # seo is OPTIONAL too: when absent the workflow inherits a valid existing
+    # Rank Math meta (token economy — the model must not re-emit SEO the post
+    # already has). When the post has no valid meta, apply fails with a clear
+    # message telling the model to provide seo.
+    if "seo" in payload and payload["seo"] is not None:
+        seo = _object(payload["seo"], "seo")
+        _keys(seo, _SEO, "seo")
+        title = _nonempty_string(seo["title"], "seo.title")
+        if len(title) > 65:
+            raise EditorialValidationError("seo.title must contain at most 65 characters")
+        description = _nonempty_string(seo["meta_description"], "seo.meta_description")
+        if not 120 <= len(description) <= 160:
+            raise EditorialValidationError("seo.meta_description must contain 120 to 160 characters")
+        _nonempty_string(seo["focus_keyword"], "seo.focus_keyword")
 
     media_plan = payload["media_plan"]
     if not isinstance(media_plan, list) or len(media_plan) > 12:

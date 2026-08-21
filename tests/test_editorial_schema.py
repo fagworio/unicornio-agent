@@ -61,6 +61,22 @@ class EditorialSchemaTests(unittest.TestCase):
         payload["cleaned_html"] = None
         self.assertIsNone(validate_editorial(payload)["cleaned_html"])
 
+    def test_accepts_missing_seo(self):
+        payload = valid_payload()
+        del payload["seo"]
+        self.assertIsNone(validate_editorial(payload).get("seo"))
+
+    def test_accepts_null_seo(self):
+        payload = valid_payload()
+        payload["seo"] = None
+        self.assertIsNone(validate_editorial(payload)["seo"])
+
+    def test_rejects_invalid_seo_when_present(self):
+        payload = valid_payload()
+        payload["seo"] = {"title": "x" * 66, "meta_description": "curta", "focus_keyword": "jogo"}
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
     def test_rejects_non_string_cleaned_html(self):
         payload = valid_payload()
         payload["cleaned_html"] = 123
