@@ -355,13 +355,15 @@ class WorkflowTests(unittest.TestCase):
     def test_apply_normalizes_existing_featured_to_1280x720(self):
         post = self.post()
         post["featured_media"] = 7
+        # Existing featured whose REAL evidence references a cited work of the
+        # editorial ("lancamento importante" from the SEO title) is reused.
         media = {
             "id": 7,
-            "source_url": "https://wp.test/uploads/old-featured.jpg",
+            "source_url": "https://wp.test/uploads/noticia-sobre-videogame-e-lancamento-importante.jpg",
             "media_details": {"width": 2560, "height": 1916},
-            "alt_text": "Capa antiga",
-            "title": {"raw": "Capa"},
-            "caption": {"raw": "Crédito da imagem: Autor."},
+            "alt_text": "Notícia sobre videogame e lançamento importante",
+            "title": {"rendered": "Notícia sobre videogame e lançamento importante"},
+            "caption": {"rendered": "Crédito da imagem: Autor."},
         }
 
         class MediaClient(FakeClient):
@@ -381,6 +383,38 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.uploads, 1)
         self.assertEqual(client.updated[0][1]["featured_media"], 88)
         self.assertEqual(report["featured_media"], 88)
+
+    def test_apply_does_not_reuse_generic_existing_featured(self):
+        # A generic article header/wordmark (no cited work in its real
+        # evidence) must NOT be reused as featured — the post stays without
+        # a featured so the flow is forced to supply a real key art.
+        post = self.post()
+        post["featured_media"] = 7
+        media = {
+            "id": 7,
+            "source_url": "https://wp.test/uploads/5-classic-anime-banner.jpg",
+            "media_details": {"width": 1200, "height": 675},
+            "alt_text": "5 Classic Anime That Deserve Remakes",
+            "title": {"rendered": "5 Classic Anime That Deserve Remakes"},
+        }
+
+        class GenericMediaClient(FakeClient):
+            def get_media(self, media_id):
+                return media
+
+            def upload_media(self, path, *, filename, alt_text, title, caption=None):
+                self.uploads = getattr(self, "uploads", 0) + 1
+                return {"id": 88, "source_url": "https://wp.test/uploads/new.webp"}
+
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = GenericMediaClient(post)
+                report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
+        self.assertEqual(getattr(client, "uploads", 0), 0)
+        # featured_media untouched: the apply must not set a generic featured.
+        self.assertNotIn("featured_media", client.updated[0][1] if client.updated else {})
 
     def test_apply_reuses_media_library_attachment_as_new_upload(self):
         payload = editorial_payload()
@@ -450,10 +484,13 @@ class WorkflowTests(unittest.TestCase):
     def test_apply_keeps_compliant_featured_image(self):
         post = self.post()
         post["featured_media"] = 7
+        # Already 1280x720 WebP AND carrying a cited-work evidence -> kept.
         media = {
             "id": 7,
-            "source_url": "https://wp.test/uploads/featured.webp",
+            "source_url": "https://wp.test/uploads/noticia-sobre-videogame-e-lancamento-importante-1280x720.webp",
             "media_details": {"width": 1280, "height": 720},
+            "alt_text": "Notícia sobre videogame e lançamento importante",
+            "title": {"rendered": "Notícia sobre videogame e lançamento importante"},
         }
 
         class MediaClient(FakeClient):

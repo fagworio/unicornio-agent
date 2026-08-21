@@ -88,7 +88,7 @@ def apply_editorial(
 
     media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
     if featured_id is None and not config.dry_run:
-        featured_id = _normalize_existing_featured(client, post)
+        featured_id = _normalize_existing_featured(client, post, editorial)
     html = editorial["cleaned_html"]
     if media_results and not config.dry_run:
         plan = [
@@ -342,7 +342,11 @@ def _execute_media_plan(
     return results, featured_id, featured_credit
 
 
-def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) -> int | None:
+def _normalize_existing_featured(
+    client: WordPressClient,
+    post: dict[str, Any],
+    editorial: dict[str, Any] | None = None,
+) -> int | None:
     """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
     Posts imported with a featured image may carry any size/format; the
@@ -353,6 +357,13 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
     (fixed bug: the title was serialized as ``str(dict)``), so the
     deterministic featured-relevance gate can still match the work from
     real evidence instead of a generic ``featured-1280x720.webp`` name.
+
+    When ``editorial`` is provided, the existing featured is ONLY reused
+    when its real evidence (url/title/alt) references a cited work of the
+    post — a generic article header/wordmark (e.g. a "5 classic animes..."
+    banner image) is NOT the subject and is not reused, leaving the post
+    without a featured so the editorial flow must supply a real key art.
+
     Returns the (new) attachment id, or None when there is nothing to do.
     """
     featured = post.get("featured_media")
@@ -365,6 +376,31 @@ def _normalize_existing_featured(client: WordPressClient, post: dict[str, Any]) 
     details = media.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
     source_url = (media.get("source_url") or "").strip()
+    if editorial is not None:
+        entities = extract_entities(
+            title=str((editorial.get("seo") or {}).get("title") or ""),
+            content_html=str(editorial.get("cleaned_html") or ""),
+            focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
+            game_name=editorial.get("game_name"),
+        )
+        if entities:
+            evidence = " ".join(
+                part
+                for part in (
+                    source_url,
+                    str((media.get("title") or {}).get("rendered") or ""),
+                    str(media.get("alt_text") or ""),
+                )
+                if part
+            )
+            if not image_is_relevant(
+                alt_text="",
+                credit_text="",
+                source_url=evidence,
+                entities=entities,
+                source_only=True,
+            ):
+                return None
     if width == 1280 and height == 720 and source_url.lower().endswith(".webp"):
         return featured
     if not source_url:
