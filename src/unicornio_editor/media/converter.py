@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 FEATURED_WIDTH = 1200
 FEATURED_HEIGHT = 720
@@ -14,13 +14,26 @@ class MediaConversionError(RuntimeError):
     """Raised when an image cannot be verified or converted."""
 
 
+def _open_authoritative(source: Path) -> Image.Image:
+    """Open an image with its EXIF orientation applied.
+
+    Camera/phone photos store the rotation in EXIF (e.g. Orientation=6) with
+    the raw pixels lying sideways; PIL does NOT apply it automatically, so a
+    naive open would convert and publish the photo lying down. Every pipeline
+    open must go through this helper.
+    """
+    with Image.open(source) as image:
+        image.verify()
+    image = Image.open(source)
+    return ImageOps.exif_transpose(image)
+
+
 def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
     source = Path(source)
     destination = destination or source.with_suffix(".webp")
     try:
-        with Image.open(source) as image:
-            image.verify()
-        with Image.open(source) as image:
+        image = _open_authoritative(source)
+        with image:
             if image.width < 64 or image.height < 64:
                 raise MediaConversionError("image resolution is below 64x64")
             if image.mode not in {"RGB", "RGBA"}:
@@ -42,15 +55,25 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
     Featured images must always obey the portal's 1200x720 ratio, so the
     source is cover-cropped from its center and resized to the exact target
     (upscaling allowed so the guaranteed size holds for small sources).
+
+    The EXIF orientation is applied first (a photo stored sideways would
+    otherwise be published lying down) and PORTRAIT sources are rejected:
+    cover-cropping a portrait into 5:3 destroys more than half the frame, so
+    a portrait featured image is a wrong image — the agent must pick a
+    landscape key art instead (fail-closed policy).
     """
     source = Path(source)
     destination = destination or source.with_name(source.stem + "_featured.webp")
     try:
-        with Image.open(source) as image:
-            image.verify()
-        with Image.open(source) as image:
+        image = _open_authoritative(source)
+        with image:
             if image.width < 64 or image.height < 64:
                 raise MediaConversionError("image resolution is below 64x64")
+            if image.width < image.height:
+                raise MediaConversionError(
+                    f"featured source is portrait ({image.width}x{image.height} after EXIF transpose); "
+                    "a 1200x720 featured image requires a landscape source — pick landscape key art"
+                )
             work = image.convert("RGBA") if image.mode not in {"RGB", "RGBA"} else image
             target_ratio = FEATURED_WIDTH / FEATURED_HEIGHT
             width, height = work.size

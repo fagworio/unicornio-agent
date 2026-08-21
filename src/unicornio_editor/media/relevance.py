@@ -193,19 +193,31 @@ def image_is_relevant(
     credit_text: str = "",
     source_url: str = "",
     entities: Iterable[str],
+    source_only: bool = False,
 ) -> bool:
     """True when the candidate image references at least one distinctive
-    entity of the post (alt, credit or source URL)."""
+    entity of the post (alt, credit or source URL).
+
+    ``source_only=True`` ignores the agent-written alt/credit and requires the
+    real source URL (file/page name) itself to reference the subject. It is
+    used for FEATURED candidates: a credit line can decorate a wrong image
+    (e.g. a Disney castle captioned "presente em Kingdom Hearts"), but the
+    file name of a true key art carries the game/work name. Featured images
+    must depict the cited subject itself, never a tangential symbol.
+    """
     entity_set = {normalize(entity) for entity in entities if entity}
     if not entity_set:
         return False
-    haystack = " ".join(
-        (
-            normalize(alt_text),
-            normalize(credit_text),
-            _url_text(source_url),
+    if source_only:
+        haystack = _url_text(source_url)
+    else:
+        haystack = " ".join(
+            (
+                normalize(alt_text),
+                normalize(credit_text),
+                _url_text(source_url),
+            )
         )
-    )
     if not haystack.strip():
         return False
     haystack_tokens = _tokens(haystack)

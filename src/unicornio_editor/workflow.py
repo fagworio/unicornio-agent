@@ -187,6 +187,28 @@ def _execute_media_plan(
     )
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
+        is_featured = bool(item.get("is_featured"))
+        if is_featured:
+            # Featured must depict the cited subject itself: only the real
+            # source file/page name counts as evidence. The agent-written
+            # alt/credit can decorate a wrong image (e.g. a Disney castle
+            # captioned "presente em Kingdom Hearts" for a game post), but a
+            # true key art file name carries the game/work name.
+            if not image_is_relevant(
+                alt_text="",
+                credit_text="",
+                source_url=" ".join(
+                    str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
+                ),
+                entities=entities,
+                source_only=True,
+            ):
+                listed = ", ".join(sorted(entities)) or "nenhuma"
+                return (
+                    "featured deve retratar o assunto citado (arquivo/pagina de origem "
+                    f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
+                )
+            return None
         if not image_is_relevant(
             alt_text=str(item.get("alt_text") or ""),
             credit_text=str(item.get("credit_text") or ""),

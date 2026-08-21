@@ -40,6 +40,47 @@ class RelevanceTests(unittest.TestCase):
             )
         )
 
+    def test_featured_source_only_rejects_decorated_unrelated_image(self):
+        # A Disney castle captioned "presente em Kingdom Hearts" passes the
+        # normal gate (credit mentions the entity) but FAILS the featured
+        # source-only gate: the real file/page name carries no entity.
+        entities = extract_entities(
+            title="Kingdom Hearts ganha anime na Disney+ com Tetsuya Nomura",
+            game_name="Kingdom Hearts",
+        )
+        self.assertTrue(
+            image_is_relevant(
+                alt_text="Castelo da Cinderela na Tokyo Disneyland",
+                credit_text="Crédito da imagem: LMP 2001. Castelo da Cinderela, símbolo do universo Disney presente em Kingdom Hearts. CC BY-SA 4.0.",
+                source_url="https://commons.wikimedia.org/wiki/File:Tokyo_Disneyland_Cinderella_Castle_2023-07-02.jpg",
+                entities=entities,
+            )
+        )
+        self.assertFalse(
+            image_is_relevant(
+                alt_text="Castelo da Cinderela na Tokyo Disneyland",
+                credit_text="Crédito da imagem: LMP 2001. Castelo da Cinderela, símbolo do universo Disney presente em Kingdom Hearts. CC BY-SA 4.0.",
+                source_url="https://commons.wikimedia.org/wiki/File:Tokyo_Disneyland_Cinderella_Castle_2023-07-02.jpg",
+                entities=entities,
+                source_only=True,
+            )
+        )
+
+    def test_featured_source_only_accepts_key_art_filename(self):
+        entities = extract_entities(
+            title="Kingdom Hearts ganha anime na Disney+ com Tetsuya Nomura",
+            game_name="Kingdom Hearts",
+        )
+        self.assertTrue(
+            image_is_relevant(
+                alt_text="",
+                credit_text="",
+                source_url="https://commons.wikimedia.org/wiki/File:Kingdom_Hearts_wordmark_the_first_game_of_the_series.png",
+                entities=entities,
+                source_only=True,
+            )
+        )
+
     def test_generic_convention_photo_rejected_for_anime_post(self):
         entities = extract_entities(
             title="Oshi no Ko Season 4 ganha teaser visual e se aproxima da Final Season",

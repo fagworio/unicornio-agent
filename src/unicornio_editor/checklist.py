@@ -180,6 +180,42 @@ def run_pre_publish_checklist(
     else:
         check("destaque_1200x720", True, "sem destaque para verificar", skipped=True)
 
+    # 7c. Featured must depict the cited subject itself (source-only gate):
+    #     the agent-written alt/credit can decorate a wrong image (e.g. a
+    #     Disney castle captioned as Kingdom Hearts), but the real source
+    #     file/page name of a true key art carries the game/work name.
+    featured_plan_items = [
+        item
+        for item in (editorial.get("media_plan") or [])
+        if isinstance(item, Mapping) and bool(item.get("is_featured"))
+    ]
+    if featured_plan_items:
+        featured_item = featured_plan_items[0]
+        featured_source_relevant = image_is_relevant(
+            alt_text="",
+            credit_text="",
+            source_url=" ".join(
+                str(featured_item.get(key) or "")
+                for key in ("direct_image_url", "source_page_url")
+            ),
+            entities=image_entities,
+            source_only=True,
+        )
+        listed = ", ".join(sorted(image_entities)) or "nenhuma"
+        check(
+            "destaque_relevancia",
+            featured_source_relevant,
+            (
+                "destaque retrata o assunto citado (origem com entidade: "
+                f"{', '.join(sorted(image_entities)) or 'nenhuma'})"
+                if featured_source_relevant
+                else f"destaque SEM relacao com o assunto (origem sem entidades: {listed}); "
+                "troque por key art/imagem do jogo/obra"
+            ),
+        )
+    else:
+        check("destaque_relevancia", True, "sem item featured no media_plan; nao verificavel", skipped=True)
+
     # 8. Every published image must be WebP.
     image_urls = list(inline_images)
     if featured_ok and client is not None:

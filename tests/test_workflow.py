@@ -293,8 +293,8 @@ class WorkflowTests(unittest.TestCase):
     def media_item(paragraph_index=0, is_featured=False):
         return {
             "paragraph_index": paragraph_index,
-            "source_page_url": "https://source.example/page",
-            "direct_image_url": "https://source.example/image.jpg",
+            "source_page_url": "https://source.example/titulo",
+            "direct_image_url": "https://source.example/titulo.jpg",
             "author": "Autor",
             "license": "CC BY 4.0",
             "license_url": "https://creativecommons.org/licenses/by/4.0/",

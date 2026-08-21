@@ -10,6 +10,7 @@ from PIL import Image
 from unicornio_editor.media.converter import (
     FEATURED_HEIGHT,
     FEATURED_WIDTH,
+    MediaConversionError,
     convert_to_webp,
     prepare_featured_webp,
 )
@@ -117,14 +118,48 @@ class MediaPipelineTests(unittest.TestCase):
                 self.assertEqual(image.format, "WEBP")
                 self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
 
-    def test_prepare_featured_webp_pads_narrow_sources_to_target_ratio(self):
+    def test_prepare_featured_webp_rejects_portrait_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            # 500x1000 (portrait) source gets cover-cropped to 5:3 then upscaled.
+            # A portrait source cannot become a sane 5:3 featured image:
+            # cover-cropping destroys more than half the frame, so it must be
+            # rejected and the agent must pick a landscape key art instead.
             source = directory / "portrait.png"
             Image.new("RGB", (500, 1000), "green").save(source, format="PNG")
+            with self.assertRaises(MediaConversionError):
+                prepare_featured_webp(source)
+            self.assertFalse(Path(str(source).replace(".png", "_featured.webp")).exists())
+
+    def test_exif_orientation_is_applied_before_conversion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            # Phone/camera photos store rotation in EXIF (Orientation=6) with
+            # the raw pixels lying sideways. The pipeline must transpose the
+            # image before converting, or the photo is published lying down.
+            raw = Image.new("RGB", (4000, 3000), "purple")
+            exif = Image.Exif()
+            exif[274] = 6
+            source = directory / "sideways.jpg"
+            raw.save(source, format="JPEG", exif=exif, quality=90)
+            self.assertEqual(Image.open(source).size, (4000, 3000))  # raw pixels
+            output = convert_to_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "WEBP")
+                self.assertEqual(image.size, (3000, 4000))  # transposed
+
+    def test_prepare_featured_webp_applies_exif_then_keeps_landscape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            # A photo whose raw pixels are portrait but EXIF says landscape
+            # (Orientation=5) becomes landscape after transpose and is valid.
+            raw = Image.new("RGB", (3000, 4000), "orange")
+            exif = Image.Exif()
+            exif[274] = 5  # rotate 90 CCW -> 4000x3000 landscape
+            source = directory / "exif_portrait_raw.jpg"
+            raw.save(source, format="JPEG", exif=exif, quality=90)
             output = prepare_featured_webp(source)
             with Image.open(output) as image:
+                self.assertEqual(image.format, "WEBP")
                 self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
 
     def test_download_retries_on_rate_limit_then_succeeds(self):
