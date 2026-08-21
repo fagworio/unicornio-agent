@@ -55,6 +55,11 @@ def apply_editorial(
     _require_pending(post)
     backup = SnapshotStore(root).save(post_id, post)
     editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+    if editorial["site_relevance"]["decision"] == "process" and editorial.get("cleaned_html") is None:
+        # No-rewrite path (token economy): reuse the deterministic cleaned
+        # content of the prepared post instead of asking the model to re-emit
+        # text it did not change. CTA/Fonte/rodape are added by the builder.
+        editorial = {**editorial, "cleaned_html": clean_html(_raw_content(post))}
     _save_editorial_latest(root, post_id, editorial)
     if editorial["site_relevance"]["decision"] == "skip":
         return {

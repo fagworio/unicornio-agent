@@ -25,7 +25,7 @@ Process only WordPress posts with status `pending`.
 
 1. Run `unicornio-editor list-pending --compact` (economy mode; see below).
 2. Run `unicornio-editor prepare POST_ID --compact`.
-3. Produce strict editorial JSON with `site_relevance`, `cleaned_html`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`.
+3. Produce strict editorial JSON with `site_relevance`, `seo`, `media_plan`, and trailer fields. When the post is about a game, set `game_name` to the exact game name (the code deterministically finds and validates the YouTube trailer — never invent trailer URLs); otherwise `game_name: null`. `cleaned_html` is OPTIONAL: omit it (or set null) when the prepared text is already good — `apply` then reuses the deterministic cleaned content (no-rewrite path); include it ONLY when you actually rewrite the text.
 4. Google Images is only discovery. Verify the original page and a public-domain, compatible Creative Commons, or explicit permission license.
 5. Record source page, author, license, license URL, capture time, and visible credit. Reject uncertain images.
 6. Use local WordPress Media Library uploads only; do not use external buckets/CDNs or hotlinks. Featured images are mandatory and are prepared at exactly 1200x720 WebP (`is_featured: true` on at most one media_plan item).
@@ -64,6 +64,12 @@ several-fold. They are mandatory, not style advice.
   Never revisit a post that already has `backups/<ID>/editorial.latest.json` unless asked.
 - Write the editorial JSON to a file with `write_file` and pass the path to `apply`/`checklist`;
   never paste the JSON body into the conversation more than once.
+- OMIT `cleaned_html` from the editorial JSON unless you actually rewrote the text (no-rewrite
+  default). The model re-emitting an unchanged article is pure output-token waste; the code reuses
+  the prepared content deterministically.
+- NEVER include the CTA, the Fonte or any footer in `cleaned_html` — `append_canonical_footer`
+  inserts exactly one canonical CTA + Fonte and strips any duplicates. Writing them costs tokens
+  and risks duplication.
 - When the media plan does not add real reading value, do not search for images at all.
 
 ## Operational pitfalls (learned in production)

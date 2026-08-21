@@ -13,6 +13,7 @@ from .backup import SnapshotStore
 from .checklist import run_pre_publish_checklist
 from .config import ConfigError, load_config
 from .editorial_schema import validate_editorial
+from .html_cleaner import clean_html
 from .maintenance import generate_report
 from .workflow import (
     apply_editorial,
@@ -151,6 +152,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
             post = client.get_post(args.post_id)
+            if editorial.get("cleaned_html") is None and editorial["site_relevance"]["decision"] == "process":
+                raw = (post.get("content") or {}).get("raw")
+                if not isinstance(raw, str):
+                    raise WordPressError("post content.raw is missing")
+                editorial = {**editorial, "cleaned_html": clean_html(raw)}
             backup = SnapshotStore(args.root).save(args.post_id, post)
             content, trailer = compose_final_content(editorial, config, original_link_of(post))
             result = run_pre_publish_checklist(

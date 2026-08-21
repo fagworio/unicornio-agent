@@ -29,7 +29,10 @@ Processar autonomamente posts WordPress com status `pending`, melhorar texto/SEO
    conteudo por batch no contexto; o compacto imprime so id/titulo/palavras/link).
 2. Para cada post retornado, rode `unicornio-editor prepare ID`.
 3. Classifique a relevancia antes de qualquer reescrita. Se `site_relevance.decision=skip`, gere o JSON de skip, rode `apply` apenas para registrar o resultado local/saida (ele nao altera o WordPress) e passe imediatamente ao proximo post.
-4. Se relevante, edite apenas o `cleaned_html` conforme `src/unicornio_editor/prompts.py`.
+4. Se relevante, edite apenas o `cleaned_html` conforme o fluxo editorial. O `cleaned_html` no JSON
+   e OPCIONAL: se o texto preparado ja estiver bom, omita (o `apply` reusa o conteudo preparado,
+   sem reescrita). So inclua quando reescrever de fato. NUNCA inclua CTA, Fonte ou rodape no
+   `cleaned_html` — o codigo insere o CTA+Fonte canonicos e remove duplicados.
 5. Retorne/produza JSON estrito no formato exigido pelo prompt editorial.
 6. Pesquise imagens apenas quando o `media_plan` indicar ganho real de leitura. Use Google Images para descoberta, mas abra a página original e confirme licença pública, Creative Commons compatível ou permissão explícita.
 7. Quando o conteúdo for sobre um jogo, preencha `game_name` no JSON editorial com o nome exato do jogo; a descoberta e a validação do trailer são determinísticas (o código busca no YouTube `<game_name> trailer`, valida via oEmbed e insere o embed antes do CTA) — nunca invente URLs de trailer. Conteúdo que não seja de jogo usa `game_name: null`.

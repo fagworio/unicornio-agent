@@ -51,6 +51,22 @@ class EditorialSchemaTests(unittest.TestCase):
         payload["cleaned_html"] = ""
         self.assertEqual(validate_editorial(payload)["site_relevance"]["decision"], "skip")
 
+    def test_accepts_missing_cleaned_html(self):
+        payload = valid_payload()
+        del payload["cleaned_html"]
+        self.assertIsNone(validate_editorial(payload).get("cleaned_html"))
+
+    def test_accepts_null_cleaned_html(self):
+        payload = valid_payload()
+        payload["cleaned_html"] = None
+        self.assertIsNone(validate_editorial(payload)["cleaned_html"])
+
+    def test_rejects_non_string_cleaned_html(self):
+        payload = valid_payload()
+        payload["cleaned_html"] = 123
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
     def test_rejects_seo_title_over_65_chars(self):
         payload = valid_payload()
         payload["seo"]["title"] = "x" * 66

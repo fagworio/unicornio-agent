@@ -87,6 +87,20 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(Path(report["backup"]).exists())
             self.assertEqual(client.updated, [])
 
+    def test_apply_without_cleaned_html_reuses_prepared_content(self):
+        # No-rewrite path (token economy): the model omits cleaned_html and
+        # apply must deterministically reuse the cleaned post content,
+        # then compose the canonical CTA + Fonte in code.
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload()
+            del payload["cleaned_html"]
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(True), Path(directory), 42, payload)
+            self.assertIn("<p>Original.</p>", report["content_preview"])
+            self.assertIn("Confira mais novidades", report["content_preview"])
+            self.assertIn('Fonte: <a href="https://source.example/news"', report["content_preview"])
+            self.assertEqual(report["wordpress_changed"], False)
+
     def test_apply_skip_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

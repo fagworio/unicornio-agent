@@ -39,7 +39,7 @@ _MEDIA = {
 def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.8) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise EditorialValidationError("editorial result must be an object")
-    _keys(payload, _TOP_LEVEL, "top-level")
+    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html"})
     relevance = _object(payload["site_relevance"], "site_relevance")
     _keys(relevance, _RELEVANCE, "site_relevance")
     decision = relevance["decision"]
@@ -56,10 +56,14 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     ):
         raise EditorialValidationError("site_relevance.matched_topics must be a list of strings")
 
-    cleaned_html = payload["cleaned_html"]
-    if not isinstance(cleaned_html, str):
-        raise EditorialValidationError("cleaned_html must be a string")
-    if decision == "process" and not cleaned_html.strip():
+    # cleaned_html is OPTIONAL: when absent or null the workflow reuses the
+    # deterministic cleaned content of the prepared post (no-rewrite path).
+    # This is the token-economy default: the model must not re-emit text it
+    # did not change. CTA/Fonte/rodape are always code-inserted (builder).
+    cleaned_html = payload.get("cleaned_html")
+    if cleaned_html is not None and not isinstance(cleaned_html, str):
+        raise EditorialValidationError("cleaned_html must be a string or null")
+    if decision == "process" and isinstance(cleaned_html, str) and not cleaned_html.strip():
         raise EditorialValidationError("cleaned_html cannot be empty when processing")
 
     seo = _object(payload["seo"], "seo")
@@ -120,9 +124,10 @@ def _object(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
-def _keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
+def _keys(value: Mapping[str, Any], expected: set[str], name: str, optional: set[str] | None = None) -> None:
     actual = set(value)
-    missing = expected - actual
+    required = expected - (optional or set())
+    missing = required - actual
     unknown = actual - expected
     if missing or unknown:
         details = []
