@@ -177,18 +177,18 @@ def apply_editorial(
     if featured_credit and not config.dry_run:
         content = append_featured_credit(content, featured_credit)
     inline_normalization: list[dict[str, Any]] = []
+    image_entities = extract_entities(
+        title=str(editorial["seo"].get("title") or ""),
+        content_html=html,
+        focus_keyword=str(editorial["seo"].get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),
+    )
     if not config.dry_run:
         # Normalização técnica sem LLM (Fase 5.2): imagens inline relevantes
         # em formato errado (JPEG/PNG) viram WebP local automaticamente —
         # problema técnico não volta ao modelo. Irrelevantes ficam como estão:
         # o gate relevancia_imagens bloqueia e o agente corrige.
-        entities = extract_entities(
-            title=str(editorial["seo"].get("title") or ""),
-            content_html=html,
-            focus_keyword=str(editorial["seo"].get("focus_keyword") or ""),
-            game_name=editorial.get("game_name"),
-        )
-        content, inline_normalization = _normalize_inline_images(client, config, content, entities)
+        content, inline_normalization = _normalize_inline_images(client, config, content, image_entities)
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
     checklist = run_pre_publish_checklist(
         post={**post, "featured_media": featured_id or post.get("featured_media")},
@@ -247,7 +247,7 @@ def apply_editorial(
                 "blocked_detail": "; ".join(
                     str(item.get("detail") or "")[:200] for item in failed_items[:3]
                 ),
-                "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
+                "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities),
             }
     if config.dry_run:
         return {
@@ -259,7 +259,7 @@ def apply_editorial(
             "trailer": trailer,
             "media_plan_results": media_results,
             "checklist": checklist,
-            "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
+            "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities),
         }
 
     latest = client.get_post(post_id)
@@ -310,7 +310,7 @@ def apply_editorial(
         "inline_normalization": inline_normalization,
         "featured_media": result.get("featured_media"),
         "checklist": checklist,
-        "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
+        "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities),
     }
 
 
