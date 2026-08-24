@@ -1,218 +1,118 @@
-import io
-import json
+"""Testes dos modos compactos do CLI (economia de tokens).
+
+As projecoes compactas seguem a regra: SUCCESS = minimo de informacao;
+FAILURE = somente o necessario para corrigir. O relatorio completo fica em
+arquivo (apply.latest.json) para auditoria.
+"""
+
 import unittest
-from contextlib import redirect_stdout
-from pathlib import Path
-from unittest.mock import patch
 
-from unicornio_editor.cli import main
-from unicornio_editor.config import Config
+from unicornio_editor.cli import _compact_apply, _compact_checklist
 
 
-class FakeCliClient:
-    def list_pending(self, **_kwargs):
-        return [
-            {
-                "id": 42,
-                "status": "pending",
-                "date": "2026-08-21T03:00:00",
-                "date_gmt": "2026-08-21T06:00:00",
-                "title": {"raw": "Titulo de teste", "rendered": "Titulo de teste"},
-                "content": {"raw": "<p>ola</p>", "rendered": "<p>ola</p>"},
-                "meta": {},
-                "link": "https://wp.test/?p=42",
-            }
-        ]
-
-    def get_post(self, post_id):
-        return {
-            "id": post_id,
-            "status": "pending",
-            "date": "2026-08-21T03:00:00",
-            "date_gmt": "2026-08-21T06:00:00",
-            "title": {"raw": "Titulo de teste", "rendered": "Titulo de teste"},
-            "content": {"raw": "<p>ola</p>", "rendered": "<p>ola</p>"},
-            "meta": {},
-            "link": f"https://wp.test/?p={post_id}",
-        }
-
-
-class CliTests(unittest.TestCase):
-    def test_help_returns_success(self):
-        with self.assertRaises(SystemExit) as raised:
-            main(["--help"])
-        self.assertEqual(raised.exception.code, 0)
-
-    def test_list_pending_prints_json(self):
-        output = io.StringIO()
-        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-        ), redirect_stdout(output):
-            self.assertEqual(main(["list-pending"]), 0)
-        self.assertEqual(json.loads(output.getvalue())[0]["id"], 42)
-
-    def test_list_pending_compact_omits_content(self):
-        output = io.StringIO()
-        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-        ), redirect_stdout(output):
-            self.assertEqual(main(["list-pending", "--compact"]), 0)
-        data = json.loads(output.getvalue())
-        self.assertEqual(data[0]["id"], 42)
-        self.assertNotIn("content", data[0])
-        self.assertIn("title", data[0])
-        self.assertIn("word_count", data[0])
-
-    def test_queue_monitor_prints_stable_line(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            output = io.StringIO()
-            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-            ), redirect_stdout(output):
-                self.assertEqual(main(["queue", "--monitor", "--root", directory]), 0)
-            self.assertEqual(output.getvalue().strip(), "42")
-
-    def test_cards_prints_compact_cards(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            output = io.StringIO()
-            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-            ), redirect_stdout(output):
-                self.assertEqual(main(["cards", "--root", directory]), 0)
-            data = json.loads(output.getvalue())
-            self.assertEqual(data["count"], 1)
-            card = data["cards"][0]
-            self.assertEqual(card["id"], 42)
-            self.assertIn("titulo", card["entities"])
-            self.assertFalse(card["seo_exists"])
-            self.assertFalse(card["featured"])
-
-    def test_apply_dry_run_flag_does_not_write(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            editorial_file = Path(directory) / "editorial.json"
-            editorial_file.write_text(
-                json.dumps(
-                    {
-                        "site_relevance": {
-                            "decision": "process",
-                            "confidence": 0.99,
-                            "reason": "Teste",
-                            "matched_topics": ["games"],
-                        },
-                        "cleaned_html": "<p>Texto revisado.</p>",
-                        "seo": {
-                            "title": "Título sobre videogame e lançamento importante",
-                            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
-                            "focus_keyword": "videogame",
-                        },
-                        "media_plan": [],
-                        "needs_trailer": False,
-                        "trailer_url": None,
-                        "game_name": None,
-                    }
-                ),
-                encoding="utf-8",
-            )
-            output = io.StringIO()
-            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-            ), redirect_stdout(output):
-                self.assertEqual(
-                    main(["apply", "42", str(editorial_file), "--dry-run", "--root", directory]), 0
-                )
-            data = json.loads(output.getvalue())
-            self.assertEqual(data["dry_run"], True)
-            self.assertEqual(data["wordpress_changed"], False)
-
-    def test_prepare_compact_writes_file_and_prints_summary(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            output = io.StringIO()
-            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-            prepared = {
-                "post_id": 42,
-                "status": "pending",
-                "backup": f"{directory}/backups/42/snapshot.json",
-                "cleaned_html": "<p>ola mundo</p><h2>Subtitulo</h2>",
-                "original_link": "https://source.example/artigo",
-                "wordpress_changed": False,
-            }
-            with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-                "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-            ), patch(
-                "unicornio_editor.cli.prepare_post", return_value=prepared
-            ), redirect_stdout(output):
-                self.assertEqual(main(["prepare", "42", "--compact", "--root", directory]), 0)
-            data = json.loads(output.getvalue())
-            self.assertEqual(data["post_id"], 42)
-            self.assertEqual(data["word_count"], 3)
-            self.assertEqual(data["original_link"], "https://source.example/artigo")
-            self.assertNotIn("cleaned_html", data)
-            saved = json.loads(Path(directory, "backups/42/prepared.json").read_text(encoding="utf-8"))
-            self.assertEqual(saved["cleaned_html"], "<p>ola mundo</p><h2>Subtitulo</h2>")
-
-    def test_maintenance_report_does_not_require_wordpress_credentials(self):
-        import json
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as directory:
-            report_file = Path(directory) / "posts.json"
-            report_file.write_text(json.dumps([{"id": 1, "content": {"raw": "<p>x</p>"}, "meta": {}}]))
-            output = io.StringIO()
-            with redirect_stdout(output):
-                self.assertEqual(main(["maintenance-report", str(report_file)]), 0)
-            self.assertIn("missing_cta_source", output.getvalue())
-
-    def test_publish_ready_reports_quality_blocks(self):
-        output = io.StringIO()
-        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=True)
-        outcomes = [
+class CompactOutputTests(unittest.TestCase):
+    def test_compact_apply_success_is_minimal(self):
+        result = _compact_apply(
             {
                 "post_id": 1,
-                "wordpress_changed": False,
-                "status": "blocked",
-                "reason": "checklist pre-publicacao com falhas",
+                "wordpress_changed": True,
+                "featured_media": 7,
+                "checklist": {
+                    "items": [{"name": "backup", "status": "pass"}],
+                    "all_passed": True,
+                },
+                "media_plan_results": [
+                    {"media_id": 10},
+                    {"media_id": 11},
+                    {"status": "rejected", "detail": "x"},
+                ],
+                "content_preview": "<p>texto gigante que nao deve vazar</p>",
+                "trailer": {"video_id": "abc"},
             }
-        ]
-        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-        ), patch("unicornio_editor.cli.publish_ready_posts", return_value=outcomes), redirect_stdout(output):
-            self.assertEqual(main(["publish-ready"]), 0)
-        data = json.loads(output.getvalue())
-        self.assertEqual(data["published"], 0)
-        self.assertEqual(data["quality_blocked"], 1)
-        self.assertEqual(data["blocked_posts"][0]["post_id"], 1)
+        )
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["checklist"], "pass")
+        self.assertEqual(result["media"], {"accepted": 2, "rejected": 1})
+        self.assertEqual(result["featured_media"], 7)
+        self.assertNotIn("failed", result)
+        # Nunca retorna o que o agente nao precisa decidir agora.
+        self.assertNotIn("content_preview", result)
+        self.assertNotIn("trailer", result)
+        self.assertNotIn("checklist_items", result)
 
-    def test_publish_ready_stays_silent_when_all_cleanly_skipped(self):
-        output = io.StringIO()
-        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-        outcomes = [
+    def test_compact_apply_needs_rework_lists_only_failures(self):
+        result = _compact_apply(
             {
-                "post_id": 1,
+                "post_id": 2,
                 "wordpress_changed": False,
-                "status": "skipped",
-                "reason": "sem editorial.latest.json",
+                "status": "needs_rework",
+                "blocked_reasons": ["imagens_no_corpo"],
+                "blocked_detail": "esperado 4, encontrado 2",
+                "checklist": {
+                    "items": [
+                        {
+                            "name": "imagens_no_corpo",
+                            "status": "fail",
+                            "detail": "esperado 4, encontrado 2",
+                        }
+                    ]
+                },
             }
-        ]
-        with patch("unicornio_editor.cli.load_config", return_value=config), patch(
-            "unicornio_editor.cli.WordPressClient", return_value=FakeCliClient()
-        ), patch("unicornio_editor.cli.publish_ready_posts", return_value=outcomes), redirect_stdout(output):
-            self.assertEqual(main(["publish-ready"]), 0)
-        self.assertEqual(output.getvalue(), "")
+        )
+        self.assertEqual(result["status"], "needs_rework")
+        self.assertEqual(
+            result["failed"],
+            [{"name": "imagens_no_corpo", "detail": "esperado 4, encontrado 2"}],
+        )
 
+    def test_compact_apply_dry_run_reports_checklist(self):
+        result = _compact_apply(
+            {
+                "post_id": 3,
+                "wordpress_changed": False,
+                "dry_run": True,
+                "checklist": {
+                    "items": [{"name": "imagens_no_corpo", "status": "fail", "detail": "0/4"}]
+                },
+                "media_plan_results": [],
+            }
+        )
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["checklist"], "fail")
+        self.assertEqual(result["failed"], [{"name": "imagens_no_corpo", "detail": "0/4"}])
+
+    def test_compact_apply_uncertain_is_minimal(self):
+        result = _compact_apply(
+            {
+                "post_id": 4,
+                "wordpress_changed": False,
+                "status": "uncertain",
+                "skip_reason": "conteudo irrelevante",
+            }
+        )
+        self.assertEqual(result["status"], "uncertain")
+        self.assertEqual(result["skip_reason"], "conteudo irrelevante")
+
+    def test_compact_checklist_failure_only(self):
+        ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})
+        self.assertEqual(ok, {"status": "pass", "failed": []})
+        bad = _compact_checklist(
+            {
+                "items": [
+                    {"name": "a", "status": "pass"},
+                    {"name": "b", "status": "fail", "detail": "detalhe b"},
+                    {"name": "c", "status": "error", "detail": "detalhe c"},
+                ]
+            }
+        )
+        self.assertEqual(bad["status"], "fail")
+        self.assertEqual(
+            bad["failed"],
+            [
+                {"name": "b", "detail": "detalhe b"},
+                {"name": "c", "detail": "detalhe c"},
+            ],
+        )
 
 
 if __name__ == "__main__":

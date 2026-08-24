@@ -16,7 +16,11 @@ class MediaDownloadError(RuntimeError):
 
 LEGACY_LOCAL_UPLOAD_PATH = "/wp-content/uploads/2019/06/"
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 6
+# Economia de custo: poucas tentativas por fonte. Insistir em retry (6x)
+# queima tempo e contexto; trocar de fonte e mais barato (politica
+# "source A falhou -> tentar source B"). O valor pode vir da config
+# EDITOR_MAX_SOURCE_RETRIES (tentativas totais = retries + 1).
+_MAX_ATTEMPTS = 3
 
 
 def _retry_delay(attempt: int, response_headers=None) -> float:
@@ -41,14 +45,20 @@ def select_reupload_source(local_url: str, effective_url: str | None = None) -> 
     return local_url
 
 
-def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1024) -> Path:
+def download_image(
+    url: str,
+    destination: Path,
+    *,
+    max_bytes: int = 8 * 1024 * 1024,
+    max_attempts: int = _MAX_ATTEMPTS,
+) -> Path:
     if not url.startswith(("http://", "https://")):
         raise MediaDownloadError("image URL must use HTTP(S)")
     if max_bytes < 1024:
         raise MediaDownloadError("max_bytes is too small")
     request = Request(url, headers={"Accept": "image/*", "User-Agent": "unicornio-editor/0.1"})
     last_error: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             with urlopen(request, timeout=30) as response:
                 content_type = response.headers.get_content_type()
@@ -71,7 +81,7 @@ def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1
                         output.write(chunk)
         except HTTPError as exc:
             destination.unlink(missing_ok=True)
-            if exc.code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS:
+            if exc.code in _RETRYABLE_STATUS and attempt < max_attempts:
                 time.sleep(_retry_delay(attempt, exc.headers))
                 continue
             raise MediaDownloadError(f"image download failed (HTTP {exc.code})") from exc
@@ -80,7 +90,7 @@ def download_image(url: str, destination: Path, *, max_bytes: int = 8 * 1024 * 1
             if isinstance(exc, MediaDownloadError):
                 raise
             last_error = exc
-            if attempt < _MAX_ATTEMPTS:
+            if attempt < max_attempts:
                 time.sleep(_retry_delay(attempt))
                 continue
             raise MediaDownloadError("image download failed") from exc

@@ -20,11 +20,13 @@ from .workflow import (
     build_cards,
     build_queue_report,
     compose_final_content,
+    get_cleaned_content,
     original_link_of,
     prepare_post,
     publish_post,
     publish_ready_posts,
     resolve_editorial_defaults,
+    validate_media_plan,
 )
 from .wordpress import WordPressClient, WordPressError
 
@@ -85,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="valida e mostra o resultado (checklist + preview) sem escrever no WordPress",
     )
+    apply_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="grava o relatorio completo em backups/<id>/apply.latest.json e imprime "
+        "apenas o resumo (economia de tokens): success = minimo, failure = so o que corrigir",
+    )
 
     checklist_parser = subparsers.add_parser(
         "checklist", help="roda o checklist pre-publicacao (somente leitura)"
@@ -92,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     checklist_parser.add_argument("post_id", type=int)
     checklist_parser.add_argument("editorial_file", type=Path)
     checklist_parser.add_argument("--root", type=Path, default=Path("."))
+    checklist_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="imprime apenas {status, failed} (failure-only; economiza tokens)",
+    )
 
     publish_parser = subparsers.add_parser(
         "publish",
@@ -119,6 +132,22 @@ def build_parser() -> argparse.ArgumentParser:
     media_search_parser.add_argument(
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
+
+    content_parser = subparsers.add_parser(
+        "content",
+        help="retorna o cleaned_html do post (somente leitura; use SO quando for "
+        "reescrever o texto, em vez de abrir o prepared.json inteiro)",
+    )
+    content_parser.add_argument("post_id", type=int)
+    content_parser.add_argument("--root", type=Path, default=Path("."))
+
+    media_validate_parser = subparsers.add_parser(
+        "media-validate",
+        help="valida o media_plan de um editorial.json SEM executar download/upload "
+        "(1 chamada compacta; corriga o plano antes do apply)",
+    )
+    media_validate_parser.add_argument("editorial_file", type=Path)
+    media_validate_parser.add_argument("--root", type=Path, default=Path("."))
     return parser
 
 
@@ -166,6 +195,77 @@ def _media_search_item(item: dict) -> dict:
         "tem_credito": "crédito da imagem" in f"{title} {caption}".lower(),
         "url": str(item.get("source_url") or ""),
     }
+
+
+def _failed_items(checklist: dict | None) -> list[dict]:
+    """Apenas os itens que falharam (failure-only; economia de tokens)."""
+    if not isinstance(checklist, dict):
+        return []
+    return [
+        {"name": item.get("name"), "detail": str(item.get("detail") or "")[:200]}
+        for item in (checklist.get("items") or [])
+        if item.get("status") in ("fail", "error") and item.get("name")
+    ]
+
+
+def _compact_apply(result: dict) -> dict:
+    """Projecao enxuta do apply: success = minimo, failure = so o que corrigir.
+
+    O relatorio completo (checklist, midia, trailer, preview) fica em
+    ``backups/<id>/apply.latest.json``; o terminal so devolve o necessario
+    para o agente decidir o proximo passo.
+    """
+    post_id = result.get("post_id")
+    failed = _failed_items(result.get("checklist"))
+    media_results = result.get("media_plan_results") or []
+    accepted = sum(1 for m in media_results if m.get("media_id"))
+    rejected = sum(
+        1 for m in media_results if m.get("status") in ("rejected", "blocked")
+    )
+    if result.get("status") == "needs_rework":
+        reasons = [
+            {"name": name, "detail": result.get("blocked_detail") or ""}
+            for name in (result.get("blocked_reasons") or [])
+        ]
+        return {
+            "post_id": post_id,
+            "status": "needs_rework",
+            "wordpress_changed": False,
+            "failed": failed or reasons,
+        }
+    if result.get("status") == "uncertain":
+        return {
+            "post_id": post_id,
+            "status": "uncertain",
+            "wordpress_changed": False,
+            "skip_reason": result.get("skip_reason"),
+        }
+    if result.get("dry_run"):
+        return {
+            "post_id": post_id,
+            "status": "dry_run",
+            "wordpress_changed": False,
+            "checklist": "pass" if not failed else "fail",
+            "media": {"accepted": accepted, "rejected": rejected},
+            **({"failed": failed} if failed else {}),
+        }
+    compact = {
+        "post_id": post_id,
+        "status": "applied" if result.get("wordpress_changed") else "not_changed",
+        "wordpress_changed": bool(result.get("wordpress_changed")),
+        "checklist": "pass" if not failed else "fail",
+        "featured_media": result.get("featured_media"),
+        "media": {"accepted": accepted, "rejected": rejected},
+    }
+    if failed:
+        compact["failed"] = failed
+    return compact
+
+
+def _compact_checklist(checklist: dict) -> dict:
+    """Checklist failure-only: {status, failed} (detalhes vao para o relatorio)."""
+    failed = _failed_items(checklist)
+    return {"status": "pass" if not failed else "fail", "failed": failed}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -242,11 +342,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client=client,
             )
             result["trailer"] = trailer
+            if args.compact:
+                result = _compact_checklist(result)
         elif args.command == "publish":
             result = publish_post(client, config, args.root, args.post_id)
         elif args.command == "media-search":
             items = client.search_media(args.termo, per_page=args.limit)
             result = [_media_search_item(item) for item in items]
+        elif args.command == "content":
+            result = get_cleaned_content(client, args.root, args.post_id)
+        elif args.command == "media-validate":
+            payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
+            result = validate_media_plan(client, payload)
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
@@ -254,7 +361,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if published or blocked:
                 result = {
                     "published": len(published),
-                    "posts": published,
+                    "posts": [
+                        {
+                            "post_id": o.get("post_id"),
+                            "link": o.get("link"),
+                            "published_at": o.get("published_at"),
+                        }
+                        for o in published
+                    ],
                     "blocked_or_skipped": len(outcomes) - len(published),
                     "quality_blocked": len(blocked),
                     "blocked_posts": [
@@ -262,6 +376,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "post_id": outcome.get("post_id"),
                             "status": outcome.get("status"),
                             "reason": outcome.get("reason"),
+                            "failed": [
+                                item.get("name")
+                                for item in ((outcome.get("checklist") or {}).get("items") or [])
+                                if item.get("status") in ("fail", "error")
+                            ],
                         }
                         for outcome in blocked
                     ],
@@ -273,6 +392,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = apply_editorial(client, config, args.root, args.post_id, payload)
+            if args.compact:
+                # Auditoria completa em arquivo; terminal so com o resumo
+                # (success = minimo, failure = so o que corrigir).
+                audit = args.root / "backups" / str(args.post_id) / "apply.latest.json"
+                audit.parent.mkdir(parents=True, exist_ok=True)
+                audit.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                result = _compact_apply(result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (ConfigError, WordPressError, OSError, ValueError) as exc:

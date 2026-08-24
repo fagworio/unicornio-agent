@@ -9,9 +9,11 @@ from unicornio_editor.workflow import (
     apply_editorial,
     build_cards,
     build_queue_report,
+    get_cleaned_content,
     prepare_post,
     publish_post,
     publish_ready_posts,
+    validate_media_plan,
 )
 
 
@@ -323,6 +325,74 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(cards[1]["blocked"])
             self.assertIsNone(cards[1]["blocked_reason"])
 
+    def test_build_cards_fetches_rework_by_include_and_fills_with_new(self):
+        # P2: o cards NAO carrega 100 posts — rework vem do filesystem e e
+        # buscado por include; novos so para completar o lote (per_page=batch).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blocked_post = self.post()
+            blocked_post["title"] = {"raw": "Rework antigo"}
+            new_post = dict(blocked_post)
+            new_post["id"] = 43
+            new_post["title"] = {"raw": "Novo post"}
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.blocked.json").write_text(
+                json.dumps({"status": "blocked"}), encoding="utf-8"
+            )
+
+            class RecordingClient(FakeClient):
+                def __init__(self, posts):
+                    self.posts = posts
+                    self.calls = []
+                    self.seen = set()
+
+                def list_pending(self, **kwargs):
+                    self.calls.append(kwargs)
+                    include = kwargs.get("include")
+                    candidates = [
+                        p
+                        for p in self.posts
+                        if p["id"] not in self.seen
+                        and (p["id"] in include if include else True)
+                    ]
+                    result = candidates[: kwargs.get("per_page", 10)]
+                    self.seen.update(p["id"] for p in result)
+                    return result
+
+            client = RecordingClient([blocked_post, new_post])
+            report = build_cards(client, self.config(True), root)
+            self.assertEqual([c["id"] for c in report["cards"]], [42, 43])
+            self.assertEqual(client.calls[0]["include"], [42])  # rework por include
+            self.assertEqual(client.calls[1]["per_page"], 1)  # 1 novo completa o lote
+
+    def test_get_cleaned_content_returns_cleaned_html(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            result = get_cleaned_content(client, Path(directory), 42)
+            self.assertEqual(result["post_id"], 42)
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["cleaned_html"], "<p>Original.</p>")
+            self.assertEqual(result["original_link"], "https://source.example/news")
+
+    def test_validate_media_plan_rejects_irrelevant_items(self):
+        payload = editorial_payload()
+        payload["media_plan"] = [
+            self.media_item(paragraph_index=0),
+            {
+                **self.media_item(paragraph_index=3),
+                "alt_text": "gatinho fofo dormindo",
+                "direct_image_url": "https://s3.example/gatinho.jpg",
+                "source_page_url": "https://s3.example/gatinho",
+                "credit_text": "Crédito da imagem: Autor. CC0.",
+            },
+        ]
+        client = FakeClient(self.post())
+        result = validate_media_plan(client, payload)
+        self.assertEqual(result["valid"], 1)
+        self.assertEqual(len(result["rejected"]), 1)
+        self.assertEqual(result["rejected"][0]["index"], 1)
+        self.assertIn("sem relacao", result["rejected"][0]["reason"])
+
     def test_apply_skip_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())
@@ -588,7 +658,9 @@ class WorkflowTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 client = ReuseClient(self.post())
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
-        dl.assert_called_once_with("https://wp.test/uploads/reuse-source.webp", mock.ANY)
+        dl.assert_called_once_with(
+            "https://wp.test/uploads/reuse-source.webp", mock.ANY, max_attempts=3
+        )
         self.assertEqual(report["featured_media"], 77)
         self.assertEqual(client.updated[0][1]["featured_media"], 77)
 

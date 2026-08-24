@@ -89,7 +89,7 @@ def apply_editorial(
 
     media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
     if featured_id is None and not config.dry_run:
-        featured_id = _normalize_existing_featured(client, post, editorial)
+        featured_id = _normalize_existing_featured(client, config, post, editorial)
     html = editorial["cleaned_html"]
     if media_results and not config.dry_run:
         plan = [
@@ -218,6 +218,149 @@ def _clear_processing_markers(root: Path, post_id: int) -> None:
         pass
 
 
+def _media_item_rejection(
+    item: dict[str, Any],
+    entities: set[str],
+    client: WordPressClient,
+    attachment_cache: dict[int, dict[str, Any]],
+) -> str | None:
+    """Motivo de rejeicao de um item do media_plan, ou None se valido.
+
+    Compartilhada pelo ``_execute_media_plan`` (apply) e pelo
+    ``validate_media_plan`` (media-validate, 1 chamada antes do apply):
+    reuso da Media Library exige credito visivel no attachment; featured deve
+    retratar o assunto citado pela evidencia real (arquivo/pagina de origem);
+    inline deve referenciar entidade distintiva do post.
+    """
+    is_featured = bool(item.get("is_featured"))
+    media_id = item.get("media_library_id")
+    attachment = None
+    if media_id:
+        if media_id not in attachment_cache:
+            attachment_cache[media_id] = client.get_media(media_id)
+        attachment = attachment_cache[media_id]
+    if attachment is not None:
+        title = str((attachment.get("title") or {}).get("rendered") or "")
+        alt = str(attachment.get("alt_text") or "")
+        caption = str((attachment.get("caption") or {}).get("rendered") or "")
+        url = str(attachment.get("source_url") or "")
+        credit = title or caption
+        if "crédito da imagem" not in credit.lower():
+            return (
+                "reuso da midia library exige credito visivel no attachment original "
+                "(title/caption sem 'Crédito da imagem'); nao usar como fonte"
+            )
+        source = " ".join(part for part in (url, title, alt, caption) if part)
+        if is_featured:
+            if not image_is_relevant(
+                alt_text="", credit_text="", source_url=source, entities=entities, source_only=True
+            ):
+                listed = ", ".join(sorted(entities)) or "nenhuma"
+                return (
+                    "featured reusada deve retratar o assunto citado "
+                    f"(attachment sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
+                )
+            return None
+        if not image_is_relevant(
+            alt_text=str(item.get("alt_text") or ""),
+            credit_text=str(item.get("credit_text") or ""),
+            source_url=source,
+            entities=entities,
+        ):
+            listed = ", ".join(sorted(entities)) or "nenhuma"
+            return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
+        return None
+    if is_featured:
+        # Featured must depict the cited subject itself: only the real
+        # source file/page name counts as evidence. The agent-written
+        # alt/credit can decorate a wrong image (e.g. a Disney castle
+        # captioned "presente em Kingdom Hearts" for a game post), but a
+        # true key art file name carries the game/work name.
+        if not image_is_relevant(
+            alt_text="",
+            credit_text="",
+            source_url=" ".join(
+                str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
+            ),
+            entities=entities,
+            source_only=True,
+        ):
+            listed = ", ".join(sorted(entities)) or "nenhuma"
+            return (
+                "featured deve retratar o assunto citado (arquivo/pagina de origem "
+                f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
+            )
+        return None
+    if not image_is_relevant(
+        alt_text=str(item.get("alt_text") or ""),
+        credit_text=str(item.get("credit_text") or ""),
+        source_url=" ".join(
+            str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
+        ),
+        entities=entities,
+    ):
+        listed = ", ".join(sorted(entities)) or "nenhuma"
+        return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
+    return None
+
+
+def validate_media_plan(
+    client: WordPressClient,
+    editorial: dict[str, Any],
+) -> dict[str, Any]:
+    """Valida o media_plan de um editorial SEM executar download/upload.
+
+    Retorna ``{valid, rejected: [{index, reason}]}`` — o agente corrige o
+    plano antes do apply (1 chamada compacta em vez de aplicar e ver itens
+    rejeitados no resultado). Deterministico e somente leitura.
+    """
+    plan = editorial.get("media_plan") or []
+    if not plan:
+        return {"valid": 0, "rejected": []}
+    entities = extract_entities(
+        title=str((editorial.get("seo") or {}).get("title") or ""),
+        content_html=str(editorial.get("cleaned_html") or ""),
+        focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),
+    )
+    cache: dict[int, dict[str, Any]] = {}
+    valid = 0
+    rejected: list[dict[str, Any]] = []
+    for index, item in enumerate(plan):
+        reason = _media_item_rejection(item, entities, client, cache)
+        if reason:
+            rejected.append({"index": index, "reason": reason})
+        else:
+            valid += 1
+    return {"valid": valid, "rejected": rejected}
+
+
+def get_cleaned_content(
+    client: WordPressClient,
+    root: Path,
+    post_id: int,
+) -> dict[str, Any]:
+    """Conteudo limpo do post (somente leitura; sob demanda para reescrita).
+
+    Nao cria snapshot (o apply salva): comando ``content POST_ID`` — o agente
+    le o cleaned_html UMA vez quando realmente vai reescrever o texto, em vez
+    de abrir o prepared.json inteiro.
+    """
+    from .content_quality import word_count
+
+    post = client.get_post(post_id)
+    _require_pending(post)
+    raw = _raw_content(post)
+    cleaned = clean_html(raw)
+    return {
+        "post_id": post_id,
+        "status": post["status"],
+        "cleaned_html": cleaned,
+        "original_link": _original_link(post),
+        "word_count": word_count(cleaned),
+    }
+
+
 def _execute_media_plan(
     editorial: dict[str, Any],
     config: Config,
@@ -261,71 +404,7 @@ def _execute_media_plan(
         return attachment_cache[media_id]
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
-        is_featured = bool(item.get("is_featured"))
-        attachment = _attachment_evidence(item)
-        if attachment is not None:
-            title = str((attachment.get("title") or {}).get("rendered") or "")
-            alt = str(attachment.get("alt_text") or "")
-            caption = str((attachment.get("caption") or {}).get("rendered") or "")
-            url = str(attachment.get("source_url") or "")
-            credit = title or caption
-            if "crédito da imagem" not in credit.lower():
-                return (
-                    "reuso da midia library exige credito visivel no attachment original "
-                    "(title/caption sem 'Crédito da imagem'); nao usar como fonte"
-                )
-            source = " ".join(part for part in (url, title, alt, caption) if part)
-            if is_featured:
-                if not image_is_relevant(
-                    alt_text="", credit_text="", source_url=source, entities=entities, source_only=True
-                ):
-                    listed = ", ".join(sorted(entities)) or "nenhuma"
-                    return (
-                        "featured reusada deve retratar o assunto citado "
-                        f"(attachment sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
-                    )
-                return None
-            if not image_is_relevant(
-                alt_text=str(item.get("alt_text") or ""),
-                credit_text=str(item.get("credit_text") or ""),
-                source_url=source,
-                entities=entities,
-            ):
-                listed = ", ".join(sorted(entities)) or "nenhuma"
-                return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
-            return None
-        if is_featured:
-            # Featured must depict the cited subject itself: only the real
-            # source file/page name counts as evidence. The agent-written
-            # alt/credit can decorate a wrong image (e.g. a Disney castle
-            # captioned "presente em Kingdom Hearts" for a game post), but a
-            # true key art file name carries the game/work name.
-            if not image_is_relevant(
-                alt_text="",
-                credit_text="",
-                source_url=" ".join(
-                    str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
-                ),
-                entities=entities,
-                source_only=True,
-            ):
-                listed = ", ".join(sorted(entities)) or "nenhuma"
-                return (
-                    "featured deve retratar o assunto citado (arquivo/pagina de origem "
-                    f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
-                )
-            return None
-        if not image_is_relevant(
-            alt_text=str(item.get("alt_text") or ""),
-            credit_text=str(item.get("credit_text") or ""),
-            source_url=" ".join(
-                str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
-            ),
-            entities=entities,
-        ):
-            listed = ", ".join(sorted(entities)) or "nenhuma"
-            return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
-        return None
+        return _media_item_rejection(item, entities, client, attachment_cache)
 
     if config.dry_run:
         results: list[dict[str, Any]] = []
@@ -374,7 +453,11 @@ def _execute_media_plan(
             download_url = (
                 attachment.get("source_url") if attachment is not None else item["direct_image_url"]
             )
-            source = download_image(str(download_url), tmp / f"source_{position}{suffix}")
+            source = download_image(
+                str(download_url),
+                tmp / f"source_{position}{suffix}",
+                max_attempts=config.max_source_retries + 1,
+            )
             # Content verification: the image just downloaded must actually be
             # listed on the source page (fail-closed). A gallery/CDN URL can
             # serve bytes of another work while its slug/alt say the right
@@ -429,6 +512,7 @@ def _execute_media_plan(
 
 def _normalize_existing_featured(
     client: WordPressClient,
+    config: Config,
     post: dict[str, Any],
     editorial: dict[str, Any] | None = None,
 ) -> int | None:
@@ -497,7 +581,11 @@ def _normalize_existing_featured(
     try:
         with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
             tmp = Path(directory)
-            source = download_image(source_url, tmp / "featured_source.jpg")
+            source = download_image(
+                source_url,
+                tmp / "featured_source.jpg",
+                max_attempts=config.max_source_retries + 1,
+            )
             webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
             new_media = client.upload_media(
                 str(webp),
@@ -1006,6 +1094,30 @@ def _game_hint(title: str) -> bool:
     return bool(tokens & _GAME_HINT_WORDS)
 
 
+def _rework_ids(root: Path) -> list[int]:
+    """IDs com ``editorial.blocked.json`` (rework), sem os uncertain.
+
+    Leitura direta do filesystem (token economy + CPU): nao busca 100 posts
+    no WordPress so para descobrir quais estao bloqueados. ``uncertain.json``
+    vence (o agente ja decidiu que nao ha como processar).
+    """
+    backups = root / "backups"
+    if not backups.is_dir():
+        return []
+    ids: list[int] = []
+    for entry in backups.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / "editorial.blocked.json").is_file() and not (
+            entry / "uncertain.json"
+        ).is_file():
+            try:
+                ids.append(int(entry.name))
+            except ValueError:
+                continue
+    return sorted(ids)
+
+
 def build_cards(
     client: WordPressClient,
     config: Config,
@@ -1019,20 +1131,37 @@ def build_cards(
     without touching the terminal: title, word count, distinctive entities,
     original link, featured/seo/image gaps, preserved-image count, game hint
     and processing state. Posts the publish gate reopened carry ``blocked`` +
-    ``blocked_reason`` (token economy: the card tells the agent WHAT to fix) and
-    are sorted FIRST so rework is corrected before new posts are started.
-    Deterministic and read-only.
+    ``blocked_reason`` (token economy: the card tells the agent WHAT to fix)
+    and come FIRST, FIFO by id (oldest rework first), before new pending
+    posts. Deterministic and read-only.
+
+    The fetch is bounded: rework ids come from ``backups/*/editorial.blocked.json``
+    and are fetched by ``include``; new posts are fetched only to fill the
+    remaining slots — never 100 full posts to return 2 cards.
     """
     from .content_quality import word_count
     from .html_cleaner import clean_html
     from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 
-    per_page = per_page or config.batch_limit
-    # Busca uma janela maior que o lote: o WP lista pending por data e posts
-    # reabertos (blocked) podem ser antigos — sem isso o rework mais velho
-    # nunca entraria no lote e o loop verificar->corrigir->publicar travaria
-    # de novo. O corte para o lote acontece DEPOIS de ordenar rework primeiro.
-    posts = client.list_pending(per_page=max(per_page, 100))
+    per_page = per_page or config.max_posts_per_run
+    rework_ids = _rework_ids(root)
+    posts: list[dict[str, Any]] = []
+    if rework_ids:
+        posts.extend(
+            client.list_pending(include=rework_ids[:per_page], per_page=len(rework_ids[:per_page]))
+        )
+    remaining = per_page - len(posts)
+    if remaining > 0:
+        posts.extend(client.list_pending(per_page=remaining))
+    seen: set[int] = set()
+    ordered: list[dict[str, Any]] = []
+    for post in posts:
+        post_id = post.get("id")
+        if not isinstance(post_id, int) or post_id in seen:
+            continue
+        seen.add(post_id)
+        ordered.append(post)
+    posts = ordered
     cards: list[dict[str, Any]] = []
     for post in posts:
         post_id = post.get("id")

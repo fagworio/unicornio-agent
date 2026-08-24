@@ -30,7 +30,9 @@ class WordPressClient:
         self.config = config
         self.base_url = f"{config.wordpress_url}{config.wordpress_api_base}"
 
-    def list_pending(self, *, page: int = 1, per_page: int = 10) -> list[dict[str, Any]]:
+    def list_pending(
+        self, *, page: int = 1, per_page: int = 10, include: list[int] | None = None
+    ) -> list[dict[str, Any]]:
         if not 1 <= page <= 10000 or not 1 <= per_page <= 100:
             raise ValueError("page and per_page are outside safe limits")
         # Query `status=pending` server-side: some installations (including
@@ -43,6 +45,8 @@ class WordPressClient:
             "page": page,
             "per_page": per_page,
         }
+        if include:
+            query["include"] = ",".join(str(int(pid)) for pid in include)
         try:
             data = self._request("GET", "/posts", query)
         except WordPressError as exc:

@@ -19,7 +19,7 @@ class Config:
     app_user: str = ""
     app_password: str = field(default="", repr=False)
     dry_run: bool = True
-    batch_limit: int = 3
+    batch_limit: int = 2
     http_timeout: float = 15.0
     lock_ttl: int = 900
     min_relevance_confidence: float = 0.80
@@ -31,6 +31,10 @@ class Config:
     vision_api_key: str = field(default="", repr=False)
     vision_base_url: str = ""
     vision_model: str = "gpt-4o-mini"
+    # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
+    max_posts_per_run: int = 2  # cards por lote / posts processados por run
+    max_media_candidates: int = 3  # candidatos de midia analisados por imagem
+    max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
 
     def __repr__(self) -> str:
         return (
@@ -121,7 +125,7 @@ def load_config() -> Config:
         app_user=app_user,
         app_password=app_password,
         dry_run=dry_run,
-        batch_limit=_int("EDITOR_BATCH_LIMIT", 3, 1, 100),
+        batch_limit=_int("EDITOR_BATCH_LIMIT", 2, 1, 10),
         http_timeout=_float("EDITOR_HTTP_TIMEOUT", 15.0, 1.0, 120.0),
         lock_ttl=_int("EDITOR_LOCK_TTL", 900, 30, 86400),
         min_relevance_confidence=_float(
@@ -137,6 +141,9 @@ def load_config() -> Config:
             "EDITOR_VISION_BASE_URL", _env("EDITOR_VISION_BASE_URL", "https://api.openai.com/v1")
         ),
         vision_model=_env("EDITOR_VISION_MODEL", "gpt-4o-mini"),
+        max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 2, 1, 10),
+        max_media_candidates=_int("EDITOR_MAX_MEDIA_CANDIDATES", 3, 1, 10),
+        max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
     )
 
 
