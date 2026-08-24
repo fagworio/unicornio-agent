@@ -50,3 +50,7 @@ Thumbs.db
 
 # Runtime artifacts created by the cron agent
 work/
+
+# Editorial drafts (runtime artifacts; removed by cleanup-cron)
+editorial_*.json
+editorials/
