@@ -931,7 +931,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(client.updated), 1)
             state_meta = client.updated[0][1]["meta"]
             self.assertEqual(state_meta["_hermes_state"], "blocked")
-            self.assertEqual(state_meta["_hermes_attempts"], 1)
+            self.assertEqual(state_meta["_hermes_attempts"], "1")
             self.assertNotEqual(state_meta["_hermes_next_retry_at"], "")
             self.assertEqual(report["state"], "blocked")
             self.assertEqual(report["attempts"], 1)
@@ -1089,8 +1089,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(meta["_hermes_state"], "ready")
             self.assertTrue(meta["_hermes_ready_hash"])
             self.assertTrue(meta["_hermes_ready_manifest"])
-            self.assertEqual(meta["_hermes_policy_version"], 2)
-            self.assertEqual(meta["_hermes_attempts"], 0)
+            # WP REST persiste meta como string (tipo 'string' registrado).
+            self.assertEqual(meta["_hermes_policy_version"], "2")
+            self.assertEqual(meta["_hermes_attempts"], "0")
             queue = build_queue_report(client, root)
             self.assertEqual(queue["edited"], 1)
             self.assertEqual(queue["ready_ids"], [42])
@@ -1212,7 +1213,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result["state"], "blocked")
             meta = client.post["meta"]
             self.assertEqual(meta["_hermes_state"], "blocked")
-            self.assertEqual(meta["_hermes_attempts"], 0)
+            self.assertEqual(meta["_hermes_attempts"], "0")
             self.assertEqual(meta["_hermes_next_retry_at"], "")
 
     def test_discard_post_marks_uncertain_and_leaves_queue(self):

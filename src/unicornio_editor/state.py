@@ -91,11 +91,13 @@ def build_state_markers(
         raise ValueError("attempts must be a non-negative integer")
     markers: dict[str, Any] = {
         META_STATE: state,
-        META_ATTEMPTS: attempts,
+        # WP REST exige string para meta registrada (tipo 'string'); o read
+        # converte de volta com _int_or/_str_or.
+        META_ATTEMPTS: str(attempts),
         META_NEXT_RETRY: next_retry_at or "",
         META_LAST_ERROR: last_error or "",
         META_READY_HASH: ready_hash or "",
-        META_POLICY_VERSION: policy_version,
+        META_POLICY_VERSION: str(policy_version),
         META_PROCESSED_AT: processed_at or now_iso(),
     }
     if state == STATE_READY:
@@ -197,9 +199,14 @@ def canonical_json(value: Any) -> str:
 
 
 def _int_or(value: Any, default: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool):
         return default
-    return max(0, value)
+    if isinstance(value, int):
+        return max(0, value)
+    # WP REST devolve meta como string mesmo para numeros.
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return default
 
 
 def _str_or(value: Any) -> str:

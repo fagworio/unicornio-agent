@@ -9,7 +9,8 @@ class ObservabilityTests(unittest.TestCase):
     def test_markers_contain_only_safe_processing_metadata(self):
         markers = build_processing_markers("process", 0.95, processed_at="2026-08-20T12:00:00Z")
         self.assertEqual(markers["_ai_editor_decision"], "process")
-        self.assertEqual(markers["_ai_editor_confidence"], 0.95)
+        # WP REST exige string para meta registrada (tipo 'string').
+        self.assertEqual(markers["_ai_editor_confidence"], "0.95")
         self.assertNotIn("content", markers)
         self.assertNotIn("password", json.dumps(markers).lower())
 

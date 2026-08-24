@@ -26,7 +26,8 @@ def build_processing_markers(
     return {
         "_ai_editor_version": _VERSION,
         "_ai_editor_decision": decision,
-        "_ai_editor_confidence": confidence,
+        # WP REST exige string para meta registrada (tipo 'string').
+        "_ai_editor_confidence": str(confidence),
         "_ai_editor_processed_at": processed_at or datetime.now(timezone.utc).isoformat(),
         "_ai_editor_correlation_id": correlation_id or str(uuid.uuid4()),
     }
