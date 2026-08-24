@@ -50,6 +50,18 @@ class HtmlCleanerTests(unittest.TestCase):
         )
         self.assertIn('<img src="https://s3.example/foto.webp" alt="Foto" />', result)
 
+    def test_keeps_image_with_uso_com_credito(self):
+        # Politica 2026-08: credito visivel e a evidencia (uso com credito) —
+        # figura com esse marcador + URL tambem e preservada, senao o apply
+        # no-rewrite descartaria as imagens e o post entraria em loop de rework.
+        result = clean_html(
+            '<figure class="aligncenter"><img src="https://s3.example/atlantis.webp" alt="Atlantis" />'
+            "<figcaption>Crédito da imagem: Gamingbible. Key art de Disney's Atlantis. "
+            "Uso com crédito (https://www.gamingbible.com/artigo).</figcaption></figure>"
+        )
+        self.assertIn('<img src="https://s3.example/atlantis.webp"', result)
+        self.assertIn("Uso com crédito", result)
+
     def test_drops_image_when_credit_has_no_license(self):
         result = clean_html(
             '<figure><img src="https://s3.example/sem.webp" alt="Sem licença" />'
@@ -57,6 +69,25 @@ class HtmlCleanerTests(unittest.TestCase):
         )
         self.assertNotIn("<img", result)
         self.assertIn("Crédito da imagem: Autor", result)
+
+    def test_repairs_orphan_img_next_to_credit_figure(self):
+        # Layout quebrado de producao: <figure> de credito seguido de <img>
+        # solto. O reparo move o img para dentro da figura (loop de rework).
+        from unicornio_editor.html_cleaner import _repair_orphan_media
+
+        broken = (
+            '<p>Texto.</p>'
+            '<figure class="aligncenter"><figcaption>Crédito da imagem: Autor. Cena. '
+            "Uso com crédito (https://src.example/artigo).</figcaption></figure>"
+            '<img width="1280" height="720" src="https://s3.example/cena.jpg" />'
+            "<p>Mais texto.</p>"
+        )
+        repaired = _repair_orphan_media(broken)
+        cleaned = clean_html(repaired)
+        self.assertIn('src="https://s3.example/cena.jpg"', cleaned)
+        # Figura sem credito nao e tocada (img continua solta e e descartada).
+        safe = "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure><img src=\"https://s3.example/y.jpg\" />"
+        self.assertEqual(clean_html(_repair_orphan_media(safe)), "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure>")
 
     def test_drops_image_when_figure_has_no_figcaption(self):
         result = clean_html(

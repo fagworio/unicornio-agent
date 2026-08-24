@@ -14,7 +14,7 @@ from .builder import append_canonical_footer
 from .checklist import _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
-from .html_cleaner import clean_html
+from .html_cleaner import _repair_orphan_media, clean_html
 from .list_quality import detect_list_format
 from .manifest import (
     META_READY_MANIFEST,
@@ -69,7 +69,7 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
         "post_id": post_id,
         "status": post["status"],
         "backup": str(backup),
-        "cleaned_html": clean_html(raw),
+        "cleaned_html": clean_html(_repair_orphan_media(raw)),
         "original_link": _original_link(post),
         "wordpress_changed": False,
     }
@@ -666,7 +666,7 @@ def get_cleaned_content(
     post = client.get_post(post_id)
     _require_pending(post)
     raw = _raw_content(post)
-    cleaned = clean_html(raw)
+    cleaned = clean_html(_repair_orphan_media(raw))
     return {
         "post_id": post_id,
         "status": post["status"],
@@ -947,7 +947,7 @@ def resolve_editorial_defaults(editorial: dict[str, Any], post: dict[str, Any]) 
             post, game_name=editorial.get("game_name")
         )
     if resolved.get("cleaned_html") is None:
-        resolved["cleaned_html"] = clean_html(_raw_content(post))
+        resolved["cleaned_html"] = clean_html(_repair_orphan_media(_raw_content(post)))
     return resolved
 
 
@@ -1613,8 +1613,11 @@ def build_cards(
         if not isinstance(meta, dict):
             meta = {}
         entities = extract_entities(title=title, content_html=raw)
-        preserved = len(re.findall(r"<img\b", clean_html(raw)))
-        images = _images_summary(raw, title, entities)
+        # Delta sobre o conteudo LIMPO (o que o apply realmente produz): o
+        # clean_html preserva figuras com credito completo — sem isso o card
+        # contaria imagens que o apply descartaria (loop de rework invisivel).
+        cleaned = clean_html(raw)
+        images = _images_summary(cleaned, title, entities)
         featured = _featured_diagnosis(client, post, entities)
         fix = _fix_plan(backups_dir, images, featured, blocked) if blocked else None
         cards.append(

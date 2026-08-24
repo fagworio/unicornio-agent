@@ -58,13 +58,56 @@ _ALLOWED_ATTRS = {"class", "id", "title", "alt", "href", "src", "target", "rel",
 # rediscovery (token economy: the code validates, no AI and no web involved).
 _LICENSE_TOKEN = re.compile(
     r"cc\s*0"
-    r"|cc\s*by(?:\s*[-–]\s*(?:sa|nc|nd|nc-sa|nc-nd))?"
+    r"|cc\s*by(?:[\s-]*[-–]?\s*(?:sa|nc|nd|nc-sa|nc-nd))?"
     r"|creative\s*commons"
     r"|public\s*domain"
     r"|dominio\s*publico"
     r"|dom[ií]nio\s*p[uú]blico"
+    r"|uso\s*com\s*credito"  # politica 2026-08: credito visivel = evidencia
 )
 _CREDIT_MARKER = re.compile(r"credito\s+da\s+imagem|^credito\s*:")
+
+
+def _repair_orphan_media(html: str) -> str:
+    """Reempacota <img> soltos junto a figura de crédito adjacente.
+
+    Layout quebrado observado em produção: um apply antigo gravou
+    ``<figure><figcaption>Crédito da imagem: ...</figcaption></figure>``
+    seguido de ``<img .../>`` FORA da figura (ou o inverso). O clean_html
+    descarta img fora de figure — e o no-rewrite seguinte zerava as imagens
+    do post (loop de rework: imagens_no_corpo falha sempre). Este reparo é
+    determinístico: emparelha cada img solto com a figura de crédito
+    adjacente (anterior ou posterior, apenas whitespace entre) e move o img
+    para dentro da figura, antes do figcaption. Conservador: só mexe quando
+    a figura carrega o marcador de crédito e não tem img.
+    """
+    if not isinstance(html, str) or "<img" not in html.lower():
+        return html
+    _FIG_WITH_IMG = re.compile(
+        r"(<figure\b[^>]*>.*?</figure>)\s*(<img\b[^>]*>)", re.IGNORECASE | re.DOTALL
+    )
+    _IMG_WITH_FIG = re.compile(
+        r"(<img\b[^>]*>)\s*(<figure\b[^>]*>.*?</figure>)", re.IGNORECASE | re.DOTALL
+    )
+
+    def _fold(match: re.Match[str]) -> str:
+        figure, img = match.group(1), match.group(2)
+        if "<img" in figure.lower():
+            return match.group(0)  # figura já tem img; não duplica
+        caption = re.search(r"<figcaption>", figure, re.IGNORECASE)
+        # "credito da imagem" pode vir acentuado ("Crédito") — normaliza.
+        if not caption or "credito da imagem" not in _normalize(figure):
+            return match.group(0)
+        return figure[: caption.start()] + img + figure[caption.start() :]
+
+    result = html
+    for _ in range(10):
+        folded = _FIG_WITH_IMG.sub(_fold, result)
+        folded = _IMG_WITH_FIG.sub(_fold, folded)
+        if folded == result:
+            break
+        result = folded
+    return result
 
 
 def clean_html(html: str) -> str:

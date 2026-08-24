@@ -379,9 +379,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
                 parts += [str(pid) for pid in report["recent_unprocessed_ids"]]
                 if report.get("eligible_rework_ids"):
-                    parts.append(
-                        "r:" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H")
-                    )
+                    # Bucket de 30min (alinhado ao tick do cron): com rework
+                    # elegivel, o hash muda a cada tick e o agente acorda para
+                    # corrigir — um bloqueio pendente nunca some da agenda e o
+                    # ritmo real e limitado pelo cooldown (30m/2h).
+                    now = _dt.datetime.now(_dt.timezone.utc)
+                    bucket = now.strftime("%Y-%m-%dT%H:") + ("00" if now.minute < 30 else "30")
+                    parts.append("r:" + bucket)
                 line = " ".join(parts) or "0"
                 print(line)
                 return 0
