@@ -11,6 +11,32 @@ class ContentQualityError(ValueError):
     """Raised when content fails a publication-quality gate."""
 
 
+# Portuguese stopwords that carry no keyword signal; a focus keyword may
+# contain them (e.g. "remakes de animes clássicos") without them needing to
+# appear verbatim in the copy.
+_PT_STOPWORDS = frozenset(
+    "de e o a os as do da dos das em para com que no na num numa por ao aos à às um uma".split()
+)
+
+
+def _keyword_in_text(keyword: str, text: str) -> bool:
+    """Keyword relevance: every significant token of the keyword must occur
+    in the text, in order (gaps allowed).
+
+    A strict substring check is too brittle for Portuguese SEO keywords:
+    "bass x machina netflix" never matches "Bass x Machina: Netflix ..." due
+    to punctuation, while "vazamentos gta 6" never matches "vazamentos de
+    GTA 6" due to the stopword. The tokens are the signal, and they must
+    still appear in the same relative order in the target text.
+    """
+    tokens = re.findall(r"[\wÀ-ÿ]+", keyword.casefold())
+    significant = [t for t in tokens if t not in _PT_STOPWORDS]
+    if not significant:
+        return keyword.casefold() in text.casefold()
+    haystack = iter(re.findall(r"[\wÀ-ÿ]+", text.casefold()))
+    return all(any(token == candidate for candidate in haystack) for token in significant)
+
+
 _AI_PATTERNS = (
     "em conclusão",
     "é importante destacar que",
@@ -42,6 +68,7 @@ def validate_content_quality(
     matched_topics: Iterable[str],
     allowed_topics: Iterable[str] = (),
     related_terms: Iterable[str] = (),
+    required_images: int | None = None,
 ) -> dict[str, int | bool]:
     if not isinstance(html, str) or not html.strip():
         raise ContentQualityError("content must contain readable text")
@@ -50,7 +77,16 @@ def validate_content_quality(
     if not isinstance(focus_keyword, str) or not focus_keyword.strip():
         raise ContentQualityError("focus keyword is required")
     words = word_count(html)
-    required_images = minimum_image_count(words)
+    required_images = (
+        required_images
+        if required_images is not None
+        else minimum_image_count(words)
+    )
+    # The 2/4/6 minimum ALWAYS holds: an image-less post is a low-quality
+    # post and must not be published. The relevance-first policy still
+    # applies to the images themselves (a wrong image is rejected by the
+    # relevance gate) — it never waives the count. Listicles get their own
+    # minimum (max(2, item count)) from the checklist via required_images.
     if image_count < required_images:
         raise ContentQualityError(
             f"content with {words} words requires at least {required_images} relevant images"
@@ -64,7 +100,7 @@ def validate_content_quality(
     body = re.sub(r"<[^>]+>", " ", html).casefold()
     title_folded = title.casefold()
     keyword = focus_keyword.casefold().strip()
-    if keyword not in title_folded or keyword not in body:
+    if not _keyword_in_text(keyword, title_folded) or not _keyword_in_text(keyword, body):
         raise ContentQualityError("focus keyword must occur naturally in title and content")
     for term in related_terms:
         if isinstance(term, str) and term.strip() and term.casefold() not in body:

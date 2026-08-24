@@ -20,11 +20,29 @@ from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
 from .editorial_schema import EditorialValidationError, validate_editorial
 from .list_quality import ListContentError, validate_list_content
+from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
 from .wordpress import WordPressClient
 
 _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
+
+
+def _required_image_count(words: int, *, title: str, content: str) -> int:
+    """Minimum body images for the post.
+
+    Plain articles follow the 2/4/6 SEO rule (by word count). Listicles
+    follow their structural rule of one image per numbered item instead:
+    ``max(2, item_count)`` — so a 5-item list with 5 images passes even
+    though 2/4/6 would demand 6, and the image rule never conflicts with
+    ``estrutura_lista``.
+    """
+    from .list_quality import detect_list_format
+
+    promised = detect_list_format(title or "", content or "")
+    if promised is not None:
+        return max(2, promised)
+    return minimum_image_count(words)
 
 
 def run_pre_publish_checklist(
@@ -94,27 +112,21 @@ def run_pre_publish_checklist(
     else:
         check("fonte_original_link", True, "sem original_link; bloco Fonte nao exigido", skipped=True)
 
-    # 6. Body images per content length (SEO rule: 2/4/6 minimum).
-    #    Relevance-first policy: images must represent the exact cited
-    #    subject; when no relevant image exists, absence beats a wrong image,
-    #    so the minimum is waived for posts with zero images.
+    # 6. Body images per content length (SEO rule: 2/4/6 minimum). The
+    #    minimum ALWAYS holds — an image-less post must not be published.
+    #    Listicles get their own floor (max(2, item count)) so the 2/4/6 rule
+    #    never conflicts with the one-image-per-item structural rule.
     words = word_count(content)
-    required = minimum_image_count(words)
+    required = _required_image_count(
+        words, title=str((post.get("title") or {}).get("raw") or ""), content=content
+    )
     inline_images = _IMG_RE.findall(content)
     image_count = len(inline_images)
-    if image_count == 0:
-        check(
-            "imagens_no_corpo",
-            True,
-            f"{words} palavras exigem >= {required} imagens; nenhuma imagem relevante "
-            "disponivel — minimo dispensado (politica: preferir ausencia a imagem fora de contexto)",
-        )
-    else:
-        check(
-            "imagens_no_corpo",
-            image_count >= required,
-            f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
-        )
+    check(
+        "imagens_no_corpo",
+        image_count >= required,
+        f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
+    )
 
     # 6b. Every inline image must be semantically related to the cited subject
     #     (deterministic entity-overlap gate; generic concept matches fail).
@@ -255,6 +267,33 @@ def run_pre_publish_checklist(
     else:
         check("imagens_webp", True, "sem imagens para verificar", skipped=True)
 
+    # 8b. Every inline image must declare real dimensions inside the portal
+    #     content range (MIN..MAX wide) — the converter enforces it at apply
+    #     time; this gate re-checks the final published content so a wrong
+    #     source (tiny thumbnail, stretched art) cannot slip through.
+    from .media.converter import MAX_INLINE_WIDTH, MIN_INLINE_WIDTH
+
+    bad_dimensions: list[str] = []
+    for tag in re.findall(r"<img\b[^>]*>", content, flags=re.IGNORECASE):
+        width_match = re.search(r'\bwidth="(\d+)"', tag, flags=re.IGNORECASE)
+        height_match = re.search(r'\bheight="(\d+)"', tag, flags=re.IGNORECASE)
+        if not width_match or not height_match:
+            bad_dimensions.append("sem width/height")
+            continue
+        width = int(width_match.group(1))
+        height = int(height_match.group(1))
+        if not MIN_INLINE_WIDTH <= width <= MAX_INLINE_WIDTH or height <= 0:
+            bad_dimensions.append(f"{width}x{height}")
+    if inline_images:
+        check(
+            "dimensoes_imagens",
+            not bad_dimensions,
+            f"{len(inline_images)} imagem(ns); fora do padrao {MIN_INLINE_WIDTH}-{MAX_INLINE_WIDTH}px: "
+            f"{', '.join(bad_dimensions) or 'nenhuma'}",
+        )
+    else:
+        check("dimensoes_imagens", True, "sem imagens para verificar", skipped=True)
+
     # 9. Trailer: game content must carry a validated YouTube embed.
     game_name = editorial.get("game_name")
     if isinstance(game_name, str) and game_name.strip():
@@ -275,6 +314,7 @@ def run_pre_publish_checklist(
             image_count=image_count,
             matched_topics=relevance.get("matched_topics") or [],
             allowed_topics=config.site_topics,
+            required_images=required,
         )
         check("qualidade_texto", True, f"{quality['words']} palavras, qualidade ok")
     except ContentQualityError as exc:
@@ -296,6 +336,70 @@ def run_pre_publish_checklist(
         check("schema_editorial", True, "JSON editorial valido no schema estrito")
     except EditorialValidationError as exc:
         check("schema_editorial", False, str(exc))
+
+    # 14. Vision gate (optional, fail-closed when enabled): a cheap vision
+    #     model confirms each published image depicts its alt subject. This
+    #     catches a CDN serving the wrong image under a correct slug — the
+    #     one case the deterministic gates cannot see. Only posts that passed
+    #     every other gate pay for vision calls.
+    vision_ready, vision_msg = vision_config_ready(
+        enabled=config.vision_enabled, api_key=config.vision_api_key
+    )
+    if not vision_ready:
+        check("imagens_visao", True, vision_msg, skipped=True)
+    elif any(item["status"] == "fail" for item in items):
+        check(
+            "imagens_visao",
+            True,
+            "post ja bloqueado por outro gate; verificacao de visao nao executada",
+            skipped=True,
+        )
+    else:
+        vision_failures: list[str] = []
+        for item in content_images:
+            src = str(item.get("src") or "")
+            alt = str(item.get("alt") or "")
+            try:
+                ok, reason = verify_image_subject(
+                    image_url=src,
+                    subject=alt,
+                    api_key=config.vision_api_key,
+                    base_url=config.vision_base_url,
+                    model=config.vision_model,
+                    timeout=config.http_timeout,
+                )
+            except VisionGateError as exc:
+                vision_failures.append(f"{src[:60]}: {exc}")
+                continue
+            if not ok:
+                vision_failures.append(f"{src[:60]}: {reason}")
+        if featured_ok and client is not None:
+            try:
+                media = client.get_media(featured)
+                featured_url = str(media.get("source_url") or "").strip()
+                featured_subject = str(editorial.get("seo", {}).get("title") or "").strip()
+                if featured_url and featured_subject:
+                    ok, reason = verify_image_subject(
+                        image_url=featured_url,
+                        subject=featured_subject,
+                        api_key=config.vision_api_key,
+                        base_url=config.vision_base_url,
+                        model=config.vision_model,
+                        timeout=config.http_timeout,
+                    )
+                    if not ok:
+                        vision_failures.append(f"destaque: {reason}")
+            except (VisionGateError, Exception) as exc:  # noqa: BLE001 - report, keep gate
+                vision_failures.append(f"destaque: {exc}")
+        if vision_failures:
+            check("imagens_visao", False, "; ".join(vision_failures[:3]))
+        else:
+            check(
+                "imagens_visao",
+                True,
+                f"{len(content_images) + (1 if featured_ok and client is not None else 0)} "
+                "imagem(ns) confirmadas pelo modelo de visao",
+            )
 
     passed = sum(1 for item in items if item["status"] == "pass")
     skipped = sum(1 for item in items if item["status"] == "skip")

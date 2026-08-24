@@ -27,6 +27,10 @@ class Config:
     site_topics: tuple[str, ...] = ()
     publish_enabled: bool = False
     publish_limit: int = 0
+    vision_enabled: bool = False
+    vision_api_key: str = field(default="", repr=False)
+    vision_base_url: str = ""
+    vision_model: str = "gpt-4o-mini"
 
     def __repr__(self) -> str:
         return (
@@ -41,7 +45,9 @@ class Config:
             f"min_skip_confidence={self.min_skip_confidence!r}, "
             f"site_topics={len(self.site_topics)} tópicos, "
             f"publish_enabled={self.publish_enabled!r}, "
-            f"publish_limit={self.publish_limit!r})"
+            f"publish_limit={self.publish_limit!r}, "
+            f"vision_enabled={self.vision_enabled!r}, "
+            f"vision_model={self.vision_model!r})"
         )
 
 
@@ -125,6 +131,12 @@ def load_config() -> Config:
         site_topics=_topics("SITE_TOPICS"),
         publish_enabled=_bool("PUBLISH_ENABLED", False),
         publish_limit=_int("PUBLISH_LIMIT", 0, 0, 100),
+        vision_enabled=_bool("EDITOR_VISION_ENABLED", False),
+        vision_api_key=_env("EDITOR_VISION_API_KEY"),
+        vision_base_url=_validate_url(
+            "EDITOR_VISION_BASE_URL", _env("EDITOR_VISION_BASE_URL", "https://api.openai.com/v1")
+        ),
+        vision_model=_env("EDITOR_VISION_MODEL", "gpt-4o-mini"),
     )
 
 

@@ -16,6 +16,15 @@ from unicornio_editor.workflow import (
 
 
 def editorial_payload(decision="process"):
+    # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
+    # editorial valido — 2 imagens reais com credito + keyword no corpo.
+    title = "Título sobre videogame e lançamento importante"
+    images = (
+        '<figure><img src="https://s3.example/noticia-importante-1.webp" alt="%s" width="800" height="450" />'
+        "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+        '<figure><img src="https://s3.example/noticia-importante-2.webp" alt="%s" width="800" height="450" />'
+        "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+    ) % (title, title)
     return {
         "site_relevance": {
             "decision": decision,
@@ -23,9 +32,9 @@ def editorial_payload(decision="process"):
             "reason": "Teste",
             "matched_topics": ["games"] if decision == "process" else [],
         },
-        "cleaned_html": "<p>Texto revisado.</p>",
+        "cleaned_html": f"<p>Texto revisado sobre videogame e lançamento.</p>{images}",
         "seo": {
-            "title": "Título sobre videogame e lançamento importante",
+            "title": title,
             "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
             "focus_keyword": "videogame",
         },
@@ -89,6 +98,7 @@ class WorkflowTests(unittest.TestCase):
             "date_gmt": "2026-08-21T06:00:00",
             "content": {"raw": "<article><p>Original.</p></article>"},
             "meta": {"original_link": "https://source.example/news"},
+            "featured_media": 7,
         }
 
     def test_prepare_creates_snapshot_and_cleans_content(self):
@@ -130,6 +140,48 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["unprocessed_ids"], [])
             self.assertEqual(report["recent_unprocessed_ids"], [])
 
+    def test_queue_reports_blocked_as_rework_not_edited(self):
+        # Fix do loop verificar->corrigir->publicar: post com
+        # editorial.blocked.json (publish gate reabriu, ou apply recusou) NAO
+        # conta como "edited" (pronto p/ publicar) — conta como blocked/rework e
+        # entra na linha do monitor para o agente editorial acordar e corrigir.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            payload = editorial_payload()
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            (root / "backups" / "42" / "editorial.blocked.json").write_text(
+                json.dumps(
+                    {"status": "blocked", "reason": "checklist pre-publicacao com falhas"}
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient(self.post())
+            report = build_queue_report(client, root)
+            self.assertEqual(report["edited"], 0)
+            self.assertEqual(report["blocked"], 1)
+            self.assertEqual(report["unprocessed_ids"], [])
+            self.assertEqual(report["blocked_ids"], [42])
+            self.assertEqual(report["recent_blocked_ids"], [42])
+            # Sem latest.json (apply recusou por imagens_no_corpo): continua
+            # rework, nunca volta como "unprocessed" sem marcador.
+            (root / "backups" / "42" / "editorial.latest.json").unlink()
+            report = build_queue_report(client, root)
+            self.assertEqual(report["blocked"], 1)
+            self.assertEqual(report["unprocessed_ids"], [])
+            self.assertEqual(report["recent_blocked_ids"], [42])
+            # uncertain vence: se o agente ja registrou uncertain.json, o post
+            # sai da fila de trabalho — re-tentar so queimaria tokens.
+            (root / "backups" / "42" / "uncertain.json").write_text(
+                json.dumps({"status": "uncertain"}), encoding="utf-8"
+            )
+            report = build_queue_report(client, root)
+            self.assertEqual(report["blocked"], 0)
+            self.assertEqual(report["uncertain"], 1)
+            self.assertEqual(report["blocked_ids"], [])
+
     def test_queue_monitor_excludes_old_backlog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -157,7 +209,7 @@ class WorkflowTests(unittest.TestCase):
                 Path(directory, "backups/42/editorial.latest.json").read_text(encoding="utf-8")
             )
             self.assertEqual(saved["seo"]["title"], "Titulo herdado do post")
-            self.assertIn("<p>Texto revisado.</p>", report["content_preview"])
+            self.assertIn("<p>Texto revisado sobre videogame e lançamento.</p>", report["content_preview"])
 
     def test_apply_requires_seo_when_post_meta_invalid(self):
         from unicornio_editor.editorial_schema import EditorialValidationError
@@ -223,6 +275,54 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(card["images"]["preservadas"], 1)
             self.assertEqual(card["original_link"], "https://source.example/news")
 
+    def test_build_cards_marks_blocked_with_reason_and_sorts_first(self):
+        # Fix do loop: card de post reaberto pelo publish gate mostra
+        # blocked=true + blocked_reason (o que corrigir) e vem PRIMEIRO no
+        # lote — o agente editorial corrige rework antes de posts novos.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blocked_post = self.post()  # id 42
+            blocked_post["title"] = {"raw": "Jogo bloqueado no gate"}
+            new_post = dict(blocked_post)
+            new_post["id"] = 43
+            new_post["title"] = {"raw": "Post novo qualquer"}
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(editorial_payload()), encoding="utf-8"
+            )
+            (root / "backups" / "42" / "editorial.blocked.json").write_text(
+                json.dumps(
+                    {
+                        "post_id": 42,
+                        "status": "blocked",
+                        "blocked_checklist": {
+                            "items": [
+                                {"name": "imagens_no_corpo", "status": "fail"},
+                                {"name": "destaque_1280x720", "status": "fail"},
+                                {"name": "backup", "status": "pass"},
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeMulti(FakeClient):
+                def list_pending(self, **kwargs):
+                    return [blocked_post, new_post]
+
+            report = build_cards(FakeMulti(blocked_post), self.config(True), root)
+            cards = report["cards"]
+            self.assertEqual([c["id"] for c in cards], [42, 43])  # rework primeiro
+            self.assertTrue(cards[0]["blocked"])
+            self.assertFalse(cards[0]["edited"])  # latest existe, mas blocked
+            self.assertEqual(
+                cards[0]["blocked_reason"],
+                "checklist: imagens_no_corpo, destaque_1280x720",
+            )
+            self.assertFalse(cards[1]["blocked"])
+            self.assertIsNone(cards[1]["blocked_reason"])
+
     def test_apply_skip_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())
@@ -241,6 +341,28 @@ class WorkflowTests(unittest.TestCase):
                 client.updated[0][1]["meta"]["rank_math_focus_keyword"], "videogame"
             )
             self.assertEqual(client.updated[0][1]["meta"]["_ai_editor_decision"], "process")
+
+    def test_apply_clears_blocked_and_uncertain_markers_on_success(self):
+        # Fix do loop: re-aplicar com sucesso remove editorial.blocked.json e
+        # uncertain.json — sem isso o post ficaria "blocked" para sempre e o
+        # monitor acordaria o agente em loop corrigindo post já corrigido.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.blocked.json").write_text(
+                json.dumps({"status": "blocked"}), encoding="utf-8"
+            )
+            (root / "backups" / "42" / "uncertain.json").write_text(
+                json.dumps({"status": "uncertain"}), encoding="utf-8"
+            )
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self.assertTrue(report["wordpress_changed"])
+            self.assertFalse((root / "backups/42/editorial.blocked.json").exists())
+            self.assertFalse((root / "backups/42/uncertain.json").exists())
+            queue = build_queue_report(client, root)
+            self.assertEqual(queue["blocked"], 0)
+            self.assertEqual(queue["edited"], 1)
 
     def test_apply_embeds_youtube_trailer_for_game_content(self):
         trailer = {
@@ -312,33 +434,40 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_executes_media_plan_and_sets_featured(self):
         payload = editorial_payload()
-        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
         payload["media_plan"] = [
-            self.media_item(paragraph_index=1),
-            self.media_item(paragraph_index=4, is_featured=True),
+            self.media_item(paragraph_index=0),
+            self.media_item(paragraph_index=3),
+            self.media_item(paragraph_index=6, is_featured=True),
         ]
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), mock.patch(
             "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
         ), mock.patch(
             "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/featured.webp")
         ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             side_effect=[
                 {"id": 50, "source_url": "https://wp.test/50.webp"},
                 {"id": 51, "source_url": "https://wp.test/51.webp"},
+                {"id": 52, "source_url": "https://wp.test/52.webp"},
             ],
         ):
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         payload_sent = client.updated[0][1]
-        self.assertEqual(payload_sent["featured_media"], 51)
+        self.assertEqual(payload_sent["featured_media"], 52)
         raw = payload_sent["content"]["raw"]
         self.assertIn("https://wp.test/50.webp", raw)
+        self.assertIn("https://wp.test/51.webp", raw)
         self.assertIn("Crédito da imagem", raw)
-        self.assertEqual(report["featured_media"], 51)
-        self.assertEqual(len(report["media_plan_results"]), 2)
-        self.assertTrue(report["media_plan_results"][1]["featured"])
+        self.assertEqual(report["featured_media"], 52)
+        self.assertEqual(len(report["media_plan_results"]), 3)
+        self.assertTrue(report["media_plan_results"][2]["featured"])
 
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
@@ -418,7 +547,13 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_reuses_media_library_attachment_as_new_upload(self):
         payload = editorial_payload()
-        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        payload["cleaned_html"] = (
+            "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+            '<figure><img src="https://s3.example/noticia-importante-1.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+            '<figure><img src="https://s3.example/noticia-importante-2.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+        )
         # Reuse item: media_library_id references an existing attachment whose
         # title carries the credit block. The apply must download from the
         # attachment URL and upload a NEW attachment (original untouched).
@@ -443,6 +578,10 @@ class WorkflowTests(unittest.TestCase):
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/reuse.webp")) as dl, mock.patch(
             "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/reuse_featured.webp")
         ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             return_value={"id": 77, "source_url": "https://wp.test/uploads/reuse-featured-1280x720.webp"},
         ):
@@ -455,7 +594,13 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_rejects_media_library_reuse_without_credit(self):
         payload = editorial_payload()
-        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+        payload["cleaned_html"] = (
+            "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+            '<figure><img src="https://s3.example/noticia-importante-1.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+            '<figure><img src="https://s3.example/noticia-importante-2.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+        )
         item = self.media_item(paragraph_index=1, is_featured=True)
         item["media_library_id"] = 501
         payload["media_plan"] = [item]
@@ -549,10 +694,10 @@ class WorkflowTests(unittest.TestCase):
         post["content"] = {
             "raw": (
                 "<p>Texto revisado sobre videogame.</p>"
-                '<figure class="aligncenter"><img src="https://wp.test/1.webp" alt="Imagem do titulo do jogo" />'
+                '<figure class="aligncenter"><img src="https://wp.test/1.webp" width="1280" height="720" alt="Imagem do titulo do jogo" />'
                 "<figcaption>Crédito da imagem: Autor. Imagem do titulo do jogo. CC BY 4.0.</figcaption></figure>"
                 "<p>Mais texto sobre videogame e jogos.</p>"
-                '<figure class="aligncenter"><img src="https://wp.test/2.webp" alt="Imagem do titulo do jogo" />'
+                '<figure class="aligncenter"><img src="https://wp.test/2.webp" width="1280" height="720" alt="Imagem do titulo do jogo" />'
                 "<figcaption>Crédito da imagem: Autor. Imagem do titulo do jogo. CC BY 4.0.</figcaption></figure>"
                 '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
                 "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
@@ -648,6 +793,50 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(published), 2)
         self.assertEqual([o["post_id"] for o in published], [1, 2])
         self.assertEqual(len(client.updated), 2)
+
+
+    def test_apply_fails_fast_without_minimum_images(self):
+        # Politica 2/4/6 sem waiver: um editorial cujo conteudo nao atinge o
+        # minimo de imagens NAO pode ser gravado — o apply recusa (needs_rework),
+        # arquiva editorial.blocked.json e devolve o post a fila.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = editorial_payload()
+            payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # 0 imagens
+            payload["media_plan"] = []
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), root, 42, payload)
+            self.assertEqual(report["status"], "needs_rework")
+            self.assertIn("imagens_no_corpo", report["blocked_reasons"])
+            self.assertFalse(report["wordpress_changed"])
+            self.assertEqual(client.updated, [])
+            self.assertFalse((root / "backups/42/editorial.latest.json").exists())
+            self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
+
+    def test_publish_blocked_records_rework_but_keeps_latest(self):
+        # Gate duplo fechado: o publish bloqueia o post e registra
+        # editorial.blocked.json, MAS mantém editorial.latest.json — o post
+        # continua candidato nas próximas janelas (remover o latest orfanaria
+        # o post mesmo com conteúdo bom já gravado no WordPress).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups" / "42").mkdir(parents=True)
+            payload = editorial_payload()
+            payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # falha no checklist
+            (root / "backups" / "42" / "editorial.latest.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            client = FakeClient(self.post())
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            report = publish_post(client, config, root, 42)
+            self.assertEqual(report["status"], "blocked")
+            self.assertTrue(report["reopened_for_rework"])
+            self.assertFalse(report["wordpress_changed"])
+            self.assertTrue((root / "backups/42/editorial.latest.json").is_file())
+            self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
 
 
 if __name__ == "__main__":

@@ -9,6 +9,15 @@ from PIL import Image, ImageOps
 FEATURED_WIDTH = 1280
 FEATURED_HEIGHT = 720
 MAX_INLINE_WIDTH = 1280
+# Content images below this width render tiny on the portal layout; the
+# source is rejected instead of upscaled (upscaling never happens).
+MIN_INLINE_WIDTH = 640
+
+
+def image_dimensions(path: Path) -> tuple[int, int]:
+    """Return (width, height) of an image file without decoding pixels."""
+    with Image.open(path) as image:
+        return image.size
 
 
 class MediaConversionError(RuntimeError):
@@ -27,6 +36,95 @@ def _open_authoritative(source: Path) -> Image.Image:
         image.verify()
     image = Image.open(source)
     return ImageOps.exif_transpose(image)
+
+
+# Transparent images are rejected: a source whose usable (non-transparent)
+# pixels cover less than this fraction of the frame is a defective/empty
+# image (logos cut to 3% opacity, blank overlays) — flattening it over white
+# would publish an empty frame, so it fails instead of being published.
+_MIN_OPAQUE_FRACTION = 0.01
+
+
+def _alpha_channel(image: Image.Image) -> Image.Image | None:
+    """Canal alpha da imagem, ou None quando o modo nao tem transparencia."""
+    if image.mode == "RGBA":
+        return image.getchannel("A")
+    if image.mode in ("LA", "PA"):
+        return image.getchannel("A")
+    if image.mode == "P" and "transparency" in image.info:
+        return image.convert("RGBA").getchannel("A")
+    return None
+
+
+def image_has_transparency(path: Path) -> bool:
+    """True quando a imagem tem canal alpha com pelo menos um pixel translucido.
+
+    Read-only, usada pelo pipeline para reportar (e pelo flatten para decidir).
+    Modos sem canal alpha (JPEG/RGB) nunca sao transparentes.
+    """
+    try:
+        with Image.open(path) as image:
+            alpha = _alpha_channel(image)
+            if alpha is None:
+                return False
+            return alpha.getextrema() != (255, 255)
+    except OSError:
+        return False
+
+
+def flatten_transparency(image: Image.Image) -> Image.Image:
+    """Compoe a imagem sobre fundo branco e devolve RGB (sem canal alpha).
+
+    A regra editorial e \"imagem transparente nao entra no post\": a fonte
+    pode chegar como PNG/WebP com canal alpha (key art recortada, logo), mas o
+    arquivo publicado deve ser opaco — fundo transparente vira caixa
+    preta/branca dependendo do tema e degrada o layout. Em vez de rejeitar
+    toda key art com alpha, o alpha e achatado sobre branco ANTES do upload e
+    da insercao no content (a imagem usada nunca e transparente).
+    """
+    if image.mode == "RGBA":
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.getchannel("A"))
+        return background
+    if image.mode in ("LA", "PA"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image.convert("RGBA"), mask=image.getchannel("A"))
+        return background
+    if image.mode == "P" and "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _reject_if_empty_alpha(image: Image.Image) -> None:
+    """Fail-closed: imagem (quase) totalmente transparente e rejeitada.
+
+    Flatten nao salva uma imagem vazia — composicao sobre branco so faz
+    sentido quando ha conteudo opaco real para publicar.
+    """
+    alpha = _alpha_channel(image)
+    if alpha is None:
+        return
+    histogram = alpha.histogram()
+    opaque_pixels = sum(histogram[1:])
+    total_pixels = sum(histogram)
+    if opaque_pixels == 0:
+        raise MediaConversionError(
+            "imagem totalmente transparente (sem pixels opacos); troque por uma imagem com fundo"
+        )
+    if opaque_pixels < _MIN_OPAQUE_FRACTION * total_pixels:
+        raise MediaConversionError(
+            "imagem quase totalmente transparente "
+            f"({opaque_pixels / total_pixels:.2%} de pixels opacos); troque por uma imagem com fundo"
+        )
+
+
+def _flatten_if_transparent(image: Image.Image) -> Image.Image:
+    """Aplica a politica de transparencia: rejeita imagem vazia, achata o resto."""
+    _reject_if_empty_alpha(image)
+    return flatten_transparency(image)
 
 
 def _cap_inline_width(image: Image.Image) -> Image.Image:
@@ -52,8 +150,16 @@ def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
         with image:
             if image.width < 64 or image.height < 64:
                 raise MediaConversionError("image resolution is below 64x64")
+            if image.width < MIN_INLINE_WIDTH:
+                raise MediaConversionError(
+                    f"inline image source is {image.width}px wide (minimum {MIN_INLINE_WIDTH}px); "
+                    "pick a larger source — content images are never upscaled"
+                )
             if image.mode not in {"RGB", "RGBA"}:
                 image = image.convert("RGBA")
+            # Politica de transparencia: imagem vazia e rejeitada; o resto e
+            # achatado sobre branco — o WebP publicado nunca tem canal alpha.
+            image = _flatten_if_transparent(image)
             image = _cap_inline_width(image)
             destination.parent.mkdir(parents=True, exist_ok=True)
             image.save(destination, format="WEBP", quality=85, method=6)
@@ -92,6 +198,9 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
                     "a 1280x720 featured image requires a landscape source — pick landscape key art"
                 )
             work = image.convert("RGBA") if image.mode not in {"RGB", "RGBA"} else image
+            # Politica de transparencia: imagem vazia e rejeitada; o resto e
+            # achatado sobre branco — o destaque publicado nunca tem alpha.
+            work = _flatten_if_transparent(work)
             target_ratio = FEATURED_WIDTH / FEATURED_HEIGHT
             width, height = work.size
             current_ratio = width / height

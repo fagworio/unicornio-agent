@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from unicornio_editor.checklist import run_pre_publish_checklist
 from unicornio_editor.config import Config
@@ -79,16 +80,16 @@ class ChecklistTests(unittest.TestCase):
 
     def test_all_pass_when_every_rule_is_satisfied(self):
         content = (
-            '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Redfall key art" />'
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" />'
             "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Texto revisado sobre o jogo videogame.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Redfall key art" />'
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" width="1280" height="720" alt="Redfall key art" />'
             "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Mais texto sobre videogame e o lançamento.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/c.webp" alt="Redfall key art" />'
+            '<figure class="aligncenter"><img src="https://media.example/c.webp" width="1280" height="720" alt="Redfall key art" />'
             "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Fechando o texto sobre videogame.</p>"
-            '<figure class="aligncenter"><img src="https://media.example/d.webp" alt="Redfall key art" />'
+            '<figure class="aligncenter"><img src="https://media.example/d.webp" width="1280" height="720" alt="Redfall key art" />'
             "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
             "<p>Último parágrafo com videogame.</p>"
             "<hr /><h3>Confira mais novidades em nosso Portal de Notícias!</h3><hr />"
@@ -130,10 +131,11 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
 
-    def test_body_images_waived_when_no_image_available(self):
-        # Policy: absence beats a wrong image — 0 images does not block.
+    def test_body_images_fail_when_no_image_available(self):
+        # The 2/4/6 minimum ALWAYS holds: an image-less post must not pass.
         result = self._run_checklist()
-        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "pass")
+        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
+        self.assertEqual(self.statuses(result)["qualidade_texto"], "fail")
 
     def test_irrelevant_image_fails_relevance_gate(self):
         # A real bat is NOT a valid image for a videogame news post.
@@ -289,6 +291,114 @@ class ChecklistTests(unittest.TestCase):
                 client=FakeClient(),
             )
         self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
+
+    def test_accepts_inline_dimensions_within_standard(self):
+        content = (
+            "<p>Texto sobre videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Jogo importante" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" width="900" height="506" alt="Jogo importante" /></figure>'
+        )
+        result = self._run_checklist(content=content)
+        item = next(i for i in result["items"] if i["name"] == "dimensoes_imagens")
+        self.assertEqual(item["status"], "pass", item["detail"])
+
+    def test_rejects_inline_dimensions_outside_standard(self):
+        content = (
+            "<p>Texto sobre videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="500" height="300" alt="Jogo importante" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Jogo importante" /></figure>'
+        )
+        result = self._run_checklist(content=content)
+        item = next(i for i in result["items"] if i["name"] == "dimensoes_imagens")
+        self.assertEqual(item["status"], "fail")
+        self.assertIn("500x300", item["detail"])
+        self.assertIn("sem width/height", item["detail"])
+    def test_vision_gate_skipped_when_disabled(self):
+        content = (
+            "<p>Texto sobre videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Jogo importante" /></figure>'
+        )
+        with mock.patch(
+            "unicornio_editor.checklist.verify_image_subject", return_value=(True, "ok")
+        ) as verify:
+            result = self._run_checklist(content=content)
+        item = next(i for i in result["items"] if i["name"] == "imagens_visao")
+        self.assertEqual(item["status"], "skip")
+        verify.assert_not_called()
+
+    def test_vision_gate_blocks_when_model_denies_subject(self):
+        content = (
+            "<p>Texto sobre o jogo Redfall e seu lançamento.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            "<p>Mais texto sobre Redfall e jogos.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        editorial = editorial_payload()
+        editorial["seo"] = {
+            "title": "Redfall ganha data de lançamento",
+            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+            "focus_keyword": "Redfall",
+        }
+        post = make_post(meta={"original_link": "https://source.example/news"})
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=True,
+            vision_api_key="k",
+            vision_base_url="http://vision.test/v1",
+            vision_model="vision-m",
+        )
+        with mock.patch(
+            "unicornio_editor.checklist.verify_image_subject",
+            side_effect=[(True, "ok"), (False, "modelo de visao NEGOU o assunto")],
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                backup_path = Path(directory) / "snapshot.json"
+                backup_path.write_text("{}")
+                result = run_pre_publish_checklist(
+                    post=post,
+                    editorial=editorial,
+                    content=content,
+                    backup_path=backup_path,
+                    config=config,
+                    client=FakeClient(),
+                )
+        item = next(i for i in result["items"] if i["name"] == "imagens_visao")
+        self.assertEqual(item["status"], "fail")
+        self.assertIn("NEGOU", item["detail"])
+        self.assertFalse(result["all_passed"])
+
+    def test_vision_gate_skipped_when_earlier_gate_failed(self):
+        content = "<p>Texto sobre videogame sem imagem.</p>"
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=True,
+            vision_api_key="k",
+            vision_base_url="http://vision.test/v1",
+            vision_model="vision-m",
+        )
+        with mock.patch("unicornio_editor.checklist.verify_image_subject") as verify:
+            with tempfile.TemporaryDirectory() as directory:
+                backup_path = Path(directory) / "snapshot.json"
+                backup_path.write_text("{}")
+                result = run_pre_publish_checklist(
+                    post=make_post(meta={"original_link": "https://source.example/news"}),
+                    editorial=editorial_payload(),
+                    content=content,
+                    backup_path=backup_path,
+                    config=config,
+                    client=FakeClient(),
+                )
+        item = next(i for i in result["items"] if i["name"] == "imagens_visao")
+        self.assertEqual(item["status"], "skip")
+        verify.assert_not_called()
 
 
 if __name__ == "__main__":

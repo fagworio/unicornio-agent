@@ -39,6 +39,13 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("old.example", result)
         self.assertNotIn("Fonte", result)
 
+    def test_strips_import_fonte_principal_artifact(self):
+        html = '<p>Notícia.</p><br><a href="https://example.com/news/game">Fonte Principal</a>'
+        result = append_canonical_footer(html, "https://example.com/news/game")
+        self.assertNotIn("Fonte Principal", result)
+        self.assertIn("Fonte:", result)
+        self.assertEqual(result.count("Fonte:"), 1)
+
     def test_rejects_non_http_original_link(self):
         with self.assertRaises(BuilderError):
             append_canonical_footer("<p>Notícia.</p>", "javascript:alert(1)")

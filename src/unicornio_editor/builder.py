@@ -39,6 +39,17 @@ def append_canonical_footer(html: str, original_link: str | None) -> str:
         cleaned,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    # Import-era footer artifact: a bare link labelled "Fonte Principal"
+    # (or similar) with no target/rel attributes, e.g.
+    # `<br><a href="...">Fonte Principal</a>`. It is NOT the canonical
+    # Fonte block, so strip it and the surrounding <br> so the canonical
+    # footer below is the only source block.
+    cleaned = re.sub(
+        r'\s*<br\s*/?>\s*<a\b[^>]*>\s*(?:Fonte Principal|Fonte Original|Fonte)\s*</a>',
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     cleaned = re.sub(
         r"(?:\s*<hr\s*/?>\s*)+$",
         "",

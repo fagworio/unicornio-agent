@@ -12,6 +12,7 @@ from unicornio_editor.media.converter import (
     FEATURED_WIDTH,
     MediaConversionError,
     convert_to_webp,
+    image_has_transparency,
     prepare_featured_webp,
 )
 from unicornio_editor.media.downloader import MediaDownloadError, download_image, select_reupload_source
@@ -82,11 +83,97 @@ class MediaPipelineTests(unittest.TestCase):
     def test_converts_to_webp(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
-            source.write_bytes(ImageHandler.payload)
+            big = io.BytesIO()
+            Image.new("RGB", (800, 600), "blue").save(big, format="PNG")
+            source.write_bytes(big.getvalue())
             output = convert_to_webp(source)
             self.assertEqual(output.suffix, ".webp")
             with Image.open(output) as image:
                 self.assertEqual(image.format, "WEBP")
+                self.assertEqual(image.size, (800, 600))
+
+    def test_image_has_transparency_detects_alpha(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rgb = Path(directory) / "rgb.png"
+            Image.new("RGB", (64, 64), "red").save(rgb, format="PNG")
+            self.assertFalse(image_has_transparency(rgb))
+            opaque = Path(directory) / "opaque.png"
+            Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(opaque, format="PNG")
+            self.assertFalse(image_has_transparency(opaque))  # alpha 255 em tudo
+            alpha = Path(directory) / "alpha.png"
+            half = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            half.paste(Image.new("RGBA", (32, 64), (255, 0, 0, 255)), (32, 0))
+            half.save(alpha, format="PNG")
+            self.assertTrue(image_has_transparency(alpha))
+
+    def test_convert_to_webp_flattens_transparency(self):
+        # Politica de transparencia: fonte com canal alpha NAO entra no post —
+        # o WebP publicado e composto sobre fundo branco (opaco), nunca RGBA.
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "alpha.png"
+            half = Image.new("RGBA", (800, 600), (0, 0, 0, 0))  # metade transparente
+            half.paste(Image.new("RGBA", (400, 600), (200, 50, 50, 255)), (400, 0))
+            half.save(source, format="PNG")
+            output = convert_to_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "WEBP")
+                self.assertEqual(image.mode, "RGB")  # sem canal alpha
+                white = image.getpixel((0, 300))  # era transparente -> branco
+                assert isinstance(white, tuple) and len(white) == 3
+                self.assertGreaterEqual(white[0], 240)
+                self.assertGreaterEqual(white[1], 240)
+                self.assertGreaterEqual(white[2], 240)
+                red = image.getpixel((600, 300))  # era opaco -> mantem a cor
+                assert isinstance(red, tuple) and len(red) == 3
+                self.assertGreater(red[0], 150)
+                self.assertLess(red[1], 100)
+
+    def test_rejects_fully_transparent_image(self):
+        # Fail-closed: imagem sem nenhum pixel opaco e rejeitada — achatar
+        # sobre branco publicaria um quadro vazio.
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "empty.png"
+            Image.new("RGBA", (800, 600), (0, 0, 0, 0)).save(source, format="PNG")
+            with self.assertRaises(MediaConversionError):
+                convert_to_webp(source)
+            self.assertFalse(Path(str(source).replace(".png", ".webp")).exists())
+
+    def test_prepare_featured_webp_flattens_transparency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source = directory / "keyart.png"
+            half = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
+            half.paste(Image.new("RGBA", (1920, 540), (30, 120, 200, 255)), (0, 540))
+            half.save(source, format="PNG")
+            output = prepare_featured_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "WEBP")
+                self.assertEqual(image.mode, "RGB")
+                self.assertEqual(image.size, (FEATURED_WIDTH, FEATURED_HEIGHT))
+                top = image.getpixel((FEATURED_WIDTH // 2, 100))  # era transparente
+                assert isinstance(top, tuple) and len(top) == 3
+                self.assertGreaterEqual(top[0], 240)
+                self.assertGreaterEqual(top[1], 240)
+                self.assertGreaterEqual(top[2], 240)
+
+    def test_rejects_small_inline_source_below_minimum_width(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            small = io.BytesIO()
+            Image.new("RGB", (500, 300), "green").save(small, format="PNG")
+            source.write_bytes(small.getvalue())
+            with self.assertRaises(MediaConversionError):
+                convert_to_webp(source)
+
+    def test_caps_inline_width_at_maximum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            wide = io.BytesIO()
+            Image.new("RGB", (2000, 1125), "red").save(wide, format="PNG")
+            source.write_bytes(wide.getvalue())
+            output = convert_to_webp(source)
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (1280, 720))
 
     def test_upload_uses_local_wordpress_media_client(self):
         with tempfile.TemporaryDirectory() as directory:

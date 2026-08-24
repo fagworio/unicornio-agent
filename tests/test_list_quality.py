@@ -35,6 +35,25 @@ class ListQualityTests(unittest.TestCase):
         bad = GOOD.replace("<h2>1. Scrapped Princess: a ciência por trás da magia</h2>", "<h2>1. A ciência por trás da magia</h2>")
         with self.assertRaises(ListContentError):
             validate_list_content("2 animes para assistir se você ama Frieren", bad)
+    def test_accepts_zero_image_listicle(self):
+        html = (
+            "<p>Intro.</p>"
+            "<h2>1. Tokyo Ghoul: um horror que precisa respirar</h2>"
+            "<p>Descrição do item.</p>"
+            "<h2>2. Berserk: uma adaptação corajosa</h2>"
+            "<p>Descrição do item 2.</p>"
+        )
+        report = validate_list_content("2 animes para assistir se você ama Frieren", html)
+        self.assertTrue(report["passed"])
+
+    def test_rejects_unnumbered_h2_even_without_images(self):
+        html = (
+            "<p>Intro.</p>"
+            "<h2>Tokyo Ghoul</h2>"
+            "<p>Descrição do item.</p>"
+        )
+        with self.assertRaises(ListContentError):
+            validate_list_content("2 animes para assistir se você ama Frieren", html)
 
 
 if __name__ == "__main__":

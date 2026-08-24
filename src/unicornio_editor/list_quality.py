@@ -78,6 +78,11 @@ def validate_list_content(title: str, html: str) -> dict[str, int | bool]:
     parser = _BlockParser()
     parser.feed(html)
     blocks = parser.blocks
+    # Relevance-first policy: a listicle may legitimately have zero images
+    # (absence beats a wrong image), so the image-order contract is waived
+    # when the content carries no image at all; numbering and count still
+    # hold. The structural contract only applies to posts that HAVE images.
+    has_any_image = any(tag in {"figure", "img"} for tag, _, _ in blocks)
     headings = [(i, value) for i, (tag, value, _) in enumerate(blocks) if tag == "h2"]
     if len(headings) != promised:
         raise ListContentError(f"title promises {promised} items but content has {len(headings)} H2 items")
@@ -91,6 +96,8 @@ def validate_list_content(title: str, html: str) -> dict[str, int | bool]:
         if not name or len(name) < 3 or ":" not in name:
             raise ListContentError(f"item {number} H2 must identify the item and its description")
         seen.append(number)
+        if not has_any_image:
+            continue
         if index + 1 >= len(blocks) or blocks[index + 1][0] not in {"figure", "img"}:
             raise ListContentError(f"item {number} must have its image immediately after H2")
         if index + 2 >= len(blocks) or blocks[index + 2][0] != "p":

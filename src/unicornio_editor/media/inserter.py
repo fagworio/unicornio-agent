@@ -47,7 +47,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
     for item in plan:
         if not isinstance(item, Mapping):
             raise MediaInsertionError("each media placement must be an object")
-        required = {"paragraph_index", "media_url", "alt_text", "credit_text"}
+        required = {"paragraph_index", "media_url", "alt_text", "credit_text", "width", "height"}
         if set(item) != required:
             raise MediaInsertionError("media placement has missing or unknown fields")
         index = item["paragraph_index"]
@@ -64,12 +64,24 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise MediaInsertionError("media_url must be an absolute HTTP(S) URL")
+        width = item["width"]
+        height = item["height"]
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or width <= 0
+            or height <= 0
+        ):
+            raise MediaInsertionError("width and height must be positive integers")
         alt = _text(item["alt_text"], "alt_text")
         credit = _text(item["credit_text"], "credit_text")
         if not credit.startswith("Crédito da imagem:"):
             raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
         figure = (
-            f'<figure class="aligncenter"><img src="{escape(url, quote=True)}" alt="{escape(alt, quote=True)}" />'
+            f'<figure class="aligncenter"><img src="{escape(url, quote=True)}" '
+            f'width="{width}" height="{height}" alt="{escape(alt, quote=True)}" />'
             f"<figcaption>{escape(credit)}</figcaption></figure>"
         )
         placements.append((index, figure))

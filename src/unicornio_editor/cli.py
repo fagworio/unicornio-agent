@@ -195,7 +195,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
-                line = " ".join(str(pid) for pid in report["recent_unprocessed_ids"]) or "0"
+                # Linha estavel: rework (posts reabertos pelo publish gate) +
+                # pending recentes nao processados. O monitor hasheia a linha e
+                # so acorda o LLM quando ela muda — rework pendente conta como
+                # trabalho, senao o loop verificar->corrigir->publicar trava.
+                line = " ".join(
+                    str(pid)
+                    for pid in (report.get("recent_blocked_ids", []) + report["recent_unprocessed_ids"])
+                ) or "0"
                 print(line)
                 return 0
             result = report
