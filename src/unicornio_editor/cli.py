@@ -20,12 +20,16 @@ from .workflow import (
     build_cards,
     build_queue_report,
     compose_final_content,
+    discard_post,
     get_cleaned_content,
+    load_draft,
+    mark_uncertain,
     original_link_of,
     prepare_post,
     publish_post,
     publish_ready_posts,
     resolve_editorial_defaults,
+    retry_post,
     validate_media_plan,
 )
 from .wordpress import WordPressClient, WordPressError
@@ -148,6 +152,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     media_validate_parser.add_argument("editorial_file", type=Path)
     media_validate_parser.add_argument("--root", type=Path, default=Path("."))
+
+    draft_parser = subparsers.add_parser(
+        "draft",
+        help="imprime o editorial.draft.json do post (base do rework incremental; "
+        "leia SO para corrigir o componente apontado pelo fix do card)",
+    )
+    draft_parser.add_argument("post_id", type=int)
+    draft_parser.add_argument("--root", type=Path, default=Path("."))
+
+    retry_parser = subparsers.add_parser(
+        "retry",
+        help="reabre um post AWAITING_HUMAN/BLOCKED (revisao humana): zera tentativas "
+        "e cooldown; o post volta a fila de rework — nunca força READY",
+    )
+    retry_parser.add_argument("post_id", type=int)
+    retry_parser.add_argument("--root", type=Path, default=Path("."))
+
+    discard_parser = subparsers.add_parser(
+        "discard",
+        help="descarta um post da fila editorial (decisao humana): grava uncertain.json "
+        "e estado UNCERTAIN — sai da agenda e nunca publica",
+    )
+    discard_parser.add_argument("post_id", type=int)
+    discard_parser.add_argument("--root", type=Path, default=Path("."))
+    discard_parser.add_argument("--reason", type=str, default="")
+
+    uncertain_parser = subparsers.add_parser(
+        "uncertain",
+        help="registra a decisao do agente de nao processar o post agora (motivo obrigatorio)",
+    )
+    uncertain_parser.add_argument("post_id", type=int)
+    uncertain_parser.add_argument("--root", type=Path, default=Path("."))
+    uncertain_parser.add_argument("--reason", type=str, required=True)
     return parser
 
 
@@ -209,11 +246,15 @@ def _failed_items(checklist: dict | None) -> list[dict]:
 
 
 def _compact_apply(result: dict) -> dict:
-    """Projecao enxuta do apply: success = minimo, failure = so o que corrigir.
+    """Projecao enxuta do apply (Fase 6): success = minimo, failure = so o que corrigir.
 
+    - Sucesso: {post_id, status: ready, wordpress_changed, checklist: pass,
+      images: {required, valid}}.
+    - needs_rework: {post_id, status, state, attempts, next_retry_at,
+      wordpress_changed, failed: [{name, detail, required?, valid?, missing?}]}
+      — o delta exato (o que falhou, quanto falta) sem checklist completo.
     O relatorio completo (checklist, midia, trailer, preview) fica em
-    ``backups/<id>/apply.latest.json``; o terminal so devolve o necessario
-    para o agente decidir o proximo passo.
+    ``backups/<id>/apply.latest.json``.
     """
     post_id = result.get("post_id")
     failed = _failed_items(result.get("checklist"))
@@ -222,17 +263,32 @@ def _compact_apply(result: dict) -> dict:
     rejected = sum(
         1 for m in media_results if m.get("status") in ("rejected", "blocked")
     )
+    images = result.get("images") or {}
     if result.get("status") == "needs_rework":
-        reasons = [
-            {"name": name, "detail": result.get("blocked_detail") or ""}
-            for name in (result.get("blocked_reasons") or [])
-        ]
-        return {
+        reasons: list[dict] = []
+        for name in (result.get("blocked_reasons") or []):
+            item: dict = {"name": name, "detail": result.get("blocked_detail") or ""}
+            if name == "imagens_no_corpo" and images:
+                item.update(
+                    {
+                        "required": images.get("required"),
+                        "valid": images.get("valid"),
+                        "missing": images.get("missing"),
+                    }
+                )
+            reasons.append(item)
+        compact = {
             "post_id": post_id,
             "status": "needs_rework",
+            "state": result.get("state"),
+            "attempts": result.get("attempts"),
+            "next_retry_at": result.get("next_retry_at"),
             "wordpress_changed": False,
             "failed": failed or reasons,
         }
+        if images:
+            compact["images"] = images
+        return compact
     if result.get("status") == "uncertain":
         return {
             "post_id": post_id,
@@ -240,23 +296,38 @@ def _compact_apply(result: dict) -> dict:
             "wordpress_changed": False,
             "skip_reason": result.get("skip_reason"),
         }
-    if result.get("dry_run"):
+    if result.get("status") == "skipped":
         return {
+            "post_id": post_id,
+            "status": "skipped",
+            "wordpress_changed": False,
+            "skip_reason": result.get("skip_reason"),
+        }
+    if result.get("dry_run"):
+        compact = {
             "post_id": post_id,
             "status": "dry_run",
             "wordpress_changed": False,
             "checklist": "pass" if not failed else "fail",
             "media": {"accepted": accepted, "rejected": rejected},
-            **({"failed": failed} if failed else {}),
         }
+        if images:
+            compact["images"] = {"required": images.get("required"), "valid": images.get("valid")}
+        if failed:
+            compact["failed"] = failed
+        return compact
     compact = {
         "post_id": post_id,
-        "status": "applied" if result.get("wordpress_changed") else "not_changed",
+        "status": "ready" if result.get("status") == "ready" else (
+            "applied" if result.get("wordpress_changed") else "not_changed"
+        ),
         "wordpress_changed": bool(result.get("wordpress_changed")),
         "checklist": "pass" if not failed else "fail",
         "featured_media": result.get("featured_media"),
         "media": {"accepted": accepted, "rejected": rejected},
     }
+    if images:
+        compact["images"] = {"required": images.get("required"), "valid": images.get("valid")}
     if failed:
         compact["failed"] = failed
     return compact
@@ -295,14 +366,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
-                # Linha estavel: rework (posts reabertos pelo publish gate) +
-                # pending recentes nao processados. O monitor hasheia a linha e
-                # so acorda o LLM quando ela muda — rework pendente conta como
-                # trabalho, senao o loop verificar->corrigir->publicar trava.
-                line = " ".join(
-                    str(pid)
-                    for pid in (report.get("recent_blocked_ids", []) + report["recent_unprocessed_ids"])
-                ) or "0"
+                # Linha estavel hasheada pelo monitor do cron. Trabalho
+                # elegivel (Fase 9): rework BLOCKED fora de cooldown (todos,
+                # nao so os recentes — um bloqueio antigo nao pode sumir da
+                # agenda) + pending recentes nao processados. UNCERTAIN /
+                # AWAITING_HUMAN / SKIPPED / READY / BLOCKED em cooldown
+                # ficam fora. Com rework elegivel, um bucket de hora entra na
+                # linha: o hash muda a cada hora e o agente acorda para
+                # tentar corrigir (o cooldown limita o ritmo real).
+                import datetime as _dt
+
+                parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
+                parts += [str(pid) for pid in report["recent_unprocessed_ids"]]
+                if report.get("eligible_rework_ids"):
+                    parts.append(
+                        "r:" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H")
+                    )
+                line = " ".join(parts) or "0"
                 print(line)
                 return 0
             result = report
@@ -354,6 +434,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "media-validate":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = validate_media_plan(client, payload)
+        elif args.command == "draft":
+            result = load_draft(args.root, args.post_id)
+        elif args.command == "retry":
+            result = retry_post(client, config, args.root, args.post_id)
+        elif args.command == "discard":
+            result = discard_post(client, config, args.root, args.post_id, reason=args.reason)
+        elif args.command == "uncertain":
+            result = mark_uncertain(client, config, args.root, args.post_id, reason=args.reason)
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]

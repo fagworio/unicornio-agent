@@ -35,6 +35,10 @@ class Config:
     max_posts_per_run: int = 2  # cards por lote / posts processados por run
     max_media_candidates: int = 3  # candidatos de midia analisados por imagem
     max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
+    # Loop de rework (verificar -> corrigir -> publicar) com backoff:
+    max_rework_attempts: int = 3  # 3a falha do apply -> AWAITING_HUMAN
+    rework_cooldown_minutes: int = 30  # 1a falha +30m; 2a +2h (30m * 4)
+    policy_version: int = 2  # versao da politica editorial do READY manifest
 
     def __repr__(self) -> str:
         return (
@@ -144,6 +148,9 @@ def load_config() -> Config:
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 2, 1, 10),
         max_media_candidates=_int("EDITOR_MAX_MEDIA_CANDIDATES", 3, 1, 10),
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
+        max_rework_attempts=_int("EDITOR_MAX_REWORK_ATTEMPTS", 3, 1, 10),
+        rework_cooldown_minutes=_int("EDITOR_REWORK_COOLDOWN_MINUTES", 30, 1, 1440),
+        policy_version=_int("EDITOR_POLICY_VERSION", 2, 1, 100),
     )
 
 

@@ -77,48 +77,38 @@ Se `decision=skip` ou a confianca ficar abaixo do limite configurado, o comando 
 - Fail-closed: se a validacao falhar, nao atualiza.
 - Fail-closed de relevancia: conteudo fora da linha editorial ou incerto nao e editado.
 - Limite de lote pequeno por execucao.
-- Imagens importadas existentes no corpo sao descartadas.
+- Imagens importadas existentes: preservadas so com credito completo; descartadas sem ele.
+- Estados operacionais persistidos no WordPress (`_hermes_state`): somente READY publica.
 - CTA e Fonte sao gerados de forma canonica.
 - `original_link` e a unica fonte da URL de referencia.
 
 ## Pipeline
 
 ```text
-Hermes cron
-  -> lista pending
-  -> snapshot
-  -> classifica relevancia
-     -> irrelevante/incerto: skip sem alterar e proximo post
-     -> relevante: continua
-  -> remove article/div/tags ruins/imagens inline importadas
-  -> Hermes melhora texto e SEO
-  -> Hermes cria plano de midia
-  -> Google Images: descoberta de candidatos
-  -> verifica licença pública/permissão e registra evidência
-  -> baixa para área temporária -> valida -> WebP
-  -> WordPress Media REST local (sem bucket/CDN externo)
-  -> crédito obrigatório no conteúdo/metadados
-  -> featured image: legenda + crédito visível no conteúdo quando necessário
-  -> imagem destacada se ausente: obrigatoria, 1280x720 (16:9) WebP
-  -> trailer oficial se relevante: busca determinística no YouTube
-     (<game_name> trailer), validação via oEmbed, embed antes do CTA
-  -> monta CTA + Fonte
-  -> checklist pre-publicacao (somente leitura): backup, pending,
-     relevancia, conteudo, Fonte/original_link, imagens por tamanho
-     (2/4/6), imagem de destaque obrigatoria, WebP, trailer, CTA,
-     qualidade de texto, estrutura e schema — publicar so com all_passed
-  -> valida
-  -> salva backups/<ID>/editorial.latest.json
-  -> publicacao: somente via `publish`/`publish-ready` (checklist revalidado
-     + gate PUBLISH_ENABLED + cota PUBLISH_LIMIT por janela)
-  -> cron de publicacao diario: 00h=5, 08h=7, 12h=8, 18h=10, 21h=10
-     (~40/dia; America/Sao_Paulo; backlog novo entre 03:30 e 05:00)
-  -> qualidade garantida por codigo, nao por diligencia do LLM: schema
-     estrito, checklist 100% obrigatorio no apply E no publish (qualquer
-     fail = blocked, reportado no cron), PUBLISH_ENABLED como gate duplo
-  -> custo de API reduzido: toolsets do cron editorial restritos
-     (terminal+file+web) e EDITOR_BATCH_LIMIT=5 amortizam o prompt fixo
-     (~US$ 0,004-0,008/post em deepseek-v4-flash; publish roda sem LLM)
+Hermes cron (monitor: so acorda com trabalho elegivel)
+  -> cards (UMA chamada, max 2 posts): delta exato de imagens
+     (required/valid/missing/irrelevant/non_webp), diagnostico da featured
+     (exists/relevant/webp/dimensions/action) e plano fix para rework
+  -> editorial JSON estrito (draft salvo pelo apply ANTES da execucao pesada)
+  -> media-validate (1 chamada) quando ha midia nova
+  -> apply = PREFLIGHT COMPLETO:
+     resolve editorial -> executa midia (download, WebP, upload, credito)
+     -> normaliza tecnicamente (featured 1280x720 WebP; inline nao-WebP
+        relevante convertida — sem LLM) -> monta conteudo (trailer + CTA + Fonte)
+     -> checklist INTEIRO (backup, pending, relevancia, Fonte, 2/4/6, featured,
+        WebP, dimensoes, trailer, CTA, qualidade de texto, estrutura, schema)
+     -> falha: needs_rework + estado blocked (backoff 30m/2h; 3a falha
+        AWAITING_HUMAN) — nada e gravado
+     -> sucesso: grava conteudo + meta _hermes_state=ready + Ready Manifest
+        (SHA-256) — SOMENTE ready significa apto a publicar
+  -> estados no WordPress (_hermes_state/_hermes_attempts/_hermes_next_retry_at/
+     _hermes_last_error/_hermes_ready_hash/_hermes_policy_version)
+  -> publicacao (cron, 00h=5/08h=7/12h=8/18h=10/21h=10, ~40/dia):
+     publish-ready consulta SOMENTE READY; hash do manifest intacto -> publica
+     sem revalidar; mudou (STALE) -> revalida com o checklist; falhou -> blocked
+     (volta para rework do agente)
+  -> qualidade garantida por codigo, nao por diligencia do LLM: o apply nunca
+     grava post que o publish bloquearia; o publish apenas confirma
 ```
 
 ## Instalacao
@@ -180,13 +170,15 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Alt text descritivo nas novas imagens.
 
 ### Midia
-- Remover imagens inline importadas existentes.
+- Imagens inline importadas: PRESERVADAS quando o figure carrega credito
+  completo (validacao deterministica por codigo); sem credito completo sao
+  removidas e exigem redescobrimento no media_plan.
 - Escolher novas imagens por contexto da secao.
+- Minimo OBRIGATORIO 2/4/6 (2 <= 600 palavras, 4 <= 1000, 6 acima; listicle =
+  max(2, itens)) — sem waiver; o apply recusa abaixo do minimo.
 - Inserir apos um paragrafo que introduza visualmente o assunto, normalmente apos 2-4 paragrafos.
-- Minimo sugerido de 3 paragrafos entre imagens.
-- Video conta como quebra visual.
-- Maximo padrao de 4 imagens inline.
-- Converter para WebP antes do upload.
+- Minimo de 3 paragrafos entre imagens.
+- Converter para WebP antes do upload (normalizacao tecnica e automatica no apply).
 - Google Images é somente índice de descoberta; a fonte é a página ORIGINAL da imagem (preview do Google não é fonte).
 - Política de imagens (2026-08): qualquer imagem da web pode ser usada com CRÉDITO VISÍVEL — o crédito é a evidência. Licenças livres (CC0, CC BY, domínio público, permissão) são preferidas; para as demais, usar o marcador "Uso com crédito".
 - Não usar imagem apenas porque aparece como “pública” no Google; registrar URL da página original, autor, licença (ou "Uso com crédito"), termos e data da captura.

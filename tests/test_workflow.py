@@ -9,10 +9,13 @@ from unicornio_editor.workflow import (
     apply_editorial,
     build_cards,
     build_queue_report,
+    discard_post,
     get_cleaned_content,
+    load_draft,
     prepare_post,
     publish_post,
     publish_ready_posts,
+    retry_post,
     validate_media_plan,
 )
 
@@ -73,6 +76,13 @@ class FakeClient:
 
     def update_post(self, post_id, payload):
         self.updated.append((post_id, payload))
+        # Espelha o WordPress: o update muta o post (content/meta/featured).
+        if isinstance(payload.get("content"), dict):
+            self.post.setdefault("content", {})["raw"] = payload["content"]["raw"]
+        if isinstance(payload.get("meta"), dict):
+            self.post.setdefault("meta", {}).update(payload["meta"])
+        if "featured_media" in payload:
+            self.post["featured_media"] = payload["featured_media"]
         return {"id": post_id, "status": "pending", **payload}
 
     def publish(self, post_id, meta=None):
@@ -269,12 +279,17 @@ class WorkflowTests(unittest.TestCase):
             card = report["cards"][0]
             self.assertEqual(card["id"], 42)
             self.assertIn("redfall", card["entities"])
-            self.assertTrue(card["featured"])
+            self.assertTrue(card["featured"]["exists"])
+            # Delta de imagens: 1 relevante de 2 exigidas (minimo 2/4/6).
+            self.assertEqual(card["images"]["required"], 2)
+            self.assertEqual(card["images"]["valid"], 1)
+            self.assertEqual(card["images"]["missing"], 1)
+            self.assertEqual(card["images"]["irrelevant"], 0)
+            self.assertEqual(card["images"]["non_webp"], 0)
+            # Featured existente (hardcoded do fake) nao retrata Redfall.
+            self.assertEqual(card["featured"]["action"], "replace")
             self.assertTrue(card["seo_exists"])
             self.assertTrue(card["game_hint"])
-            self.assertEqual(card["images"]["total"], 1)
-            self.assertEqual(card["images"]["relevantes"], 1)
-            self.assertEqual(card["images"]["preservadas"], 1)
             self.assertEqual(card["original_link"], "https://source.example/news")
 
     def test_build_cards_marks_blocked_with_reason_and_sorts_first(self):
@@ -317,11 +332,16 @@ class WorkflowTests(unittest.TestCase):
             cards = report["cards"]
             self.assertEqual([c["id"] for c in cards], [42, 43])  # rework primeiro
             self.assertTrue(cards[0]["blocked"])
-            self.assertFalse(cards[0]["edited"])  # latest existe, mas blocked
+            self.assertEqual(cards[0]["state"], "blocked")  # latest existe, mas blocked
             self.assertEqual(
                 cards[0]["blocked_reason"],
                 "checklist: imagens_no_corpo, destaque_1280x720",
             )
+            # Plano de correcao derivado do checklist bloqueado (Fase 4.3):
+            # o agente sabe o que corrigir SÓ pelo card.
+            self.assertEqual(cards[0]["fix"]["find_inline_images"], 2)
+            self.assertTrue(cards[0]["fix"]["replace_featured"])
+            self.assertFalse(cards[0]["fix"]["fix_list_structure"])
             self.assertFalse(cards[1]["blocked"])
             self.assertIsNone(cards[1]["blocked_reason"])
 
@@ -363,7 +383,9 @@ class WorkflowTests(unittest.TestCase):
             report = build_cards(client, self.config(True), root)
             self.assertEqual([c["id"] for c in report["cards"]], [42, 43])
             self.assertEqual(client.calls[0]["include"], [42])  # rework por include
-            self.assertEqual(client.calls[1]["per_page"], 1)  # 1 novo completa o lote
+            # Fill amplo (a maioria dos pending pode ser ready/out-of-queue);
+            # o custo de tokens e so dos cards impressos, nao do fetch.
+            self.assertEqual(client.calls[1]["per_page"], 20)
 
     def test_get_cleaned_content_returns_cleaned_html(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -393,12 +415,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["rejected"][0]["index"], 1)
         self.assertIn("sem relacao", result["rejected"][0]["reason"])
 
-    def test_apply_skip_does_not_write(self):
+    def test_apply_skip_does_not_write_content(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())
             report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload("skip"))
             self.assertFalse(report["wordpress_changed"])
-            self.assertEqual(client.updated, [])
+            self.assertEqual(report["status"], "skipped")
+            # So telemetria de estado (meta), nunca conteudo.
+            self.assertEqual(len(client.updated), 1)
+            payload = client.updated[0][1]
+            self.assertNotIn("content", payload)
+            self.assertEqual(payload["meta"]["_hermes_state"], "skipped")
 
     def test_apply_processes_pending_without_sending_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -504,7 +531,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_executes_media_plan_and_sets_featured(self):
         payload = editorial_payload()
-        payload["cleaned_html"] = "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
+        # O texto precisa conter a keyword (qualidade_texto faz parte do
+        # preflight completo desde a Fase 2 — o apply bloqueia qualquer falha).
+        payload["cleaned_html"] = (
+            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
+            "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
+        )
         payload["media_plan"] = [
             self.media_item(paragraph_index=0),
             self.media_item(paragraph_index=3),
@@ -567,11 +599,21 @@ class WorkflowTests(unittest.TestCase):
 
         class MediaClient(FakeClient):
             def get_media(self, media_id):
+                if media_id == 88:
+                    # Apos o re-upload, o WP retorna o NOVO attachment (WebP
+                    # 1280x720 com a proveniencia preservada no title/alt).
+                    return {
+                        "id": 88,
+                        "source_url": "https://wp.test/uploads/noticia-sobre-videogame-e-lancamento-importante-1280x720.webp",
+                        "media_details": {"width": 1280, "height": 720},
+                        "alt_text": "Notícia sobre videogame e lançamento importante",
+                        "title": {"rendered": "Notícia sobre videogame e lançamento importante"},
+                    }
                 return media
 
             def upload_media(self, path, *, filename, alt_text, title, caption=None):
                 self.uploads = getattr(self, "uploads", 0) + 1
-                return {"id": 88, "source_url": "https://wp.test/uploads/featured-1280x720.webp"}
+                return {"id": 88, "source_url": "https://wp.test/uploads/noticia-sobre-videogame-e-lancamento-importante-1280x720.webp"}
 
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
             "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
@@ -618,7 +660,7 @@ class WorkflowTests(unittest.TestCase):
     def test_apply_reuses_media_library_attachment_as_new_upload(self):
         payload = editorial_payload()
         payload["cleaned_html"] = (
-            "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
+            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
             '<figure><img src="https://s3.example/noticia-importante-1.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
             "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
             '<figure><img src="https://s3.example/noticia-importante-2.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
@@ -756,10 +798,13 @@ class WorkflowTests(unittest.TestCase):
             )
             client = FakeClient(self.post())
             report = publish_post(client, self.config(False), root, 42)
-        self.assertFalse(report["wordpress_changed"])
-        self.assertEqual(report["status"], "blocked")
-        self.assertGreater(report["checklist"]["failed"], 0)
-        self.assertEqual(client.updated, [])
+            self.assertFalse(report["wordpress_changed"])
+            self.assertEqual(report["status"], "blocked")
+            self.assertGreater(report["checklist"]["failed"], 0)
+            # O publish reabriu para rework: estado blocked gravado no WP.
+            self.assertEqual(len(client.updated), 1)
+            self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "blocked")
+            self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
 
     def checklist_pass_post(self):
         post = self.post()
@@ -869,8 +914,9 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_fails_fast_without_minimum_images(self):
         # Politica 2/4/6 sem waiver: um editorial cujo conteudo nao atinge o
-        # minimo de imagens NAO pode ser gravado — o apply recusa (needs_rework),
-        # arquiva editorial.blocked.json e devolve o post a fila.
+        # minimo de imagens NAO pode ser gravado — o apply recusa (needs_rework)
+        # e arquiva editorial.blocked.json. O editorial.latest.json permanece
+        # (o post mantém a candidatura; o publish decide com o conteudo real).
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             payload = editorial_payload()
@@ -881,9 +927,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["status"], "needs_rework")
             self.assertIn("imagens_no_corpo", report["blocked_reasons"])
             self.assertFalse(report["wordpress_changed"])
-            self.assertEqual(client.updated, [])
-            self.assertFalse((root / "backups/42/editorial.latest.json").exists())
+            # Telemetria de estado: o apply grava blocked + attempts (backoff).
+            self.assertEqual(len(client.updated), 1)
+            state_meta = client.updated[0][1]["meta"]
+            self.assertEqual(state_meta["_hermes_state"], "blocked")
+            self.assertEqual(state_meta["_hermes_attempts"], 1)
+            self.assertNotEqual(state_meta["_hermes_next_retry_at"], "")
+            self.assertEqual(report["state"], "blocked")
+            self.assertEqual(report["attempts"], 1)
+            self.assertTrue((root / "backups/42/editorial.latest.json").is_file())
             self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
+            # Draft preservado para o rework incremental (Fase 3).
+            self.assertTrue((root / "backups/42/editorial.draft.json").is_file())
 
     def test_publish_blocked_records_rework_but_keeps_latest(self):
         # Gate duplo fechado: o publish bloqueia o post e registra
@@ -909,6 +964,268 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(report["wordpress_changed"])
             self.assertTrue((root / "backups/42/editorial.latest.json").is_file())
             self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
+
+    def test_normalize_inline_images_converts_relevant_non_webp(self):
+        # Fase 5.2: imagem inline relevante fora do formato (JPEG) vira WebP
+        # local automaticamente — problema tecnico nao volta ao modelo.
+        # Irrelevante fica como esta (gate relevancia bloqueia e o agente decide).
+        from unicornio_editor.media.relevance import extract_entities
+        from unicornio_editor.workflow import _normalize_inline_images
+
+        html = (
+            '<figure><img src="https://s3.example/redfall-key-art.webp" width="800" height="450" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+            '<figure><img src="https://s3.example/redfall-screenshot.jpg" alt="Redfall screenshot" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+            '<figure><img src="https://s3.example/gatinho.jpg" alt="gatinho fofo" />'
+            "<figcaption>Crédito da imagem: Autor. CC0.</figcaption></figure>"
+        )
+        entities = extract_entities(title="Redfall ganha novo gameplay", content_html=html)
+
+        class UploadClient:
+            def __init__(self):
+                self.uploads = []
+
+            def upload_media(self, path, *, filename, alt_text, title, caption=None):
+                self.uploads.append({"filename": filename, "alt_text": alt_text})
+                return {"id": 99, "source_url": "https://wp.test/uploads/redfall-screenshot-800x450.webp"}
+
+        client = UploadClient()
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/s.jpg")), mock.patch(
+            "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
+        ), mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(800, 450)):
+            normalized, results = _normalize_inline_images(client, self.config(False), html, entities)
+
+        self.assertIn("https://wp.test/uploads/redfall-screenshot-800x450.webp", normalized)
+        self.assertIn("width=\"800\" height=\"450\"", normalized)
+        # WebP original intocado; irrelevante intocada.
+        self.assertIn("redfall-key-art.webp", normalized)
+        self.assertIn("gatinho.jpg", normalized)
+        self.assertEqual(len(client.uploads), 1)
+        self.assertIn("redfall-screenshot", client.uploads[0]["filename"])
+        statuses = {r["status"] for r in results}
+        self.assertIn("normalized", statuses)
+        self.assertIn("irrelevant", statuses)
+
+    def test_apply_saves_draft_before_heavy_execution(self):
+        # Fase 3: o rascunho editorial e persistido ANTES da execucao pesada —
+        # mesmo com falha de midia/checklist, o trabalho editorial fica salvo.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = editorial_payload()
+            payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"
+            payload["media_plan"] = []
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, payload)  # falha (0 imagens)
+            draft = json.loads(
+                (root / "backups/42/editorial.draft.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(draft["seo"]["focus_keyword"], "videogame")
+            self.assertIn("cleaned_html", draft)
+            # load_draft devolve o rascunho (base do rework incremental).
+            loaded = load_draft(root, 42)
+            self.assertEqual(loaded["seo"]["title"], draft["seo"]["title"])
+
+    def test_apply_full_checklist_gate_blocks_any_failure(self):
+        # Fase 2: QUALQUER falha do checklist impede READY — nao so
+        # imagens_no_corpo. Post sem featured e com media_plan vazio falha
+        # imagem_destaque e nunca e gravado.
+        post = self.post()
+        post["featured_media"] = 0
+        payload = editorial_payload()
+        payload["cleaned_html"] = (
+            "<p>Texto revisado sobre videogame e lancamento.</p>"
+            '<figure><img src="https://s3.example/a.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+            '<figure><img src="https://s3.example/b.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+            "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
+        )
+        payload["media_plan"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(post)
+            report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+            self.assertEqual(report["status"], "needs_rework")
+            self.assertIn("imagem_destaque", report["blocked_reasons"])
+            self.assertNotIn("imagens_no_corpo", report["blocked_reasons"])
+            self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "blocked")
+            # Nenhuma gravacao de conteudo: so telemetria de estado.
+            self.assertNotIn("content", client.updated[0][1])
+
+    def test_rework_backoff_escalates_to_awaiting_human(self):
+        # Fase 8: 1a falha +30m (blocked), 2a +2h (blocked), 3a AWAITING_HUMAN.
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # 0 imagens
+        payload["media_plan"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            first = apply_editorial(client, self.config(False), root, 42, payload)
+            second = apply_editorial(client, self.config(False), root, 42, payload)
+            third = apply_editorial(client, self.config(False), root, 42, payload)
+            self.assertEqual(first["state"], "blocked")
+            self.assertEqual(first["attempts"], 1)
+            self.assertNotEqual(first["next_retry_at"], "")
+            self.assertEqual(second["state"], "blocked")
+            self.assertEqual(second["attempts"], 2)
+            self.assertEqual(third["state"], "awaiting_human")
+            self.assertEqual(third["attempts"], 3)
+            self.assertEqual(third["next_retry_at"], "")
+            # AWAITING_HUMAN sai da fila de trabalho do monitor.
+            queue = build_queue_report(client, root)
+            self.assertEqual(queue["awaiting_human"], 1)
+            self.assertEqual(queue["eligible_rework_ids"], [])
+            self.assertIn(42, queue["awaiting_human_ids"])
+
+    def test_apply_success_marks_ready_with_manifest(self):
+        # Fase 1 + Fase 11: apply com checklist 100% grava _hermes_state=ready
+        # e o Ready Manifest (hash SHA-256) — nao e o latest.json que decide.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(report["state"], "ready")
+            meta = client.post["meta"]
+            self.assertEqual(meta["_hermes_state"], "ready")
+            self.assertTrue(meta["_hermes_ready_hash"])
+            self.assertTrue(meta["_hermes_ready_manifest"])
+            self.assertEqual(meta["_hermes_policy_version"], 2)
+            self.assertEqual(meta["_hermes_attempts"], 0)
+            queue = build_queue_report(client, root)
+            self.assertEqual(queue["edited"], 1)
+            self.assertEqual(queue["ready_ids"], [42])
+
+    def test_publish_ready_cheap_path_via_manifest(self):
+        # Fase 11: nada mudou no WP desde o apply -> publica sem revalidar.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            outcome = publish_post(client, config, root, 42)
+            self.assertEqual(outcome["status"], "published")
+            self.assertEqual(outcome["integrity"], "manifest_match")
+            self.assertEqual(len(client.updated), 2)  # apply + publish (sem revalidacao)
+
+    def test_publish_ready_stale_revalidates_and_blocks(self):
+        # Fase 11: conteudo mudou apos o apply (edicao externa) -> STALE ->
+        # revalidacao completa; falha -> blocked (nunca publica quebrado).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            client.post["content"]["raw"] = "<p>Conteudo alterado externamente.</p>"
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            outcome = publish_post(client, config, root, 42)
+            self.assertEqual(outcome["status"], "blocked")
+            self.assertGreater(outcome["checklist"]["failed"], 0)
+            self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
+            self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
+
+    def test_publish_ready_only_processes_ready_or_legacy(self):
+        # Fase 10: blocked/uncertain/awaiting_human nao entram no publish —
+        # sem checklist caro para quem pertence a fila de rework.
+        ready_post = self.checklist_pass_post()
+        ready_post["id"] = 1
+        blocked_post = dict(ready_post)
+        blocked_post["id"] = 2
+        blocked_post["meta"] = {"_hermes_state": "blocked", "_hermes_attempts": 1}
+        uncertain_post = dict(ready_post)
+        uncertain_post["id"] = 3
+        uncertain_post["meta"] = {"_hermes_state": "uncertain"}
+
+        class MultiClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def get_post(self, post_id):
+                return next(p for p in self.posts if p["id"] == post_id)
+
+            def list_pending(self, per_page=100):
+                return self.posts
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = MultiClient([ready_post, blocked_post, uncertain_post])
+            # Post 1 passa pelo preflight (fica READY com manifest).
+            apply_editorial(client, self.config(False), root, 1, editorial_payload())
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            outcomes = publish_ready_posts(client, config, root)
+            published = [o for o in outcomes if o.get("wordpress_changed")]
+            self.assertEqual([o["post_id"] for o in published], [1])
+            # blocked/uncertain nem chegam ao publish_post (0 chamadas).
+            publish_writes = [u for u in client.updated if u[1].get("status") == "publish"]
+            self.assertEqual(len(publish_writes), 1)
+
+    def test_queue_monitor_respects_rework_cooldown(self):
+        # Fase 9: BLOCKED em cooldown (next_retry_at futuro) nao e elegivel;
+        # vencido/legado e elegivel e entra na linha do monitor.
+        import datetime
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        in_cooldown = self.post()
+        in_cooldown["id"] = 1
+        in_cooldown["meta"] = {
+            "_hermes_state": "blocked",
+            "_hermes_attempts": 1,
+            "_hermes_next_retry_at": (now + datetime.timedelta(hours=2)).isoformat(),
+        }
+        eligible = self.post()
+        eligible["id"] = 2
+        eligible["meta"] = {
+            "_hermes_state": "blocked",
+            "_hermes_attempts": 1,
+            "_hermes_next_retry_at": (now - datetime.timedelta(minutes=5)).isoformat(),
+        }
+
+        class MultiClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def list_pending(self, per_page=50):
+                return self.posts
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = build_queue_report(MultiClient([in_cooldown, eligible]), Path(directory))
+            self.assertEqual(report["blocked"], 2)
+            self.assertEqual(report["eligible_rework_ids"], [2])
+            self.assertEqual(report["blocked_ids"], [1, 2])
+
+    def test_retry_post_resets_attempts_and_cooldown(self):
+        # Fase 13 (minimo): revisao humana reabre AWAITING_HUMAN/BLOCKED sem
+        # forcar READY — zera tentativas e cooldown, mantem blocked.
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            result = retry_post(client, self.config(False), Path(directory), 42)
+            self.assertEqual(result["status"], "retried")
+            self.assertEqual(result["state"], "blocked")
+            meta = client.post["meta"]
+            self.assertEqual(meta["_hermes_state"], "blocked")
+            self.assertEqual(meta["_hermes_attempts"], 0)
+            self.assertEqual(meta["_hermes_next_retry_at"], "")
+
+    def test_discard_post_marks_uncertain_and_leaves_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            result = discard_post(client, self.config(False), root, 42, reason="sem imagens reais")
+            self.assertEqual(result["status"], "discarded")
+            self.assertEqual(client.post["meta"]["_hermes_state"], "uncertain")
+            self.assertTrue((root / "backups/42/uncertain.json").is_file())
+            queue = build_queue_report(client, root)
+            self.assertEqual(queue["uncertain"], 1)
+            self.assertIn(42, queue["uncertain_ids"])
 
 
 if __name__ == "__main__":

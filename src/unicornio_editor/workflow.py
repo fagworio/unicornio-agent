@@ -11,19 +11,47 @@ from typing import Any
 
 from .backup import SnapshotStore
 from .builder import append_canonical_footer
-from .checklist import run_pre_publish_checklist
+from .checklist import _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import clean_html
 from .list_quality import detect_list_format
-from .media.converter import convert_to_webp, image_dimensions, image_has_transparency, prepare_featured_webp
+from .manifest import (
+    META_READY_MANIFEST,
+    build_ready_manifest,
+    manifest_hash,
+    manifest_matches,
+    parse_manifest,
+    serialize_manifest,
+)
+from .media.converter import (
+    convert_to_webp,
+    image_dimensions,
+    image_has_transparency,
+    prepare_featured_webp,
+)
 from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
-from .media.relevance import extract_entities, image_is_relevant
+from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.source_verify import verify_downloaded_against_source
 from .media.wordpress_media import upload_image
 from .observability import build_processing_markers
 from .seo.rank_math import build_meta
+from .state import (
+    STATE_AWAITING_HUMAN,
+    STATE_BLOCKED,
+    STATE_NEW,
+    STATE_PROCESSING,
+    STATE_PUBLISHED,
+    STATE_READY,
+    STATE_SKIPPED,
+    STATE_UNCERTAIN,
+    build_state_markers,
+    out_of_queue,
+    read_state,
+    retry_eligible,
+    rework_backoff,
+)
 from .trailer import TrailerError, build_trailer_html, find_game_trailer
 from .wordpress import WordPressClient
 
@@ -54,6 +82,16 @@ def apply_editorial(
     post_id: int,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    """Preflight completo: valida, resolve, executa mídia, monta conteúdo e
+    roda o checklist INTEIRO antes de gravar qualquer coisa no WordPress.
+
+    Somente um apply com checklist 100% (``checklist.failed == 0``) escreve o
+    conteúdo e marca o post ``READY`` (meta ``_hermes_state``) com o Ready
+    Manifest (hash SHA-256). Qualquer falha -> ``needs_rework`` + estado
+    ``blocked`` (com contagem de tentativas e ``next_retry_at`` — backoff
+    30m/2h, 3ª falha vira AWAITING_HUMAN). Nenhum post quebrado chega ao
+    publish: o publish-ready apenas confirma o hash.
+    """
     post = client.get_post(post_id)
     _require_pending(post)
     backup = SnapshotStore(root).save(post_id, post)
@@ -66,11 +104,19 @@ def apply_editorial(
         # the processing queue, visible for review) instead of being dropped
         # forever via editorial.latest.json.
         _save_uncertain(root, post_id, editorial)
+        _write_state_markers(
+            client,
+            config,
+            post_id,
+            STATE_UNCERTAIN,
+            last_error=editorial["site_relevance"]["reason"],
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": False,
             "dry_run": config.dry_run,
             "status": "uncertain",
+            "state": STATE_UNCERTAIN,
             "skip_reason": editorial["site_relevance"]["reason"],
             "confidence": confidence,
             "backup": str(backup),
@@ -79,13 +125,28 @@ def apply_editorial(
         editorial = resolve_editorial_defaults(editorial, post)
     _save_editorial_latest(root, post_id, editorial)
     if decision == "skip":
+        _write_state_markers(
+            client,
+            config,
+            post_id,
+            STATE_SKIPPED,
+            last_error=editorial["site_relevance"]["reason"],
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": False,
             "dry_run": config.dry_run,
+            "status": "skipped",
+            "state": STATE_SKIPPED,
             "skip_reason": editorial["site_relevance"]["reason"],
             "backup": str(backup),
         }
+
+    # Draft persistido ANTES da execução pesada: mesmo que download/upload/
+    # checklist falhem, o trabalho editorial fica salvo e o rework corrige
+    # somente o componente com problema (nunca reescreve o texto nem re-gera
+    # SEO do zero).
+    _save_draft(root, post_id, editorial)
 
     media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
     if featured_id is None and not config.dry_run:
@@ -115,6 +176,20 @@ def apply_editorial(
     content, trailer = compose_final_content(editorial_with_media, config, original_link_of(post))
     if featured_credit and not config.dry_run:
         content = append_featured_credit(content, featured_credit)
+    inline_normalization: list[dict[str, Any]] = []
+    if not config.dry_run:
+        # Normalização técnica sem LLM (Fase 5.2): imagens inline relevantes
+        # em formato errado (JPEG/PNG) viram WebP local automaticamente —
+        # problema técnico não volta ao modelo. Irrelevantes ficam como estão:
+        # o gate relevancia_imagens bloqueia e o agente corrige.
+        entities = extract_entities(
+            title=str(editorial["seo"].get("title") or ""),
+            content_html=html,
+            focus_keyword=str(editorial["seo"].get("focus_keyword") or ""),
+            game_name=editorial.get("game_name"),
+        )
+        content, inline_normalization = _normalize_inline_images(client, config, content, entities)
+        editorial_with_media = {**editorial_with_media, "cleaned_html": content}
     checklist = run_pre_publish_checklist(
         post={**post, "featured_media": featured_id or post.get("featured_media")},
         editorial=editorial_with_media,
@@ -123,39 +198,56 @@ def apply_editorial(
         config=config,
         client=client,
     )
-    # NOTE: the pre-publish checklist above already validates the list
-    # structure (item 12, estrutura_lista) in a non-fatal way; the apply must
-    # NOT crash on it — a crash here would leave the post half-processed
-    # (editorial.latest.json saved, content never written). The publish gate
-    # decides. (Removed the unprotected validate_list_content call.)
-    # FAIL-FAST (politica verificar -> corrigir -> publicar): um editorial que
-    # nao atinge o minimo de imagens (2/4/6, sem waiver desde 2026-08-22) NAO
-    # pode ser gravado — post sem o minimo nunca publicaria. O apply recusa a
-    # escrita, arquiva o editorial em editorial.blocked.json e devolve o post
-    # a fila (remove editorial.latest.json) para re-edição. Os demais itens do
-    # checklist sao decididos pelo publish gate, que tambem reabre para
-    # correção quando bloqueia (ver _reopen_for_rework).
+    # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
+    # item do checklist com falha impede READY — o apply NUNCA grava um post
+    # que o publish-ready bloquearia depois. O editorial fica arquivado em
+    # editorial.blocked.json (rascunho preservado em editorial.draft.json) e
+    # o post volta à fila de rework com backoff (30m/2h -> AWAITING_HUMAN).
     if not config.dry_run:
-        image_fail = next(
-            (
-                item
-                for item in (checklist.get("items") or [])
-                if item.get("name") == "imagens_no_corpo"
-                and item.get("status") == "fail"
-            ),
-            None,
-        )
-        if image_fail is not None:
+        failed_items = [
+            item
+            for item in (checklist.get("items") or [])
+            if item.get("status") in ("fail", "error") and item.get("name")
+        ]
+        if failed_items:
+            state_info = read_state(post)
+            attempts = state_info["attempts"] + 1
+            backoff = rework_backoff(
+                attempts,
+                cooldown_minutes=config.rework_cooldown_minutes,
+                max_attempts=config.max_rework_attempts,
+            )
+            last_error = "; ".join(
+                f"{item['name']}: {str(item.get('detail') or '')[:120]}"
+                for item in failed_items[:5]
+            )
             _save_blocked(root, post_id, editorial, checklist)
+            _write_state_markers(
+                client,
+                config,
+                post_id,
+                backoff["state"],
+                attempts=backoff["attempts"],
+                next_retry_at=backoff["next_retry_at"],
+                last_error=last_error,
+            )
             return {
                 "post_id": post_id,
                 "wordpress_changed": False,
                 "dry_run": False,
                 "status": "needs_rework",
+                "state": backoff["state"],
+                "attempts": backoff["attempts"],
+                "next_retry_at": backoff["next_retry_at"],
                 "backup": str(backup),
                 "checklist": checklist,
-                "blocked_reasons": ["imagens_no_corpo"],
-                "blocked_detail": image_fail.get("detail", ""),
+                "media_plan_results": media_results,
+                "inline_normalization": inline_normalization,
+                "blocked_reasons": [item["name"] for item in failed_items],
+                "blocked_detail": "; ".join(
+                    str(item.get("detail") or "")[:200] for item in failed_items[:3]
+                ),
+                "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
             }
     if config.dry_run:
         return {
@@ -167,10 +259,20 @@ def apply_editorial(
             "trailer": trailer,
             "media_plan_results": media_results,
             "checklist": checklist,
+            "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
         }
 
     latest = client.get_post(post_id)
     _require_pending(latest)
+    manifest = build_ready_manifest(
+        post_id=post_id,
+        content=content,
+        featured_media=featured_id or latest.get("featured_media"),
+        seo=editorial["seo"],
+        original_link=original_link_of(post),
+        editorial=editorial_with_media,
+        policy_version=config.policy_version,
+    )
     update_payload: dict[str, Any] = {
         "content": {"raw": content},
         "meta": {
@@ -179,6 +281,12 @@ def apply_editorial(
                 editorial["site_relevance"]["decision"],
                 editorial["site_relevance"]["confidence"],
             ),
+            **build_state_markers(
+                STATE_READY,
+                ready_hash=manifest_hash(manifest),
+                policy_version=config.policy_version,
+            ),
+            META_READY_MANIFEST: serialize_manifest(manifest),
         },
     }
     if featured_id:
@@ -192,12 +300,17 @@ def apply_editorial(
         "post_id": post_id,
         "wordpress_changed": True,
         "dry_run": False,
+        "status": "ready",
+        "state": STATE_READY,
+        "ready_hash": manifest_hash(manifest),
         "backup": str(backup),
         "status_after": result.get("status"),
         "trailer": trailer,
         "media_plan_results": media_results,
+        "inline_normalization": inline_normalization,
         "featured_media": result.get("featured_media"),
         "checklist": checklist,
+        "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"]),
     }
 
 
@@ -216,6 +329,208 @@ def _clear_processing_markers(root: Path, post_id: int) -> None:
                 marker.unlink()
     except OSError:
         pass
+
+
+def _write_state_markers(
+    client: WordPressClient,
+    config: Config,
+    post_id: int,
+    state: str,
+    *,
+    attempts: int = 0,
+    next_retry_at: str = "",
+    last_error: str = "",
+    ready_hash: str = "",
+) -> None:
+    """Persiste o estado operacional ``_hermes_*`` no WordPress (write mode).
+
+    Telemetria de estado: falha aqui não derruba o fluxo — o pior caso é o
+    post ficar sem estado e o publish-ready revalidar pelo checklist (mais
+    caro, nunca inseguro).
+    """
+    if config.dry_run:
+        return
+    try:
+        client.update_post(
+            post_id,
+            {
+                "meta": build_state_markers(
+                    state,
+                    attempts=attempts,
+                    next_retry_at=next_retry_at,
+                    last_error=last_error,
+                    ready_hash=ready_hash,
+                    policy_version=config.policy_version,
+                )
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetria nunca bloqueia o fluxo
+        pass
+
+
+def _save_draft(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
+    """Persiste o rascunho editorial resolvido ANTES da execução pesada.
+
+    ``editorial.draft.json`` é a base do rework: o agente carrega o rascunho,
+    corrige SOMENTE o componente com problema (media_plan, seo, texto) e
+    re-aplica — o trabalho editorial caro nunca é refeito do zero.
+    """
+    try:
+        directory = root / "backups" / str(post_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "editorial.draft.json").write_text(
+            json.dumps(editorial, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _inline_filename_from_source(source_url: str, width: int, height: int) -> str:
+    """Nome de arquivo com proveniência para imagens inline normalizadas.
+
+    Mantém o slug da fonte original no nome (evidência para o gate
+    determinístico de relevância) e anota as dimensões reais.
+    """
+    stem = Path(source_url.split("?", 1)[0]).stem or ""
+    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+    if len(slug) < 5:
+        return f"inline-{width}x{height}.webp"
+    return f"{slug[:80].strip('-')}-{width}x{height}.webp"
+
+
+def _normalize_inline_images(
+    client: WordPressClient,
+    config: Config,
+    html: str,
+    entities: set[str],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Re-upload de imagens inline não-WebP (relevantes) como WebP local.
+
+    Problema técnico (formato/dimensão) não volta ao modelo: imagem já
+    relevante e com crédito é baixada, convertida (transparência achatada,
+    largura limitada a 1280px), re-upload como NOVO attachment preservando
+    alt/credit, e a URL trocada no conteúdo — o WebP publicado nunca é
+    transparente (política). Imagens irrelevantes ou cujo download falha
+    ficam como estão: o gate relevancia_imagens/imagens_webp bloqueia o
+    apply e o agente decide (substituir/remover) com o delta do card.
+    """
+    if not entities:
+        return html, []
+    images = {str(item.get("src") or ""): item for item in iter_content_images(html)}
+    if not images:
+        return html, []
+    results: list[dict[str, Any]] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src_match = re.search(r'\bsrc="([^"]+)"', tag, flags=re.IGNORECASE)
+        if not src_match:
+            return tag
+        src = src_match.group(1)
+        if src.lower().split("?", 1)[0].endswith(".webp"):
+            return tag
+        info = images.get(src) or {}
+        alt = str(info.get("alt") or "")
+        caption = str(info.get("caption") or "")
+        if not image_is_relevant(
+            alt_text=alt,
+            credit_text=caption,
+            source_url=src,
+            entities=entities,
+        ):
+            results.append(
+                {
+                    "src": src[:80],
+                    "status": "irrelevant",
+                    "detail": "sem relacao com o conteudo; deixada como esta (gate relevancia bloqueia)",
+                }
+            )
+            return tag
+        try:
+            with tempfile.TemporaryDirectory(prefix="unicornio-inline-") as directory:
+                tmp = Path(directory)
+                suffix = Path(src.split("?", 1)[0]).suffix or ".jpg"
+                source = download_image(
+                    src,
+                    tmp / f"inline_source{suffix}",
+                    max_attempts=config.max_source_retries + 1,
+                )
+                webp = convert_to_webp(source, tmp / "inline.webp")
+                width, height = image_dimensions(webp)
+                filename = _inline_filename_from_source(src, width, height)
+                media = client.upload_media(
+                    str(webp),
+                    filename=filename,
+                    alt_text=alt,
+                    title=caption or alt,
+                    caption=caption,
+                )
+                media_url = str(media.get("source_url") or "").strip()
+                if not media_url:
+                    raise WorkflowError("inline normalization upload returned no source_url")
+        except Exception as exc:  # noqa: BLE001 - download/convert/upload: reporta e segue
+            results.append({"src": src[:80], "status": "error", "detail": str(exc)[:140]})
+            return tag
+        tag = re.sub(r'\bsrc="[^"]*"', f'src="{media_url}"', tag, count=1, flags=re.IGNORECASE)
+        tag = re.sub(r'\bwidth="[^"]*"', f'width="{width}"', tag, count=1, flags=re.IGNORECASE)
+        tag = re.sub(r'\bheight="[^"]*"', f'height="{height}"', tag, count=1, flags=re.IGNORECASE)
+        if not re.search(r"\bwidth=", tag, flags=re.IGNORECASE):
+            stripped = tag.rstrip()
+            if stripped.endswith("/>"):
+                tag = stripped[:-2] + f' width="{width}" height="{height}" />'
+            elif stripped.endswith(">"):
+                tag = stripped[:-1] + f' width="{width}" height="{height}">'
+        results.append(
+            {
+                "src": src[:80],
+                "status": "normalized",
+                "media_url": media_url,
+                "width": width,
+                "height": height,
+            }
+        )
+        return tag
+
+    normalized = re.sub(r"<img\b[^>]*>", _replace, html, flags=re.IGNORECASE)
+    return normalized, results
+
+
+def _images_summary(content: str, title: str, entities: set[str] | None = None) -> dict[str, int]:
+    """Delta de imagens determinístico: quanto o conteúdo TEM vs PRECISA.
+
+    ``required`` segue a política 2/4/6 (listicle = max(2, itens));
+    ``valid`` conta as inline relevantes; ``missing`` é o que falta para
+    READY; ``irrelevant``/``non_webp`` são os problemas técnicos que o
+    código resolve (non_webp relevante é normalizado automaticamente).
+    """
+    from .content_quality import word_count
+
+    words = word_count(content)
+    required = _required_image_count(words, title=title or "", content=content)
+    images = iter_content_images(content)
+    relevant = [
+        item
+        for item in images
+        if image_is_relevant(
+            alt_text=str(item.get("alt") or ""),
+            credit_text=str(item.get("caption") or ""),
+            source_url=str(item.get("src") or ""),
+            entities=entities or set(),
+        )
+    ]
+    non_webp = sum(
+        1
+        for item in images
+        if not str(item.get("src") or "").lower().split("?", 1)[0].endswith(".webp")
+    )
+    return {
+        "required": required,
+        "valid": len(relevant),
+        "missing": max(0, required - len(relevant)),
+        "irrelevant": len(images) - len(relevant),
+        "non_webp": non_webp,
+    }
 
 
 def _media_item_rejection(
@@ -756,9 +1071,12 @@ def _save_editorial_latest(root: Path, post_id: int, editorial: dict[str, Any]) 
 def _save_blocked(root: Path, post_id: int, editorial: dict[str, Any], checklist: dict[str, Any]) -> None:
     """Archive an editorial the apply refused to write (checklist failed).
 
-    Keeps ``editorial.blocked.json`` as the audit trail and removes
-    ``editorial.latest.json`` so the post returns to the unprocessed queue
-    for rework (the verify -> fix -> publish loop).
+    Keeps ``editorial.blocked.json`` as the audit trail. ``editorial.latest.json``
+    is NOT removed: the post keeps its publish candidacy (its WordPress content
+    may already carry good images from a previous successful apply — removing
+    the latest would orphan the post and the publish gate would never try it).
+    The agent sees the blocked marker in the cards, fixes the failing items and
+    re-applies; the next publish window decides with the real content.
     """
     try:
         directory = root / "backups" / str(post_id)
@@ -771,9 +1089,6 @@ def _save_blocked(root: Path, post_id: int, editorial: dict[str, Any], checklist
             ),
             encoding="utf-8",
         )
-        latest = directory / "editorial.latest.json"
-        if latest.is_file():
-            latest.unlink()
     except OSError:
         pass
 
@@ -816,12 +1131,16 @@ def publish_post(
     root: Path,
     post_id: int,
 ) -> dict[str, Any]:
-    """Publish a single post gated by the full pre-publish checklist.
+    """Publish de UM post, somente a partir do estado READY.
 
-    Sequence: pending check -> editorial.latest.json -> relevance -> snapshot
-    -> checklist (all items must pass) -> PUBLISH_ENABLED gate -> publish.
-    Every failure returns a ``status`` of skipped/blocked with the reason;
-    the post is only ever published when every gate passes.
+    Caminho barato (determinístico): post READY cujo Ready Manifest (hash
+    SHA-256) ainda bate com o WordPress agora -> conteúdo idêntico ao do
+    preflight -> publica SEM re-executar o checklist caro (nada mudou).
+
+    Caminho de revalidação: STALE (hash mudou) ou legado (sem estado) ->
+    checklist completo -> publica se 100%, senão BLOCKED (fora da fila até o
+    agente re-aplicar). Estados blocked/awaiting_human/uncertain/skipped
+    nunca são tocados aqui — pertencem à fila de rework/do agente.
     """
     post = client.get_post(post_id)
     if post.get("status") != "pending":
@@ -831,6 +1150,23 @@ def publish_post(
             "status": "skipped",
             "reason": f"post status is {post.get('status')}, expected pending",
         }
+    state_info = read_state(post)
+    state = state_info["state"]
+    if state not in (None, STATE_READY):
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "skipped",
+            "reason": f"estado {state} (fora da fila de publicacao; rework/agente)",
+            "state": state,
+        }
+    if state == STATE_READY:
+        raw_meta = post.get("meta")
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        stored = parse_manifest(meta.get(META_READY_MANIFEST))
+        if manifest_matches(post, stored, state_info["ready_hash"], policy_version=config.policy_version):
+            return _publish_now(client, config, post_id, integrity="manifest_match")
+        # STALE: algo mudou desde o preflight -> revalida com o checklist.
     editorial_path = root / "backups" / str(post_id) / "editorial.latest.json"
     if not editorial_path.is_file():
         return {
@@ -838,6 +1174,7 @@ def publish_post(
             "wordpress_changed": False,
             "status": "skipped",
             "reason": "sem editorial.latest.json (post ainda nao passou pelo pipeline)",
+            "state": state,
         }
     try:
         editorial = validate_editorial(
@@ -850,6 +1187,7 @@ def publish_post(
             "wordpress_changed": False,
             "status": "skipped",
             "reason": f"editorial.latest.json invalido: {exc}",
+            "state": state,
         }
     if editorial["site_relevance"]["decision"] != "process":
         return {
@@ -857,6 +1195,7 @@ def publish_post(
             "wordpress_changed": False,
             "status": "skipped",
             "reason": editorial["site_relevance"]["reason"],
+            "state": state,
         }
     backup = SnapshotStore(root).save(post_id, post)
     checklist = run_pre_publish_checklist(
@@ -868,19 +1207,27 @@ def publish_post(
         client=client,
     )
     if checklist["failed"]:
-        # Registra o bloqueio SEM remover editorial.latest.json: o post continua
-        # candidato nas proximas janelas (o conteudo no WP pode ja estar bom —
-        # remover o latest orfana o post e o publish nunca mais o tenta). O
-        # agente ve o editorial.blocked.json nos cards, corrige (re-apply) e a
-        # proxima janela publica.
+        # Registra o bloqueio SEM remover editorial.latest.json: o post
+        # continua candidato nas proximas janelas (o conteudo no WP pode ja
+        # estar bom — remover o latest orfana o post e o publish nunca mais o
+        # tenta). O agente ve o editorial.blocked.json nos cards, corrige
+        # (re-apply) e a proxima janela publica.
         _record_blocked(root, post_id, checklist)
+        _write_state_markers(
+            client,
+            config,
+            post_id,
+            STATE_BLOCKED,
+            last_error="checklist pre-publicacao com falhas",
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": False,
             "status": "blocked",
-            "reason": "checklist pre-publicacao com falhas",
+            "reason": "checklist pre-publicacao com falhas (STALE/legado revalidado)",
             "checklist": checklist,
             "reopened_for_rework": True,
+            "state": STATE_BLOCKED,
         }
     if not config.publish_enabled:
         return {
@@ -889,9 +1236,34 @@ def publish_post(
             "status": "blocked",
             "reason": "PUBLISH_ENABLED=false (gate de publicacao desligado)",
             "checklist": checklist,
+            "state": state,
+        }
+    return _publish_now(client, config, post_id, integrity="revalidated")
+
+
+def _publish_now(
+    client: WordPressClient,
+    config: Config,
+    post_id: int,
+    *,
+    integrity: str,
+) -> dict[str, Any]:
+    """Publica de fato e marca PUBLISHED (gate PUBLISH_ENABLED já verificado)."""
+    if not config.publish_enabled:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "blocked",
+            "reason": "PUBLISH_ENABLED=false (gate de publicacao desligado)",
         }
     published_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    result = client.publish(post_id, meta={"_ai_editor_published_at": published_at})
+    result = client.publish(
+        post_id,
+        meta={
+            "_ai_editor_published_at": published_at,
+            **build_state_markers(STATE_PUBLISHED, policy_version=config.policy_version),
+        },
+    )
     return {
         "post_id": post_id,
         "wordpress_changed": True,
@@ -899,7 +1271,8 @@ def publish_post(
         "status_after": result.get("status"),
         "link": result.get("link"),
         "published_at": published_at,
-        "checklist": checklist,
+        "integrity": integrity,
+        "state": STATE_PUBLISHED,
     }
 
 
@@ -909,16 +1282,27 @@ def publish_ready_posts(
     root: Path,
     limit: int = 0,
 ) -> list[dict[str, Any]]:
-    """Publish pending posts that pass the checklist, up to ``limit`` per window.
+    """Publish dos pending prontos, até a cota da janela (PUBLISH_LIMIT).
 
-    ``limit`` counts only successfully published posts; skipped/blocked posts
-    do not consume the window quota. ``limit=0`` means no cap.
+    Fase 10: percorre apenas trabalho elegível — posts READY (caminho barato
+    via manifest) e legado sem estado (revalidação). Posts blocked/
+    awaiting_human/uncertain/skipped são ignorados sem custo (sem checklist).
+    ``limit`` conta somente publicados; ``limit=0`` = sem cota.
     """
     outcomes: list[dict[str, Any]] = []
-    posts = client.list_pending(per_page=50)
+    posts = client.list_pending(per_page=100)
     for candidate in posts:
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, int):
+            continue
+        state_info = read_state(candidate)
+        if state_info["state"] not in (None, STATE_READY):
+            continue  # fora da fila de publicacao — sem chamadas caras
+        if state_info["state"] is None and (
+            root / "backups" / str(candidate_id) / "editorial.blocked.json"
+        ).is_file():
+            # Legado ja sinalizado como rework: nao revalida a cada janela —
+            # o agente corrige (re-apply) e o estado vira READY.
             continue
         published = sum(1 for outcome in outcomes if outcome.get("wordpress_changed"))
         if limit and published >= limit:
@@ -996,19 +1380,18 @@ def build_queue_report(
     per_page: int = 50,
     recent_days: int = 7,
 ) -> dict[str, Any]:
-    """Deterministic queue status: pending posts x already-processed ones.
+    """Estado determinístico da fila, orientado pela meta ``_hermes_state``.
 
-    Read-only. ``edited`` means ``backups/<id>/editorial.latest.json`` exists
-    (the post went through the pipeline and waits for the publish cron).
-    ``blocked`` means ``backups/<id>/editorial.blocked.json`` exists — the
-    publish gate reopened the post (checklist failure) or the apply refused it;
-    it needs rework (re-edit), NOT publication, and is NOT counted as edited.
-    ``recent_unprocessed_ids`` + ``recent_blocked_ids`` are the stable line the
-    cron monitor script hashes to decide whether an agent run is needed (token
-    economy: no LLM on idle). Only posts with ``date_gmt`` inside the last
-    ``recent_days`` are monitored, so a months-old pending backlog never wakes
-    the agent and never floods the publish flow; the full report still lists
-    every pending post.
+    Read-only. A meta do WordPress é a fonte de verdade; marcadores de
+    filesystem (editorial.latest.json / editorial.blocked.json / uncertain.json)
+    são o fallback para posts legado (sem estado). ``edited`` significa
+    estado READY (apto à publicação — o publish-ready confirma o hash).
+    ``blocked`` = rework (apply recusou ou publish reabriu); o monitor só
+    considera elegíveis os BLOCKED cujo ``next_retry_at`` venceu (cooldown
+    respeitado — um post não reaparece na agenda enquanto estiver em
+    cooldown). ``awaiting_human``/``uncertain``/``skipped`` saem da fila.
+    ``recent_unprocessed_ids`` + ``eligible_rework_ids`` formam a linha
+    estável que o monitor hasheia (token economy: sem LLM no idle).
     """
     from .content_quality import word_count
 
@@ -1019,26 +1402,49 @@ def build_queue_report(
     recent_unprocessed: list[int] = []
     blocked_ids: list[int] = []
     recent_blocked: list[int] = []
+    eligible_rework: list[int] = []
+    ready_ids: list[int] = []
+    awaiting_human_ids: list[int] = []
+    uncertain_ids: list[int] = []
+    skipped_ids: list[int] = []
     for post in posts:
         post_id = post.get("id")
         if not isinstance(post_id, int):
             continue
         backups_dir = root / "backups" / str(post_id)
-        edited = (backups_dir / "editorial.latest.json").is_file()
-        blocked = (backups_dir / "editorial.blocked.json").is_file()
-        prepared = (backups_dir / "prepared.json").is_file()
-        uncertain = (backups_dir / "uncertain.json").is_file()
-        ready = edited and not blocked
-        if uncertain:
-            # uncertain vence: o agente ja decidiu que nao ha como processar
-            # (ou tentou e o apply recusou) — o post fica fora da fila de
-            # trabalho; re-tentar so queimaria tokens sem resultado.
-            pass
-        elif blocked:
+        state_info = read_state(post)
+        state = state_info["state"]
+        latest_file = (backups_dir / "editorial.latest.json").is_file()
+        blocked_file = (backups_dir / "editorial.blocked.json").is_file()
+        uncertain_file = (backups_dir / "uncertain.json").is_file()
+        if state is None:
+            # Legado (sem meta de estado): marcadores de filesystem decidem.
+            if uncertain_file:
+                state = STATE_UNCERTAIN
+            elif blocked_file:
+                state = STATE_BLOCKED
+            elif latest_file:
+                state = STATE_READY  # legado: latest sem bloqueio == pronto
+            else:
+                state = STATE_NEW
+        # Elegibilidade usa o estado RESOLVIDO (legado incluido): blocked sem
+        # next_retry_at (ou com ele vencido) volta a agenda do monitor.
+        effective_state = {**state_info, "state": state}
+        if state == STATE_UNCERTAIN:
+            uncertain_ids.append(post_id)
+        elif state == STATE_AWAITING_HUMAN:
+            awaiting_human_ids.append(post_id)
+        elif state == STATE_SKIPPED:
+            skipped_ids.append(post_id)
+        elif state == STATE_READY:
+            ready_ids.append(post_id)
+        elif state == STATE_BLOCKED:
             blocked_ids.append(post_id)
+            if retry_eligible(effective_state):
+                eligible_rework.append(post_id)
             if _is_recent(post, cutoff):
                 recent_blocked.append(post_id)
-        elif not ready:
+        else:  # NEW / PROCESSING / desconhecido
             unprocessed.append(post_id)
             if _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
@@ -1049,10 +1455,16 @@ def build_queue_report(
                 "date": post.get("date"),
                 "date_gmt": post.get("date_gmt"),
                 "word_count": word_count((post.get("content") or {}).get("rendered") or ""),
-                "prepared": prepared,
-                "edited": ready and not uncertain,
-                "blocked": blocked and not uncertain,
-                "uncertain": uncertain,
+                "state": state,
+                "attempts": state_info["attempts"],
+                "next_retry_at": state_info["next_retry_at"],
+                "last_error": state_info["last_error"][:160],
+                "prepared": (backups_dir / "prepared.json").is_file(),
+                "edited": state == STATE_READY,
+                "blocked": state == STATE_BLOCKED,
+                "uncertain": state == STATE_UNCERTAIN,
+                "awaiting_human": state == STATE_AWAITING_HUMAN,
+                "skipped": state == STATE_SKIPPED,
                 "title": title,
             }
         )
@@ -1061,15 +1473,27 @@ def build_queue_report(
     recent_unprocessed.sort()
     blocked_ids.sort()
     recent_blocked.sort()
+    eligible_rework.sort()
+    ready_ids.sort()
+    awaiting_human_ids.sort()
+    uncertain_ids.sort()
+    skipped_ids.sort()
     return {
         "pending": len(rows),
-        "edited": sum(1 for row in rows if row["edited"]),
-        "blocked": sum(1 for row in rows if row["blocked"]),
-        "uncertain": sum(1 for row in rows if row["uncertain"]),
+        "edited": len(ready_ids),
+        "blocked": len(blocked_ids),
+        "uncertain": len(uncertain_ids),
+        "awaiting_human": len(awaiting_human_ids),
+        "skipped": len(skipped_ids),
         "unprocessed_ids": unprocessed,
         "recent_unprocessed_ids": recent_unprocessed,
         "blocked_ids": blocked_ids,
         "recent_blocked_ids": recent_blocked,
+        "eligible_rework_ids": eligible_rework,
+        "ready_ids": ready_ids,
+        "awaiting_human_ids": awaiting_human_ids,
+        "uncertain_ids": uncertain_ids,
+        "skipped_ids": skipped_ids,
         "recent_days": recent_days,
         "posts": rows,
     }
@@ -1125,23 +1549,19 @@ def build_cards(
     *,
     per_page: int | None = None,
 ) -> dict[str, Any]:
-    """Compact per-post cards for the agent (token economy: ONE call).
+    """Cartões compactos por post para o agente (economia de tokens: UMA chamada).
 
-    Each card carries everything the model needs to write the editorial JSON
-    without touching the terminal: title, word count, distinctive entities,
-    original link, featured/seo/image gaps, preserved-image count, game hint
-    and processing state. Posts the publish gate reopened carry ``blocked`` +
-    ``blocked_reason`` (token economy: the card tells the agent WHAT to fix)
-    and come FIRST, FIFO by id (oldest rework first), before new pending
-    posts. Deterministic and read-only.
-
-    The fetch is bounded: rework ids come from ``backups/*/editorial.blocked.json``
-    and are fetched by ``include``; new posts are fetched only to fill the
-    remaining slots — never 100 full posts to return 2 cards.
+    Cada card carrega o DELTA exato (Fase 4): quantas imagens são exigidas,
+    quantas válidas existem, quantas faltam, quantas são irrelevantes/não-WebP,
+    diagnóstico da featured (existe? relevante? WebP? dimensões? ação) e, para
+    posts bloqueados, o plano ``fix`` — o agente sabe o que corrigir SÓ pelo
+    card, sem abrir blocked.json/checklist/logs/source. Rework vem PRIMEIRO
+    (FIFO por id); posts fora da fila (uncertain/awaiting_human/skipped/ready)
+    não geram card.
     """
     from .content_quality import word_count
     from .html_cleaner import clean_html
-    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+    from .media.relevance import extract_entities
 
     per_page = per_page or config.max_posts_per_run
     rework_ids = _rework_ids(root)
@@ -1152,7 +1572,8 @@ def build_cards(
         )
     remaining = per_page - len(posts)
     if remaining > 0:
-        posts.extend(client.list_pending(per_page=remaining))
+        # Fetch amplo e filtra: muitos pending podem ser ready/out-of-queue.
+        posts.extend(client.list_pending(per_page=max(remaining * 5, 20)))
     seen: set[int] = set()
     ordered: list[dict[str, Any]] = []
     for post in posts:
@@ -1161,12 +1582,30 @@ def build_cards(
             continue
         seen.add(post_id)
         ordered.append(post)
-    posts = ordered
     cards: list[dict[str, Any]] = []
-    for post in posts:
+    for post in ordered:
         post_id = post.get("id")
         if not isinstance(post_id, int):
             continue
+        backups_dir = root / "backups" / str(post_id)
+        state_info = read_state(post)
+        state = state_info["state"]
+        blocked_file = (backups_dir / "editorial.blocked.json").is_file()
+        uncertain_file = (backups_dir / "uncertain.json").is_file()
+        latest_file = (backups_dir / "editorial.latest.json").is_file()
+        if state is None:
+            # Legado: marcadores de filesystem decidem.
+            if uncertain_file:
+                state = STATE_UNCERTAIN
+            elif blocked_file:
+                state = STATE_BLOCKED
+            elif latest_file:
+                state = STATE_READY
+            else:
+                state = STATE_NEW
+        if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
+            continue  # fora da fila de trabalho do agente
+        blocked = state == STATE_BLOCKED
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
         rendered = (post.get("content") or {}).get("rendered") or ""
@@ -1174,21 +1613,10 @@ def build_cards(
         if not isinstance(meta, dict):
             meta = {}
         entities = extract_entities(title=title, content_html=raw)
-        images = iter_content_images(raw)
-        relevant_images = [
-            item
-            for item in images
-            if image_is_relevant(
-                alt_text=str(item.get("alt") or ""),
-                credit_text=str(item.get("caption") or ""),
-                source_url=str(item.get("src") or ""),
-                entities=entities,
-            )
-        ]
         preserved = len(re.findall(r"<img\b", clean_html(raw)))
-        backups_dir = root / "backups" / str(post_id)
-        blocked = (backups_dir / "editorial.blocked.json").is_file()
-        uncertain = (backups_dir / "uncertain.json").is_file()
+        images = _images_summary(raw, title, entities)
+        featured = _featured_diagnosis(client, post, entities)
+        fix = _fix_plan(backups_dir, images, featured, blocked) if blocked else None
         cards.append(
             {
                 "id": post_id,
@@ -1197,20 +1625,22 @@ def build_cards(
                 "word_count": word_count(rendered or raw),
                 "entities": sorted(entities),
                 "original_link": meta.get("original_link"),
-                "featured": isinstance(post.get("featured_media"), int) and post["featured_media"] > 0,
                 "seo_exists": _seo_is_valid(meta),
-                "images": {
-                    "total": len(images),
-                    "relevantes": len(relevant_images),
-                    "preservadas": preserved,
-                },
+                "images": images,
+                "featured": featured,
                 "game_hint": _game_hint(title),
-                # uncertain vence: o agente ja decidiu que nao ha como
-                # processar — o card sai da fila de trabalho (nao re-tenta).
-                "edited": (backups_dir / "editorial.latest.json").is_file() and not blocked and not uncertain,
-                "blocked": blocked and not uncertain,
-                "blocked_reason": _blocked_reason(backups_dir) if blocked and not uncertain else None,
-                "uncertain": uncertain,
+                "state": state,
+                "attempts": state_info["attempts"],
+                "next_retry_at": state_info["next_retry_at"],
+                "last_error": state_info["last_error"][:160],
+                "blocked": blocked,
+                "blocked_reason": _blocked_reason(backups_dir) if blocked else None,
+                "fix": fix,
+                "draft": (
+                    str(backups_dir / "editorial.draft.json")
+                    if (backups_dir / "editorial.draft.json").is_file()
+                    else None
+                ),
                 "prepared": (backups_dir / "prepared.json").is_file(),
             }
         )
@@ -1219,6 +1649,117 @@ def build_cards(
     # rotaciona, em vez de os mesmos 10 blocked monopolizarem o topo.
     cards.sort(key=lambda card: (not card.get("blocked", False), int(card.get("id") or 0)))
     return {"count": len(cards[:per_page]), "cards": cards[:per_page]}
+
+
+def _featured_diagnosis(
+    client: WordPressClient,
+    post: dict[str, Any],
+    entities: set[str],
+) -> dict[str, Any]:
+    """Diagnóstico determinístico da featured atual (Fase 4.2).
+
+    ``exists``/``relevant``/``webp``/``dimensions``/``valid`` + ``action``:
+    - ``normalize`` — semanticamente correta mas formato/dimensão errados:
+      o apply normaliza automaticamente (o agente não busca nada).
+    - ``replace``   — irrelevante (não retrata o assunto): o agente deve
+      buscar key art nova.
+    - ``provide``   — não existe: o agente deve incluir ``is_featured`` no
+      media_plan.
+    - ``ok``        — já válida; nada a fazer.
+    """
+    featured_raw = post.get("featured_media")
+    if not isinstance(featured_raw, int) or featured_raw <= 0:
+        return {
+            "exists": False,
+            "relevant": None,
+            "webp": None,
+            "dimensions": None,
+            "valid": False,
+            "action": "provide",
+        }
+    featured_id = featured_raw
+    webp: bool | None = None
+    dimensions: str | None = None
+    relevant: bool | None = None
+    try:
+        media = client.get_media(featured_id)
+        details = media.get("media_details") or {}
+        width, height = details.get("width"), details.get("height")
+        dimensions = f"{width or '?'}x{height or '?'}"
+        source_url = (media.get("source_url") or "").strip()
+        webp = source_url.lower().split("?", 1)[0].endswith(".webp")
+        if entities:
+            evidence = " ".join(
+                part
+                for part in (
+                    source_url,
+                    str((media.get("title") or {}).get("rendered") or ""),
+                    str(media.get("alt_text") or ""),
+                )
+                if part
+            )
+            relevant = image_is_relevant(
+                alt_text="", credit_text="", source_url=evidence, entities=entities, source_only=True
+            )
+    except Exception:  # noqa: BLE001 - media lookup failure: diagnostico conservador
+        pass
+    valid = bool(relevant and webp and dimensions == "1280x720")
+    if valid:
+        action = "ok"
+    elif relevant is False:
+        action = "replace"
+    else:
+        action = "normalize"
+    return {
+        "exists": True,
+        "relevant": relevant,
+        "webp": webp,
+        "dimensions": dimensions,
+        "valid": valid,
+        "action": action,
+    }
+
+
+def _fix_plan(
+    backups_dir: Path,
+    images: dict[str, int],
+    featured: dict[str, Any],
+    blocked: bool,
+) -> dict[str, Any] | None:
+    """Plano de correção derivado do checklist bloqueado (Fase 4.3).
+
+    O agente lê APENAS o card e sabe: quantas imagens buscar, se a featured
+    será normalizada pelo código (nada a fazer), se precisa substituí-la,
+    se a lista/estrutura/texto precisam de ajuste.
+    """
+    if not blocked:
+        return None
+    names: set[str] = set()
+    try:
+        data = json.loads((backups_dir / "editorial.blocked.json").read_text(encoding="utf-8"))
+        checklist = data.get("blocked_checklist")
+        if isinstance(checklist, dict):
+            names = {
+                str(item.get("name"))
+                for item in (checklist.get("items") or [])
+                if item.get("status") in ("fail", "error") and item.get("name")
+            }
+    except (OSError, ValueError):
+        pass
+    # find_inline_images = o delta real (missing) — vale para blocked legado
+    # (sem blocked_checklist) e para qualquer gate que deixe imagens faltando.
+    return {
+        "find_inline_images": images["missing"],
+        "normalize_featured": featured.get("action") == "normalize",
+        "replace_featured": featured.get("action") == "replace",
+        "provide_featured": featured.get("action") == "provide",
+        "normalize_inline": "imagens_webp" in names,
+        "remove_irrelevant_images": "relevancia_imagens" in names,
+        "fix_list_structure": "estrutura_lista" in names,
+        "rewrite_text": "qualidade_texto" in names,
+        "provide_trailer": "trailer_youtube" in names,
+        "fix_dimensions": "dimensoes_imagens" in names,
+    }
 
 
 def _blocked_reason(backups_dir: Path) -> str | None:
@@ -1281,3 +1822,109 @@ def _original_link(post: dict[str, Any]) -> str | None:
         return None
     value = meta.get("original_link")
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def load_draft(root: Path, post_id: int) -> dict[str, Any]:
+    """Rascunho editorial persistido (base do rework incremental).
+
+    Lê ``backups/<id>/editorial.draft.json``; sem draft, cai para o
+    ``editorial.latest.json`` (legado). O agente carrega o rascunho, corrige
+    SOMENTE o componente apontado pelo ``fix`` do card e re-aplica.
+    """
+    directory = root / "backups" / str(post_id)
+    draft = directory / "editorial.draft.json"
+    source = draft if draft.is_file() else directory / "editorial.latest.json"
+    if not source.is_file():
+        raise WorkflowError(f"sem editorial.draft.json nem editorial.latest.json para o post {post_id}")
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise WorkflowError(f"draft ilegivel ({source.name}): {exc}") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("draft invalido: conteudo nao e um objeto JSON")
+    return value
+
+
+def retry_post(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+) -> dict[str, Any]:
+    """Reabre um post AWAITING_HUMAN/BLOCKED para nova tentativa automática.
+
+    Operação explícita de revisão humana: zera as tentativas e o cooldown
+    (``next_retry_at`` vazio = elegível imediatamente), mantendo o estado
+    BLOCKED para o agente ver o card e corrigir. Nunca força READY.
+    """
+    post = client.get_post(post_id)
+    if post.get("status") != "pending":
+        raise WorkflowError(f"post {post_id} nao esta pending ({post.get('status')})")
+    if config.dry_run:
+        raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    _write_state_markers(
+        client,
+        config,
+        post_id,
+        STATE_BLOCKED,
+        attempts=0,
+        last_error="reaberto por revisao humana (retry)",
+    )
+    return {
+        "post_id": post_id,
+        "status": "retried",
+        "state": STATE_BLOCKED,
+        "attempts": 0,
+        "wordpress_changed": True,
+    }
+
+
+def discard_post(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Descarta um post da fila editorial (decisão humana ou do agente).
+
+    Grava ``uncertain.json`` (escape já existente do pipeline) e o estado
+    UNCERTAIN — o post sai da agenda do monitor e nunca publica.
+    """
+    post = client.get_post(post_id)
+    if post.get("status") != "pending":
+        raise WorkflowError(f"post {post_id} nao esta pending ({post.get('status')})")
+    if config.dry_run:
+        raise WorkflowError("discard e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    editorial = {"site_relevance": {"decision": "skip", "confidence": 1.0, "reason": reason or "descartado"}}
+    _save_uncertain(root, post_id, editorial)
+    _write_state_markers(
+        client,
+        config,
+        post_id,
+        STATE_UNCERTAIN,
+        last_error=reason or "descartado",
+    )
+    return {
+        "post_id": post_id,
+        "status": "discarded",
+        "state": STATE_UNCERTAIN,
+        "wordpress_changed": True,
+    }
+
+
+def mark_uncertain(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Registra a decisão do agente de não processar o post agora.
+
+    O agente usava ``uncertain.json`` direto no filesystem; este comando
+    valida e persiste também o estado no WordPress (fonte de verdade única).
+    """
+    if not reason or not reason.strip():
+        raise WorkflowError("motivo obrigatorio para marcar uncertain")
+    return discard_post(client, config, root, post_id, reason=reason.strip())
