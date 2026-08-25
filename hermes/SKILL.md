@@ -64,6 +64,10 @@ produção — consulte quando algo falhar ou parecer estranho).
    fundo branco antes do upload/insert (o WebP publicado nunca é
    transparente); imagem (quase) totalmente transparente é REJEITADA — troque
    por uma versão com fundo.
+   (h) SEM imagem REPETIDA no mesmo post: cada imagem do corpo deve ser
+   distinta (mesma obra = imagens/ângulos/capturas diferentes, nunca a mesma
+   URL usada várias vezes). O checklist `imagens_duplicadas` bloqueia — não
+   reuse a mesma imagem em múltiplos `media_plan` nem como featured + inline.
    ORDEM DE BUSCA (regra 2026-08-21): comece na WEB — Google Images/web_search
    para key art em sites de notícias, páginas oficiais, lojas (Steam CDN
    header.jpg etc.) — extraia a URL DIRETA da página original e use
@@ -86,6 +90,15 @@ produção — consulte quando algo falhar ou parecer estranho).
    WebP automaticamente no apply; imagens inline relevantes não-WebP idem
    (sem nova busca semântica). SÓ procure imagem nova quando o card disser
    `featured.action: replace|provide` ou `fix.find_inline_images > 0`.
+8b. LINKS INTERNOS SÃO DO CÓDIGO, não seus: o apply adiciona (determinístico,
+    sem IA) um link interno de categoria na PRIMEIRA ocorrência de cada termo
+    inequívoco do mapa (Netflix, PlayStation 5, Xbox Series X, PC, Marvel,
+    DC Comics, Star Wars, etc.), no máximo uma vez por URL, com link padrão
+    follow e sem target=_blank. Termos que dependem de contexto ("manga",
+    "max" isolado, "teaser", "análise", "crítica", "DC" isolado, Android/iOS
+    isolados) NÃO recebem link automático. Você NÃO precisa nem deve incluir
+    esses links no JSON editorial: o apply os insere sozinho. Se o conteúdo
+    já tiver o termo dentro de um <a> ou heading, o código respeita.
 9. NÃO rode `checklist` manualmente: o apply já valida antes de gravar e o
    publish-ready re-valida por manifest (hash). `--dry-run` NÃO é obrigatório:
    use-o apenas em rework complexo, mídia nova, JSON que já falhou ou quando
@@ -114,7 +127,10 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - **UNCERTAIN / SKIPPED / AWAITING_HUMAN** = fora da fila: não gera card, não
   re-tenta, não publica.
 - O monitor (`queue --monitor`) só acorda o agente com trabalho ELEGÍVEL:
-  rework fora de cooldown + pending recentes não processados.
+  rework fora de cooldown + pending recentes não processados. O rework NÃO
+  reativa por bucket de parede: o hash muda só quando um `next_retry_at`
+  (cooldown real) expira — bloqueio em cooldown não acorda o agente a cada
+  tick. Rework eterno = erro seu: use `uncertain` para post não-corrigível.
 
 ## Loop verificar -> corrigir -> publicar (blocked/rework)
 
@@ -174,8 +190,8 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 ## Diagnóstico barato (sessões interativas — todo token custa dinheiro)
 
 - Para "verificar X" (fila, publicações, custo, crons, tokens): rode UMA chamada
-  `work/diagnostico.sh` (fila editorial + custo real por fonte no state.db do
-  Hermes, cache-hit já descontado). Custo < $0.01 por verificação.
+  `scripts/diagnostico.sh` (fila editorial; read-only). Custo < $0.01 por
+  verificação.
 - NUNCA explore `src/**`, `.env`, `backups/**`, logs ou JSONs grandes para
   diagnosticar — o script e o CLI (`queue`, `list-pending --compact`) são a
   interface.

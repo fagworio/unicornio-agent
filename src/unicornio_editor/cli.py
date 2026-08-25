@@ -339,6 +339,26 @@ def _compact_checklist(checklist: dict) -> dict:
     return {"status": "pass" if not failed else "fail", "failed": failed}
 
 
+def _monitor_line(report: dict) -> str:
+    """Linha ESTAVEL do monitor (hasheada pelo cron).
+
+    So muda quando ha trabalho elegivel real: pending recente nao processado
+    (id), rework BLOCKED fora de cooldown (id) e rework em cooldown codificado
+    como id@next_retry_at (minuto). O hash so muda quando um cooldown expira
+    (o post troca de grupo cooldown -> elegivel), NUNCA a cada tick por um
+    bucket de parede — evita rework eterno queimando tokens.
+    """
+    parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
+    parts += [str(pid) for pid in report.get("recent_unprocessed_ids", [])]
+    in_cooldown = sorted(
+        f"{row['id']}@{str(row.get('next_retry_at') or '')[:16]}"
+        for row in (report.get("posts") or [])
+        if row.get("state") == "blocked" and row.get("next_retry_at")
+    )
+    parts += in_cooldown
+    return " ".join(parts) or "0"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
@@ -366,28 +386,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
-                # Linha estavel hasheada pelo monitor do cron. Trabalho
-                # elegivel (Fase 9): rework BLOCKED fora de cooldown (todos,
-                # nao so os recentes — um bloqueio antigo nao pode sumir da
-                # agenda) + pending recentes nao processados. UNCERTAIN /
-                # AWAITING_HUMAN / SKIPPED / READY / BLOCKED em cooldown
-                # ficam fora. Com rework elegivel, um bucket de hora entra na
-                # linha: o hash muda a cada hora e o agente acorda para
-                # tentar corrigir (o cooldown limita o ritmo real).
-                import datetime as _dt
-
-                parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
-                parts += [str(pid) for pid in report["recent_unprocessed_ids"]]
-                if report.get("eligible_rework_ids"):
-                    # Bucket de 30min (alinhado ao tick do cron): com rework
-                    # elegivel, o hash muda a cada tick e o agente acorda para
-                    # corrigir — um bloqueio pendente nunca some da agenda e o
-                    # ritmo real e limitado pelo cooldown (30m/2h).
-                    now = _dt.datetime.now(_dt.timezone.utc)
-                    bucket = now.strftime("%Y-%m-%dT%H:") + ("00" if now.minute < 30 else "30")
-                    parts.append("r:" + bucket)
-                line = " ".join(parts) or "0"
-                print(line)
+                # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
+                # so muda quando ha trabalho elegivel real, nunca a cada tick.
+                print(_monitor_line(report))
                 return 0
             result = report
         elif args.command == "cards":

@@ -538,9 +538,12 @@ class WorkflowTests(unittest.TestCase):
             "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
         )
         payload["media_plan"] = [
-            self.media_item(paragraph_index=0),
-            self.media_item(paragraph_index=3),
-            self.media_item(paragraph_index=6, is_featured=True),
+            {**self.media_item(paragraph_index=0), "direct_image_url": "https://source.example/a.jpg"},
+            {**self.media_item(paragraph_index=3), "direct_image_url": "https://source.example/b.jpg"},
+            {
+                **self.media_item(paragraph_index=6, is_featured=True),
+                "direct_image_url": "https://source.example/keyart.jpg",
+            },
         ]
         with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), mock.patch(
             "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
@@ -1227,6 +1230,76 @@ class WorkflowTests(unittest.TestCase):
             queue = build_queue_report(client, root)
             self.assertEqual(queue["uncertain"], 1)
             self.assertIn(42, queue["uncertain_ids"])
+
+    def test_validate_media_plan_rejects_duplicate_source(self):
+        # Politica anti-repeticao: a MESMA fonte nao pode entrar duas vezes
+        # no media_plan (o "mesma imagem no post inteiro" da producao). O
+        # segundo item com a mesma URL e rejeitado ANTES do apply.
+        item = {
+            "paragraph_index": 1,
+            "source_page_url": "https://source.example/titulo",
+            "direct_image_url": "https://cdn.example/titulo.jpg",
+            "author": "Autor",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "credit_text": "Crédito da imagem: Autor. Título do jogo. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).",
+            "alt_text": "Titulo do jogo key art",
+            "is_featured": False,
+        }
+        editorial = editorial_payload()
+        editorial["media_plan"] = [dict(item), dict(item)]
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            result = validate_media_plan(client, editorial)
+        self.assertEqual(result["valid"], 1)
+        self.assertEqual(len(result["rejected"]), 1)
+        self.assertIn("repetida", result["rejected"][0]["reason"])
+
+    def test_apply_rejects_duplicate_media_plan_source(self):
+        # O apply tambem rejeita a segunda ocorrencia da mesma fonte (o card
+        # nao insere a mesma imagem duas vezes).
+        payload = editorial_payload()
+        payload["cleaned_html"] = (
+            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
+            "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
+        )
+        base = {
+            "source_page_url": "https://source.example/titulo",
+            "direct_image_url": "https://source.example/titulo.jpg",
+            "author": "Autor",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "credit_text": "Crédito da imagem: Autor. Imagem do titulo do jogo. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).",
+            "alt_text": "Imagem do titulo do jogo",
+            "is_featured": False,
+        }
+        payload["media_plan"] = [
+            {**base, "paragraph_index": 0},
+            {**base, "paragraph_index": 3},
+        ]
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), mock.patch(
+            "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            side_effect=[
+                {"id": 50, "source_url": "https://wp.test/50.webp"},
+            ],
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = FakeClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        # O segundo item (fonte duplicada) e rejeitado; nao entra no conteudo.
+        # Resultado de sucesso carrega media_id; rejeitado carrega status.
+        self.assertEqual(len(report["media_plan_results"]), 2)
+        rejected = [r for r in report["media_plan_results"] if r.get("status") == "rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("repetida", rejected[0]["detail"])
 
 
 if __name__ == "__main__":

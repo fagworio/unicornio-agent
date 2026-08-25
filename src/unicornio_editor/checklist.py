@@ -160,6 +160,28 @@ def run_pre_publish_checklist(
     else:
         check("relevancia_imagens", True, "sem imagens para validar", skipped=True)
 
+    # 6c. No repeated image: each inline image must be distinct. Reusing the
+    #     same URL several times in a post is low-quality editorial (the exact
+    #     "same key art reused throughout" failure observed in production). A
+    #     single source appearing more than once blocks READY until the agent
+    #     replaces the duplicates with distinct imagery of the same work.
+    from collections import Counter as _Counter
+
+    src_counts = _Counter(str(item.get("src") or "").strip() for item in content_images)
+    repeated = [f"{src} (x{count})" for src, count in src_counts.items() if count > 1 and src]
+    if content_images:
+        check(
+            "imagens_duplicadas",
+            not repeated,
+            (
+                f"{len(content_images)} imagem(ns); repetidas: {', '.join(repeated[:3])}"
+                if repeated
+                else f"{len(content_images)} imagem(ns) distintas"
+            ),
+        )
+    else:
+        check("imagens_duplicadas", True, "sem imagens para validar", skipped=True)
+
     # 7. Featured image is mandatory before publishing.
     featured_raw = post.get("featured_media")
     featured = featured_raw if isinstance(featured_raw, int) and featured_raw > 0 else None

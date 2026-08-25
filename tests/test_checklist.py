@@ -148,6 +148,32 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["relevancia_imagens"], "fail")
 
+    def test_duplicate_image_fails_duplicate_gate(self):
+        # Reutilizar a mesma URL de imagem varias vezes no corpo e falha
+        # editorial (o "mesma key art reaproveitada no post" da producao).
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+            "<p>Mais texto sobre videogame e o lançamento.</p>"
+        )
+        result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["imagens_duplicadas"], "fail")
+        self.assertFalse(result["all_passed"])
+
+    def test_distinct_images_pass_duplicate_gate(self):
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" width="1280" height="720" alt="Redfall key art" />'
+            "<figcaption>Crédito da imagem: Autor. Redfall. CC BY 4.0.</figcaption></figure>"
+        )
+        result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["imagens_duplicadas"], "pass")
+
     def test_relevant_image_passes_relevance_gate(self):
         content = (
             '<figure class="aligncenter"><img src="https://media.example/a.webp" alt="Cena importante do jogo" />'

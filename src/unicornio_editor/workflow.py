@@ -524,12 +524,17 @@ def _images_summary(content: str, title: str, entities: set[str] | None = None) 
         for item in images
         if not str(item.get("src") or "").lower().split("?", 1)[0].endswith(".webp")
     )
+    from collections import Counter as _Counter
+
+    src_counts = _Counter(str(item.get("src") or "").strip() for item in images)
+    duplicates = sum(count - 1 for src, count in src_counts.items() if count > 1 and src)
     return {
         "required": required,
         "valid": len(relevant),
         "missing": max(0, required - len(relevant)),
         "irrelevant": len(images) - len(relevant),
         "non_webp": non_webp,
+        "duplicates": duplicates,
     }
 
 
@@ -619,6 +624,32 @@ def _media_item_rejection(
     return None
 
 
+def _plan_source_key(item: dict[str, Any]) -> str:
+    """Chave de fonte de um item do media_plan para deteccao de duplicatas.
+
+    Reuso da Media Library -> attachment id; novo -> URL direta. O mesmo
+    conteudo visual nao pode entrar duas vezes (politica anti-repeticao).
+    """
+    media_id = item.get("media_library_id")
+    if media_id:
+        return f"lib:{media_id}"
+    return f"url:{str(item.get('direct_image_url') or '').strip()}"
+
+
+def _duplicate_source_reason(plan: list[dict[str, Any]], index: int, seen: set[str]) -> str | None:
+    """Motivo de rejeicao quando a fonte ja aparece em item anterior do plano."""
+    key = _plan_source_key(plan[index])
+    if not key or key.endswith(":"):
+        return None
+    if key in seen:
+        return (
+            "imagem repetida no media_plan (mesma fonte ja usada em outro item); "
+            "cada imagem do post deve ser distinta — troque por outra captura/ângulo da obra"
+        )
+    seen.add(key)
+    return None
+
+
 def validate_media_plan(
     client: WordPressClient,
     editorial: dict[str, Any],
@@ -641,8 +672,11 @@ def validate_media_plan(
     cache: dict[int, dict[str, Any]] = {}
     valid = 0
     rejected: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
     for index, item in enumerate(plan):
         reason = _media_item_rejection(item, entities, client, cache)
+        if reason is None:
+            reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason:
             rejected.append({"index": index, "reason": reason})
         else:
@@ -723,8 +757,11 @@ def _execute_media_plan(
 
     if config.dry_run:
         results: list[dict[str, Any]] = []
-        for item in plan:
+        seen_sources: set[str] = set()
+        for index, item in enumerate(plan):
             reason = _rejection_reason(item)
+            if reason is None:
+                reason = _duplicate_source_reason(plan, index, seen_sources)
             results.append(
                 {
                     "paragraph_index": item.get("paragraph_index"),
@@ -737,10 +774,13 @@ def _execute_media_plan(
     featured_id: int | None = None
     featured_credit: str | None = None
     page_cache: dict[str, list[str] | None] = {}
+    seen_sources: set[str] = set()
     with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
         tmp = Path(directory)
         for position, item in enumerate(plan):
             reason = _rejection_reason(item)
+            if reason is None:
+                reason = _duplicate_source_reason(plan, position, seen_sources)
             if reason:
                 results.append(
                     {
@@ -1339,8 +1379,17 @@ def compose_final_content(
     """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
 
     Returns ``(content, trailer)`` so callers can report what was embedded.
+
+    Internal category links are added deterministically (no LLM) to the body
+    HTML BEFORE the trailer/footer are appended, so the CTA/Fonte blocks and
+    the trailer embed are never linked. The enrichment runs on the same final
+    content the checklist validates and the manifest hashes.
     """
     html = editorial["cleaned_html"]
+    if config.internal_links_enabled:
+        from .internal_links import add_internal_links
+
+        html = add_internal_links(html)
     trailer = _discover_trailer(editorial, config)
     if trailer is not None:
         html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
@@ -1762,6 +1811,7 @@ def _fix_plan(
         "rewrite_text": "qualidade_texto" in names,
         "provide_trailer": "trailer_youtube" in names,
         "fix_dimensions": "dimensoes_imagens" in names,
+        "remove_duplicate_images": "imagens_duplicadas" in names,
     }
 
 

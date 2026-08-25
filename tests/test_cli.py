@@ -7,7 +7,7 @@ arquivo (apply.latest.json) para auditoria.
 
 import unittest
 
-from unicornio_editor.cli import _compact_apply, _compact_checklist
+from unicornio_editor.cli import _compact_apply, _compact_checklist, _monitor_line
 
 
 class CompactOutputTests(unittest.TestCase):
@@ -92,6 +92,37 @@ class CompactOutputTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "uncertain")
         self.assertEqual(result["skip_reason"], "conteudo irrelevante")
+
+    def test_monitor_line_idle_is_zero(self):
+        # Sem trabalho elegivel a linha e "0" (estavel; nao acorda o agente).
+        self.assertEqual(
+            _monitor_line({"eligible_rework_ids": [], "recent_unprocessed_ids": [], "posts": []}),
+            "0",
+        )
+
+    def test_monitor_line_encodes_cooldown_not_wall_clock(self):
+        # Rework em cooldown e codificado por next_retry_at (id@minuto), nao
+        # por bucket de parede: a linha so muda quando o cooldown expira.
+        report = {
+            "eligible_rework_ids": [],
+            "recent_unprocessed_ids": [],
+            "posts": [
+                {
+                    "id": 42,
+                    "state": "blocked",
+                    "next_retry_at": "2026-08-25T14:30:00+00:00",
+                }
+            ],
+        }
+        self.assertEqual(_monitor_line(report), "42@2026-08-25T14:30")
+
+    def test_monitor_line_includes_eligible_and_new(self):
+        report = {
+            "eligible_rework_ids": [2],
+            "recent_unprocessed_ids": [9],
+            "posts": [],
+        }
+        self.assertEqual(_monitor_line(report), "2 9")
 
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})

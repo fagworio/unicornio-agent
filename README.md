@@ -186,6 +186,22 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
 - Sem crédito visível, descartar a imagem e procurar outra.
 
+### Links internos (código determinístico, sem IA)
+- O apply adiciona links internos para categorias do portal na PRIMEIRA
+  ocorrência de cada termo inequívoco do mapa (Netflix, PlayStation 5,
+  Xbox Series X, PC, Marvel, DC Comics, Star Wars, Disney+, HBO Max, etc.),
+  no máximo uma vez por URL, com link interno padrão (follow, sem
+  target=_blank, sem rel=nofollow).
+- Termos que dependem de contexto ("manga", "max" isolado, "teaser",
+  "análise"/"crítica"/"review", "DC" isolado, Android/iOS isolados) NÃO
+  recebem link automático — uma string replace não julga contexto.
+- Nunca linka dentro de um `<a>` existente, nem dentro de headings
+  (h1-h6), nem no meio de uma palavra (boundary de palavra completa).
+- O enriquecimento roda no `compose_final_content` (mesmo conteúdo que o
+  checklist valida e o manifest hasheia) e pode ser desligado com
+  `EDITOR_INTERNAL_LINKS_ENABLED=false`. O mapa vive em
+  `src/unicornio_editor/internal_links.py`.
+
 ### Fonte
 Formato final:
 
