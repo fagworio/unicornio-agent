@@ -573,7 +573,9 @@ def _media_item_rejection(
         source = " ".join(part for part in (url, title, alt, caption) if part)
         if is_featured:
             if not image_is_relevant(
-                alt_text="", credit_text="", source_url=source, entities=entities, source_only=True
+                alt_text="", credit_text="", source_url=source,
+                search_query=str(item.get("search_query") or ""),
+                entities=entities, source_only=True,
             ):
                 listed = ", ".join(sorted(entities)) or "nenhuma"
                 return (
@@ -585,6 +587,7 @@ def _media_item_rejection(
             alt_text=str(item.get("alt_text") or ""),
             credit_text=str(item.get("credit_text") or ""),
             source_url=source,
+            search_query=str(item.get("search_query") or ""),
             entities=entities,
         ):
             listed = ", ".join(sorted(entities)) or "nenhuma"
@@ -602,6 +605,7 @@ def _media_item_rejection(
             source_url=" ".join(
                 str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
             ),
+            search_query=str(item.get("search_query") or ""),
             entities=entities,
             source_only=True,
         ):
@@ -617,6 +621,7 @@ def _media_item_rejection(
         source_url=" ".join(
             str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
         ),
+        search_query=str(item.get("search_query") or ""),
         entities=entities,
     ):
         listed = ", ".join(sorted(entities)) or "nenhuma"

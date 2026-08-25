@@ -204,11 +204,12 @@ def image_is_relevant(
     alt_text: str = "",
     credit_text: str = "",
     source_url: str = "",
+    search_query: str = "",
     entities: Iterable[str],
     source_only: bool = False,
 ) -> bool:
     """True when the candidate image references at least one distinctive
-    entity of the post (alt, credit or source URL).
+    entity of the post (alt, credit, source URL or discovery query).
 
     ``source_only=True`` ignores the agent-written alt/credit and requires the
     real source URL (file/page name) itself to reference the subject. It is
@@ -216,18 +217,34 @@ def image_is_relevant(
     (e.g. a Disney castle captioned "presente em Kingdom Hearts"), but the
     file name of a true key art carries the game/work name. Featured images
     must depict the cited subject itself, never a tangential symbol.
+
+    ``search_query`` is the discovery query that returned this image (e.g.
+    "redfall xbox series"). It mirrors the editor's manual flow: if a
+    filtered image search returned the candidate, it is the subject sought.
+    For featured, the query is only additional evidence — the real source
+    URL must still be present, so a fabricated query cannot smuggle a wrong
+    image past the gate on its own.
     """
     entity_set = {normalize(entity) for entity in entities if entity}
     if not entity_set:
         return False
     if source_only:
-        haystack = _url_text(source_url)
+        # Featured: a real source URL must always be present. The query is
+        # additional evidence on top of it — it can rescue a generic
+        # filename (header.jpg) but can never smuggle an image with no
+        # source at all.
+        if not str(source_url or "").strip():
+            return False
+        haystack = " ".join(
+            (_url_text(source_url), normalize(search_query))
+        )
     else:
         haystack = " ".join(
             (
                 normalize(alt_text),
                 normalize(credit_text),
                 _url_text(source_url),
+                normalize(search_query),
             )
         )
     if not haystack.strip():

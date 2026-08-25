@@ -19,11 +19,18 @@ O Google Images é **somente índice de descoberta** — a fonte é a página
    verificadas) e `unicornio-editor media-search TERMO --limit N` (reuso da
    Media Library). Busque na web só se nenhum dos dois servir. Imagem nova
    verificada -> REGISTRE no cache.
-2. **Web/Google Images/web_search** para key art oficial: sites de notícias,
-   páginas oficiais, lojas (ex.: Steam CDN `header.jpg`). Extraia a URL
-   DIRETA da página original e use `license: "Uso com crédito"` com
-   `license_url` = a página original.
-3. **Wikimedia Commons é FALLBACK** (pouca key art oficial e rate-limit 429):
+2. **Google Images com filtro do editor** (determinístico):
+   `unicornio-editor media-search-web TERMO --size xga --ratio w --limit N`.
+   Aplica imgsz=xga (1024x768) e imgar=w (proporção larga) + udm=2, e devolve
+   candidatos com URL direta + página de origem + a `query` usada — sem você
+   montar URL de busca nem parsear resultados (economia de tokens). O Google
+   é apenas ÍNDICE: a fonte é a página ORIGINAL. Use `license: "Uso com
+   crédito"` com `license_url` = a página original.
+3. **Query como evidência**: registre `search_query` no media_plan (a busca
+   que retornou a imagem). O gate de relevância aceita quando a query contém
+   a obra — espelha o fluxo manual do editor. Declare a query real; nunca
+   invente uma para decorar imagem errada (URL de origem ainda exigida).
+4. **Wikimedia Commons é FALLBACK** (pouca key art oficial e rate-limit 429):
    não trave re-tentando Wikimedia; troque para fontes web imediatamente.
 
 ## Regras obrigatórias (aplicadas deterministicamente no `apply`)

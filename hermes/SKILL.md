@@ -68,12 +68,23 @@ produção — consulte quando algo falhar ou parecer estranho).
    distinta (mesma obra = imagens/ângulos/capturas diferentes, nunca a mesma
    URL usada várias vezes). O checklist `imagens_duplicadas` bloqueia — não
    reuse a mesma imagem em múltiplos `media_plan` nem como featured + inline.
-   ORDEM DE BUSCA (regra 2026-08-21): comece na WEB — Google Images/web_search
-   para key art em sites de notícias, páginas oficiais, lojas (Steam CDN
-   header.jpg etc.) — extraia a URL DIRETA da página original e use
-   `license: "Uso com crédito"` com `license_url` = a página original.
-   Wikimedia Commons é FALLBACK (pouca key art oficial e rate-limit 429) —
-   não trave re-tentando Wikimedia; troque para fontes web imediatamente.
+   ORDEM DE BUSCA (regra 2026-08-21): comece na WEB. Use
+   `unicornio-editor media-search-web TERMO --size xga --ratio w --limit N`
+   (determinístico, sem você montar URL): ele já aplica o filtro do editor
+   (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2) e devolve
+   candidatos com URL direta + página de origem + a query usada. Google
+   Images (web_search manual) é fallback para casos não cobertos — lembre:
+   Google Images é só índice de descoberta. Extraia a URL
+   DIRETA da página original e use `license: "Uso com crédito"` com
+   `license_url` = a página original.
+   QUERY COMO EVIDÊNCIA: registre no media_plan o campo `search_query` (a
+   busca que retornou a imagem, ex.: "redfall xbox series"). O gate aceita a
+   imagem quando a query contém a obra — como no seu fluxo manual, se a busca
+   filtrada retornou, é o que se procura. Declare SEMPRE a query real; nunca
+   invente uma para "decorar" uma imagem errada (a URL de origem ainda é
+   exigida). Wikimedia Commons é FALLBACK (pouca key art oficial e rate-limit
+   429) — não trave re-tentando Wikimedia; troque para fontes web
+   imediatamente.
 6. Antes do apply com mídia nova, valide o plano com `unicornio-editor
    media-validate editorial.json` (1 chamada; {valid, rejected}) — corrija o
    que rejeitar.

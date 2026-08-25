@@ -37,6 +37,12 @@ _MEDIA = {
     # from this attachment and re-uploaded as a NEW attachment (the original
     # title/alt/caption are never overwritten).
     "media_library_id",
+    # Query de descoberta que retornou esta imagem (ex.: "redfall xbox
+    # series"). Evidencia de relevancia (fluxo manual do editor): se a busca
+    # filtrada retornou a imagem, ela e o que se procura. O agente DEVE
+    # declarar a query real usada; nunca inventar para "decorar" uma imagem
+    # errada.
+    "search_query",
 }
 
 
@@ -92,7 +98,10 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     featured_count = 0
     for index, item in enumerate(media_plan):
         media = _object(item, f"media_plan[{index}]")
-        _keys(media, _MEDIA, f"media_plan[{index}]", optional={"media_library_id"})
+        _keys(
+            media, _MEDIA, f"media_plan[{index}]",
+            optional={"media_library_id", "search_query"},
+        )
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
             raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")

@@ -137,6 +137,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
 
+    media_search_web_parser = subparsers.add_parser(
+        "media-search-web",
+        help="descobre candidatos de imagem via Google Images com filtro de tamanho/"
+        "proporcao (somente leitura; index de descoberta, a fonte e a pagina original)",
+    )
+    media_search_web_parser.add_argument("termo", type=str, help="termo de busca (ex.: redfall xbox series)")
+    media_search_web_parser.add_argument(
+        "--size", default="xga", help="classe de tamanho Google imgsz (default: xga = 1024x768)"
+    )
+    media_search_web_parser.add_argument(
+        "--ratio", default="w", help="proporcao Google imgar (default: w = larga)"
+    )
+    media_search_web_parser.add_argument(
+        "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
+    )
+
     content_parser = subparsers.add_parser(
         "content",
         help="retorna o cleaned_html do post (somente leitura; use SO quando for "
@@ -434,6 +450,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "media-search":
             items = client.search_media(args.termo, per_page=args.limit)
             result = [_media_search_item(item) for item in items]
+        elif args.command == "media-search-web":
+            from .media.search import search_web_images
+
+            candidates = search_web_images(
+                args.termo,
+                size=args.size,
+                ratio=args.ratio,
+                limit=args.limit,
+            )
+            result = {
+                "query": args.termo,
+                "size_filter": f"{args.size}|{args.ratio}",
+                "count": len(candidates),
+                "candidates": candidates,
+            }
         elif args.command == "content":
             result = get_cleaned_content(client, args.root, args.post_id)
         elif args.command == "media-validate":

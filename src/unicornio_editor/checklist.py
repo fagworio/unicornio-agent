@@ -254,6 +254,7 @@ def run_pre_publish_checklist(
                 str(featured_item.get(key) or "")
                 for key in ("direct_image_url", "source_page_url")
             ),
+            search_query=str(featured_item.get("search_query") or ""),
             entities=image_entities,
             source_only=True,
         )
