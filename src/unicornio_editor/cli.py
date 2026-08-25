@@ -159,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     media_search_web_parser.add_argument(
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
+    media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
 
     content_parser = subparsers.add_parser(
         "content",
