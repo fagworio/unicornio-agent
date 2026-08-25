@@ -64,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
         "usada pelo monitor_script do cron para nao acordar o LLM em ticks ociosos",
     )
 
+    telemetry_parser = subparsers.add_parser(
+        "telemetry",
+        help="resumo agregado das blocagens/resultados do pipeline (work/telemetry.jsonl; "
+        "somente leitura) — responde 'a fila parou por que?'",
+    )
+    telemetry_parser.add_argument("--root", type=Path, default=Path("."))
+
     cards_parser = subparsers.add_parser(
         "cards",
         help="cartoes compactos dos posts pending (entidades, gaps, SEO, imagens, dica de jogo) — "
@@ -399,6 +406,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
             if args.compact:
                 result = _compact_listing(result)
+        elif args.command == "telemetry":
+            from .observability import read_telemetry_summary
+
+            result = read_telemetry_summary(args.root)
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
@@ -452,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = [_media_search_item(item) for item in items]
         elif args.command == "media-search-web":
             from .media.search import search_web_images
+            from .observability import append_telemetry
 
             candidates = search_web_images(
                 args.termo,
@@ -459,6 +471,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ratio=args.ratio,
                 limit=args.limit,
             )
+            if not candidates:
+                # Possivel bloqueio/rate-limit do Google em producao: registrar
+                # para o operador distinguir "nao ha imagem" de "busca falhou".
+                append_telemetry(
+                    args.root, "media_search_empty",
+                    query=args.termo,
+                    size_filter=f"{args.size}|{args.ratio}",
+                )
             result = {
                 "query": args.termo,
                 "size_filter": f"{args.size}|{args.ratio}",

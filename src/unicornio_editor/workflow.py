@@ -35,7 +35,7 @@ from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.source_verify import verify_downloaded_against_source
 from .media.wordpress_media import upload_image
-from .observability import build_processing_markers
+from .observability import append_telemetry, build_processing_markers
 from .seo.rank_math import build_meta
 from .state import (
     STATE_AWAITING_HUMAN,
@@ -111,6 +111,10 @@ def apply_editorial(
             STATE_UNCERTAIN,
             last_error=editorial["site_relevance"]["reason"],
         )
+        append_telemetry(
+            root, "apply_uncertain",
+            post_id=post_id, reason=editorial["site_relevance"]["reason"],
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": False,
@@ -131,6 +135,10 @@ def apply_editorial(
             post_id,
             STATE_SKIPPED,
             last_error=editorial["site_relevance"]["reason"],
+        )
+        append_telemetry(
+            root, "apply_skipped",
+            post_id=post_id, reason=editorial["site_relevance"]["reason"],
         )
         return {
             "post_id": post_id,
@@ -231,6 +239,20 @@ def apply_editorial(
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
             )
+            images_summary = _images_summary(
+                content, _post_title(post) or editorial["seo"]["title"], image_entities
+            )
+            append_telemetry(
+                root, "apply_blocked",
+                post_id=post_id,
+                attempts=backoff["attempts"],
+                reason=", ".join(item["name"] for item in failed_items),
+                missing_images=images_summary.get("missing", 0),
+                valid_images=images_summary.get("valid", 0),
+                blocked_detail=(
+                    "; ".join(str(item.get("detail") or "")[:120] for item in failed_items[:3])
+                ),
+            )
             return {
                 "post_id": post_id,
                 "wordpress_changed": False,
@@ -247,7 +269,7 @@ def apply_editorial(
                 "blocked_detail": "; ".join(
                     str(item.get("detail") or "")[:200] for item in failed_items[:3]
                 ),
-                "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities),
+                "images": images_summary,
             }
     if config.dry_run:
         return {
@@ -296,6 +318,7 @@ def apply_editorial(
     # continuar listando blocked/uncertain (senao o monitor acordaria o agente
     # em loop para "corrigir" um post ja corrigido).
     _clear_processing_markers(root, post_id)
+    append_telemetry(root, "apply_ready", post_id=post_id)
     return {
         "post_id": post_id,
         "wordpress_changed": True,

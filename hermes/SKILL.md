@@ -201,11 +201,16 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 ## Diagnóstico barato (sessões interativas — todo token custa dinheiro)
 
 - Para "verificar X" (fila, publicações, custo, crons, tokens): rode UMA chamada
-  `scripts/diagnostico.sh` (fila editorial; read-only). Custo < $0.01 por
-  verificação.
+  `scripts/diagnostico.sh` (fila editorial + telemetria; read-only). Custo <
+  $0.01 por verificação.
+- Para "a fila parou por quê?": `unicornio-editor telemetry` resume as
+  blocagens/resultados do pipeline (apply_ready, apply_blocked + motivo,
+  apply_uncertain, apply_skipped, media_search_empty) a partir de
+  `work/telemetry.jsonl` — gerado automaticamente no loop (apply e
+  media-search-web). Distingue "não há imagem" de "busca falhou/bloqueada".
 - NUNCA explore `src/**`, `.env`, `backups/**`, logs ou JSONs grandes para
-  diagnosticar — o script e o CLI (`queue`, `list-pending --compact`) são a
-  interface.
+  diagnosticar — o script e o CLI (`queue`, `list-pending --compact`,
+  `telemetry`) são a interface.
 
 ## Operational pitfalls (resumo — detalhes em references/operacao.md)
 

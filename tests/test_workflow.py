@@ -1302,5 +1302,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("repetida", rejected[0]["detail"])
 
 
+    def test_apply_writes_blocked_telemetry(self):
+        # Telemetria central: um apply que falha no checklist grava
+        # work/telemetry.jsonl com apply_blocked + motivo, para o operador
+        # responder "a fila parou por que?" sem abrir backups.
+        from unicornio_editor.observability import read_telemetry_summary
+
+        payload = editorial_payload()
+        # Conteudo sem imagens -> imagens_no_corpo falha -> needs_rework.
+        payload["cleaned_html"] = "<p>Texto sobre videogame sem imagem.</p>"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), root, 42, payload)
+            self.assertEqual(report["status"], "needs_rework")
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["by_event"].get("apply_blocked"), 1)
+            reasons = summary["by_reason"]["apply_blocked"]
+            self.assertTrue(any("imagens" in r for r in reasons))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,4 +12,7 @@ set -a
 # shellcheck disable=SC1091
 source ./.env
 set +a
-exec "$ROOT/.venv/bin/unicornio-editor" queue --root "$ROOT"
+echo "== fila =="
+"$ROOT/.venv/bin/unicornio-editor" queue --root "$ROOT"
+echo "== telemetria (blocagens) =="
+"$ROOT/.venv/bin/unicornio-editor" telemetry --root "$ROOT"

@@ -1,8 +1,16 @@
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from unicornio_editor.observability import build_processing_markers, log_event
+from unicornio_editor.observability import (
+    append_telemetry,
+    build_processing_markers,
+    log_event,
+    read_telemetry_summary,
+    telemetry_path,
+)
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -21,6 +29,33 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(output["event"], "apply_finished")
         self.assertNotIn("hidden", stream.getvalue())
         self.assertNotIn("token", output)
+
+    def test_append_and_summary_telemetry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_telemetry(root, "apply_blocked", post_id=1, reason="imagens_no_corpo", missing_images=2)
+            append_telemetry(root, "apply_blocked", post_id=2, reason="verificacao_origem")
+            append_telemetry(root, "apply_ready", post_id=3)
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["by_event"]["apply_blocked"], 2)
+            self.assertEqual(summary["by_event"]["apply_ready"], 1)
+            self.assertEqual(summary["by_reason"]["apply_blocked"]["imagens_no_corpo"], 1)
+            self.assertEqual(summary["by_reason"]["apply_blocked"]["verificacao_origem"], 1)
+            self.assertTrue((root / "work" / "telemetry.jsonl").is_file())
+
+    def test_telemetry_summary_tolerates_missing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = read_telemetry_summary(Path(directory))
+            self.assertEqual(summary["total_events"], 0)
+            self.assertEqual(summary["by_event"], {})
+
+    def test_telemetry_redacts_sensitive_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_telemetry(root, "apply_blocked", api_key="supersecret")
+            raw = telemetry_path(root).read_text()
+            self.assertNotIn("supersecret", raw)
+            self.assertNotIn("api_key", raw)
 
 
 if __name__ == "__main__":
