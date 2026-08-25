@@ -138,7 +138,7 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - **UNCERTAIN / SKIPPED / AWAITING_HUMAN** = fora da fila: não gera card, não
   re-tenta, não publica.
 - O monitor (`queue --monitor`) só acorda o agente com trabalho ELEGÍVEL:
-  rework fora de cooldown + pending recentes não processados. O rework NÃO
+  rework fora de cooldown + pending não processados. O rework NÃO
   reativa por bucket de parede: o hash muda só quando um `next_retry_at`
   (cooldown real) expira — bloqueio em cooldown não acorda o agente a cada
   tick. Rework eterno = erro seu: use `uncertain` para post não-corrigível.

@@ -96,7 +96,7 @@ class CompactOutputTests(unittest.TestCase):
     def test_monitor_line_idle_is_zero(self):
         # Sem trabalho elegivel a linha e "0" (estavel; nao acorda o agente).
         self.assertEqual(
-            _monitor_line({"eligible_rework_ids": [], "recent_unprocessed_ids": [], "posts": []}),
+            _monitor_line({"eligible_rework_ids": [], "unprocessed_ids": [], "posts": []}),
             "0",
         )
 
@@ -105,7 +105,7 @@ class CompactOutputTests(unittest.TestCase):
         # por bucket de parede: a linha so muda quando o cooldown expira.
         report = {
             "eligible_rework_ids": [],
-            "recent_unprocessed_ids": [],
+            "unprocessed_ids": [],
             "posts": [
                 {
                     "id": 42,
@@ -119,10 +119,22 @@ class CompactOutputTests(unittest.TestCase):
     def test_monitor_line_includes_eligible_and_new(self):
         report = {
             "eligible_rework_ids": [2],
-            "recent_unprocessed_ids": [9],
+            "unprocessed_ids": [9],
             "posts": [],
         }
         self.assertEqual(_monitor_line(report), "2 9")
+
+    def test_monitor_line_wakes_for_old_pending(self):
+        # Backlog antigo (>7d, fora de recent_unprocessed_ids) TAMBEM acorda o
+        # agente: a linha do monitor usa unprocessed_ids (todo pending nao
+        # processado), nao so os recentes — o backlog nao pode morrer de fome.
+        report = {
+            "eligible_rework_ids": [],
+            "unprocessed_ids": [101416],
+            "recent_unprocessed_ids": [],
+            "posts": [],
+        }
+        self.assertEqual(_monitor_line(report), "101416")
 
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})

@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_parser.add_argument(
         "--monitor",
         action="store_true",
-        help="imprime apenas a linha estavel (ids pending recentes NAO processados, ou '0'); "
+        help="imprime apenas a linha estavel (ids pending NAO processados, ou '0'); "
         "usada pelo monitor_script do cron para nao acordar o LLM em ticks ociosos",
     )
 
@@ -366,14 +366,14 @@ def _compact_checklist(checklist: dict) -> dict:
 def _monitor_line(report: dict) -> str:
     """Linha ESTAVEL do monitor (hasheada pelo cron).
 
-    So muda quando ha trabalho elegivel real: pending recente nao processado
-    (id), rework BLOCKED fora de cooldown (id) e rework em cooldown codificado
+    So muda quando ha trabalho elegivel real: pending nao processado (id),
+    rework BLOCKED fora de cooldown (id) e rework em cooldown codificado
     como id@next_retry_at (minuto). O hash so muda quando um cooldown expira
     (o post troca de grupo cooldown -> elegivel), NUNCA a cada tick por um
     bucket de parede — evita rework eterno queimando tokens.
     """
     parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
-    parts += [str(pid) for pid in report.get("recent_unprocessed_ids", [])]
+    parts += [str(pid) for pid in report.get("unprocessed_ids", [])]
     in_cooldown = sorted(
         f"{row['id']}@{str(row.get('next_retry_at') or '')[:16]}"
         for row in (report.get("posts") or [])

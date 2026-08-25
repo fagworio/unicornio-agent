@@ -5,7 +5,7 @@
 # cron: o Hermes hasheia a saida exata; enquanto ela nao muda, o agente LLM
 # NAO e acordado (idle custa zero tokens). A linha muda SOMENTE quando ha
 # trabalho elegivel real:
-#   * pending recente nao processado (id)
+#   * pending nao processado (id)
 #   * rework BLOCKED fora de cooldown (id)  — so reativa com progresso
 #   * rework em cooldown codificado como id@next_retry_at (minuto) — o hash
 #     so muda quando o cooldown realmente expira, nunca a cada tick.

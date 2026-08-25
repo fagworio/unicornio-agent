@@ -1467,7 +1467,7 @@ def build_queue_report(
     considera elegíveis os BLOCKED cujo ``next_retry_at`` venceu (cooldown
     respeitado — um post não reaparece na agenda enquanto estiver em
     cooldown). ``awaiting_human``/``uncertain``/``skipped`` saem da fila.
-    ``recent_unprocessed_ids`` + ``eligible_rework_ids`` formam a linha
+    ``unprocessed_ids`` + ``eligible_rework_ids`` formam a linha
     estável que o monitor hasheia (token economy: sem LLM no idle).
     """
     from .content_quality import word_count
