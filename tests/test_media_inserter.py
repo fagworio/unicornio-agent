@@ -3,12 +3,13 @@ import unittest
 from unicornio_editor.media.inserter import MediaInsertionError, append_featured_credit, insert_media
 
 
-def _item(index=1, url="https://media.example/image.webp", alt="Imagem de jogo", width=1280, height=720):
+def _item(index=1, url="https://media.example/image.webp", alt="Imagem de jogo",
+          width=1280, height=720, credit="Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0)."):
     return {
         "paragraph_index": index,
         "media_url": url,
         "alt_text": alt,
-        "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
+        "credit_text": credit,
         "width": width,
         "height": height,
     }
@@ -26,7 +27,7 @@ class MediaInserterTests(unittest.TestCase):
         result = insert_media(html, [_item(index=1)])
         self.assertIn(
             '<figure class="aligncenter"><img src="https://media.example/image.webp" '
-            'width="1280" height="720" alt="Imagem de jogo" />',
+            'width="1280" height="720" alt="Imagem de jogo" title="Imagem de jogo" />',
             result,
         )
         self.assertIn("<figcaption>Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).</figcaption>", result)
@@ -60,7 +61,14 @@ class MediaInserterTests(unittest.TestCase):
             "<h2>2. Segundo jogo</h2><p>Descricao do segundo.</p>"
             "<h2>3. Terceiro jogo</h2><p>Descricao do terceiro.</p>"
         )
-        plan = [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(3)]
+        plan = [
+            _item(
+                index=i,
+                url=f"https://media.example/{i}.webp",
+                credit=f"Crédito da imagem: Autor. Captura {i}. Domínio público (CC0).",
+            )
+            for i in range(3)
+        ]
         result = insert_media(html, plan, listicle=True)
         self.assertIn("<h2>1. Melhor jogo</h2><figure class=\"aligncenter\">", result)
         self.assertIn("<h2>2. Segundo jogo</h2><figure class=\"aligncenter\">", result)
@@ -79,6 +87,41 @@ class MediaInserterTests(unittest.TestCase):
         ]
         with self.assertRaises(MediaInsertionError):
             insert_media("".join("<p>Texto.</p>" for _ in range(8)), plan)
+
+    def test_deduplicates_identical_credit(self):
+        # O MESMO texto de credito nao se repete: remove a figura ORFA (sem img)
+        # que duplica o credito de uma figura com imagem (bug da producao).
+        from unicornio_editor.media.text import dedupe_credit_figures
+
+        html = (
+            '<figure class="aligncenter"><img src="https://x/a.webp" alt="A" />'
+            "<figcaption>Crédito da imagem: Nintendo. Uso com crédito.</figcaption></figure>"
+            '<figure class="aligncenter"><figcaption>Crédito da imagem: Nintendo. Uso com crédito.</figcaption></figure>'
+            "<p>Texto.</p>"
+        )
+        result = dedupe_credit_figures(html)
+        self.assertEqual(result.count("<figcaption>Crédito da imagem: Nintendo. Uso com crédito.</figcaption>"), 1)
+        self.assertEqual(result.count('<figure class="aligncenter">'), 1)
+
+    def test_strips_html_from_credit(self):
+        # Credito com HTML (<p>...<p>) vira TEXTO PURO no figcaption.
+        item = _item(index=1, credit="<p>Crédito da imagem: <strong>Autor</strong> (via Site).</p>")
+        result = insert_media("<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>", [item])
+        self.assertIn("<figcaption>Crédito da imagem: Autor (via Site).</figcaption>", result)
+        self.assertNotIn("<p>", result[result.index("<figcaption>")+len("<figcaption>"):result.index("</figcaption>")])
+
+    def test_adds_seo_title_to_image(self):
+        # SEO sem IA: todo <img> do content ganha title (descricao/obra).
+        item = _item(index=1, alt="Donkey Kong Bananza (Nintendo Switch 2)")
+        result = insert_media("<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>", [item])
+        self.assertIn('title="Donkey Kong Bananza (Nintendo Switch 2)"', result)
+        self.assertIn('alt="Donkey Kong Bananza (Nintendo Switch 2)"', result)
+
+    def test_append_featured_credit_strips_html(self):
+        credit = "<p>Crédito da imagem: Credit: Nintendo</p>"
+        result = append_featured_credit("<p>Texto.</p><p>Cont.</p>", credit)
+        self.assertIn("Credit: Nintendo", result)
+        self.assertNotIn("<p>Credit", result)
 
 
 if __name__ == "__main__":

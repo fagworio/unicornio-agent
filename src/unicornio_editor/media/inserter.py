@@ -14,14 +14,23 @@ class MediaInsertionError(ValueError):
 
 
 def append_featured_credit(html: str, credit_text: str) -> str:
-    """Add one visible featured-image credit without duplicating it."""
+    """Add one visible featured-image credit without duplicating it.
+
+    O credito e sanitizado para TEXTO PURO (nunca HTML) e so e adicionado se
+    ainda nao aparecer no conteudo (dedup por texto exato) — evita o caption
+    duplicado que aparecia no post de producao.
+    """
     if not isinstance(html, str):
         raise MediaInsertionError("HTML must be a string")
-    credit = _text(credit_text, "credit_text")
+    from .text import plain_text
+
+    credit = plain_text(credit_text)
+    if not credit:
+        return html
     if not credit.startswith("Crédito da imagem:"):
         raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
     if credit in html:
-        return html
+        return html  # ja presente (dedup)
     match = re.search(r"</p>\s*", html, flags=re.IGNORECASE)
     figure = f'<p class="image-credit">{escape(credit)}</p>'
     if not match:
@@ -75,13 +84,21 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             or height <= 0
         ):
             raise MediaInsertionError("width and height must be positive integers")
-        alt = _text(item["alt_text"], "alt_text")
-        credit = _text(item["credit_text"], "credit_text")
+        from .text import plain_text
+
+        alt = plain_text(item["alt_text"])
+        credit = plain_text(item["credit_text"])
+        if not credit:
+            raise MediaInsertionError("credit_text is required")
         if not credit.startswith("Crédito da imagem:"):
             raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
+        # SEO determinístico (sem IA): title = alt (texto descritivo da obra),
+        # garantindo que o <img> nunca fique sem title.
+        img_title = alt or credit
         figure = (
             f'<figure class="aligncenter"><img src="{escape(url, quote=True)}" '
-            f'width="{width}" height="{height}" alt="{escape(alt, quote=True)}" />'
+            f'width="{width}" height="{height}" alt="{escape(alt, quote=True)}" '
+            f'title="{escape(img_title, quote=True)}" />'
             f"<figcaption>{escape(credit)}</figcaption></figure>"
         )
         placements.append((index, figure))

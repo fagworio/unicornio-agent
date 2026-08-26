@@ -20,6 +20,47 @@ def image_dimensions(path: Path) -> tuple[int, int]:
         return image.size
 
 
+def image_is_mostly_flat(path, *, sample_px=12000, edge_threshold=18.0) -> bool:
+    """Heuristic: a mostly-flat image (no real artwork, only text/banner).
+
+    An image that is essentially a solid/very-low-detail graphic (a text
+    banner, a logo on a plain background, a coming soon card) carries no
+    editorial artwork. We detect it deterministically by downsampling to a
+    small grid and measuring the mean edge magnitude (Sobel-ish via neighbor
+    deltas). Below edge_threshold it is treated as mostly flat and the
+    featured candidate should be rejected (a text-only featured is not key art).
+
+    Returns True when the image has almost no structural detail.
+    """
+    try:
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(image)
+            image = image.convert("L")
+            ratio = max(1.0, (image.width * image.height) / float(sample_px))
+            small = image.resize(
+                (max(1, int(image.width / ratio ** 0.5)),
+                 max(1, int(image.height / ratio ** 0.5))),
+                Image.Resampling.BOX,
+            )
+            w, h = small.size
+            pixels = list(small.getdata())
+            total = 0.0
+            count = 0
+            for y in range(1, h - 1):
+                row = y * w
+                for x in range(1, w - 1):
+                    c = pixels[row + x]
+                    dx = abs(pixels[row + x + 1] - c) + abs(pixels[row + x - 1] - c)
+                    dy = abs(pixels[row + w + x] - c) + abs(pixels[row - w + x] - c)
+                    total += dx + dy
+                    count += 1
+            if count == 0:
+                return True
+            return (total / count) < edge_threshold
+    except Exception:
+        return False
+
+
 class MediaConversionError(RuntimeError):
     """Raised when an image cannot be verified or converted."""
 

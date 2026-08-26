@@ -28,6 +28,7 @@ from .media.converter import (
     convert_to_webp,
     image_dimensions,
     image_has_transparency,
+    image_is_mostly_flat,
     prepare_featured_webp,
 )
 from .media.downloader import download_image
@@ -869,6 +870,18 @@ def _execute_media_plan(
                 webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
             else:
                 webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+            # Featured "so texto" nao e key art: rejeita (a featured deve ter
+            # arte/visual real da obra, nao um banner/texto plano).
+            if is_featured and image_is_mostly_flat(webp):
+                results.append(
+                    {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": "featured aparenta ser so texto/arte plana sem conteudo visual; "
+                        "escolha uma key art/imagem real da obra",
+                    }
+                )
+                continue
             width, height = image_dimensions(webp)
             media = upload_image(client, webp, evidence)
             media_id = media.get("id")
@@ -957,9 +970,13 @@ def _normalize_existing_featured(
         return featured
     if not source_url:
         return None
-    title = str((media.get("title") or {}).get("rendered") or "").strip() or "Imagem de destaque"
-    alt = str(media.get("alt_text") or "").strip()
-    caption = str((media.get("caption") or {}).get("rendered") or "").strip()
+    from .media.text import plain_text
+
+    title = plain_text(
+        str((media.get("title") or {}).get("rendered") or "")
+    ) or "Imagem de destaque"
+    alt = plain_text(str(media.get("alt_text") or ""))
+    caption = plain_text(str((media.get("caption") or {}).get("rendered") or ""))
     filename = _featured_filename_from_source(source_url)
     try:
         with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
@@ -1418,6 +1435,10 @@ def compose_final_content(
         from .internal_links import add_internal_links
 
         html = add_internal_links(html)
+    # Remove figuras orfas de credito duplicado (figcaption repetido sem <img>).
+    from .media.text import dedupe_credit_figures
+
+    html = dedupe_credit_figures(html)
     trailer = _discover_trailer(editorial, config)
     if trailer is not None:
         html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
