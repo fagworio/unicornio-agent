@@ -54,8 +54,6 @@ _DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "in
 _UNWRAP_TAGS = {"article", "div"}
 _VOID_TAGS = {"area", "base", "br", "col", "hr", "link", "meta", "param", "source", "track", "wbr"}
 _ALLOWED_ATTRS = {"class", "id", "title", "alt", "href", "src", "target", "rel", "width", "height"}
-# License evidence that makes an imported inline image reusable without
-# rediscovery (token economy: the code validates, no AI and no web involved).
 _LICENSE_TOKEN = re.compile(
     r"cc\s*0"
     r"|cc\s*by(?:[\s-]*[-–]?\s*(?:sa|nc|nd|nc-sa|nc-nd))?"
@@ -63,24 +61,12 @@ _LICENSE_TOKEN = re.compile(
     r"|public\s*domain"
     r"|dominio\s*publico"
     r"|dom[ií]nio\s*p[uú]blico"
-    r"|uso\s*com\s*credito"  # politica 2026-08: credito visivel = evidencia
+    r"|uso\s*com\s*credito"
 )
 _CREDIT_MARKER = re.compile(r"credito\s+da\s+imagem|^credito\s*:")
 
 
 def _repair_orphan_media(html: str) -> str:
-    """Reempacota <img> soltos junto a figura de crédito adjacente.
-
-    Layout quebrado observado em produção: um apply antigo gravou
-    ``<figure><figcaption>Crédito da imagem: ...</figcaption></figure>``
-    seguido de ``<img .../>`` FORA da figura (ou o inverso). O clean_html
-    descarta img fora de figure — e o no-rewrite seguinte zerava as imagens
-    do post (loop de rework: imagens_no_corpo falha sempre). Este reparo é
-    determinístico: emparelha cada img solto com a figura de crédito
-    adjacente (anterior ou posterior, apenas whitespace entre) e move o img
-    para dentro da figura, antes do figcaption. Conservador: só mexe quando
-    a figura carrega o marcador de crédito e não tem img.
-    """
     if not isinstance(html, str) or "<img" not in html.lower():
         return html
     _FIG_WITH_IMG = re.compile(
@@ -93,12 +79,11 @@ def _repair_orphan_media(html: str) -> str:
     def _fold(match: re.Match[str]) -> str:
         figure, img = match.group(1), match.group(2)
         if "<img" in figure.lower():
-            return match.group(0)  # figura já tem img; não duplica
+            return match.group(0)
         caption = re.search(r"<figcaption>", figure, re.IGNORECASE)
-        # "credito da imagem" pode vir acentuado ("Crédito") — normaliza.
         if not caption or "credito da imagem" not in _normalize(figure):
             return match.group(0)
-        return figure[: caption.start()] + img + figure[caption.start() :]
+        return figure[: caption.start()] + img + figure[caption.start():]
 
     result = html
     for _ in range(10):
@@ -110,21 +95,67 @@ def _repair_orphan_media(html: str) -> str:
     return result
 
 
+# Shortcode nativo do WordPress: [caption ...]<img .../> Crédito...[/caption]
+_WP_CAPTION_BLOCK_RE = re.compile(
+    r"\[caption\b[^\]]*\].*?\[/caption\]", re.IGNORECASE | re.DOTALL
+)
+_WP_CAPTION_PLACEHOLDER = "__WP_CAPTION_%d__"
+
+
+def _extract_wp_captions(html: str) -> tuple[str, list[tuple[str, str]]]:
+    """Troca blocos [caption]...[/caption] por placeholders preservando-os intactos.
+
+    O _TreeParser (HTMLParser) nao entende o shortcode: trata [caption ...] como
+    texto e o <img> interno como elemento solto, que o _serialize descartaria.
+    Para nao perder a imagem, extraimos cada bloco ANTES do parse e o
+    re-inserimos DEPOIS.
+    """
+    if not isinstance(html, str) or "[caption" not in html.lower():
+        return html, []
+    store: list[tuple[str, str]] = []
+
+    def _store(match: re.Match[str]) -> str:
+        key = _WP_CAPTION_PLACEHOLDER % len(store)
+        store.append((key, match.group(0)))
+        return key
+
+    return _WP_CAPTION_BLOCK_RE.sub(_store, html), store
+
+
+def _sanitize_wp_caption_block(block: str) -> str:
+    """Sanitiza a legenda de um [caption] preservando o <img> (texto puro)."""
+    img = re.search(r"<img\b[^>]*>", block, re.IGNORECASE)
+    if not img:
+        return block
+    head = block[: img.start()]
+    tail = block[img.end():]
+    caption = re.sub(r"<[^>]+>", " ", tail)
+    caption = re.sub(r"[\s\u00a0]+", " ", caption).strip()
+    if not caption.lower().startswith("crédito da imagem:"):
+        caption = "Crédito da imagem: " + caption
+    return head + img.group(0) + " " + caption
+
+
 def clean_html(html: str) -> str:
     """Return safe, normalized HTML while preserving editorial text.
 
-    Imported inline images are dropped UNLESS they live inside a ``<figure>``
-    whose ``<figcaption>`` carries a complete credit block (credit phrase +
-    author text + license identifier + license URL). Those are preserved so a
-    post that already ships verified, licensed imagery is not re-discovered
-    from scratch (token economy; validation is deterministic, by code).
+    Imported inline images are dropped UNLESS they live inside a <figure> whose
+    <figcaption> carries a complete credit block, OR inside a WordPress
+    [caption]...[/caption] shortcode (rendered by WP as a figure with credit).
+    Both are preserved so verified licensed imagery is not re-discovered.
     """
     if not isinstance(html, str):
         raise TypeError("html must be a string")
+    extracted, captions = _extract_wp_captions(html)
     parser = _TreeParser()
-    parser.feed(html)
+    parser.feed(extracted)
     parser.close()
-    return "".join(_serialize(child) for child in parser.root.children).strip()
+    cleaned = "".join(_serialize(child) for child in parser.root.children).strip()
+    if not captions:
+        return cleaned
+    for key, block in captions:
+        cleaned = cleaned.replace(key, _sanitize_wp_caption_block(block))
+    return cleaned
 
 
 def _serialize(value: _Node | str, keep_licensed_image: bool = False) -> str:
@@ -170,12 +201,6 @@ def _serialize_img(node: _Node) -> str:
 
 
 def _has_complete_credit(figure: _Node) -> bool:
-    """True when the figure ships verifiable license evidence for its image.
-
-    Requires a ``<figcaption>`` whose text contains the credit marker, a
-    license identifier (CC variant / public domain) and a license URL. The
-    author is implied by the text between the marker and the license token.
-    """
     for child in figure.children:
         if isinstance(child, _Node) and child.tag == "figcaption":
             text = _node_text(child)
@@ -193,7 +218,6 @@ def _has_complete_credit(figure: _Node) -> bool:
 
 
 def _normalize(text: str) -> str:
-    """Lowercase and strip diacritics so matching survives accents/encoding."""
     decomposed = unicodedata.normalize("NFD", text.lower())
     return decomposed.encode("ascii", "ignore").decode("ascii")
 

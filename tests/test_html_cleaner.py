@@ -106,5 +106,34 @@ class HtmlCleanerTests(unittest.TestCase):
         self.assertIn('<img src="https://s3.example/s.webp" alt="a" />', result)
 
 
+    def test_keeps_image_inside_wp_caption_shortcode(self):
+        # O shortcode nativo [caption]...[/caption] (que o WP renderiza como
+        # figure com credito) deve PRESERVAR o <img> interno — nao dropar como
+        # se fosse uma imagem importada fora de <figure>.
+        html = (
+            '[caption id="" align="aligncenter" width="1280"]'
+            '<img src="https://s3.example/wp-inline.webp" width="1280" height="721" alt="Filme" /> '
+            "Crédito da imagem: Autor. Filme. Uso com crédito.[/caption]"
+        )
+        result = clean_html(html)
+        self.assertIn("<img", result)
+        self.assertIn("Crédito da imagem: Autor. Filme. Uso com crédito.", result)
+        self.assertIn("[caption", result)
+        self.assertIn("[/caption]", result)
+
+    def test_keeps_caption_img_with_other_content(self):
+        html = (
+            "<p>Texto do post.</p>"
+            '[caption id="" align="aligncenter" width="1280"]'
+            '<img src="https://s3.example/inline.webp" width="1280" height="721" alt="A" /> '
+            "Crédito da imagem: Autor. Uso com crédito.[/caption]"
+            "<p>Mais texto.</p>"
+        )
+        result = clean_html(html)
+        self.assertIn("<p>Texto do post.</p>", result)
+        self.assertIn("<p>Mais texto.</p>", result)
+        self.assertIn('<img src="https://s3.example/inline.webp"', result)
+
+
 if __name__ == "__main__":
     unittest.main()
