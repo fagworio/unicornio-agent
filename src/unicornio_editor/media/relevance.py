@@ -112,26 +112,62 @@ _FIGCAPTION_RE = re.compile(
     r"<figcaption\b[^>]*>(.*?)</figcaption>", re.IGNORECASE | re.DOTALL
 )
 
+# Shortcode nativo do WordPress: [caption id="" align="aligncenter" width="1280"]<img/> Crédito...[/caption]
+_WP_CAPTION_RE = re.compile(
+    r"\[caption\b[^\]]*\].*?\[/caption\]", re.IGNORECASE | re.DOTALL
+)
+
+
+def _wp_caption_text(block: str) -> str:
+    """Texto da legenda de um bloco [caption]: o que vem APOS o </img> e antes de [/caption]."""
+    parts = re.split(r"<img\b[^>]*>", block, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return ""
+    tail = re.sub(r"\[/?caption\b[^>]*\]", " ", parts[1], flags=re.IGNORECASE)
+    return re.sub(_TAG_RE, " ", tail).strip()
+
+
 
 def iter_content_images(content: str) -> list[dict[str, str]]:
-    """Extract every inline image with its alt and figcaption credit text."""
+    """Extract every inline image with its alt and credit text.
+
+    Reconhece tanto <figure><img/><figcaption>...</figcaption></figure> quanto o
+    shortcode nativo do WP [caption]...<img/>...Crédito...[/caption].
+    """
     images: list[dict[str, str]] = []
+    text = content or ""
 
     def _extract(tag_html: str) -> dict[str, str]:
         attrs = dict(_IMG_ATTR_RE.findall(tag_html))
         return {"src": attrs.get("src", ""), "alt": attrs.get("alt", "")}
 
-    for figure in _FIGURE_RE.findall(content or ""):
+    def _push_from_figure(figure: str) -> None:
         tag = _IMG_TAG_RE.search(figure)
         if not tag:
-            continue
+            return
         item = _extract(tag.group(0))
         caption = _FIGCAPTION_RE.search(figure)
         if caption:
             item["caption"] = re.sub(_TAG_RE, "", caption.group(1)).strip()
         images.append(item)
-    remainder = _FIGURE_RE.sub("", content or "")
-    for tag in _IMG_TAG_RE.findall(remainder):
+
+    for figure in _FIGURE_RE.findall(text):
+        _push_from_figure(figure)
+    remainder = _FIGURE_RE.sub("", text)
+
+    # Shortcode WP: extrai a legenda (credito) que segue o <img>.
+    handled = remainder
+    for block in _WP_CAPTION_RE.findall(remainder):
+        tag = _IMG_TAG_RE.search(block)
+        if not tag:
+            continue
+        item = _extract(tag.group(0))
+        caption = _wp_caption_text(block)
+        if caption:
+            item["caption"] = caption
+        images.append(item)
+        handled = handled.replace(block, "")
+    for tag in _IMG_TAG_RE.findall(handled):
         images.append(_extract(tag))
     return images
 

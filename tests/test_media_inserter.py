@@ -26,12 +26,12 @@ class MediaInserterTests(unittest.TestCase):
         html = "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>"
         result = insert_media(html, [_item(index=1)])
         self.assertIn(
-            '<figure class="aligncenter"><img src="https://media.example/image.webp" '
+            '[caption id="" align="aligncenter" width="1280"]<img src="https://media.example/image.webp" '
             'width="1280" height="720" alt="Imagem de jogo" title="Imagem de jogo" />',
             result,
         )
-        self.assertIn("<figcaption>Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).</figcaption>", result)
-        self.assertLess(result.index('</p><figure class="aligncenter">'), result.index("<p>Três."))
+        self.assertIn("Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).[/caption]", result)
+        self.assertLess(result.index('</p>[caption id="" align="aligncenter"'), result.index("<p>Três."))
 
     def test_rejects_insertion_inside_paragraph(self):
         with self.assertRaises(MediaInsertionError):
@@ -70,10 +70,10 @@ class MediaInserterTests(unittest.TestCase):
             for i in range(3)
         ]
         result = insert_media(html, plan, listicle=True)
-        self.assertIn("<h2>1. Melhor jogo</h2><figure class=\"aligncenter\">", result)
-        self.assertIn("<h2>2. Segundo jogo</h2><figure class=\"aligncenter\">", result)
-        self.assertIn("<h2>3. Terceiro jogo</h2><figure class=\"aligncenter\">", result)
-        self.assertEqual(result.count("<figure class=\"aligncenter\">"), 3)
+        self.assertIn("<h2>1. Melhor jogo</h2>[caption id=\"\" align=\"aligncenter\"", result)
+        self.assertIn("<h2>2. Segundo jogo</h2>[caption id=\"\" align=\"aligncenter\"", result)
+        self.assertIn("<h2>3. Terceiro jogo</h2>[caption id=\"\" align=\"aligncenter\"", result)
+        self.assertEqual(result.count("[caption id=\"\" align=\"aligncenter\""), 3)
 
     def test_listicle_rejects_placement_without_preceding_h2(self):
         html = "<p>Texto solto antes.</p><h2>1. Item</h2><p>Descricao.</p>"
@@ -107,8 +107,8 @@ class MediaInserterTests(unittest.TestCase):
         # Credito com HTML (<p>...<p>) vira TEXTO PURO no figcaption.
         item = _item(index=1, credit="<p>Crédito da imagem: <strong>Autor</strong> (via Site).</p>")
         result = insert_media("<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>", [item])
-        self.assertIn("<figcaption>Crédito da imagem: Autor (via Site).</figcaption>", result)
-        self.assertNotIn("<p>", result[result.index("<figcaption>")+len("<figcaption>"):result.index("</figcaption>")])
+        self.assertIn("Crédito da imagem: Autor (via Site).[/caption]", result)
+        self.assertNotIn("<p>Crédito", result)
 
     def test_adds_seo_title_to_image(self):
         # SEO sem IA: todo <img> do content ganha title (descricao/obra).

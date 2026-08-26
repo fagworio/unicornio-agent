@@ -95,11 +95,17 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         # SEO determinístico (sem IA): title = alt (texto descritivo da obra),
         # garantindo que o <img> nunca fique sem title.
         img_title = alt or credit
-        figure = (
-            f'<figure class="aligncenter"><img src="{escape(url, quote=True)}" '
+        # Padrao NATIVO do WordPress: shortcode [caption ...]...[/caption].
+        # O WP renderiza com estilo proprio (aligncenter, legenda) e mantem o
+        # layout da galeria; nao usar <figure> manual para nao quebrar o tema.
+        img = (
+            f'<img src="{escape(url, quote=True)}" '
             f'width="{width}" height="{height}" alt="{escape(alt, quote=True)}" '
             f'title="{escape(img_title, quote=True)}" />'
-            f"<figcaption>{escape(credit)}</figcaption></figure>"
+        )
+        figure = (
+            f'[caption id="" align="aligncenter" width="{width}"]'
+            f"{img} {escape(credit)}[/caption]"
         )
         placements.append((index, figure))
         indexes.append(index)
