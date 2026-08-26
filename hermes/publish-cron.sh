@@ -39,7 +39,9 @@ while [ "$ATTEMPT" -le 3 ]; do
   if out="$("$ROOT/.venv/bin/unicornio-editor" publish-ready 2>&1)"; then
     # Watchdog pattern: stdout vazio = nada a publicar (silencioso).
     if [ -n "$out" ]; then
-      printf '%s\n' "$out" | tee "$LOG"
+      # JSON cru vai para o log (auditoria); o Telegram recebe o relatorio
+      # legivel (posts id/titulo/data/status + custo de tokens das ultimas 24h).
+      printf '%s\n' "$out" | tee "$LOG" | "$ROOT/.venv/bin/python" "$ROOT/hermes/relatorio_publicacao.py"
     fi
     exit 0
   fi
