@@ -111,6 +111,27 @@ Hermes cron (monitor: so acorda com trabalho elegivel)
      grava post que o publish bloquearia; o publish apenas confirma
 ```
 
+## Vision gate (custo controlado, gpt-4o-mini)
+
+O checklist de publicacao tem um gate final de visao que confirma se cada imagem
+publicada e visualmente consistente com o assunto (pega o caso que regex/URL/hash
+nao veem: um CDN servindo imagem errada sob slug certo). Para manter o custo baixo:
+
+- **Prompt restrito**: metadados (ALT/URL/fonte) sao contexto, os PIXELS sao a
+  evidencia. O modelo nunca tenta nomear a obra (evita o knowledge cutoff para
+  noticias de 2026). Retorna Structured Outputs `{status, confidence, visual_type}`.
+- **detail: low por padrao** (~2833 tok/img). A **featured** escala para
+  `high` (13x) apenas quando AMBIGUOUS; **inline** so `low` (descarta se nao
+  confirmar).
+- **Cache por hash(imagem)+entidade** (`work/vision_cache.json`) evita re-analisar
+  a mesma key art em varios posts.
+- **Limites mecanicos** de chamadas por post (`EDITOR_VISION_MAX_LOW/HIGH`).
+- Chave: `OPENAI_API_KEY` (fallback `EDITOR_VISION_API_KEY`). Fail-closed.
+- Custo medido localmente: ~US$ 0.44 por 1000 imagens em `detail: low`.
+
+Config em `.env`: `EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`,
+`EDITOR_VISION_MAX_LOW`, `EDITOR_VISION_MAX_HIGH`.
+
 ## Instalacao
 
 ```bash

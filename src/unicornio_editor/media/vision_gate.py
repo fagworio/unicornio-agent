@@ -1,14 +1,23 @@
-"""Vision gate: confirms an image depicts its caption with a vision LLM.
+"""Vision gate: confirms an image depicts its subject with a cheap vision LLM.
 
 The deterministic gates (relevance text, source-page verification) cannot
 catch a CDN that serves the wrong image under a correct slug at the exact
 moment of download. This final belt-and-suspenders gate asks a cheap vision
-model whether the actual published image depicts the subject named in its
-alt/caption. Fail-closed: API errors block publication with the reason.
+model whether the actual published image is visually consistent with the
+subject it is meant to illustrate. Fail-closed: API errors block publication
+with the reason.
+
+Design (cost-controlled):
+- Prompt is RESTRICTED: the model judges the PIXELS, treating ALT/filename/URL
+  as context only ("a real bat captioned Redfall is NOT Redfall"). It never
+  tries to name the work (knowledge cutoff would fail for 2026 news).
+- Uses Structured Outputs -> {status, confidence, visual_type}.
+- `detail: low` by default (~2833 tokens/image). On AMBIGUOUS and when
+  `allow_high` is set, re-asks at `detail: high` (~13x cost) before deciding.
 
 Any OpenAI-compatible vision endpoint works (OpenAI, Gemini via
-``OPENAI_COMPAT`` base URL, local vLLM, ...), configured through
-``EDITOR_VISION_*`` env vars.
+`OPENAI_COMPAT` base URL, local vLLM, ...), configured through
+`EDITOR_VISION_*` env vars (key falls back to `OPENAI_API_KEY`).
 """
 
 from __future__ import annotations
@@ -24,45 +33,111 @@ class VisionGateError(RuntimeError):
     """Raised when the vision model cannot confirm the image subject."""
 
 
+# status allowed by the model.
+_STATUS = ("MATCH", "PARTIAL_MATCH", "UNRELATED", "AMBIGUOUS")
+_VISUAL_TYPES = (
+    "gameplay", "key_art", "movie_still", "character", "person", "product",
+    "logo", "poster", "photograph", "illustration", "animal", "other",
+)
+_ACCEPT_THRESHOLD = 0.85   # MATCH and confidence >= this -> accept
+_REJECT_THRESHOLD = 0.80   # UNRELATED and confidence >= this -> reject
+
 _SYSTEM_PROMPT = (
-    "Você é um verificador de imagens editoriais. Responda apenas com a palavra "
-    "SIM ou NÃO, sem pontuação e sem explicações."
+    "You are an editorial image validator. You judge the actual VISUAL CONTENT "
+    "of an image and decide whether it is consistent with a described subject. "
+    "Return ONLY a JSON object with keys status, confidence and visual_type. "
+    "status must be one of: MATCH, PARTIAL_MATCH, UNRELATED, AMBIGUOUS. "
+    "confidence is a float 0..1. visual_type must be one of: "
+    "gameplay, key_art, movie_still, character, person, product, logo, poster, "
+    "photograph, illustration, animal, other."
 )
 
 
-def _confirm_yes_no(text: str) -> bool | None:
-    match = re.search(r"\b(sim|não|nao)\b|\b(yes|no)\b", (text or "").strip().lower())
-    if not match:
-        return None
-    return match.group(1) in {"sim", "yes"}
+def _json_output_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": list(_STATUS),
+            },
+            "confidence": {"type": "number"},
+            "visual_type": {
+                "type": "string",
+                "enum": list(_VISUAL_TYPES),
+            },
+        },
+        "required": ["status", "confidence", "visual_type"],
+        "additionalProperties": False,
+    }
 
 
-def verify_image_subject(
+def _parse_response(text: str) -> dict[str, Any]:
+    """Parse the model answer (Structured Outputs returns pure JSON)."""
+    raw = (text or "").strip()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        # Fallback: strip code fences if any.
+        fenced = re.search(r"{.*}", raw, re.DOTALL)
+        if not fenced:
+            raise VisionGateError(f"resposta invalida da API de visao: {raw[:120]!r}")
+        try:
+            data = json.loads(fenced.group(0))
+        except ValueError as exc:
+            raise VisionGateError(f"resposta invalida da API de visao: {raw[:120]!r}") from exc
+    status = data.get("status")
+    confidence = data.get("confidence")
+    visual_type = data.get("visual_type")
+    if status not in _STATUS:
+        raise VisionGateError(f"status de visao desconhecido: {status!r}")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise VisionGateError(f"confidence de visao invalida: {confidence!r}")
+    confidence = float(confidence)
+    if not 0 <= confidence <= 1:
+        raise VisionGateError(f"confidence fora de [0,1]: {confidence!r}")
+    if visual_type not in _VISUAL_TYPES:
+        visual_type = "other"
+    return {"status": status, "confidence": confidence, "visual_type": visual_type}
+
+
+def _build_user_prompt(
+    subject: str, *,
+    context: str = "", category: str = "", alt: str = "",
+) -> str:
+    """Restricted prompt: metadata is context, pixels are the evidence."""
+    lines = [
+        "Do not assume that the ALT text, filename, URL or source description "
+        "correctly describes the image. Judge the actual visual content of the "
+        "image; the textual metadata is context only.",
+        "",
+        f"Expected subject: {subject.strip()}",
+    ]
+    if category.strip():
+        lines.append(f"Category: {category.strip()}")
+    if context.strip():
+        lines.append(f"Context: {context.strip()}")
+    if alt.strip():
+        lines.append(f"ALT text (context only): {alt.strip()}")
+    lines += [
+        "",
+        "Answer whether the image is visually consistent with the expected "
+        "subject and category. Reject unrelated real-world photography, generic "
+        "animals, unrelated games, unrelated brand logos, and stock photography.",
+    ]
+    return "\n".join(lines)
+
+
+def _call_vision(
     *,
     image_url: str,
-    subject: str,
+    prompt: str,
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float = 30.0,
-) -> tuple[bool, str]:
-    """Ask the vision model whether ``image_url`` depicts ``subject``.
-
-    Returns ``(ok, reason)`` where ``ok`` is True only when the model
-    confirms the subject. Raises :class:`VisionGateError` on API failures
-    (fail-closed: the caller must not publish unverified images).
-    """
-    if not api_key:
-        raise VisionGateError("EDITOR_VISION_API_KEY ausente (gate de visao habilitado sem chave)")
-    if not image_url or not image_url.startswith(("http://", "https://")):
-        raise VisionGateError(f"imagem sem URL valida para verificacao: {image_url or 'vazio'}")
-    if not subject or not subject.strip():
-        raise VisionGateError("assunto (alt) vazio; impossivel verificar a imagem")
-
-    prompt = (
-        f"A imagem abaixo retrata: {subject.strip()}. "
-        "Se a imagem retratar exatamente isso, responda SIM. Caso contrario, responda NAO."
-    )
+    detail: str,
+    timeout: float,
+) -> dict[str, Any]:
     payload = {
         "model": model,
         "messages": [
@@ -71,12 +146,16 @@ def verify_image_subject(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url, "detail": detail},
+                    },
                 ],
             },
         ],
-        "max_tokens": 8,
+        "max_tokens": 60,
         "temperature": 0,
+        "response_format": {"type": "json_object"},
     }
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
     request = Request(
@@ -95,17 +174,71 @@ def verify_image_subject(
         raise VisionGateError(f"API de visao respondeu HTTP {exc.code}") from exc
     except (URLError, OSError, ValueError) as exc:
         raise VisionGateError(f"falha ao chamar a API de visao: {exc}") from exc
-
     try:
         answer = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionGateError("resposta invalida da API de visao") from exc
-    confirmed = _confirm_yes_no(answer)
-    if confirmed is None:
-        raise VisionGateError(f"resposta inconclusiva da API de visao: {answer!r}")
-    if confirmed:
-        return True, "modelo de visao confirmou o assunto da imagem"
-    return False, f"modelo de visao NEGOU o assunto ({subject.strip()[:80]})"
+    return _parse_response(answer)
+
+
+def _decide(result: dict[str, Any]) -> tuple[bool, str]:
+    status = result["status"]
+    confidence = result["confidence"]
+    visual_type = result.get("visual_type", "other")
+    detail = f"[{status} {confidence:.2f} {visual_type}]"
+    if status == "MATCH" and confidence >= _ACCEPT_THRESHOLD:
+        return True, f"modelo confirmou o assunto {detail}"
+    if status == "UNRELATED" and confidence >= _REJECT_THRESHOLD:
+        return False, f"modelo NEGOU o assunto {detail}"
+    # PARTIAL_MATCH or low-confidence / ambiguous -> caller may escalate.
+    return False, f"inconclusivo {detail}"
+
+
+def verify_image_subject(
+    *,
+    image_url: str,
+    subject: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: float = 30.0,
+    context: str = "",
+    category: str = "",
+    alt: str = "",
+    detail: str = "low",
+    allow_high: bool = False,
+) -> tuple[bool, str]:
+    """Ask the vision model whether ``image_url`` is consistent with ``subject``.
+
+    Returns ``(ok, reason)``. Uses ``detail`` (default `low`). When the
+    result is ambiguous/inconclusive and ``allow_high`` is True, re-asks at
+    `detail: high` once before deciding (cost escalation only on hard cases).
+    Raises :class:`VisionGateError` on API failures (fail-closed).
+    """
+    if not api_key:
+        raise VisionGateError("chave de visao ausente (gate habilitado sem chave)")
+    if not image_url or not image_url.startswith(("http://", "https://")):
+        raise VisionGateError(f"imagem sem URL valida para verificacao: {image_url or 'vazio'}")
+    if not subject or not subject.strip():
+        raise VisionGateError("assunto (alt) vazio; impossivel verificar a imagem")
+
+    detail = detail if detail in {"low", "high"} else "low"
+    prompt = _build_user_prompt(subject, context=context, category=category, alt=alt)
+    result = _call_vision(
+        image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
+        model=model, detail=detail, timeout=timeout,
+    )
+    ok, reason = _decide(result)
+    if ok or not allow_high:
+        return ok, reason
+    if result["status"] == "AMBIGUOUS" or result["confidence"] < _ACCEPT_THRESHOLD:
+        # Escalate to high once for the hard cases.
+        high_result = _call_vision(
+            image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
+            model=model, detail="high", timeout=timeout,
+        )
+        return _decide(high_result)
+    return ok, reason
 
 
 def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
@@ -113,5 +246,8 @@ def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
     if not enabled:
         return False, "gate de visao desativado (EDITOR_VISION_ENABLED=false)"
     if not api_key:
-        return False, "EDITOR_VISION_API_KEY ausente (gate habilitado sem chave)"
+        return False, "chave de visao ausente (OPENAI_API_KEY / EDITOR_VISION_API_KEY)"
     return True, "gate de visao ativo"
+
+
+__all__ = ["verify_image_subject", "vision_config_ready", "VisionGateError"]

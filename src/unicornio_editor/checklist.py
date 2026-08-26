@@ -378,40 +378,89 @@ def run_pre_publish_checklist(
             skipped=True,
         )
     else:
+        from .media.vision_cache import get_cached_decision, set_cached_decision
+
+        # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
+        vision_root = (
+            Path(str(backup_path)).parents[2] if backup_path else Path(".")
+        )
         vision_failures: list[str] = []
-        for item in content_images:
-            src = str(item.get("src") or "")
-            alt = str(item.get("alt") or "")
+        calls_low = 0
+        calls_high = 0
+        checked = 0
+
+        def _verify(
+            url: str, subject: str, *,
+            is_featured: bool, context: str = "", category: str = "",
+        ) -> None:
+            nonlocal calls_low, calls_high, checked
+            if not url or not subject.strip():
+                return
+            # Cache por imagem+entidade: evita re-analisar a mesma key art
+            # em varios posts/artigos.
+            cached = get_cached_decision(vision_root, url, subject)
+            if cached is not None:
+                checked += 1
+                if cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.85:
+                    return
+                vision_failures.append(f"{url[:60]}: cache nao-confirma ({cached.get('status')})")
+                return
+            # Limites mecanicos de custo por post.
+            if calls_low >= config.vision_max_low:
+                vision_failures.append(f"{url[:60]}: limite de chamadas low atingido")
+                return
+            calls_low += 1
             try:
                 ok, reason = verify_image_subject(
-                    image_url=src,
-                    subject=alt,
+                    image_url=url,
+                    subject=subject,
                     api_key=config.vision_api_key,
                     base_url=config.vision_base_url,
                     model=config.vision_model,
                     timeout=config.http_timeout,
+                    context=context,
+                    category=category,
+                    alt=subject,
+                    detail=config.vision_detail,
+                    allow_high=is_featured,  # featured escala low->high; inline nao
                 )
+                checked += 1
+                if ok:
+                    set_cached_decision(
+                        vision_root, url, subject,
+                        {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
+                    )
+                    return
+                # Escalonou para high na featured? Contabiliza para o limite.
+                if is_featured and "high" in str(config.vision_detail):
+                    calls_high += 1
+                vision_failures.append(f"{url[:60]}: {reason}")
             except VisionGateError as exc:
-                vision_failures.append(f"{src[:60]}: {exc}")
-                continue
-            if not ok:
-                vision_failures.append(f"{src[:60]}: {reason}")
+                vision_failures.append(f"{url[:60]}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - report, keep gate
+                vision_failures.append(f"{url[:60]}: {exc}")
+
+        # Inline: gate determinístico ja passou; low apenas (descarta se nao confirmar).
+        for item in content_images:
+            _verify(
+                str(item.get("src") or ""),
+                str(item.get("alt") or ""),
+                is_featured=False,
+                category="game_artwork" if image_entities else "media",
+            )
+        # Featured: low -> high obrigatorio (a imagem mais importante).
         if featured_ok and client is not None:
             try:
                 media = client.get_media(featured)
                 featured_url = str(media.get("source_url") or "").strip()
                 featured_subject = str(editorial.get("seo", {}).get("title") or "").strip()
                 if featured_url and featured_subject:
-                    ok, reason = verify_image_subject(
-                        image_url=featured_url,
-                        subject=featured_subject,
-                        api_key=config.vision_api_key,
-                        base_url=config.vision_base_url,
-                        model=config.vision_model,
-                        timeout=config.http_timeout,
+                    _verify(
+                        featured_url, featured_subject,
+                        is_featured=True,
+                        context="image destaque do artigo",
+                        category="game_artwork",
                     )
-                    if not ok:
-                        vision_failures.append(f"destaque: {reason}")
             except (VisionGateError, Exception) as exc:  # noqa: BLE001 - report, keep gate
                 vision_failures.append(f"destaque: {exc}")
         if vision_failures:
@@ -420,8 +469,7 @@ def run_pre_publish_checklist(
             check(
                 "imagens_visao",
                 True,
-                f"{len(content_images) + (1 if featured_ok and client is not None else 0)} "
-                "imagem(ns) confirmadas pelo modelo de visao",
+                f"{checked} imagem(ns) confirmadas (low={calls_low}, high={calls_high})",
             )
 
     passed = sum(1 for item in items if item["status"] == "pass")

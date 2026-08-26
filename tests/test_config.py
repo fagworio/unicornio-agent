@@ -64,6 +64,41 @@ class ConfigTests(unittest.TestCase):
             config = load_config()
         self.assertNotIn("super-secret", repr(config))
 
+    def test_vision_defaults_enabled_and_low_detail(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
+            config = load_config()
+        self.assertTrue(config.vision_enabled)
+        self.assertEqual(config.vision_detail, "low")
+        self.assertEqual(config.vision_max_low, 3)
+        self.assertEqual(config.vision_max_high, 1)
+
+    def test_vision_key_falls_back_to_openai_api_key(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "OPENAI_API_KEY": "sk-test-openai",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.vision_api_key, "sk-test-openai")
+
+    def test_vision_key_editor_overrides_openai(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "OPENAI_API_KEY": "sk-test-openai",
+            "EDITOR_VISION_API_KEY": "sk-test-editor",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.vision_api_key, "sk-test-editor")
+
+    def test_vision_can_be_disabled(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "EDITOR_VISION_ENABLED": "false",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            self.assertFalse(load_config().vision_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()
