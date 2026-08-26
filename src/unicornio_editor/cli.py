@@ -32,6 +32,7 @@ from .workflow import (
     retry_post,
     validate_media_plan,
 )
+from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -507,9 +508,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "draft":
             result = load_draft(args.root, args.post_id)
         elif args.command == "retry-all":
-            from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED
-            from .workflow import build_queue_report
-
             states = {st.strip() for st in (args.states or "").split(",") if st.strip()}
             report = build_queue_report(client, args.root)
             target_ids: list[int] = []
