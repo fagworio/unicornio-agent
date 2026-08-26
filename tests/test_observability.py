@@ -58,5 +58,24 @@ class ObservabilityTests(unittest.TestCase):
             self.assertNotIn("api_key", raw)
 
 
+    def test_telemetry_context_bytes_aggregation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_telemetry(root, "cmd_output", command="cards", bytes=5000)
+            append_telemetry(root, "cmd_output", command="cards", bytes=2000)
+            append_telemetry(root, "cmd_output", command="queue", bytes=900)
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["context_bytes_by_command"]["cards"], 7000)
+            self.assertEqual(summary["context_bytes_by_command"]["queue"], 900)
+            self.assertEqual(summary["context_bytes_total"], 7900)
+
+    def test_telemetry_context_bytes_ignores_non_int(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_telemetry(root, "cmd_output", command="cards", bytes="nao-numero")
+            summary = read_telemetry_summary(root)
+            self.assertNotIn("cards", summary["context_bytes_by_command"])
+
+
 if __name__ == "__main__":
     unittest.main()

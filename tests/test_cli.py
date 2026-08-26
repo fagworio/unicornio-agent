@@ -7,7 +7,7 @@ arquivo (apply.latest.json) para auditoria.
 
 import unittest
 
-from unicornio_editor.cli import _compact_apply, _compact_checklist, _monitor_line
+from unicornio_editor.cli import _compact_apply, _compact_checklist, _monitor_line, _record_cmd_output
 
 
 class CompactOutputTests(unittest.TestCase):
@@ -156,6 +156,31 @@ class CompactOutputTests(unittest.TestCase):
                 {"name": "c", "detail": "detalhe c"},
             ],
         )
+
+
+    def test_record_cmd_output_only_for_context_commands(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        class NS:
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = NS()
+            args.root = root
+            args.command = "cards"
+            _record_cmd_output(args, {"count": 1, "cards": []})
+            # Comando de escrita nao gera cmd_output.
+            args.command = "apply"
+            _record_cmd_output(args, {"status": "ready"})
+            from unicornio_editor.observability import read_telemetry_summary
+
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["by_event"].get("cmd_output"), 1)
+            self.assertGreater(summary["context_bytes_total"], 0)
+            self.assertIn("cards", summary["context_bytes_by_command"])
 
 
 if __name__ == "__main__":

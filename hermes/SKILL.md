@@ -9,219 +9,134 @@ metadata:
 
 # UnicornioHater Editorial Agent
 
-Process only WordPress posts with status `pending`. Read the linked references
-when needed: `references/politica-imagens.md` (regras completas de imagem —
-consulte ANTES de montar o media_plan) e `references/operacao.md` (pitfalls de
-produção — consulte quando algo falhar ou parecer estranho).
+Process only WordPress posts with status `pending`. Consulte as references quando
+precisar: `references/politica-imagens.md` (regras de imagem — ANTES do
+media_plan) e `references/operacao.md` (pitfalls — quando algo falhar).
 
 ## Non-negotiable safety
 
 - Produção roda em write mode (`EDITOR_DRY_RUN=false` no .env): `apply` grava
-  conteúdo e meta, SEMPRE mantendo status `pending`. Publicação SÓ pelo cron
-  (`publish-ready`, gates PUBLISH_ENABLED=true + manifest/checklist 100%).
-- Nunca envie `status` num payload de update.
-- Re-fetch o post imediatamente antes de qualquer escrita; aborte se não for
-  `pending`.
-- Pule conteúdo irrelevante/incerto sem tocar no WordPress. Crie snapshot JSON
-  antes de processar.
-- Nunca logue credenciais, tokens, cookies ou headers de autorização completos.
+  conteúdo e meta, SEMPRE mantendo `pending`. Publicação SÓ pelo cron
+  (`publish-ready`; gates PUBLISH_ENABLED=true + manifest/checklist 100%).
+- Nunca envie `status` num payload de update. Re-fetch antes de escrever;
+  aborte se o post não for `pending`.
+- Pule conteúdo irrelevante/incerto sem tocar no WordPress. Crie snapshot antes.
+- Nunca logue credenciais, tokens, cookies ou headers completos.
 - Nunca use posts de produção para validação local.
 
 ## Fluxo editorial (economia de tokens — sucesso = mínimo, falha = só o que corrigir)
 
-1. `unicornio-editor cards` — UMA chamada devolve os cards do lote (NO MÁXIMO
-   2; rework primeiro, depois novos). Cada card traz o DELTA exato:
-   `images: {required, valid, missing, irrelevant, non_webp}`, diagnóstico da
-   `featured` (`exists / relevant / webp / dimensions / action`) e, para
-   bloqueados, o plano `fix`. Escreva os editoriais direto dos cards — nunca
-   abra blocked.json/checklist/logs/source para descobrir o que corrigir.
-   Para o estado geral da fila: `unicornio-editor queue` (read-only; o monitor
-   do cron só desperta com trabalho elegível — idle custa zero tokens).
-2. Processe NO MÁXIMO 2 posts por run e pare em ~30 tool calls. Máximo UMA
-   tentativa de correção por post por run: apply falhou → corrija → apply de
-   novo → se falhar de novo, PARE e deixe para a próxima run (backoff/cooldown
-   cuidam do ritmo; 3ª falha vira AWAITING_HUMAN).
-3. REWORK (card com `blocked: true`): leia `blocked_reason` + `fix` do card —
-   o código já disse o que corrigir (quantas imagens faltam, featured
-   normalizar/substituir, lista, texto). Carregue o rascunho com
-   `unicornio-editor draft POST_ID` e corrija SOMENTE o componente apontado
-   pelo fix — nunca reescreva texto/SEO que já estão bons. Ex.: faltam 2
-   imagens → só adicione itens ao `media_plan` do draft e re-aplique.
-4. Produza o editorial JSON estrito com `site_relevance`, `seo`, `media_plan`
-   e trailer. Jogo → `game_name` exato (o código acha/valida o trailer —
-   nunca invente URL). `cleaned_html` é OPCIONAL: omita quando o texto
-   preparado já está bom (no-rewrite; o apply reusa o conteúdo limpo
-   determinístico); inclua SÓ quando realmente reescrever — e aí use
-   `unicornio-editor content POST_ID` em vez de abrir o prepared.json inteiro.
-5. IMAGENS: consulte `references/politica-imagens.md` antes do media_plan.
-   RESUMO CRÍTICO: (a) mínimo 2/4/6 SEMPRE (2 <= 600 palavras, 4 <= 1000, 6
-   acima; listicles = max(2, nº itens)) — post sem o mínimo NÃO vira READY;
-   (b) toda imagem retrata EXATAMENTE a obra citada (nunca conceito genérico);
-   (c) featured = key art da obra citada, nunca arte da matéria; (d) inline
-   640-1280px; (e) URL direta listada na página de origem (verificação
-   byte-a-byte no apply); (f) crédito visível em toda imagem;
-   (g) SEM imagem transparente: o pipeline acha o canal alpha e achata sobre
-   fundo branco antes do upload/insert (o WebP publicado nunca é
-   transparente); imagem (quase) totalmente transparente é REJEITADA — troque
-   por uma versão com fundo.
-   (h) SEM imagem REPETIDA no mesmo post: cada imagem do corpo deve ser
-   distinta (mesma obra = imagens/ângulos/capturas diferentes, nunca a mesma
-   URL usada várias vezes). O checklist `imagens_duplicadas` bloqueia — não
-   reuse a mesma imagem em múltiplos `media_plan` nem como featured + inline.
-   ORDEM DE BUSCA (regra 2026-08-21): comece na WEB. Use
-   `unicornio-editor media-search-web TERMO --size xga --ratio w --limit N`
-   (determinístico, sem você montar URL): ele já aplica o filtro do editor
-   (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2) e devolve
-   candidatos com URL direta + página de origem + a query usada. Google
-   Images (web_search manual) é fallback para casos não cobertos — lembre:
-   Google Images é só índice de descoberta. Extraia a URL
-   DIRETA da página original e use `license: "Uso com crédito"` com
-   `license_url` = a página original.
-   QUERY COMO EVIDÊNCIA: registre no media_plan o campo `search_query` (a
-   busca que retornou a imagem, ex.: "redfall xbox series"). O gate aceita a
-   imagem quando a query contém a obra — como no seu fluxo manual, se a busca
-   filtrada retornou, é o que se procura. Declare SEMPRE a query real; nunca
-   invente uma para "decorar" uma imagem errada (a URL de origem ainda é
-   exigida). Wikimedia Commons é FALLBACK (pouca key art oficial e rate-limit
-   429) — não trave re-tentando Wikimedia; troque para fontes web
-   imediatamente.
-6. Antes do apply com mídia nova, valide o plano com `unicornio-editor
-   media-validate editorial.json` (1 chamada; {valid, rejected}) — corrija o
-   que rejeitar.
-7. `unicornio-editor apply POST_ID editorial.json --compact` — o apply É o
-   preflight COMPLETO: resolve editorial → executa mídia → monta conteúdo →
-   roda o checklist INTEIRO → só então grava. PASS → `status: ready` (o post
-   fica READY com manifest; o publish-ready apenas confirma o hash). FAIL →
-   `status: needs_rework` com `failed` (o que falhou + quanto falta) +
-   `state/attempts/next_retry_at`; o editorial fica arquivado em
-   `editorial.blocked.json` e o rascunho preservado em `editorial.draft.json`.
-   O relatório completo vai para `backups/<ID>/apply.latest.json`.
-8. Normalização técnica É DO CÓDIGO, não sua: featured relevante fora do
-   padrão (JPEG/PNG/dimensão errada) é re-baixada e convertida para 1280x720
-   WebP automaticamente no apply; imagens inline relevantes não-WebP idem
-   (sem nova busca semântica). SÓ procure imagem nova quando o card disser
-   `featured.action: replace|provide` ou `fix.find_inline_images > 0`.
-8b. LINKS INTERNOS SÃO DO CÓDIGO, não seus: o apply adiciona (determinístico,
-    sem IA) um link interno de categoria na PRIMEIRA ocorrência de cada termo
-    inequívoco do mapa (Netflix, PlayStation 5, Xbox Series X, PC, Marvel,
-    DC Comics, Star Wars, etc.), no máximo uma vez por URL, com link padrão
-    follow e sem target=_blank. Termos que dependem de contexto ("manga",
-    "max" isolado, "teaser", "análise", "crítica", "DC" isolado, Android/iOS
-    isolados) NÃO recebem link automático. Você NÃO precisa nem deve incluir
-    esses links no JSON editorial: o apply os insere sozinho. Se o conteúdo
-    já tiver o termo dentro de um <a> ou heading, o código respeita.
-9. NÃO rode `checklist` manualmente: o apply já valida antes de gravar e o
-   publish-ready re-valida por manifest (hash). `--dry-run` NÃO é obrigatório:
-   use-o apenas em rework complexo, mídia nova, JSON que já falhou ou quando
-   investigar um gate.
-10. Inspecione o resumo e o backup. `skip`/`uncertain`/dry-run devem ter
-    `wordpress_changed=false`.
-11. Publicação: só o cron (`hermes/publish-cron.sh` -> `publish-ready`), que
-    publica SOMENTE posts READY com manifest íntegro; se algo mudou desde o
-    apply (STALE) ele revalida com o checklist completo. Nunca publique
-    manualmente fora desse fluxo.
+1. `unicornio-editor cards` — UMA chamada com o DELTA exato por post (no máximo
+   2; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
+   diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
+   direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue`.
+2. Máx. 2 posts/run e pare em ~30 tool calls. Máx. UMA correção por post por
+   run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª falha →
+   AWAITING_HUMAN).
+3. REWORK (`blocked:true`): use `blocked_reason` + `fix` do card, carregue o
+   draft (`draft POST_ID`) e corrija SÓ o componente apontado — nunca reescreva
+   texto/SEO bons.
+4. Editorial estrito com `site_relevance`, `seo`, `media_plan`, trailer. Jogo →
+   `game_name` exato (código acha/valida o trailer). `cleaned_html` OPCIONAL
+   (omita no no-rewrite; use `content POST_ID` só para reescrever).
+5. IMAGENS: `references/politica-imagens.md` antes do media_plan. Regras-chave:
+   2/4/6 SEMPRE (2<=600, 4<=1000, 6+; listicle=max(2,itens)); toda imagem retrata
+   EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
+   direta listada na página de origem; crédito visível em toda imagem; sem imagem
+   transparente; sem imagem repetida no post. Busca: `media-search-web TERMO
+   --size xga --ratio w --limit N` (imgsz=xga=1024x768, imgar=w, udm=2) → candidatos
+   com URL direta + página de origem + query. Google Images (web_search manual) é
+   fallback; Google Images é só índice, a fonte é a página original. Registre
+   `search_query` no media_plan (a busca que retornou a imagem — o gate aceita
+   quando a query contém a obra; declare a query REAL, nunca invente). Wikimedia
+   é fallback (rate-limit 429).
+6. Mídia nova → valide antes: `media-validate editorial.json` (1 chamada;
+   {valid, rejected}).
+7. `apply POST_ID editorial.json --compact` = preflight COMPLETO (resolver
+   editorial → mídia → conteúdo → checklist INTEIRO → só então grava). PASS →
+   `status:ready` (manifest SHA-256; publish-ready confirma o hash). FAIL →
+   `needs_rework` + `failed` + state/attempts/next_retry_at; editorial arquivado
+   em editorial.blocked.json; rascunho em editorial.draft.json.
+8. Normalização técnica É DO CÓDIGO: featured fora do padrão é re-baixada para
+   1280x720 WebP; inline não-WebP relevante idem. SÓ procure imagem nova quando o
+   card disser `featured.action: replace|provide` ou `fix.find_inline_images > 0`.
+8b. Links internos SÃO DO CÓDIGO: o apply insere (determinístico) link interno de
+    categoria na 1ª ocorrência de cada termo inequívoco (Netflix, PlayStation 5,
+    Marvel, etc.), 1x por URL, follow sem target=_blank. Termos de contexto
+    (manga, max isolado, teaser, análise, DC isolado, Android/iOS) NÃO recebem
+    link automático. NÃO inclua esses links no JSON; o apply insere sozinho.
+9. NÃO rode `checklist` manualmente (apply já valida; publish-ready re-valida por
+   manifest). `--dry-run` só sob demanda (rework complexo, mídia nova, JSON que
+   falhou, investigar gate).
+10. `skip`/`uncertain`/dry-run devem ter `wordpress_changed=false`.
+11. Publicação: só o cron (`publish-ready`), SÓ posts READY com manifest íntegro;
+    STALE revalida com checklist. Nunca publique manualmente.
 
-O agente nunca muda um post para status de publicação. Todos os créditos de mídia
-devem ficar visíveis e rastreáveis à evidência da licença.
+O agente nunca muda um post para status de publicação. Créditos de mídia sempre
+visíveis e rastreáveis à licença.
 
-## Estados operacionais (fonte de verdade: meta `_hermes_state` no WordPress)
+## Estados (fonte de verdade: meta `_hermes_state` no WordPress)
 
 ```text
 NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBLISHED
 ```
 
-- **READY** = preflight 100% (checklist completo passou no apply). SÓ `ready`
-  significa apto à publicação. `editorial.latest.json` NÃO significa pronto.
-- **BLOCKED** = precisa rework; o card vem PRIMEIRO no lote com `fix`.
-  Backoff: 1ª falha +30m, 2ª +2h, 3ª → **AWAITING_HUMAN** (sai da fila;
-  humana decide com `retry` ou `discard`).
-- **UNCERTAIN / SKIPPED / AWAITING_HUMAN** = fora da fila: não gera card, não
-  re-tenta, não publica.
-- O monitor (`queue --monitor`) só acorda o agente com trabalho ELEGÍVEL:
-  rework fora de cooldown + pending não processados. O rework NÃO
-  reativa por bucket de parede: o hash muda só quando um `next_retry_at`
-  (cooldown real) expira — bloqueio em cooldown não acorda o agente a cada
-  tick. Rework eterno = erro seu: use `uncertain` para post não-corrigível.
+- READY = preflight 100% (checklist passou no apply). SÓ `ready` publica.
+- BLOCKED = rework; card vem primeiro com `fix`. Backoff: 1ª +30m, 2ª +2h,
+  3ª → AWAITING_HUMAN (`retry`/`discard` humano).
+- UNCERTAIN / SKIPPED / AWAITING_HUMAN = fora da fila (não gera card, não re-tenta,
+  não publica).
+- Monitor (`queue --monitor`) só acorda com trabalho ELEGÍVEL (rework fora de
+  cooldown + pending não processados). NÃO reativa por bucket de parede: o hash
+  muda só quando `next_retry_at` expira. Rework eterno = erro seu → use
+  `uncertain`.
 
-## Loop verificar -> corrigir -> publicar (blocked/rework)
+## Rework (verificar → corrigir → publicar)
 
-- O card sinaliza rework (`blocked: true` + `blocked_reason` + `fix`). Posts
-  reabertos vêm PRIMEIRO no lote — corrija-os ANTES de posts novos.
-- Corrija pelo `fix` do card usando o draft (`unicornio-editor draft POST_ID`):
-  altere só o componente apontado e re-aplique. NUNCA re-aplicar sem correção
-  (o apply recusa de novo e conta tentativa/cooldown).
-- Sem como corrigir (ex.: nenhuma imagem real da obra disponível):
-  `unicornio-editor uncertain POST_ID --reason "..."` para tirar o post da
-  fila — NUNCA force um apply que vai falhar.
-- `apply` com status `needs_rework` NÃO é final: corrija e tente de novo no
-  mesmo lote (máx. 1 correção por post por run); o post continua pending e
-  fora da publicação.
+- Corrija pelo `fix` do card usando o draft; altere só o componente apontado e
+  re-aplique. NUNCA re-aplicar sem correção.
+- Sem como corrigir (ex.: sem imagem real da obra): `uncertain POST_ID --reason`
+  — NUNCA force apply que vai falhar.
+- `needs_rework` não é final: corrija e tente de novo no mesmo lote (máx. 1).
 
 ## Token economy (cron runs — todo token custa dinheiro)
 
-- KEY ART CACHE FIRST: antes de QUALQUER busca web, consulte
-  `work/keyart_cache.json` (obra -> imagens verificadas) e
-  `unicornio-editor media-search TERMO --limit N` (reuso da biblioteca). Busque na
-  web só se nenhum dos dois servir. Imagem verificada nova → REGISTRE no cache.
-- UMA busca por obra; verifique por fragmento (grep) da página original — nunca
-  despeje HTML no terminal (salve em /tmp).
-- `apply --compact` SEMPRE (resumo no terminal, relatório completo em
-  `backups/<id>/apply.latest.json`); `--dry-run` apenas sob demanda (rework,
-  transformação grande, mídia complexa, JSON que já falhou, investigação).
-- `media-validate` antes do apply quando o media_plan tiver mídia nova
-  (1 chamada; evita apply com itens rejeitados).
-- `prepare`/`content` SO quando for reescrever o texto — no-rewrite não precisa.
-- Decida skip/uncertain SÓ pelo card; não prepare nem busque imagem de conteúdo
-  irrelevante.
-- Batch: EDITOR_BATCH_LIMIT=2 — processe NO MÁXIMO 2 posts por execução e
-  pare em ~30 tool calls (run curta = contexto pequeno = barata).
+- KEY ART CACHE FIRST: `work/keyart_cache.json` + `media-search TERMO` (reuso da
+  Media Library) antes de QUALQUER busca web. Imagem nova verificada → registre.
+- UMA busca por obra; verifique por fragmento da página original (não despeje
+  HTML no terminal).
+- `apply --compact` SEMPRE; `--dry-run` só sob demanda.
+- `media-validate` antes do apply com mídia nova (1 chamada).
+- `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
+- Decida skip/uncertain SÓ pelo card.
+- Batch: EDITOR_BATCH_LIMIT=2; ~30 tool calls/run.
 - `list-pending --compact` e `prepare --compact` SEMPRE (~1.3 KB vs ~120 KB).
-- NUNCA leia src/**, pyproject.toml, .env nem testes para "entender o fluxo" —
-  o CLI é a interface; exceção: erro não autoexplicativo → leia SÓ a função do
-  traceback.
+- NUNCA leia src/**, pyproject.toml, .env nem testes — o CLI é a interface.
 - Não repita comandos; não re-prepare post já visto.
-- Escreva o editorial num arquivo (write_file) e passe o path; nunca cole o JSON
-  duas vezes no chat.
-- OMITA `cleaned_html` sem reescrita real; OMITA `seo` quando o card mostra
-  `seo_exists` (o código herda). NUNCA inclua CTA/Fonte no cleaned_html (o
-  builder insere o canônico e remove duplicados).
-- Skip conservador: só com confidence >= 0.9; abaixo disso o apply grava
-  `uncertain.json` (post fica pending, fora da fila) — não force skip final.
+- Escreva o editorial num arquivo e passe o path; nunca cole o JSON 2x no chat.
+- OMITA `cleaned_html` sem reescrita; OMITA `seo` quando `seo_exists`. NUNCA
+  inclua CTA/Fonte no cleaned_html.
+- Skip conservador: só com confidence >= 0.9; abaixo, o apply grava uncertain.
 - Tópicos: `matched_topics` precisa intersectar SITE_TOPICS.
-- Alt de imagem SEMPRE nomeia a obra ("Redfall key art"), nunca genérico.
-- IMAGENS SÃO OBRIGATÓRIAS (mínimo 2/4/6 SEM waiver): todo editorial
-  processado DEVE ter media_plan com imagens reais verificadas até o mínimo do
-  word count. O apply RECUSA gravar editorial abaixo do mínimo (status
-  `needs_rework`, arquiva `editorial.blocked.json` e o post volta à fila de
-  rework). NÃO existe "não buscar imagens quando não agregar valor" — buscar é
-  parte do prepare, sempre. Se após busca honesta não houver imagem real
-  relevante, registre `uncertain` (decisão do agente) em vez de aplicar sem
-  imagens.
+- Alt de imagem SEMPRE nomeia a obra, nunca genérico.
+- IMAGENS SÃO OBRIGATÓRIAS (2/4/6 SEM waiver): sem imagens reais até o mínimo,
+  o apply recusa. Se após busca honesta não houver imagem, registre `uncertain`.
 
-## Diagnóstico barato (sessões interativas — todo token custa dinheiro)
+## Diagnóstico barato (interativo)
 
-- Para "verificar X" (fila, publicações, custo, crons, tokens): rode UMA chamada
-  `scripts/diagnostico.sh` (fila editorial + telemetria; read-only). Custo <
-  $0.01 por verificação.
-- Para "a fila parou por quê?": `unicornio-editor telemetry` resume as
-  blocagens/resultados do pipeline (apply_ready, apply_blocked + motivo,
-  apply_uncertain, apply_skipped, media_search_empty) a partir de
-  `work/telemetry.jsonl` — gerado automaticamente no loop (apply e
-  media-search-web). Distingue "não há imagem" de "busca falhou/bloqueada".
-- NUNCA explore `src/**`, `.env`, `backups/**`, logs ou JSONs grandes para
-  diagnosticar — o script e o CLI (`queue`, `list-pending --compact`,
-  `telemetry`) são a interface.
+- `scripts/diagnostico.sh` (fila + telemetria; read-only; custo < $0.01).
+- `unicornio-editor telemetry` resume blocagens/resultados (apply_ready,
+  apply_blocked+motivo, apply_uncertain, apply_skipped, media_search_empty,
+  cmd_output) de `work/telemetry.jsonl`. Distingue "não há imagem" de "busca
+  falhou/bloqueada".
+- NUNCA explore src/**/.env/backups/**/logs grandes — o CLI é a interface.
 
-## Operational pitfalls (resumo — detalhes em references/operacao.md)
+## Operational pitfalls (detalhes em references/operacao.md)
 
-- CLI lê env direto: sempre `set -a && . ./.env && set +a && .venv/bin/...`
-  (sem o env ele cai na URL mock e "time out").
-- `list-pending` consulta status=pending no servidor (filtro local retorna []).
-- JANELA DE PUBLICAÇÃO SILENCIOSA = candidatos bloqueados pelo checklist (não é o
-  cron quebrado). Diagnostique com `unicornio-editor queue` (estados) e
-  `unicornio-editor checklist POST_ID backups/<ID>/editorial.latest.json`.
-- H2s de listicle PRECISAM ser numerados (`1. Obra: descrição`).
-- Keyword: toda palavra significativa precisa aparecer no título E no corpo.
-- Comandos de revisão humana: `retry POST_ID` (zera tentativas/cooldown),
-  `discard POST_ID [--reason]` (sai da fila), `uncertain POST_ID --reason`
-  (decisão do agente). Nenhum deles força READY.
+- CLI lê env direto: `set -a && . ./.env && set +a && .venv/bin/...`.
+- `list-pending` consulta status=pending no servidor.
+- JANELA DE PUBLICAÇÃO SILENCIOSA = candidatos bloqueados pelo checklist (não é
+  o cron quebrado). Diagnostique com `queue` + `checklist`.
+- H2s de listicle numerados (`1. Obra: descrição`); keyword no título E no corpo.
+- Revisão humana: `retry POST_ID`, `discard POST_ID [--reason]`, `uncertain
+  POST_ID --reason`. Nenhum força READY.

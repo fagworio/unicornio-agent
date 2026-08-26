@@ -72,6 +72,8 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
     path = telemetry_path(root)
     counts: dict[str, int] = {}
     reasons: dict[str, dict[str, int]] = {}
+    cmd_bytes: dict[str, int] = {}
+    total_cmd_bytes = 0
     last_ts: str | None = None
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -87,6 +89,12 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
             if isinstance(reason, str) and reason.strip():
                 bucket = reasons.setdefault(event, {})
                 bucket[reason] = bucket.get(reason, 0) + 1
+            if event == "cmd_output":
+                command = record.get("command")
+                size = record.get("bytes")
+                if isinstance(command, str) and isinstance(size, int):
+                    cmd_bytes[command] = cmd_bytes.get(command, 0) + size
+                    total_cmd_bytes += size
             ts = record.get("ts")
             if isinstance(ts, str):
                 last_ts = ts
@@ -95,6 +103,8 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
         "total_events": sum(counts.values()),
         "by_event": counts,
         "by_reason": reasons,
+        "context_bytes_by_command": cmd_bytes,
+        "context_bytes_total": total_cmd_bytes,
         "last_event_at": last_ts,
     }
 

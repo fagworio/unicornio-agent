@@ -137,6 +137,8 @@ Teste:
 unicornio-editor list-pending
 unicornio-editor prepare 12345
 unicornio-editor maintenance-report posts.json
+# Medir gasto de contexto por run (telemetria):
+unicornio-editor telemetry --root .
 # Descoberta de imagens via Google Images com filtro do editor
 # (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2):
 unicornio-editor media-search-web "redfall xbox series" --size xga --ratio w --limit 5

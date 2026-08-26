@@ -546,11 +546,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 result = _compact_apply(result)
+        _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (ConfigError, WordPressError, OSError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
+
+
+# Comandos de LEITURA que alimentam o contexto do LLM (o custo de tokens que
+# queremos medir). Comandos de escrita (apply/publish/retry/...) tem eventos
+# proprios na telemetria e nao entram aqui.
+_CONTEXT_CMDS = frozenset(
+    {"list-pending", "queue", "cards", "prepare", "draft", "content",
+     "media-search", "media-search-web", "checklist", "telemetry"}
+)
+
+
+def _record_cmd_output(args: argparse.Namespace, result: Any) -> None:
+    """Registra quantos bytes de contexto um comando de leitura produziu.
+
+    Cada chamada de leitura imprime um JSON que o LLM consome como contexto;
+    esse tamanho e o custo de tokens real da run. Grava ``cmd_output`` no
+    telemetry.jsonl central (fail-soft) para o operador somar o gasto por run.
+    """
+    command = getattr(args, "command", None)
+    if command not in _CONTEXT_CMDS:
+        return
+    try:
+        payload = json.dumps(result, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return
+    try:
+        from .observability import append_telemetry
+
+        append_telemetry(
+            getattr(args, "root", Path(".")),
+            "cmd_output",
+            command=command,
+            bytes=len(payload.encode("utf-8")),
+        )
+    except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
+        pass
 
 
 if __name__ == "__main__":
