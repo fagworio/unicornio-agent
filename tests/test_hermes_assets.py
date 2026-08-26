@@ -31,6 +31,17 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("unicornio-editor-monitor.sh", content)
         self.assertIn("references", content)
 
+    def test_cron_installer_is_idempotent(self):
+        # Nao duplica jobs: o install DEVE editar um job existente (em vez de
+        # sempre criar) e remover duplicatas deixadas por installs antigos.
+        script = ROOT / "hermes" / "cron-install.sh"
+        content = script.read_text()
+        self.assertIn("cron edit", content)          # atualiza em vez de duplicar
+        self.assertIn("cron create", content)        # cria quando nao existe
+        self.assertIn("cron remove", content)        # remove duplicados
+        self.assertIn("jobs.json", content)          # le o estado real dos crons
+        self.assertIn("MATCH_IDS", content)
+
     def test_skill_assets_referenced_actually_exist(self):
         skill = (ROOT / "hermes" / "SKILL.md").read_text()
         # Referencias do skill devem existir no repo (senao o agente tenta ler

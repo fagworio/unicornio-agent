@@ -6,8 +6,10 @@ publicos) e o resultado por imagem. Usa a chave de `OPENAI_API_KEY` /
 `EDITOR_VISION_API_KEY` do ambiente (ou `--key`). NAO altera o WordPress.
 
 Uso:
-  OPENAI_API_KEY=sk-... python scripts/measure_vision_cost.py
-  python scripts/measure_vision_cost.py --key sk-... --posts 5
+  Defina a chave no ambiente (ex.: a variavel OPENAI_API_KEY do .env de
+  producao) e rode:
+  python scripts/measure_vision_cost.py
+  python scripts/measure_vision_cost.py --key SUA_CHAVE --posts 5
 
 Precos (gpt-4o-mini): input $0.15/M, output $0.60/M; imagem low ~2833 tok,
 high ~2.833 + tiles*5.667 (estimativa 6 tiles para 1920x1080).
