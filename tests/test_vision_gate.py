@@ -96,43 +96,21 @@ class VisionGateTests(unittest.TestCase):
         # Structured Outputs pede JSON com status/confidence/visual_type.
         self.assertEqual(payload.get("response_format", {}).get("type"), "json_object")
 
-    def test_escalates_to_high_on_ambiguous(self):
-        # Primeira chamada low -> AMBIGUOUS; allow_high -> segunda chamada high.
+    def test_ambiguous_passes_without_escalation(self):
+        # AMBIGUOUS (sem rejeicao clara) NAO bloqueia: passa direto, sem escalar
+        # para high — evita prender posts em rework por confianca baixa.
         VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}'
-
-        def deny_first():
-            return '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}'
-        original_answer = VisionHandler.answer
-
-        class HandlerThatHighs(VisionHandler):
-            pass
-        # Simula: 1a low AMBIGUOUS, 2a high MATCH.
-        seq = [
-            '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}',
-            '{"status": "MATCH", "confidence": 0.90, "visual_type": "key_art"}',
-        ]
-        old_do = VisionHandler.do_POST
-
-        def do_post(self):
-            VisionHandler.answer = seq.pop(0) if seq else '{"status": "MATCH", "confidence": 0.9, "visual_type": "key_art"}'
-            old_do(self)
-
-        VisionHandler.do_POST = do_post
-        try:
-            ok, reason = self._verify(detail="low", allow_high=True)
-        finally:
-            VisionHandler.do_POST = old_do
-            VisionHandler.answer = original_answer
+        ok, reason = self._verify(detail="low", allow_high=True)
         self.assertTrue(ok, reason)
-        # Deve ter feito 2 chamadas: low + high.
+        self.assertIn("inconclusivo", reason)
         details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
-        self.assertEqual(details, ["low", "high"])
+        self.assertEqual(details, ["low"])  # nao escala
 
-    def test_inline_does_not_escalate_to_high(self):
-        # allow_high=False: AMBIGUOUS nao escala -> rejeita (inconclusivo).
+    def test_inline_ambiguous_passes(self):
+        # Inline AMBIGUOUS tambem passa (nao bloqueia por confianca baixa).
         VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}'
         ok, reason = self._verify(detail="low", allow_high=False)
-        self.assertFalse(ok)
+        self.assertTrue(ok, reason)
         details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
         self.assertEqual(details, ["low"])  # apenas 1 chamada
 

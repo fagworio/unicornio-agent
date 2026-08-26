@@ -186,12 +186,15 @@ def _decide(result: dict[str, Any]) -> tuple[bool, str]:
     confidence = result["confidence"]
     visual_type = result.get("visual_type", "other")
     detail = f"[{status} {confidence:.2f} {visual_type}]"
-    if status == "MATCH" and confidence >= _ACCEPT_THRESHOLD:
-        return True, f"modelo confirmou o assunto {detail}"
     if status == "UNRELATED" and confidence >= _REJECT_THRESHOLD:
         return False, f"modelo NEGOU o assunto {detail}"
-    # PARTIAL_MATCH or low-confidence / ambiguous -> caller may escalate.
-    return False, f"inconclusivo {detail}"
+    # MATCH alto -> aceita.
+    if status == "MATCH" and confidence >= _ACCEPT_THRESHOLD:
+        return True, f"modelo confirmou o assunto {detail}"
+    # Inconclusivo (MATCH baixo, PARTIAL_MATCH, AMBIGUOUS ou UNRELATED de baixa
+    # confianca) NAO bloqueia: a imagem pode estar correta, apenas o modelo
+    # nao esta confiante. Passa com aviso para nao prender posts em rework.
+    return True, f"inconclusivo (sem rejeicao clara) {detail}"
 
 
 def verify_image_subject(

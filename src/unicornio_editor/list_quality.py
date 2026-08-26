@@ -15,6 +15,11 @@ _LIST_TERMS = re.compile(
     re.IGNORECASE,
 )
 _COUNT = re.compile(r"\b(\d{1,3})\b")
+_COUNT_WITH_TERM = re.compile(
+    r"\b(?:top\s+)?(\d{1,3})\s*(?:\s+(melhores|piores|animes|jogos|filmes|séries|series|personagens|smartphones|recomendações|recomendacoes|seleção|selecao|lista|ranking))\b",
+    re.IGNORECASE,
+)
+
 _NUMBERED_H2 = re.compile(r"^\s*(\d{1,3})\s*[.)-]\s+(.+?)\s*$")
 
 
@@ -60,11 +65,19 @@ class _BlockParser(HTMLParser):
 
 def detect_list_format(title: str, html: str = "") -> int | None:
     """Return the promised item count, or None when the article is not a list."""
-    title_match = _COUNT.search(title or "")
-    if not title_match:
-        return None
-    if _LIST_TERMS.search(title or "") or re.search(r"<h2[^>]*>\s*\d+\s*[.)-]", html or "", re.I):
-        return int(title_match.group(1))
+    # Numero + termo de lista juntos no titulo (ex.: "10 animes").
+    match = _COUNT_WITH_TERM.search(title or "")
+    if match:
+        return int(match.group(1))
+    # "Top N" (Top 10, Top 27...).
+    top_match = re.search(r"\btop\s+(\d{1,3})\b", title or "", re.IGNORECASE)
+    if top_match:
+        return int(top_match.group(1))
+    # H2 numerados no HTML indicam lista.
+    if re.search(r"<h2[^>]*>\s*\d+\s*[.)-]", html or "", re.I):
+        any_num = re.search(r"\b(\d{1,3})\b", title or "")
+        if any_num:
+            return int(any_num.group(1))
     return None
 
 
