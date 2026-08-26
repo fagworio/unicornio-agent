@@ -193,6 +193,19 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("post_id", type=int)
     retry_parser.add_argument("--root", type=Path, default=Path("."))
 
+    retry_all_parser = subparsers.add_parser(
+        "retry-all",
+        help="destrava em lote todos os posts AWAITING_HUMAN/BLOCKED elegiveis "
+        "(revisao humana): zera tentativas/cooldown de cada um e volta a fila "
+        "de rework — nunca força READY",
+    )
+    retry_all_parser.add_argument("--root", type=Path, default=Path("."))
+    retry_all_parser.add_argument(
+        "--states",
+        default="awaiting_human,blocked",
+        help="estados a destravar (default: awaiting_human,blocked)",
+    )
+
     discard_parser = subparsers.add_parser(
         "discard",
         help="descarta um post da fila editorial (decisao humana): grava uncertain.json "
@@ -493,6 +506,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = validate_media_plan(client, payload)
         elif args.command == "draft":
             result = load_draft(args.root, args.post_id)
+        elif args.command == "retry-all":
+            from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED
+            from .workflow import build_queue_report
+
+            states = {st.strip() for st in (args.states or "").split(",") if st.strip()}
+            report = build_queue_report(client, args.root)
+            target_ids: list[int] = []
+            for row in report.get("posts") or []:
+                st = row.get("state")
+                if st == STATE_AWAITING_HUMAN and "awaiting_human" in states:
+                    target_ids.append(int(row["id"]))
+                elif st == STATE_BLOCKED and "blocked" in states:
+                    target_ids.append(int(row["id"]))
+            outcomes = []
+            for pid in sorted(target_ids):
+                try:
+                    outcomes.append(retry_post(client, config, args.root, pid))
+                except Exception as exc:  # noqa: BLE001 - report per post
+                    outcomes.append({"post_id": pid, "status": "error", "reason": str(exc)})
+            result = {
+                "retried": sum(1 for o in outcomes if o.get("status") == "retried"),
+                "failed": sum(1 for o in outcomes if o.get("status") == "error"),
+                "posts": [
+                    {"post_id": o.get("post_id"), "status": o.get("status"),
+                     "state": o.get("state"), "reason": o.get("reason")}
+                    for o in outcomes
+                ],
+            }
         elif args.command == "retry":
             result = retry_post(client, config, args.root, args.post_id)
         elif args.command == "discard":

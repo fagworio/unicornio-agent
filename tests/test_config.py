@@ -69,8 +69,8 @@ class ConfigTests(unittest.TestCase):
             config = load_config()
         self.assertTrue(config.vision_enabled)
         self.assertEqual(config.vision_detail, "low")
-        self.assertEqual(config.vision_max_low, 3)
-        self.assertEqual(config.vision_max_high, 1)
+        self.assertEqual(config.vision_max_low, 12)
+        self.assertEqual(config.vision_max_high, 4)
 
     def test_vision_key_falls_back_to_openai_api_key(self):
         values = {

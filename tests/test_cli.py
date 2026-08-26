@@ -183,5 +183,19 @@ class CompactOutputTests(unittest.TestCase):
             self.assertIn("cards", summary["context_bytes_by_command"])
 
 
+    def test_retry_all_parser_defaults_states(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args(["retry-all", "--root", "."])
+        self.assertEqual(args.command, "retry-all")
+        self.assertEqual(args.states, "awaiting_human,blocked")
+
+    def test_retry_all_parser_custom_states(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args(["retry-all", "--states", "blocked", "--root", "."])
+        self.assertEqual(args.states, "blocked")
+
+
 if __name__ == "__main__":
     unittest.main()
