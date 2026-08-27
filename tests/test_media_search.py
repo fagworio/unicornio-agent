@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 from unicornio_editor.media.relevance import image_is_relevant
-from unicornio_editor.media.search import build_search_url, search_web_images
+from unicornio_editor.media.search import build_bing_url, build_search_url, search_bing_images, search_web_images
 
 
 class SearchUrlTests(unittest.TestCase):
@@ -117,6 +117,50 @@ class SearchQueryEvidenceTests(unittest.TestCase):
             source_only=True,
         )
         self.assertFalse(relevant)
+
+
+    def test_build_bing_url_applies_size_filter(self):
+        url = build_bing_url("dragon ball", size="xga")
+        self.assertIn("bing.com/images/search", url)
+        self.assertIn("filterui:imagesize-custom_1024_768", url)
+
+    def test_search_bing_images_parses_purl_and_murl(self):
+        html = (
+            '<div>&quot;murl&quot;:&quot;https://cdn.example/dragon.jpg&quot;,'
+            '&quot;turl&quot;:&quot;https://t.example/dragon_t.jpg&quot;,'
+            '&quot;purl&quot;:&quot;https://news.example/dragon/&quot;</div>'
+        )
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_bing_images("dragon ball", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/dragon.jpg")
+        self.assertEqual(results[0]["source_page_url"], "https://news.example/dragon/")
+
+    def test_search_web_images_rotates_to_bing(self):
+        bing_html = (
+            '&quot;murl&quot;:&quot;https://cdn.example/a.jpg&quot;,'
+            '&quot;turl&quot;:&quot;https://t.example/a_t.jpg&quot;,'
+            '&quot;purl&quot;:&quot;https://news.example/a/&quot;'
+        )
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return bing_html.encode()
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_web_images("dragon ball", limit=3)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].get("engine"), "bing")
+        self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/a.jpg")
 
 
 if __name__ == "__main__":

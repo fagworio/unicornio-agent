@@ -44,12 +44,13 @@ media_plan) e `references/operacao.md` (pitfalls — quando algo falhar).
    EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
    direta listada na página de origem; crédito visível em toda imagem; sem imagem
    transparente; sem imagem repetida no post. Busca: `media-search-web TERMO
-   --size xga --ratio w --limit N` (imgsz=xga=1024x768, imgar=w, udm=2) → candidatos
-   com URL direta + página de origem + query. SE o `media-search-web` retornar
-   vazio (count=0), NÃO conclua que "não há imagem" — o Google pode estar
+   --size xga --ratio w --limit N` — rotaciona automaticamente entre BUSCADORES
+   (Bing primário → Google → Yandex) com filtro de tamanho 1024x768, devolvendo
+   candidatos com URL direta + página de origem + query. SE retornar vazio
+   (count=0), NÃO conclua que "não há imagem" — os buscadores podem estar
    bloqueando/rate-limited (comum em IP de datacenter): caia IMEDIATAMENTE para
    `web_search` manual (Google Images/web) e extraia a URL direta da página
-   original. Google Images é só índice, a fonte é a página original. Registre
+   original. O buscador é só índice, a fonte é a página original. Registre
    `search_query` no media_plan (a busca que retornou a imagem — o gate aceita
    quando a query contém a obra; declare a query REAL, nunca invente). Wikimedia
    é fallback (rate-limit 429).

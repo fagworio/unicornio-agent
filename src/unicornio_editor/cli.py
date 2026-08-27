@@ -147,18 +147,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     media_search_web_parser = subparsers.add_parser(
         "media-search-web",
-        help="descobre candidatos de imagem via Google Images com filtro de tamanho/"
-        "proporcao (somente leitura; index de descoberta, a fonte e a pagina original)",
+        help="descobre candidatos de imagem via buscadores (Bing primario, Google/Yandex "
+        "fallback) com filtro de tamanho (somente leitura; index de descoberta, a fonte "
+        "e a pagina original)",
     )
     media_search_web_parser.add_argument("termo", type=str, help="termo de busca (ex.: redfall xbox series)")
     media_search_web_parser.add_argument(
-        "--size", default="xga", help="classe de tamanho Google imgsz (default: xga = 1024x768)"
+        "--size", default="xga", help="classe de tamanho (default: xga = 1024x768)"
     )
     media_search_web_parser.add_argument(
-        "--ratio", default="w", help="proporcao Google imgar (default: w = larga)"
+        "--ratio", default="w", help="proporcao (default: w = larga)"
     )
     media_search_web_parser.add_argument(
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
+    )
+    media_search_web_parser.add_argument(
+        "--engine", default="auto",
+        help="buscador: auto (rotaciona Bing->Google->Yandex), bing, google, yandex "
+        "(default: auto)",
     )
     media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
 
@@ -485,6 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 size=args.size,
                 ratio=args.ratio,
                 limit=args.limit,
+                engine=getattr(args, "engine", "auto"),
             )
             if not candidates:
                 # Possivel bloqueio/rate-limit do Google em producao: registrar
