@@ -48,9 +48,12 @@ media_plan) e `references/operacao.md` (pitfalls — quando algo falhar).
    (Bing primário → Google → Yandex) com filtro de tamanho 1024x768, devolvendo
    candidatos com URL direta + página de origem + query. SE retornar vazio
    (count=0), NÃO conclua que "não há imagem" — os buscadores podem estar
-   bloqueando/rate-limited (comum em IP de datacenter): caia IMEDIATAMENTE para
-   `web_search` manual (Google Images/web) e extraia a URL direta da página
-   original. O buscador é só índice, a fonte é a página original. Registre
+   bloqueando/rate-limited (comum em IP de datacenter) ou ser renderizados via
+   JS (o Yandex em especial NÃO é scrapeável por requisição simples e costuma
+   vir vazio): caia IMEDIATAMENTE para `web_search` manual (Google Images/web)
+   e extraia a URL direta da página original. Não perca tempo re-tentando um
+   buscador que retornou vazio. O buscador é só índice, a fonte é a página
+   original. Registre
    `search_query` no media_plan (a busca que retornou a imagem — o gate aceita
    quando a query contém a obra; declare a query REAL, nunca invente). Wikimedia
    é fallback (rate-limit 429).
