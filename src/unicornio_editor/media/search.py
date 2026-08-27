@@ -25,7 +25,7 @@ import json
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urlencode, urlparse
+from urllib.parse import quote_plus, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 _GOOGLE_IMAGES_BASE = "https://www.google.com/search"
@@ -242,19 +242,23 @@ def search_yandex_images(
     except (HTTPError, URLError, OSError, ValueError):
         return []
     html = page.replace("&quot;", '"')
-    origins = re.findall(r'"origin":"([^"]+)"', html)
-    img_urls = re.findall(r'"img_url":"([^"]+)"', html)
+    # O Yandex embute a URL real da imagem no parametro img_url= (URL-encoded)
+    # dos itens de resultado — exatamente o que o botao "Open" da UI usa. Um
+    # unquote revela a URL direta (ex.: i.pinimg.com/...jpg).
+    img_urls: list[str] = []
+    for raw in re.findall(r'img_url=([^&]+)', page):
+        decoded = unquote(raw)
+        if decoded.startswith("http"):
+            img_urls.append(decoded)
     if not img_urls:
-        img_urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', html)
+        img_urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', page)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for direct in img_urls:
-        direct = direct.replace("\\", "/")
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
         seen.add(direct)
-        page_url = origins[len(results)] if len(results) < len(origins) else ""
-        results.append(_candidate(query, "1024x768|w", direct, page_url, "", ""))
+        results.append(_candidate(query, "1024x768|w", direct, "", "", ""))
         if len(results) >= limit:
             break
     return results

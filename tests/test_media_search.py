@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 from unicornio_editor.media.relevance import image_is_relevant
-from unicornio_editor.media.search import build_bing_url, build_search_url, search_bing_images, search_web_images
+from unicornio_editor.media.search import build_bing_url, build_search_url, search_bing_images, search_web_images, search_yandex_images
 
 
 class SearchUrlTests(unittest.TestCase):
@@ -161,6 +161,25 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].get("engine"), "bing")
         self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/a.jpg")
+
+
+    def test_search_yandex_images_parses_img_url_param(self):
+        # O Yandex embute a URL real no param img_url= (URL-encoded) dos itens.
+        html = (
+            '<a href="/images/search?from=tabbar&img_url=https%3A%2F%2Fi.pinimg.com%2Fx.jpg'
+            '&pos=0&rpt=simage&text=dragon+ball">'
+        )
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_yandex_images("dragon ball", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["direct_image_url"], "https://i.pinimg.com/x.jpg")
 
 
 if __name__ == "__main__":
