@@ -70,6 +70,25 @@ class VisionGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("NEGOU", reason)
 
+    def test_rejects_text_banner_as_key_art(self):
+        # Banner tipografico (manchete/card de noticia) mesmo citando a obra NAO
+        # e key art: a validacao de destaque deve rejeitar.
+        VisionHandler.answer = '{"status": "MATCH", "confidence": 0.97, "visual_type": "text_banner"}'
+        ok, reason = self._verify(require_key_art=True)
+        self.assertFalse(ok)
+        self.assertIn("banner", reason)
+
+    def test_accepts_real_key_art_when_required(self):
+        VisionHandler.answer = '{"status": "MATCH", "confidence": 0.97, "visual_type": "key_art"}'
+        ok, reason = self._verify(require_key_art=True)
+        self.assertTrue(ok, reason)
+
+    def test_inline_allows_text_banner_without_key_art_requirement(self):
+        # Inline nao exige key art: um MATCH de texto nao e bloqueado pela nova regra.
+        VisionHandler.answer = '{"status": "MATCH", "confidence": 0.97, "visual_type": "text_banner"}'
+        ok, reason = self._verify(require_key_art=False)
+        self.assertTrue(ok, reason)
+
     def test_fails_closed_without_api_key(self):
         with self.assertRaises(VisionGateError):
             self._verify(api_key="")

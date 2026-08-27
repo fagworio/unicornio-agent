@@ -423,6 +423,7 @@ def run_pre_publish_checklist(
                     alt=subject,
                     detail=config.vision_detail,
                     allow_high=is_featured,  # featured escala low->high; inline nao
+                    require_key_art=is_featured,  # key art nao pode ser banner tipografico/infografico
                 )
                 checked += 1
                 if ok:

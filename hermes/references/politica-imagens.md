@@ -43,7 +43,11 @@ O Google Images é **somente índice de descoberta** — a fonte é a página
 - **(c) Featured = key art da obra citada**, nunca arte da matéria. O gate usa
   `source_only=True`: o nome real do arquivo/página de origem deve carregar a
   entidade da obra (o alt/credit que você escreve pode decorar uma imagem
-  errada).
+  errada). NUNCA use como featured um **card de manchete / banner tipográfico /
+  share-card de notícias do site** (texto sobre fundo, sem a arte da obra): o
+  gate de visão (`require_key_art`) rejeita `text_banner`/`infographic` mesmo
+  que o texto cite a obra. Wordmark/title-treatment OFICIAL da obra é aceitável;
+  card de notícia SOBRE a obra não é.
 - **(d) Inline 640–1280px** (largura); conteúdo publica com dimensões reais.
 - **(e) URL direta listada na página de origem** — verificação byte-a-byte no
   apply (`verify_downloaded_against_source`).

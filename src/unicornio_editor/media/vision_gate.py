@@ -38,6 +38,7 @@ _STATUS = ("MATCH", "PARTIAL_MATCH", "UNRELATED", "AMBIGUOUS")
 _VISUAL_TYPES = (
     "gameplay", "key_art", "movie_still", "character", "person", "product",
     "logo", "poster", "photograph", "illustration", "animal", "other",
+    "text_banner", "infographic",
 )
 _ACCEPT_THRESHOLD = 0.85   # MATCH and confidence >= this -> accept
 _REJECT_THRESHOLD = 0.80   # UNRELATED and confidence >= this -> reject
@@ -49,7 +50,7 @@ _SYSTEM_PROMPT = (
     "status must be one of: MATCH, PARTIAL_MATCH, UNRELATED, AMBIGUOUS. "
     "confidence is a float 0..1. visual_type must be one of: "
     "gameplay, key_art, movie_still, character, person, product, logo, poster, "
-    "photograph, illustration, animal, other."
+    "photograph, illustration, animal, other, text_banner, infographic."
 )
 
 
@@ -104,6 +105,7 @@ def _parse_response(text: str) -> dict[str, Any]:
 def _build_user_prompt(
     subject: str, *,
     context: str = "", category: str = "", alt: str = "",
+    require_key_art: bool = False,
 ) -> str:
     """Restricted prompt: metadata is context, pixels are the evidence."""
     lines = [
@@ -125,6 +127,18 @@ def _build_user_prompt(
         "subject and category. Reject unrelated real-world photography, generic "
         "animals, unrelated games, unrelated brand logos, and stock photography.",
     ]
+    if require_key_art:
+        lines += [
+            "",
+            "This image is intended as KEY ART / featured image of the subject: a "
+            "valid key art is the subject's own artwork, screenshot, character, or "
+            "official title treatment/wordmark.",
+            "An article headline card, news/share banner, infographic, or "
+            "typographic graphic that merely announces or describes the subject in "
+            "text but carries NO actual artwork of it is NOT acceptable as key art "
+            "— classify it as visual_type 'text_banner' (or 'infographic') and "
+            "status 'UNRELATED'.",
+        ]
     return "\n".join(lines)
 
 
@@ -181,11 +195,16 @@ def _call_vision(
     return _parse_response(answer)
 
 
-def _decide(result: dict[str, Any]) -> tuple[bool, str]:
+def _decide(result: dict[str, Any], *, require_key_art: bool = False) -> tuple[bool, str]:
     status = result["status"]
     confidence = result["confidence"]
     visual_type = result.get("visual_type", "other")
     detail = f"[{status} {confidence:.2f} {visual_type}]"
+    # Key art nao pode ser um banner tipografico/infografico (card de manchete,
+    # share card, infografico) mesmo que o texto cite a obra — nao e a arte da
+    # obra em si. Preserva wordmarks/title-treatments legitimos (o modelo julga).
+    if require_key_art and visual_type in {"text_banner", "infographic"}:
+        return False, f"imagem e banner tipografico/infografico, nao key art {detail}"
     if status == "UNRELATED" and confidence >= _REJECT_THRESHOLD:
         return False, f"modelo NEGOU o assunto {detail}"
     # MATCH alto -> aceita.
@@ -210,6 +229,7 @@ def verify_image_subject(
     alt: str = "",
     detail: str = "low",
     allow_high: bool = False,
+    require_key_art: bool = False,
 ) -> tuple[bool, str]:
     """Ask the vision model whether ``image_url`` is consistent with ``subject``.
 
@@ -226,12 +246,15 @@ def verify_image_subject(
         raise VisionGateError("assunto (alt) vazio; impossivel verificar a imagem")
 
     detail = detail if detail in {"low", "high"} else "low"
-    prompt = _build_user_prompt(subject, context=context, category=category, alt=alt)
+    prompt = _build_user_prompt(
+        subject, context=context, category=category, alt=alt,
+        require_key_art=require_key_art,
+    )
     result = _call_vision(
         image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
         model=model, detail=detail, timeout=timeout,
     )
-    ok, reason = _decide(result)
+    ok, reason = _decide(result, require_key_art=require_key_art)
     if ok or not allow_high:
         return ok, reason
     if result["status"] == "AMBIGUOUS" or result["confidence"] < _ACCEPT_THRESHOLD:
@@ -240,7 +263,7 @@ def verify_image_subject(
             image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
             model=model, detail="high", timeout=timeout,
         )
-        return _decide(high_result)
+        return _decide(high_result, require_key_art=require_key_art)
     return ok, reason
 
 
