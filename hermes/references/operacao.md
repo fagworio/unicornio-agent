@@ -9,7 +9,7 @@
   `backups/**`, logs ou JSONs grandes para "entender o fluxo". Exceção: erro
   não autoexplicativo -> leia SÓ a função do traceback.
 - Para diagnosticar (fila, publicações, custo, crons, tokens): rode UMA chamada
-  de `unicornio-editor queue` / `list-pending --compact` (ou `scripts/diagnostico.sh`).
+  de `unicornio-editor queue --compact` / `list-pending --compact` (ou `scripts/diagnostico.sh`).
   Custo < $0.01 por verificação. **Não** explore state.db manualmente.
 
 ## Ambiente e execução
@@ -21,7 +21,7 @@
 ## Janela de publicação (não confundir com cron quebrado)
 
 - **JANELA DE PUBLICAÇÃO SILENCIOSA** = candidatos bloqueados pelo checklist
-  (não é o cron quebrado). Diagnostique com `unicornio-editor queue` (estados)
+  (não é o cron quebrado). Diagnostique com `unicornio-editor queue --compact` (estados)
   e `unicornio-editor checklist POST_ID backups/<ID>/editorial.latest.json`.
 - Plano ~40 posts/dia: 00h=5, 08h=7, 12h=8, 18h=10, 21h=10 (America/Sao_Paulo).
 - `publish-cron.sh` roda `publish-ready` com gate `PUBLISH_ENABLED=true` +

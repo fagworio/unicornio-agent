@@ -7,7 +7,7 @@ arquivo (apply.latest.json) para auditoria.
 
 import unittest
 
-from unicornio_editor.cli import _compact_apply, _compact_checklist, _monitor_line, _record_cmd_output
+from unicornio_editor.cli import _compact_apply, _compact_checklist, _compact_queue, _monitor_line, _record_cmd_output
 
 
 class CompactOutputTests(unittest.TestCase):
@@ -195,6 +195,49 @@ class CompactOutputTests(unittest.TestCase):
 
         args = build_parser().parse_args(["retry-all", "--states", "blocked", "--root", "."])
         self.assertEqual(args.states, "blocked")
+
+    def test_compact_queue_drops_redundant_fields(self):
+        # A projecao compacta mantem o resumo (contagens/ids) e reduz cada post
+        # aos campos essenciais, cortando os ~15 campos redundantes do modo cheio.
+        report = {
+            "pending": 2,
+            "ready_ids": [10],
+            "unprocessed_ids": [20],
+            "posts": [
+                {
+                    "id": 10,
+                    "date": "2026-08-27",
+                    "date_gmt": "2026-08-27T03:00:00",
+                    "word_count": 2000,
+                    "state": "ready",
+                    "attempts": 0,
+                    "next_retry_at": "",
+                    "last_error": "" + ("x" * 200),
+                    "prepared": True,
+                    "edited": True,
+                    "blocked": False,
+                    "uncertain": False,
+                    "awaiting_human": False,
+                    "skipped": False,
+                    "title": "Post A",
+                }
+            ],
+        }
+        out = _compact_queue(report)
+        self.assertEqual(out["pending"], 2)
+        self.assertEqual(out["ready_ids"], [10])
+        self.assertEqual(out["unprocessed_ids"], [20])
+        post = out["posts"][0]
+        self.assertEqual(set(post.keys()), {"id", "title", "state", "attempts", "last_error"})
+        self.assertEqual(post["id"], 10)
+        self.assertEqual(post["title"], "Post A")
+        self.assertEqual(post["state"], "ready")
+        self.assertEqual(len(post["last_error"]), 80)  # truncado
+
+    def test_compact_queue_truncates_last_error(self):
+        report = {"posts": [{"id": 1, "title": "T", "state": "blocked", "attempts": 2, "last_error": "e" * 200}]}
+        out = _compact_queue(report)
+        self.assertEqual(len(out["posts"][0]["last_error"]), 80)
 
 
 if __name__ == "__main__":

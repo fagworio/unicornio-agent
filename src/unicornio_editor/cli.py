@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="imprime apenas a linha estavel (ids pending NAO processados, ou '0'); "
         "usada pelo monitor_script do cron para nao acordar o LLM em ticks ociosos",
     )
+    queue_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="projecao enxuta dos posts (id/titulo/estado/tentativas/ultimo erro) — "
+        "economia de tokens: corta os campos redundantes do modo cheio",
+    )
 
     telemetry_parser = subparsers.add_parser(
         "telemetry",
@@ -257,6 +263,30 @@ def _compact_listing(posts: list[dict]) -> list[dict]:
     return compact
 
 
+def _compact_queue(report: dict) -> dict:
+    """Projecao enxuta do relatorio de fila (economia de tokens).
+
+    O modo cheio despeja ~15 campos por post (date, word_count, booleanos
+    redundantes com ``state`` etc.). O agente decide pela fila usando apenas
+    id/titulo/estado/tentativas e o ultimo erro; o detalhe por post (imagens,
+    featured, fix) vem do ``cards``. Mantem os campos de resumo (contagens +
+    listas de ids) intactos.
+    """
+    compact = dict(report)
+    posts = report.get("posts") or []
+    compact["posts"] = [
+        {
+            "id": p.get("id"),
+            "title": p.get("title"),
+            "state": p.get("state"),
+            "attempts": p.get("attempts"),
+            "last_error": (p.get("last_error") or "")[:80],
+        }
+        for p in posts
+    ]
+    return compact
+
+
 def _media_search_item(item: dict) -> dict:
     """Projecao compacta de um candidato da Media Library (economia de tokens).
 
@@ -438,7 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
                 print(_monitor_line(report))
                 return 0
-            result = report
+            result = _compact_queue(report) if args.compact else report
         elif args.command == "cards":
             result = build_cards(client, config, args.root, per_page=args.limit)
         elif args.command == "prepare":

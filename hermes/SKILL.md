@@ -30,7 +30,7 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 1. `unicornio-editor cards` — UMA chamada com o DELTA exato por post (no máximo
    2; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
-   direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue`.
+   direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
 2. Máx. 2 posts/run e pare em ~30 tool calls. Máx. UMA correção por post por
    run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª falha →
    AWAITING_HUMAN).
@@ -143,7 +143,7 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - CLI lê env direto: `set -a && . ./.env && set +a && .venv/bin/...`.
 - `list-pending` consulta status=pending no servidor.
 - JANELA DE PUBLICAÇÃO SILENCIOSA = candidatos bloqueados pelo checklist (não é
-  o cron quebrado). Diagnostique com `queue` + `checklist`.
+  o cron quebrado). Diagnostique com `queue --compact` + `checklist`.
 - H2s de listicle numerados (`1. Obra: descrição`); keyword no título E no corpo.
 - Revisão humana: `retry POST_ID`, `discard POST_ID [--reason]`, `uncertain
   POST_ID --reason`. Nenhum força READY.
