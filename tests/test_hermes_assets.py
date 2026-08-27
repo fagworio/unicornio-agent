@@ -47,6 +47,7 @@ class HermesAssetsTests(unittest.TestCase):
         # Referencias do skill devem existir no repo (senao o agente tenta ler
         # arquivos inexistentes e gasta chamadas).
         self.assertTrue((ROOT / "hermes" / "references" / "politica-imagens.md").is_file())
+        self.assertTrue((ROOT / "hermes" / "references" / "editorial-texto.md").is_file())
         self.assertTrue((ROOT / "hermes" / "references" / "operacao.md").is_file())
         # O diagnostico referenciado pelo skill existe em scripts/.
         self.assertTrue((ROOT / "scripts" / "diagnostico.sh").is_file())

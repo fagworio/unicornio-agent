@@ -13,7 +13,6 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.publish_enabled)
         self.assertEqual(config.batch_limit, 2)
         self.assertEqual(config.max_posts_per_run, 2)
-        self.assertEqual(config.max_media_candidates, 3)
         self.assertEqual(config.max_source_retries, 2)
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
@@ -70,7 +69,6 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.vision_enabled)
         self.assertEqual(config.vision_detail, "low")
         self.assertEqual(config.vision_max_low, 12)
-        self.assertEqual(config.vision_max_high, 4)
 
     def test_vision_key_falls_back_to_openai_api_key(self):
         values = {

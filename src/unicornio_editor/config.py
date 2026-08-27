@@ -33,10 +33,8 @@ class Config:
     vision_model: str = "gpt-4o-mini"
     vision_detail: str = "low"  # OpenAI image detail: low | high (low = 2833 tok)
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
-    vision_max_high: int = 4  # chamadas high por post (escalonamento AMBIGUOUS)
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
     max_posts_per_run: int = 2  # cards por lote / posts processados por run
-    max_media_candidates: int = 3  # candidatos de midia analisados por imagem
     max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
     internal_links_enabled: bool = True  # enriquece o conteudo com links internos determinísticos
     # Loop de rework (verificar -> corrigir -> publicar) com backoff:
@@ -152,9 +150,7 @@ def load_config() -> Config:
         vision_model=_env("EDITOR_VISION_MODEL", "gpt-4o-mini"),
         vision_detail=_env("EDITOR_VISION_DETAIL", "low"),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
-        vision_max_high=_int("EDITOR_VISION_MAX_HIGH", 4, 0, 10),
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 2, 1, 10),
-        max_media_candidates=_int("EDITOR_MAX_MEDIA_CANDIDATES", 3, 1, 10),
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
         internal_links_enabled=_bool("EDITOR_INTERNAL_LINKS_ENABLED", True),
         max_rework_attempts=_int("EDITOR_MAX_REWORK_ATTEMPTS", 3, 1, 10),

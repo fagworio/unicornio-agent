@@ -11,7 +11,8 @@ metadata:
 
 Process only WordPress posts with status `pending`. Consulte as references quando
 precisar: `references/politica-imagens.md` (regras de imagem — ANTES do
-media_plan) e `references/operacao.md` (pitfalls — quando algo falhar).
+media_plan), `references/editorial-texto.md` (qualidade de texto/SEO e listas —
+ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 
 ## Non-negotiable safety
 
