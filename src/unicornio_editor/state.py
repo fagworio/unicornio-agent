@@ -63,12 +63,6 @@ META_READY_HASH = "_hermes_ready_hash"
 META_POLICY_VERSION = "_hermes_policy_version"
 META_PROCESSED_AT = "_hermes_processed_at"
 
-# Estados que saem da fila de trabalho (não acordam o agente, não publicam).
-_OUT_OF_QUEUE = frozenset(
-    {STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_PUBLISHED, STATE_READY}
-)
-
-
 def now_iso() -> str:
     """ISO-8601 UTC com segundos (formato usado nas meta keys)."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -187,10 +181,6 @@ def retry_eligible(state_info: dict[str, Any], now: datetime.datetime | None = N
         parsed = parsed.replace(tzinfo=datetime.timezone.utc)
     return parsed <= (now or datetime.datetime.now(datetime.timezone.utc))
 
-
-def out_of_queue(state: str | None) -> bool:
-    """Estados que não entram na fila de trabalho do agente."""
-    return state in _OUT_OF_QUEUE
 
 
 def canonical_json(value: Any) -> str:

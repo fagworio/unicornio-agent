@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
-from urllib.parse import urlparse
 
 
 _IMG_RE = re.compile(r'<img\b[^>]*?src=["\']([^"\']+)', re.IGNORECASE)

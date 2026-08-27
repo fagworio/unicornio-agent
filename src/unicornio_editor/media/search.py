@@ -56,9 +56,6 @@ _BING_MURL_RE = re.compile(r'"murl":"([^"]+)"')
 _BING_TURL_RE = re.compile(r'"turl":"([^"]+)"')
 
 
-class MediaSearchError(RuntimeError):
-    """Raised when an image search cannot be performed."""
-
 
 def _fetch(url: str, timeout: float) -> str:
     request = Request(url, headers={"User-Agent": _UA, "Accept": "text/html"})
@@ -308,5 +305,5 @@ def search_web_images(
 __all__ = [
     "build_search_url", "build_bing_url", "build_yandex_url",
     "search_web_images", "search_bing_images", "search_google_images",
-    "search_yandex_images", "MediaSearchError",
+    "search_yandex_images",
 ]

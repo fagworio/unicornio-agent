@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import re
 from html import escape
-from typing import Any
 
 # --- Internal link map (category URL -> unambiguous terms) -------------------
 # Terms are listed MOST SPECIFIC first within each category (multi-word before
