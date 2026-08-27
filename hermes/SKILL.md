@@ -49,8 +49,7 @@ media_plan) e `references/operacao.md` (pitfalls — quando algo falhar).
    candidatos com URL direta + página de origem + query. SE retornar vazio
    (count=0), NÃO conclua que "não há imagem" — os buscadores podem estar
    bloqueando/rate-limited (comum em IP de datacenter) ou ser renderizados via
-   JS (o Yandex em especial NÃO é scrapeável por requisição simples e costuma
-   vir vazio): caia IMEDIATAMENTE para `web_search` manual (Google Images/web)
+   JS (o Yandex agora tambem e parseado: extrai a URL direta via img_url param, costuma funcionar): caia IMEDIATAMENTE para `web_search` manual (Google Images/web)
    e extraia a URL direta da página original. Não perca tempo re-tentando um
    buscador que retornou vazio. O buscador é só índice, a fonte é a página
    original. Registre
