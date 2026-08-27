@@ -888,8 +888,8 @@ class WorkflowTests(unittest.TestCase):
             def get_post(self, post_id):
                 return next(p for p in self.posts if p["id"] == post_id)
 
-            def list_pending(self, per_page=50):
-                return self.posts
+            def list_pending(self, per_page=50, page=1):
+                return self.posts if page <= 1 else []
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1152,8 +1152,8 @@ class WorkflowTests(unittest.TestCase):
             def get_post(self, post_id):
                 return next(p for p in self.posts if p["id"] == post_id)
 
-            def list_pending(self, per_page=100):
-                return self.posts
+            def list_pending(self, per_page=100, page=1):
+                return self.posts if page <= 1 else []
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1197,8 +1197,8 @@ class WorkflowTests(unittest.TestCase):
                 super().__init__(posts[0])
                 self.posts = posts
 
-            def list_pending(self, per_page=50):
-                return self.posts
+            def list_pending(self, per_page=50, page=1):
+                return self.posts if page <= 1 else []
 
         with tempfile.TemporaryDirectory() as directory:
             report = build_queue_report(MultiClient([in_cooldown, eligible]), Path(directory))

@@ -1375,7 +1375,18 @@ def publish_ready_posts(
     ``limit`` conta somente publicados; ``limit=0`` = sem cota.
     """
     outcomes: list[dict[str, Any]] = []
-    posts = client.list_pending(per_page=100)
+    # Paginacao completa: a fila pode ter mais que 100 pending, e um post READY
+    # alem da pagina 1 nao pode ficar invisivel na janela de publicacao.
+    posts: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        chunk = client.list_pending(page=page, per_page=100)
+        posts.extend(chunk)
+        if len(chunk) < 100:
+            break
+        page += 1
+        if page > 100:
+            break  # limite de seguranca (paginas sao baratas, mas nao infinitas)
     for candidate in posts:
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, int):
