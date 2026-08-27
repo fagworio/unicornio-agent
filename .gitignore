@@ -25,6 +25,8 @@ htmlcov/
 
 # Runtime artifacts
 backups/
+backup/
+.analysis/
 reports/
 tmp/
 tmp-media/
