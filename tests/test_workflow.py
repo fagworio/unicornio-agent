@@ -446,6 +446,48 @@ class WorkflowTests(unittest.TestCase):
             # o custo de tokens e so dos cards impressos, nao do fetch.
             self.assertEqual(client.calls[1]["per_page"], 20)
 
+    def test_build_cards_includes_eligible_uncertain_and_skips_in_cooldown(self):
+        # Espelha a politica do dono (ba91a43): uncertain com cooldown
+        # expirado (ou legado sem cooldown) volta ao trabalho — o card DEVE
+        # aparecer, senao o monitor acorda o agente para posts que o cards
+        # nunca mostra (loop de tokens). Uncertain em cooldown continua fora.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            future = (
+                datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=2)
+            ).isoformat(timespec="seconds")
+            eligible = self.post()  # id 42, legado: sem meta de estado
+            eligible["title"] = {"raw": "Uncertain legado volta ao trabalho"}
+            in_cooldown = dict(eligible)
+            in_cooldown["id"] = 43
+            in_cooldown["title"] = {"raw": "Uncertain em cooldown fica fora"}
+            in_cooldown["meta"] = {
+                "_hermes_state": "uncertain",
+                "_hermes_next_retry_at": future,
+            }
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "uncertain.json").write_text(
+                json.dumps({"status": "uncertain"}), encoding="utf-8"
+            )
+            (root / "backups" / "43").mkdir(parents=True)
+            (root / "backups" / "43" / "uncertain.json").write_text(
+                json.dumps({"status": "uncertain"}), encoding="utf-8"
+            )
+
+            class FakeTwo(FakeClient):
+                def list_pending(self, **kwargs):
+                    include = kwargs.get("include")
+                    candidates = [eligible, in_cooldown]
+                    if include:
+                        candidates = [p for p in candidates if p["id"] in include]
+                    return candidates[: kwargs.get("per_page", 10)]
+
+            report = build_cards(FakeTwo(eligible), self.config(True), root)
+            ids = [c["id"] for c in report["cards"]]
+            self.assertEqual(ids, [42])  # legado elegivel imediatamente
+            self.assertEqual(report["cards"][0]["state"], "uncertain")
+            self.assertFalse(report["cards"][0]["blocked"])  # nao e rework com fix
+
     def test_get_cleaned_content_returns_cleaned_html(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

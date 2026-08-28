@@ -1784,7 +1784,15 @@ def build_cards(
                 state = STATE_READY
             else:
                 state = STATE_NEW
-        if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
+        if state == STATE_UNCERTAIN:
+            # Política do dono (ba91a43): uncertain volta ao trabalho quando o
+            # cooldown expira (legado sem cooldown = elegível imediatamente).
+            # Espelha o eligible_rework do build_queue_report — senão o monitor
+            # acorda o agente para posts que o cards nunca mostra (loop de
+            # tokens). Em cooldown, continua fora da fila.
+            if not cooldown_expired(state_info.get("next_retry_at") or ""):
+                continue
+        elif state in (STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
             continue  # fora da fila de trabalho do agente
         blocked = state == STATE_BLOCKED
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
