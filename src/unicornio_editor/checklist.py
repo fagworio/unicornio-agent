@@ -379,10 +379,10 @@ def run_pre_publish_checklist(
         check("schema_editorial", False, str(exc))
 
     # 14. Vision gate (optional, fail-closed when enabled): a cheap vision
-    #     model confirms each published image depicts its alt subject. This
-    #     catches a CDN serving the wrong image under a correct slug — the
-    #     one case the deterministic gates cannot see. Only posts that passed
-    #     every other gate pay for vision calls.
+    #     model confirms the FEATURED image depicts the subject (key art, not
+    #     a typographic/news banner). Inline images skip vision: they already
+    #     passed the deterministic relevance gate + source byte-verification,
+    #     so the pixel check is reserved for the single most visible image.
     vision_ready, vision_msg = vision_config_ready(
         enabled=config.vision_enabled, api_key=config.vision_api_key
     )
@@ -457,15 +457,10 @@ def run_pre_publish_checklist(
             except Exception as exc:  # noqa: BLE001 - report, keep gate
                 vision_failures.append(f"{url[:60]}: {exc}")
 
-        # Inline: gate determinístico ja passou; low apenas (descarta se nao confirmar).
-        for item in content_images:
-            _verify(
-                str(item.get("src") or ""),
-                str(item.get("alt") or ""),
-                is_featured=False,
-                category="game_artwork" if image_entities else "media",
-            )
-        # Featured: low -> high obrigatorio (a imagem mais importante).
+        # Featured: low -> high obrigatorio (a imagem mais importante). Inline
+        # NAO passa por visao: gate deterministico + verificacao de origem ja
+        # cobrem (economia de custo — a visao e o maior custo marginal por
+        # imagem nova).
         if featured_ok and client is not None:
             try:
                 media = client.get_media(featured)

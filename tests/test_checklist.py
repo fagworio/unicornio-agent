@@ -355,7 +355,7 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "skip")
         verify.assert_not_called()
 
-    def test_vision_gate_blocks_when_model_denies_subject(self):
+    def test_vision_gate_blocks_when_model_denies_featured(self):
         content = (
             "<p>Texto sobre o jogo Redfall e seu lançamento.</p>"
             '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
@@ -383,7 +383,7 @@ class ChecklistTests(unittest.TestCase):
         )
         with mock.patch(
             "unicornio_editor.checklist.verify_image_subject",
-            side_effect=[(True, "ok"), (False, "modelo de visao NEGOU o assunto")],
+            return_value=(False, "modelo de visao NEGOU o assunto"),
         ):
             with tempfile.TemporaryDirectory() as directory:
                 backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
@@ -401,6 +401,51 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertIn("NEGOU", item["detail"])
         self.assertFalse(result["all_passed"])
+
+    def test_vision_gate_verifies_only_featured(self):
+        # Inline NAO paga visao: apenas a featured e verificada (1 chamada),
+        # mesmo com varias imagens inline no conteudo — corte de custo.
+        content = (
+            "<p>Texto sobre o jogo Redfall e seu lançamento.</p>"
+            '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            '<figure class="aligncenter"><img src="https://media.example/b.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            "<p>Mais texto sobre Redfall e jogos.</p>"
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        editorial = editorial_payload()
+        editorial["seo"] = {
+            "title": "Redfall ganha data de lançamento",
+            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+            "focus_keyword": "Redfall",
+        }
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=True,
+            vision_api_key="k",
+            vision_base_url="http://vision.test/v1",
+            vision_model="vision-m",
+        )
+        with mock.patch(
+            "unicornio_editor.checklist.verify_image_subject", return_value=(True, "ok")
+        ) as verify:
+            with tempfile.TemporaryDirectory() as directory:
+                backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_path.write_text("{}")
+                run_pre_publish_checklist(
+                    post=make_post(meta={"original_link": "https://source.example/news"}),
+                    editorial=editorial,
+                    content=content,
+                    backup_path=backup_path,
+                    config=config,
+                    client=FakeClient(),
+                )
+        self.assertEqual(verify.call_count, 1)
+        self.assertIn("redfall-1280x720", verify.call_args.kwargs["image_url"])
 
     def test_vision_gate_skipped_when_earlier_gate_failed(self):
         content = "<p>Texto sobre videogame sem imagem.</p>"
