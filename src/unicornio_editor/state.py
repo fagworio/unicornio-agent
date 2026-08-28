@@ -162,6 +162,19 @@ def rework_backoff(
     }
 
 
+def cooldown_expired(next_retry_at: str, now: datetime.datetime | None = None) -> bool:
+    """True quando o cooldown liberou: valor vazio (nunca agendado) ou já passado."""
+    if not next_retry_at:
+        return True
+    try:
+        parsed = datetime.datetime.fromisoformat(next_retry_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed <= (now or datetime.datetime.now(datetime.timezone.utc))
+
+
 def retry_eligible(state_info: dict[str, Any], now: datetime.datetime | None = None) -> bool:
     """True quando o post bloqueado pode voltar à agenda do monitor.
 
@@ -170,16 +183,7 @@ def retry_eligible(state_info: dict[str, Any], now: datetime.datetime | None = N
     """
     if state_info.get("state") != STATE_BLOCKED:
         return False
-    next_retry = state_info.get("next_retry_at") or ""
-    if not next_retry:
-        return True
-    try:
-        parsed = datetime.datetime.fromisoformat(next_retry.replace("Z", "+00:00"))
-    except ValueError:
-        return True
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed <= (now or datetime.datetime.now(datetime.timezone.utc))
+    return cooldown_expired(state_info.get("next_retry_at") or "", now)
 
 
 

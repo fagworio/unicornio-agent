@@ -86,8 +86,10 @@ class FakeClient:
             self.post["featured_media"] = payload["featured_media"]
         return {"id": post_id, "status": "pending", **payload}
 
-    def publish(self, post_id, meta=None):
+    def publish(self, post_id, meta=None, date_gmt=None):
         payload = {"status": "publish"}
+        if date_gmt:
+            payload["date_gmt"] = date_gmt
         if meta:
             payload["meta"] = meta
         self.updated.append((post_id, payload))
@@ -190,8 +192,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 1)
             self.assertEqual(report["unprocessed_ids"], [])
             self.assertEqual(report["recent_blocked_ids"], [42])
-            # uncertain vence: se o agente ja registrou uncertain.json, o post
-            # sai da fila de trabalho — re-tentar so queimaria tokens.
+            # uncertain vence para blocked, mas (politica atual) volta ao
+            # trabalho quando o cooldown expira — legado sem cooldown e
+            # elegivel imediatamente.
             (root / "backups" / "42" / "uncertain.json").write_text(
                 json.dumps({"status": "uncertain"}), encoding="utf-8"
             )
@@ -199,6 +202,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 0)
             self.assertEqual(report["uncertain"], 1)
             self.assertEqual(report["blocked_ids"], [])
+            self.assertEqual(report["eligible_rework_ids"], [42])
 
     def test_queue_monitor_excludes_old_backlog(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -236,6 +240,28 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["awaiting_human_ids"], [99])
             self.assertEqual(report["unprocessed_ids"], [42])
             self.assertEqual(report["recent_unprocessed_ids"], [42])
+
+    def test_queue_uncertain_in_cooldown_stays_out_of_rework(self):
+        # Uncertain com next_retry_at no FUTURO nao volta ao trabalho (evita
+        # loop infinito de re-trilhagem queimando tokens); com cooldown
+        # expirado/vazio volta ao eligible_rework.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            future = (
+                datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=2)
+            ).isoformat(timespec="seconds")
+            post = self.post()
+            post["meta"] = {
+                "_hermes_state": "uncertain",
+                "_hermes_next_retry_at": future,
+            }
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "uncertain.json").write_text(
+                json.dumps({"status": "uncertain"}), encoding="utf-8"
+            )
+            report = build_queue_report(FakeClient(post), root)
+            self.assertEqual(report["uncertain"], 1)
+            self.assertEqual(report["eligible_rework_ids"], [])
 
     def test_apply_inherits_valid_seo_from_post_meta(self):
         with tempfile.TemporaryDirectory() as directory:

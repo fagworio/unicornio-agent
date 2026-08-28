@@ -98,17 +98,23 @@ class WordPressClient:
             raise WordPressError("WordPress returned an invalid media collection")
         return [item for item in data if isinstance(item, dict)]
 
-    def publish(self, post_id: int, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    def publish(
+        self, post_id: int, meta: dict[str, Any] | None = None,
+        date_gmt: str | None = None,
+    ) -> dict[str, Any]:
         """Deliberately publish a post (status=publish).
 
         This is an explicit, separate operation on purpose: ``update_post``
         refuses to touch ``status`` for pipeline safety. Callers MUST gate
         this behind the pre-publish checklist — the method itself performs
-        no safety checks by design.
+        no safety checks by design. ``date_gmt`` (ISO UTC) opcional: define a
+        data de publicacao (politica de posts antigos = data corrente).
         """
         if self.config.dry_run:
             raise SafetyError("dry-run blocks WordPress writes")
         payload: dict[str, Any] = {"status": "publish"}
+        if date_gmt:
+            payload["date_gmt"] = date_gmt
         if meta:
             payload["meta"] = meta
         return self._expect_object(self._request("POST", f"/posts/{self._id(post_id)}", body=payload))

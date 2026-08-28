@@ -49,6 +49,7 @@ from .state import (
     STATE_SKIPPED,
     STATE_UNCERTAIN,
     build_state_markers,
+    cooldown_expired,
     read_state,
     retry_eligible,
     rework_backoff,
@@ -111,11 +112,18 @@ def apply_editorial(
         # the processing queue, visible for review) instead of being dropped
         # forever via editorial.latest.json.
         _save_uncertain(root, post_id, editorial)
+        _backoff_u = rework_backoff(
+            read_state(post)["attempts"] + 1,
+            cooldown_minutes=config.rework_cooldown_minutes,
+            max_attempts=config.max_rework_attempts,
+        )
         _write_state_markers(
             client,
             config,
             post_id,
             STATE_UNCERTAIN,
+            attempts=_backoff_u["attempts"],
+            next_retry_at=_backoff_u["next_retry_at"],
             last_error=editorial["site_relevance"]["reason"],
         )
         append_telemetry(
@@ -1389,6 +1397,9 @@ def _publish_now(
             "_ai_editor_published_at": published_at,
             **build_state_markers(STATE_PUBLISHED, policy_version=config.policy_version),
         },
+        # Política do dono: post antigo em pending publica como data corrente
+        # (não fica enterrado no passado do site).
+        date_gmt=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
     )
     return {
         "post_id": post_id,
@@ -1596,6 +1607,12 @@ def build_queue_report(
         effective_state = {**state_info, "state": state}
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
+            # Política do dono: uncertain volta ao trabalho quando o cooldown
+            # expira (ou imediatamente se nunca teve cooldown — legado). Antes
+            # ficava preso para sempre: posts pending antigos nunca eram
+            # trilhados. O cooldown evita loop infinito de re-trilhagem.
+            if cooldown_expired(state_info.get("next_retry_at") or ""):
+                eligible_rework.append(post_id)
         elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
