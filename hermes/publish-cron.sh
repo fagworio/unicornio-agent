@@ -5,8 +5,8 @@
 # neste script; o .env continua dry-run para o pipeline editorial).
 # Silencioso quando nao ha nada a publicar (padrao watchdog).
 #
-# Plano de publicacao (America/Sao_Paulo): ~40 posts/dia
-#   00:00 -> 5 | 08:00 -> 7 | 12:00 -> 8 | 18:00 -> 10 | 21:00 -> 10
+# Plano de publicacao (America/Sao_Paulo): 5 posts em todas as janelas
+#   00:00 -> 5 | 08:00 -> 5 | 12:00 -> 5 | 18:00 -> 5 | 21:00 -> 5
 # (backlog novo chega entre 03:30 e 05:00; as janelas da manha/noite
 #  publicam o lote fresco, e 00:00 drena o resto do dia anterior)
 #
@@ -24,11 +24,7 @@ export PUBLISH_ENABLED=true
 
 HOUR="$(date +%H)"
 case "$HOUR" in
-  00) PUBLISH_LIMIT=5 ;;
-  08) PUBLISH_LIMIT=7 ;;
-  12) PUBLISH_LIMIT=8 ;;
-  18) PUBLISH_LIMIT=10 ;;
-  21) PUBLISH_LIMIT=10 ;;
+  00|08|12|18|21) PUBLISH_LIMIT=5 ;;
   *)  PUBLISH_LIMIT=0 ;;
 esac
 export PUBLISH_LIMIT
