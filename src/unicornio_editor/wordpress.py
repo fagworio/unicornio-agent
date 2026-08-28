@@ -31,17 +31,18 @@ class WordPressClient:
         self.base_url = f"{config.wordpress_url}{config.wordpress_api_base}"
 
     def list_pending(
-        self, *, page: int = 1, per_page: int = 10, include: list[int] | None = None
+        self, *, page: int = 1, per_page: int = 10, include: list[int] | None = None,
+        status: str = "pending",
     ) -> list[dict[str, Any]]:
         if not 1 <= page <= 10000 or not 1 <= per_page <= 100:
             raise ValueError("page and per_page are outside safe limits")
-        # Query `status=pending` server-side: some installations (including
+        # Query `status=<status>` server-side: some installations (including
         # production) hide non-published statuses from the unfiltered listing,
         # so a local filter can never discover pending posts. The local filter
         # below remains as defense in depth.
         query: dict[str, Any] = {
             "context": "edit",
-            "status": "pending",
+            "status": status,
             "page": page,
             "per_page": per_page,
         }
@@ -59,7 +60,10 @@ class WordPressClient:
             )
         if not isinstance(data, list):
             raise WordPressError("WordPress returned an invalid posts collection")
-        return [post for post in data if isinstance(post, dict) and post.get("status") == "pending"]
+        return [
+            post for post in data
+            if isinstance(post, dict) and post.get("status") == status
+        ]
 
     def get_post(self, post_id: int) -> dict[str, Any]:
         # context=edit e obrigatorio: sem ele a REST nao expoe content.raw,

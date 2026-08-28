@@ -213,6 +213,30 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["unprocessed_ids"], [42])
             self.assertEqual(report["recent_unprocessed_ids"], [])
 
+    def test_queue_lists_wp_awaiting_human_status_posts(self):
+        # Posts movidos para o status WP "awaiting_human" (decisao humana via
+        # filtro na tela de posts) saem de pending mas DEVEM continuar
+        # aparecendo no relatorio como awaiting_human — e nunca como trabalho
+        # do monitor (nao entram em unprocessed/recent_unprocessed).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+
+            class WpStatusClient(FakeClient):
+                def list_pending(self, **kwargs):
+                    if kwargs.get("status") == "awaiting_human":
+                        ah = dict(post)
+                        ah["id"] = 99
+                        ah["status"] = "awaiting_human"
+                        ah["_wp_awaiting_human"] = True
+                        return [ah]
+                    return [post]
+
+            report = build_queue_report(WpStatusClient(post), root)
+            self.assertEqual(report["awaiting_human_ids"], [99])
+            self.assertEqual(report["unprocessed_ids"], [42])
+            self.assertEqual(report["recent_unprocessed_ids"], [42])
+
     def test_apply_inherits_valid_seo_from_post_meta(self):
         with tempfile.TemporaryDirectory() as directory:
             payload = editorial_payload()

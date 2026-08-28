@@ -1547,6 +1547,20 @@ def build_queue_report(
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)
     posts = client.list_pending(per_page=per_page)
+    # Posts movidos para o status WP "awaiting_human" (decisão humana): saem
+    # de pending e deixariam de aparecer no relatório. O relatório continua
+    # listando-os como awaiting_human (o monitor/publish nunca os tocam — só
+    # o retry humano os devolve ao fluxo). Client sem o param (testes antigos)
+    # apenas não busca o status extra.
+    try:
+        awaiting_wp = client.list_pending(per_page=per_page, status="awaiting_human")
+    except TypeError:
+        awaiting_wp = []
+    _pending_ids = {p.get("id") for p in posts if isinstance(p.get("id"), int)}
+    for p in awaiting_wp:
+        if isinstance(p.get("id"), int) and p["id"] not in _pending_ids:
+            p["_wp_awaiting_human"] = True
+            posts.append(p)
     rows: list[dict[str, Any]] = []
     unprocessed: list[int] = []
     recent_unprocessed: list[int] = []
@@ -1582,7 +1596,7 @@ def build_queue_report(
         effective_state = {**state_info, "state": state}
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
-        elif state == STATE_AWAITING_HUMAN:
+        elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
             skipped_ids.append(post_id)
@@ -1613,7 +1627,7 @@ def build_queue_report(
                 "edited": state == STATE_READY,
                 "blocked": state == STATE_BLOCKED,
                 "uncertain": state == STATE_UNCERTAIN,
-                "awaiting_human": state == STATE_AWAITING_HUMAN,
+                "awaiting_human": state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
                 "title": title,
             }
