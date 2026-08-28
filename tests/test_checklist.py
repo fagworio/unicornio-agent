@@ -63,7 +63,8 @@ class ChecklistTests(unittest.TestCase):
 
     def _run_checklist(self, post=None, editorial=None, content=None, backup=True, client=None):
         with tempfile.TemporaryDirectory() as directory:
-            backup_path = Path(directory) / "snapshot.json"
+            backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
             if backup:
                 backup_path.write_text("{}")
             return run_pre_publish_checklist(
@@ -276,7 +277,8 @@ class ChecklistTests(unittest.TestCase):
             '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Cena importante do jogo" /></figure>'
         )
         with tempfile.TemporaryDirectory() as directory:
-            backup_path = Path(directory) / "snapshot.json"
+            backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
             backup_path.write_text("{}")
             editorial = editorial_payload()
             editorial["site_relevance"]["matched_topics"] = ["economia"]
@@ -304,7 +306,8 @@ class ChecklistTests(unittest.TestCase):
             '<figure class="aligncenter"><img src="https://media.example/b.webp" alt="Cena importante do jogo" /></figure>'
         )
         with tempfile.TemporaryDirectory() as directory:
-            backup_path = Path(directory) / "snapshot.json"
+            backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
             backup_path.write_text("{}")
             editorial = editorial_payload()
             editorial["site_relevance"]["matched_topics"] = ["games"]
@@ -383,7 +386,8 @@ class ChecklistTests(unittest.TestCase):
             side_effect=[(True, "ok"), (False, "modelo de visao NEGOU o assunto")],
         ):
             with tempfile.TemporaryDirectory() as directory:
-                backup_path = Path(directory) / "snapshot.json"
+                backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
                 backup_path.write_text("{}")
                 result = run_pre_publish_checklist(
                     post=post,
@@ -412,7 +416,8 @@ class ChecklistTests(unittest.TestCase):
         )
         with mock.patch("unicornio_editor.checklist.verify_image_subject") as verify:
             with tempfile.TemporaryDirectory() as directory:
-                backup_path = Path(directory) / "snapshot.json"
+                backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
                 backup_path.write_text("{}")
                 result = run_pre_publish_checklist(
                     post=make_post(meta={"original_link": "https://source.example/news"}),

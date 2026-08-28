@@ -28,6 +28,24 @@ _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
 
 
+def _project_root(backup_path: str | Path | None) -> Path:
+    """Raiz do projeto a partir de backups/<id>/snapshot.json (robusto).
+
+    Sobe na arvore ate encontrar um diretorio que contenha ``backups/`` ou
+    ``work/`` (o repo do projeto). Fallback: cwd. Nunca usa indices fixos
+    (``parents[2]`` quebrava silenciosamente com layouts diferentes e gravava
+    o cache de visao em local global — ex.: /work/vision_cache.json —, o que
+    contaminava execucoes e projetos).
+    """
+    if not backup_path:
+        return Path(".")
+    start = Path(str(backup_path)).resolve()
+    for parent in [start, *start.parents]:
+        if (parent / "backups").is_dir() or (parent / "work").is_dir():
+            return parent
+    return Path(".")
+
+
 def _required_image_count(words: int, *, title: str, content: str) -> int:
     """Minimum body images for the post.
 
@@ -381,9 +399,7 @@ def run_pre_publish_checklist(
         from .media.vision_cache import get_cached_decision, set_cached_decision
 
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
-        vision_root = (
-            Path(str(backup_path)).parents[2] if backup_path else Path(".")
-        )
+        vision_root = _project_root(backup_path)
         vision_failures: list[str] = []
         calls_low = 0
         calls_high = 0

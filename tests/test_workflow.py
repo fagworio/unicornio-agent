@@ -1,3 +1,4 @@
+import datetime
 import json
 import tempfile
 import unittest
@@ -103,11 +104,16 @@ class WorkflowTests(unittest.TestCase):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=dry_run)
 
     def post(self):
+        # Data dinamica (now - 2d): o build_queue_report so lista como
+        # "recent" posts com < 7 dias; data fixa tornava o teste sensivel ao
+        # tempo (quebrava quando o fixture envelhecia).
+        recent = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+        stamp = recent.strftime("%Y-%m-%dT%H:%M:%S")
         return {
             "id": 42,
             "status": "pending",
-            "date": "2026-08-21T03:00:00",
-            "date_gmt": "2026-08-21T06:00:00",
+            "date": stamp,
+            "date_gmt": stamp,
             "content": {"raw": "<article><p>Original.</p></article>"},
             "meta": {"original_link": "https://source.example/news"},
             "featured_media": 7,
@@ -198,8 +204,11 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             old = self.post()
-            old["date"] = "2026-05-06T10:00:00"
-            old["date_gmt"] = "2026-05-06T13:00:00"
+            old_stamp = (
+                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=90)
+            ).strftime("%Y-%m-%dT%H:%M:%S")
+            old["date"] = old_stamp
+            old["date_gmt"] = old_stamp
             report = build_queue_report(FakeClient(old), root)
             self.assertEqual(report["unprocessed_ids"], [42])
             self.assertEqual(report["recent_unprocessed_ids"], [])
