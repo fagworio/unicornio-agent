@@ -28,6 +28,20 @@ class EditorialSchemaTests(unittest.TestCase):
     def test_accepts_valid_payload(self):
         self.assertEqual(validate_editorial(valid_payload())["cleaned_html"], "<p>Texto revisado.</p>")
 
+    def test_media_exhausted_optional_boolean(self):
+        # media_exhausted e opcional (default ausente) e deve ser booleano.
+        result = validate_editorial(valid_payload())
+        self.assertNotIn("media_exhausted", result)
+        payload = valid_payload()
+        payload["media_exhausted"] = True
+        self.assertTrue(validate_editorial(payload).get("media_exhausted"))
+
+    def test_media_exhausted_rejects_non_boolean(self):
+        payload = valid_payload()
+        payload["media_exhausted"] = "sim"
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
     def test_rejects_unknown_top_level_field(self):
         payload = valid_payload()
         payload["publish"] = True

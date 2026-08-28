@@ -92,3 +92,19 @@ attachment.
   NUNCA aplique sem imagens nem force uma imagem errada.
 - Imagem inline não-WebP relevante: o `apply` normaliza automaticamente para
   WebP (sem nova busca semântica) — não procure de novo.
+
+## Waiver `media_exhausted` (busca esgotada)
+
+Quando a busca de imagens foi HONESTA e `media-search-web` devolveu
+`count=0` (não há imagem para baixar), declare `media_exhausted: true` no
+JSON editorial (booleano opcional). O código então:
+
+- **Artigo (não listicle)** com featured presente e válida: dispensa o mínimo
+  de imagens inline (`imagens_no_corpo` + a parte de imagem do
+  `qualidade_texto`) e publica com featured + texto. A featured continua
+  obrigatória e validada (relevância + visão).
+- **Listicle (Top N)**: NÃO dispensa — o post vai para `awaiting_human`
+  (revisão manual sua), sem loop de rework (não queima token re-tentando).
+
+Só declare `media_exhausted` após buscar de verdade; nunca para "pular" a
+busca de imagens.

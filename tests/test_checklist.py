@@ -476,6 +476,46 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "skip")
         verify.assert_not_called()
 
+    def test_media_exhausted_waives_inline_for_article(self):
+        # Artigo (nao listicle) com busca de imagens esgotada + featured:
+        # o minimo de imagens inline e dispensado (waived).
+        editorial = editorial_payload(media_exhausted=True)
+        content = (
+            "<p>Texto sobre o jogo videogame e seu lançamento.</p>"
+            "<p>Mais texto sobre videogame.</p>"
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(meta={"original_link": "https://source.example/news"}),
+            editorial=editorial,
+            content=content,
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "pass")
+        self.assertIn("waived", item["detail"])
+
+    def test_media_exhausted_does_not_waive_listicle(self):
+        # Listicle (Top N) NAO dispensa o minimo: continua exigindo imagem por
+        # item (vai para awaiting_human no apply, decisao manual).
+        editorial = editorial_payload(media_exhausted=True)
+        content = (
+            "<h2>1. Jogo: titulo</h2><p>Descricao do jogo.</p>"
+            "<h2>2. Jogo: titulo</h2><p>Descricao do jogo.</p>"
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(
+                title={"raw": "10 melhores jogos"},
+                meta={"original_link": "https://source.example/news"},
+            ),
+            editorial=editorial,
+            content=content,
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "fail")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -227,11 +227,23 @@ def apply_editorial(
         if failed_items:
             state_info = read_state(post)
             attempts = state_info["attempts"] + 1
-            backoff = rework_backoff(
-                attempts,
-                cooldown_minutes=config.rework_cooldown_minutes,
-                max_attempts=config.max_rework_attempts,
-            )
+            # Listicle com busca de imagens esgotada -> AWAITING_HUMAN direto
+            # (revisao manual), sem loop de rework que so queimaria token.
+            media_exhausted = bool(editorial.get("media_exhausted"))
+            if media_exhausted and detect_list_format(
+                _post_title(post) or editorial["seo"]["title"], content
+            ) is not None:
+                backoff = {
+                    "state": STATE_AWAITING_HUMAN,
+                    "attempts": attempts,
+                    "next_retry_at": "",
+                }
+            else:
+                backoff = rework_backoff(
+                    attempts,
+                    cooldown_minutes=config.rework_cooldown_minutes,
+                    max_attempts=config.max_rework_attempts,
+                )
             last_error = "; ".join(
                 f"{item['name']}: {str(item.get('detail') or '')[:120]}"
                 for item in failed_items[:5]

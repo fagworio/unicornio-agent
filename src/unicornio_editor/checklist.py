@@ -135,16 +135,37 @@ def run_pre_publish_checklist(
     #    Listicles get their own floor (max(2, item count)) so the 2/4/6 rule
     #    never conflicts with the one-image-per-item structural rule.
     words = word_count(content)
-    required = _required_image_count(
-        words, title=str((post.get("title") or {}).get("raw") or ""), content=content
-    )
+    title_str = str((post.get("title") or {}).get("raw") or "")
+    required = _required_image_count(words, title=title_str, content=content)
     inline_images = _IMG_RE.findall(content)
     image_count = len(inline_images)
-    check(
-        "imagens_no_corpo",
-        image_count >= required,
-        f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
-    )
+
+    # Waiver "media_exhausted": quando a busca de imagens foi honestamente
+    # esgotada (media-search-web devolveu count=0) E existe featured E NAO e
+    # listicle, dispensa o minimo de imagens inline — artigo publica com
+    # featured + texto. Listicle NAO dispensa (vai para awaiting_human no
+    # apply, decisao manual). A featured segue validada pelos gates destaque_*
+    # e pela visao.
+    from .list_quality import detect_list_format
+
+    media_exhausted = bool(editorial.get("media_exhausted"))
+    featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
+    is_list = detect_list_format(title_str, content) is not None
+    waive_inline = media_exhausted and featured_exists and not is_list
+
+    if waive_inline:
+        check(
+            "imagens_no_corpo",
+            True,
+            f"waived: busca de imagens esgotada e featured presente "
+            f"({image_count} inline; minimo {required} dispensado)",
+        )
+    else:
+        check(
+            "imagens_no_corpo",
+            image_count >= required,
+            f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
+        )
 
     # 6b. Every inline image must be semantically related to the cited subject
     #     (deterministic entity-overlap gate; generic concept matches fail).
@@ -355,7 +376,7 @@ def run_pre_publish_checklist(
             image_count=image_count,
             matched_topics=relevance.get("matched_topics") or [],
             allowed_topics=config.site_topics,
-            required_images=required,
+            required_images=0 if waive_inline else required,
         )
         check("qualidade_texto", True, f"{quality['words']} palavras, qualidade ok")
     except ContentQualityError as exc:

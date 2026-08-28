@@ -627,6 +627,44 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["featured_media"], 52)
         self.assertTrue(report["media_plan_results"][2]["featured"])
 
+    def test_media_exhausted_listicle_goes_awaiting_human(self):
+        # Listicle que esgotou a busca de imagens NAO fica em loop de rework:
+        # vai DIRETO para AWAITING_HUMAN (revisao manual), sem queimar token.
+        payload = editorial_payload()
+        payload["media_exhausted"] = True
+        payload["seo"] = {
+            "title": "10 melhores jogos",
+            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+            "focus_keyword": "videogame",
+        }
+        payload["cleaned_html"] = (
+            "<h2>1. Jogo: titulo</h2><p>Descricao do primeiro jogo.</p>"
+            "<h2>2. Jogo: titulo</h2><p>Descricao do segundo jogo.</p>"
+        )
+        payload["media_plan"] = [
+            {
+                **self.media_item(paragraph_index=0, is_featured=True),
+                "direct_image_url": "https://source.example/keyart.jpg",
+            },
+        ]
+        with mock.patch(
+            "unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")
+        ), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/featured.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            return_value={"id": 52, "source_url": "https://wp.test/52.webp"},
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = FakeClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        self.assertEqual(report["state"], "awaiting_human")
+        self.assertEqual(report["status"], "needs_rework")
+
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
         payload["media_plan"] = [self.media_item(paragraph_index=1, is_featured=True)]

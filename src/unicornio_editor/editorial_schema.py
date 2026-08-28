@@ -19,6 +19,10 @@ _TOP_LEVEL = {
     "needs_trailer",
     "trailer_url",
     "game_name",
+    # Busca de imagens esgotada (media-search-web devolveu count=0):
+    # autoriza o waiver do minimo de imagens inline (artigo publica com
+    # featured + texto). Listicle NAO dispensa — vai para awaiting_human.
+    "media_exhausted",
 }
 _RELEVANCE = {"decision", "confidence", "reason", "matched_topics"}
 _SEO = {"title", "meta_description", "focus_keyword"}
@@ -49,7 +53,7 @@ _MEDIA = {
 def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.8) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise EditorialValidationError("editorial result must be an object")
-    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html", "seo"})
+    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html", "seo", "media_exhausted"})
     relevance = _object(payload["site_relevance"], "site_relevance")
     _keys(relevance, _RELEVANCE, "site_relevance")
     decision = relevance["decision"]
@@ -130,6 +134,10 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     game_name = payload["game_name"]
     if game_name is not None and (not isinstance(game_name, str) or not game_name.strip()):
         raise EditorialValidationError("game_name must be null or a non-empty string")
+
+    media_exhausted = payload.get("media_exhausted", False)
+    if media_exhausted is not None and not isinstance(media_exhausted, bool):
+        raise EditorialValidationError("media_exhausted must be a boolean or null")
 
     result = dict(payload)
     result["media_plan"] = normalized_media
