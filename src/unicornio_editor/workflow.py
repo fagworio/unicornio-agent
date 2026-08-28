@@ -205,6 +205,9 @@ def apply_editorial(
         # o gate relevancia_imagens bloqueia e o agente corrige.
         content, inline_normalization = _normalize_inline_images(client, config, content, image_entities)
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
+    # Tentativas anteriores (antes desta): base do teto deterministico de
+    # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
+    attempts_before = read_state(post)["attempts"]
     checklist = run_pre_publish_checklist(
         post={**post, "featured_media": featured_id or post.get("featured_media")},
         editorial=editorial_with_media,
@@ -212,6 +215,7 @@ def apply_editorial(
         backup_path=backup,
         config=config,
         client=client,
+        attempts=attempts_before,
     )
     # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
     # item do checklist com falha impede READY — o apply NUNCA grava um post
@@ -230,7 +234,8 @@ def apply_editorial(
             # Listicle com busca de imagens esgotada -> AWAITING_HUMAN direto
             # (revisao manual), sem loop de rework que so queimaria token.
             media_exhausted = bool(editorial.get("media_exhausted"))
-            if media_exhausted and detect_list_format(
+            deterministic_exhausted = attempts >= config.max_media_search_attempts
+            if (media_exhausted or deterministic_exhausted) and detect_list_format(
                 _post_title(post) or editorial["seo"]["title"], content
             ) is not None:
                 backoff = {

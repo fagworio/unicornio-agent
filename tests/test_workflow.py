@@ -665,6 +665,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["state"], "awaiting_human")
         self.assertEqual(report["status"], "needs_rework")
 
+    def test_article_deterministic_waiver_on_second_apply(self):
+        # SEM media_exhausted do LLM: um ARTIGO falhando em imagens + featured
+        # waiva DETERMINISTICAMENTE no 2o apply (teto max_media_search_attempts=2).
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # 0 imagens
+        payload["media_plan"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            first = apply_editorial(client, self.config(False), root, 42, payload)
+            second = apply_editorial(client, self.config(False), root, 42, payload)
+        self.assertEqual(first["state"], "blocked")
+        self.assertEqual(first["attempts"], 1)
+        self.assertEqual(second["state"], "ready")
+
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
         payload["media_plan"] = [self.media_item(paragraph_index=1, is_featured=True)]
@@ -1147,8 +1162,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_rework_backoff_escalates_to_awaiting_human(self):
         # Fase 8: 1a falha +30m (blocked), 2a +2h (blocked), 3a AWAITING_HUMAN.
+        # Usa falha NAO de imagem (keyword ausente) porque o teto deterministico
+        # (max_media_search_attempts=2) resolve falha de imagem + featured no 2o
+        # apply (artigo waiva -> ready; listicle -> awaiting_human).
         payload = editorial_payload()
-        payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # 0 imagens
+        payload["seo"]["focus_keyword"] = "xbox"  # ausente no corpo -> qualidade_texto (nao-imagem)
+        payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"
         payload["media_plan"] = []
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

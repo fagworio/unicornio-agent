@@ -108,3 +108,11 @@ JSON editorial (booleano opcional). O código então:
 
 Só declare `media_exhausted` após buscar de verdade; nunca para "pular" a
 busca de imagens.
+
+**Backstop determinístico (não depende do campo):** mesmo que você NÃO declare
+`media_exhausted`, o código decide sozinho após `EDITOR_MAX_MEDIA_SEARCH_ATTEMPTS`
+(default 2) applies falhando em imagens com featured presente: artigo waiva
+inline (publica) e listicle vai para `awaiting_human`. Cada apply falho = 1
+busca completa (o `media-search-web` já rotaciona Bing → Google → Yandex
+internamente numa só chamada, + fallback `web_search`). O `media_exhausted`
+apenas adianta a decisão (economiza 1 ciclo).

@@ -71,6 +71,7 @@ def run_pre_publish_checklist(
     backup_path: str | Path | None,
     config: Config,
     client: WordPressClient | None = None,
+    attempts: int = 0,
 ) -> dict[str, Any]:
     """Run every policy rule in sequence and report the result per item."""
     if not isinstance(post, Mapping):
@@ -149,9 +150,14 @@ def run_pre_publish_checklist(
     from .list_quality import detect_list_format
 
     media_exhausted = bool(editorial.get("media_exhausted"))
+    # Deterministico: apos N applies falhando em imagens (cada apply = 1 busca
+    # completa), decide SEM depender do campo do LLM. O media_exhausted do
+    # modelo vira apenas uma dica que adianta a decisao (economiza 1 ciclo).
+    deterministic_exhausted = (attempts + 1) >= config.max_media_search_attempts
+    exhausted = media_exhausted or deterministic_exhausted
     featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
     is_list = detect_list_format(title_str, content) is not None
-    waive_inline = media_exhausted and featured_exists and not is_list
+    waive_inline = exhausted and featured_exists and not is_list
 
     if waive_inline:
         check(

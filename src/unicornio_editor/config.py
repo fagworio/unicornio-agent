@@ -39,6 +39,10 @@ class Config:
     internal_links_enabled: bool = True  # enriquece o conteudo com links internos determinísticos
     # Loop de rework (verificar -> corrigir -> publicar) com backoff:
     max_rework_attempts: int = 3  # 3a falha do apply -> AWAITING_HUMAN
+    # Teto deterministico de buscas de imagem: apos N applies falhando em
+    # imagens (cada apply = 1 busca completa: Bing->Google->Yandex + web_search),
+    # o codigo decide sozinho (artigo waiva inline; listicle -> awaiting_human).
+    max_media_search_attempts: int = 2
     rework_cooldown_minutes: int = 30  # 1a falha +30m; 2a +2h (30m * 4)
     policy_version: int = 2  # versao da politica editorial do READY manifest
 
@@ -154,6 +158,7 @@ def load_config() -> Config:
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
         internal_links_enabled=_bool("EDITOR_INTERNAL_LINKS_ENABLED", True),
         max_rework_attempts=_int("EDITOR_MAX_REWORK_ATTEMPTS", 3, 1, 10),
+        max_media_search_attempts=_int("EDITOR_MAX_MEDIA_SEARCH_ATTEMPTS", 2, 1, 10),
         rework_cooldown_minutes=_int("EDITOR_REWORK_COOLDOWN_MINUTES", 30, 1, 1440),
         policy_version=_int("EDITOR_POLICY_VERSION", 2, 1, 100),
     )
