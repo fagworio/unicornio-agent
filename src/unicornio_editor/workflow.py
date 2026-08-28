@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import datetime
 import json
 import re
@@ -53,6 +55,12 @@ from .state import (
 )
 from .trailer import TrailerError, build_trailer_html, find_game_trailer
 from .wordpress import WordPressClient
+
+
+# Media plan: download/upload/verificacao sao I/O-bound (rede); threads
+# liberam o GIL durante E/S. Em erro, o driver cai para execucao serial,
+# preservando a semantica original.
+_MEDIA_WORKERS = 4
 
 
 class WorkflowError(RuntimeError):
@@ -797,111 +805,129 @@ def _execute_media_plan(
                 }
             )
         return results, None, None
-    results = []
-    featured_id: int | None = None
-    featured_credit: str | None = None
+    outcomes: dict[int, dict[str, Any]] = {}
+    # Compartilhado entre threads: a verificacao de origem faz read-modify-write
+    # ("se ausente, busca e grava"); sob GIL o pior caso e uma busca duplicada
+    # da mesma pagina (idempotente), sem corromper o cache.
     page_cache: dict[str, list[str] | None] = {}
     seen_sources: set[str] = set()
-    with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
-        tmp = Path(directory)
-        for position, item in enumerate(plan):
-            reason = _rejection_reason(item)
-            if reason is None:
-                reason = _duplicate_source_reason(plan, position, seen_sources)
-            if reason:
-                results.append(
-                    {
-                        "paragraph_index": item.get("paragraph_index"),
-                        "status": "rejected",
-                        "detail": reason,
-                    }
-                )
-                continue
-            evidence = {
-                name: item[name]
-                for name in (
-                    "source_page_url",
-                    "direct_image_url",
-                    "author",
-                    "license",
-                    "license_url",
-                    "captured_at",
-                    "credit_text",
-                    "alt_text",
-                )
+
+    # Pre-passe SERIAL: rejeicao (relevancia/reuso) + deteccao de duplicatas.
+    # Duplicata depende da ORDEM (primeira ocorrencia vence) e o
+    # attachment_cache e populado aqui (get_media), por isso fica fora do
+    # paralelismo.
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for position, item in enumerate(plan):
+        reason = _rejection_reason(item)
+        if reason is None:
+            reason = _duplicate_source_reason(plan, position, seen_sources)
+        if reason:
+            outcomes[position] = {
+                "paragraph_index": item.get("paragraph_index"),
+                "status": "rejected",
+                "detail": reason,
             }
-            suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
-            attachment = _attachment_evidence(item)
-            download_url = (
-                attachment.get("source_url") if attachment is not None else item["direct_image_url"]
-            )
-            source = download_image(
-                str(download_url),
-                tmp / f"source_{position}{suffix}",
-                max_attempts=config.max_source_retries + 1,
-            )
-            # Content verification: the image just downloaded must actually be
-            # listed on the source page (fail-closed). A gallery/CDN URL can
-            # serve bytes of another work while its slug/alt say the right
-            # thing — the textual relevance gate cannot see that.
-            ok, verify_reason = verify_downloaded_against_source(
-                source_page_url=str(item.get("source_page_url") or ""),
-                downloaded=source,
-                direct_image_url=str(download_url),
-                cache=page_cache,
-            )
-            if not ok:
-                results.append(
-                    {
+            continue
+        pending.append((position, item))
+
+    if pending:
+        with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
+            tmp = Path(directory)
+
+            def _process_item(pair: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+                position, item = pair
+                evidence = {
+                    name: item[name]
+                    for name in (
+                        "source_page_url",
+                        "direct_image_url",
+                        "author",
+                        "license",
+                        "license_url",
+                        "captured_at",
+                        "credit_text",
+                        "alt_text",
+                    )
+                }
+                suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
+                attachment = _attachment_evidence(item)
+                download_url = (
+                    attachment.get("source_url") if attachment is not None else item["direct_image_url"]
+                )
+                source = download_image(
+                    str(download_url),
+                    tmp / f"source_{position}{suffix}",
+                    max_attempts=config.max_source_retries + 1,
+                )
+                # Verificacao de conteudo: a imagem baixada deve estar listada
+                # na pagina de origem (fail-closed).
+                ok, verify_reason = verify_downloaded_against_source(
+                    source_page_url=str(item.get("source_page_url") or ""),
+                    downloaded=source,
+                    direct_image_url=str(download_url),
+                    cache=page_cache,
+                )
+                if not ok:
+                    return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
                         "detail": f"verificacao de origem: {verify_reason}",
                     }
-                )
-                continue
-            is_featured = bool(item.get("is_featured"))
-            # Politica de transparencia: reporta se a fonte tinha canal alpha —
-            # a conversao achata sobre branco (o WebP publicado nunca e
-            # transparente) ou rejeita imagem vazia.
-            transparency = "flattened" if image_has_transparency(source) else "none"
-            if is_featured:
-                webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
-            else:
-                webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
-            # Featured "so texto" nao e key art: rejeita (a featured deve ter
-            # arte/visual real da obra, nao um banner/texto plano).
-            if is_featured and image_is_mostly_flat(webp):
-                results.append(
-                    {
+                is_featured = bool(item.get("is_featured"))
+                transparency = "flattened" if image_has_transparency(source) else "none"
+                if is_featured:
+                    webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
+                else:
+                    webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+                # Featured "so texto" nao e key art: rejeita.
+                if is_featured and image_is_mostly_flat(webp):
+                    return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
                         "detail": "featured aparenta ser so texto/arte plana sem conteudo visual; "
                         "escolha uma key art/imagem real da obra",
                     }
-                )
-                continue
-            width, height = image_dimensions(webp)
-            media = upload_image(client, webp, evidence)
-            media_id = media.get("id")
-            media_url = media.get("source_url")
-            if not media_id or not media_url:
-                raise WorkflowError(f"media upload returned no id/source_url (item {position})")
-            result: dict[str, Any] = {
-                "paragraph_index": item["paragraph_index"],
-                "media_id": media_id,
-                "media_url": media_url,
-                "alt_text": item["alt_text"],
-                "credit_text": item["credit_text"],
-                "featured": is_featured,
-                "width": width,
-                "height": height,
-                "transparency": transparency,
-            }
-            results.append(result)
-            if is_featured:
-                featured_id = media_id
-                featured_credit = item["credit_text"]
+                width, height = image_dimensions(webp)
+                media = upload_image(client, webp, evidence)
+                media_id = media.get("id")
+                media_url = media.get("source_url")
+                if not media_id or not media_url:
+                    raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                return position, {
+                    "paragraph_index": item["paragraph_index"],
+                    "media_id": media_id,
+                    "media_url": media_url,
+                    "alt_text": item["alt_text"],
+                    "credit_text": item["credit_text"],
+                    "featured": is_featured,
+                    "width": width,
+                    "height": height,
+                    "transparency": transparency,
+                }
+
+            # Fase PARALELA (I/O-bound: download/upload/verificacao). Em erro,
+            # re-executa os itens pendentes EM SERIE preservando a semantica
+            # original (a excecao propaga como no fluxo anterior).
+            try:
+                with ThreadPoolExecutor(max_workers=_MEDIA_WORKERS) as pool:
+                    processed = list(pool.map(_process_item, pending))
+            except Exception:
+                processed = [_process_item(pair) for pair in pending]
+
+            for position, result in processed:
+                outcomes[position] = result
+
+    # Reconstrói results na ordem do plano (paragrafos), rejeitados e
+    # processados intercalados como antes.
+    results = [outcomes[position] for position in sorted(outcomes)]
+    featured_id: int | None = None
+    featured_credit: str | None = None
+    for result in results:
+        if result.get("featured"):
+            featured_id = result.get("media_id")
+            featured_credit = result.get("credit_text")
     return results, featured_id, featured_credit
+
 
 
 def _normalize_existing_featured(

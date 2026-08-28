@@ -564,11 +564,11 @@ class WorkflowTests(unittest.TestCase):
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
         ), mock.patch(
             "unicornio_editor.workflow.upload_image",
-            side_effect=[
-                {"id": 50, "source_url": "https://wp.test/50.webp"},
-                {"id": 51, "source_url": "https://wp.test/51.webp"},
-                {"id": 52, "source_url": "https://wp.test/52.webp"},
-            ],
+            side_effect=lambda client, webp, evidence: {
+                "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
+                "b.jpg": {"id": 51, "source_url": "https://wp.test/51.webp"},
+                "keyart.jpg": {"id": 52, "source_url": "https://wp.test/52.webp"},
+            }[evidence["direct_image_url"].split("/")[-1]],
         ):
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
@@ -581,6 +581,50 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Crédito da imagem", raw)
         self.assertEqual(report["featured_media"], 52)
         self.assertEqual(len(report["media_plan_results"]), 3)
+        self.assertTrue(report["media_plan_results"][2]["featured"])
+
+    def test_media_plan_falls_back_to_serial_on_pool_error(self):
+        # Se o pool de threads falhar, o media plan cai para execucao SERIAL
+        # (semantica original preservada) e ainda produz o resultado correto.
+        payload = editorial_payload()
+        payload["cleaned_html"] = (
+            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
+            "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
+        )
+        payload["media_plan"] = [
+            {**self.media_item(paragraph_index=0), "direct_image_url": "https://source.example/a.jpg"},
+            {**self.media_item(paragraph_index=3), "direct_image_url": "https://source.example/b.jpg"},
+            {
+                **self.media_item(paragraph_index=6, is_featured=True),
+                "direct_image_url": "https://source.example/keyart.jpg",
+            },
+        ]
+        with mock.patch(
+            "unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")
+        ), mock.patch(
+            "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/featured.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.workflow.upload_image",
+            side_effect=lambda client, webp, evidence: {
+                "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
+                "b.jpg": {"id": 51, "source_url": "https://wp.test/51.webp"},
+                "keyart.jpg": {"id": 52, "source_url": "https://wp.test/52.webp"},
+            }[evidence["direct_image_url"].split("/")[-1]],
+        ), mock.patch(
+            "unicornio_editor.workflow.ThreadPoolExecutor",
+            side_effect=RuntimeError("pool indisponivel"),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = FakeClient(self.post())
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        self.assertEqual(client.updated[0][1]["featured_media"], 52)
+        self.assertEqual(report["featured_media"], 52)
         self.assertTrue(report["media_plan_results"][2]["featured"])
 
     def test_apply_dry_run_blocks_media_plan(self):
