@@ -181,6 +181,51 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["direct_image_url"], "https://i.pinimg.com/x.jpg")
 
+    def test_search_web_images_alternates_primary_engine_by_query(self):
+        # HTML que AMBAS as engines conseguem parsear: a primaria (escolhida
+        # pelo hash da query) vence. Prova a rotacao real, nao so o failover.
+        import zlib
+
+        html = (
+            '&quot;murl&quot;:&quot;https://cdn.example/bing.jpg&quot;,'
+            '&quot;turl&quot;:&quot;https://t.example/bing_t.jpg&quot;,'
+            '&quot;purl&quot;:&quot;https://news.example/bing/&quot; '
+            '<a href="/images/search?img_url=https%3A%2F%2Fi.pinimg.com%2Fyandex.jpg&pos=0">'
+        )
+
+        def pick_query(want_yandex):
+            i = 0
+            while True:
+                q = f"alternancia teste {i}"
+                if bool(zlib.crc32(q.encode("utf-8")) & 1) == want_yandex:
+                    return q
+                i += 1
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            q_bing = pick_query(want_yandex=False)
+            results = search_web_images(q_bing, limit=3)
+            self.assertEqual(results[0]["engine"], "bing")
+            self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/bing.jpg")
+
+            q_yandex = pick_query(want_yandex=True)
+            results = search_web_images(q_yandex, limit=3)
+            self.assertEqual(results[0]["engine"], "yandex")
+            self.assertEqual(results[0]["direct_image_url"], "https://i.pinimg.com/yandex.jpg")
+
+            # Determinismo: a MESMA query sempre comeca na mesma engine.
+            results = search_web_images(q_bing, limit=3)
+            self.assertEqual(results[0]["engine"], "bing")
+            results = search_web_images(q_yandex, limit=3)
+            self.assertEqual(results[0]["engine"], "yandex")
+
 
 if __name__ == "__main__":
     unittest.main()

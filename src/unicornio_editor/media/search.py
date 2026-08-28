@@ -5,12 +5,13 @@ image candidates so the LLM does not have to reason about search URLs or parse
 results - that cost is moved to code (token economy).
 
 Google Images blocks datacenter/cloud IPs (CAPTCHA/Cloudflare), so in production
-it frequently returns an empty/unparseable page. To stay robust, the pipeline
-tries engines in order and rotates on failure:
+it frequently returns an empty/unparseable page. To stay robust and diversify
+sources, ``search_web_images`` alternates the PRIMARY engine by query hash
+(~50/50 Bing / Yandex) and rotates to the other, then Google, on failure:
 
-  1. Bing Images  (primary - reliable from datacenter IPs)
-  2. Google Images (fallback - index only, never the source)
-  3. Yandex Images (fallback)
+  1. Bing Images  or  Yandex Images  (primary, alternates by query)
+  2. the other of the two (fallback)
+  3. Google Images (last resort - index only, never the source)
 
 IMPORTANT policy: the search engine is only a DISCOVERY INDEX, never the source.
 The direct_image_url returned is the real image URL found in the result
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, unquote, urlencode, urlparse
@@ -265,6 +267,16 @@ def search_yandex_images(
 # Rotating facade
 # ---------------------------------------------------------------------------
 
+def _primary_engine(query: str) -> str:
+    """Escolhe a engine primaria por hash estavel da query (CRC32).
+
+    Alterna Bing/Yandex entre buscas diferentes (~50/50) mantendo a MESMA
+    engine para a MESMA query (determinismo em retentativas). Google nunca e
+    primaria: bloqueia IPs de datacenter, fica como fallback final.
+    """
+    return "yandex" if (zlib.crc32((query or "").encode("utf-8")) & 1) else "bing"
+
+
 def search_web_images(
     query: str,
     *,
@@ -274,25 +286,31 @@ def search_web_images(
     timeout: float = 30.0,
     engine: str = "auto",
 ) -> list[dict[str, Any]]:
-    """Rotate through search engines until one returns candidates.
+    """Busca com rotacao REAL entre Bing e Yandex (Google como fallback).
 
-    Order: Bing (primary) -> Google (fallback) -> Yandex (fallback). When
-    engine is a concrete name, only that engine is used. Fail-closed: always
-    returns a list (possibly empty), never raises.
+    No modo ``auto`` a engine primaria alterna por query (hash CRC32 estavel:
+    ~50% Bing, ~50% Yandex) e, se a primaria nao retornar candidatos, tenta a
+    outra e por fim Google. Engine concreta (``bing``/``yandex``/``google``)
+    usa apenas aquela. Fail-closed: sempre retorna lista (possivelmente
+    vazia), nunca levanta.
     """
     query = (query or "").strip()
     if not query:
         return []
-    engines: list[tuple[str, Any]] = []
-    if engine in ("auto", "bing"):
-        engines.append(("bing", search_bing_images))
-    if engine in ("auto", "google"):
-        engines.append(("google", search_google_images))
-    if engine in ("auto", "yandex"):
-        engines.append(("yandex", search_yandex_images))
-    for name, fn in engines:
+    if engine == "auto":
+        first = _primary_engine(query)
+        second = "yandex" if first == "bing" else "bing"
+        order = [first, second, "google"]
+    else:
+        order = [engine]
+    _fns = {
+        "bing": search_bing_images,
+        "yandex": search_yandex_images,
+        "google": search_google_images,
+    }
+    for name in order:
         try:
-            last = fn(query, size=size, ratio=ratio, limit=limit, timeout=timeout)
+            last = _fns[name](query, size=size, ratio=ratio, limit=limit, timeout=timeout)
         except Exception:  # noqa: BLE001 - rotate on any failure
             last = []
         if last:
