@@ -14,6 +14,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.batch_limit, 2)
         self.assertEqual(config.max_posts_per_run, 2)
         self.assertEqual(config.max_source_retries, 2)
+        self.assertEqual(config.remote_url_policy, "audit")
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
 
@@ -41,6 +42,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_rejects_invalid_boolean(self):
         with patch.dict(os.environ, {"EDITOR_DRY_RUN": "maybe"}, clear=True):
+            with self.assertRaises(ConfigError):
+                load_config()
+
+    def test_rejects_invalid_remote_url_policy(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test", "EDITOR_REMOTE_URL_POLICY": "unsafe"}, clear=True):
             with self.assertRaises(ConfigError):
                 load_config()
 

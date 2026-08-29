@@ -15,7 +15,7 @@ from unicornio_editor.media.converter import (
     image_has_transparency,
     prepare_featured_webp,
 )
-from unicornio_editor.media.downloader import MediaDownloadError, download_image, select_reupload_source
+from unicornio_editor.media.downloader import MediaDownloadError, _retry_delay, download_image, select_reupload_source
 from unicornio_editor.media.wordpress_media import upload_image
 
 
@@ -79,6 +79,9 @@ class MediaPipelineTests(unittest.TestCase):
     def test_current_local_upload_does_not_require_fallback(self):
         current = "http://wordpress.dvl.to:8080/wp-content/uploads/2025/03/current.webp"
         self.assertEqual(select_reupload_source(current), current)
+
+    def test_retry_after_is_capped(self):
+        self.assertEqual(_retry_delay(1, {"Retry-After": "86400"}), 60.0)
 
     def test_converts_to_webp(self):
         with tempfile.TemporaryDirectory() as directory:

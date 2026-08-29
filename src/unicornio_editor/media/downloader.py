@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .url_safety import URLSafetyError, enforce_remote_url
+
 
 class MediaDownloadError(RuntimeError):
     """Raised when a remote image cannot be safely downloaded."""
@@ -20,6 +22,7 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 # "source A falhou -> tentar source B"). O valor pode vir da config
 # EDITOR_MAX_SOURCE_RETRIES (tentativas totais = retries + 1).
 _MAX_ATTEMPTS = 3
+_MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 def _retry_delay(attempt: int, response_headers=None) -> float:
@@ -28,7 +31,10 @@ def _retry_delay(attempt: int, response_headers=None) -> float:
     if response_headers is not None:
         try:
             retry_after = float(response_headers.get("Retry-After", ""))
-            return max(base, retry_after + 1.0)
+            # Servidores podem enviar horas/dias de Retry-After. O cron não
+            # deve manter uma sessão e o lock presos por esse período: troca
+            # de fonte é preferível após um minuto.
+            return min(_MAX_RETRY_AFTER_SECONDS, max(base, retry_after + 1.0))
         except (TypeError, ValueError):
             pass
     return base
@@ -50,7 +56,12 @@ def download_image(
     *,
     max_bytes: int = 8 * 1024 * 1024,
     max_attempts: int = _MAX_ATTEMPTS,
+    url_policy: str = "audit",
+    audit=None,
 ) -> Path:
+    finding = enforce_remote_url(url, mode=url_policy)
+    if finding is not None and audit is not None:
+        audit(finding)
     if not url.startswith(("http://", "https://")):
         raise MediaDownloadError("image URL must use HTTP(S)")
     if max_bytes < 1024:
@@ -84,7 +95,7 @@ def download_image(
                 time.sleep(_retry_delay(attempt, exc.headers))
                 continue
             raise MediaDownloadError(f"image download failed (HTTP {exc.code})") from exc
-        except (URLError, OSError, ValueError) as exc:
+        except (URLError, OSError, ValueError, URLSafetyError) as exc:
             destination.unlink(missing_ok=True)
             if isinstance(exc, MediaDownloadError):
                 raise

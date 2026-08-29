@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .backup import SnapshotStore
+from .backup import SnapshotStore, atomic_write_text
 from .builder import append_canonical_footer
 from .checklist import _required_image_count, run_pre_publish_checklist
 from .config import Config
@@ -459,10 +459,7 @@ def _save_draft(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "editorial.draft.json").write_text(
-            json.dumps(editorial, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(directory / "editorial.draft.json", json.dumps(editorial, ensure_ascii=False, indent=2))
     except OSError:
         pass
 
@@ -536,6 +533,7 @@ def _normalize_inline_images(
                     src,
                     tmp / f"inline_source{suffix}",
                     max_attempts=config.max_source_retries + 1,
+                    url_policy=config.remote_url_policy,
                 )
                 webp = convert_to_webp(source, tmp / "inline.webp")
                 width, height = image_dimensions(webp)
@@ -909,6 +907,10 @@ def _execute_media_plan(
                     str(download_url),
                     tmp / f"source_{position}{suffix}",
                     max_attempts=config.max_source_retries + 1,
+                    url_policy=config.remote_url_policy,
+                    audit=lambda finding: append_telemetry(
+                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    ),
                 )
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
@@ -917,6 +919,9 @@ def _execute_media_plan(
                     downloaded=source,
                     direct_image_url=str(download_url),
                     cache=page_cache,
+                    audit=lambda finding: append_telemetry(
+                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    ),
                 )
                 if not ok:
                     return position, {
@@ -1079,6 +1084,10 @@ def _normalize_existing_featured(
                 source_url,
                 tmp / "featured_source.jpg",
                 max_attempts=config.max_source_retries + 1,
+                url_policy=config.remote_url_policy,
+                audit=lambda finding: append_telemetry(
+                    root, "remote_url_audit", url=finding.url, reason=finding.reason
+                ),
             )
             webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
             new_media = client.upload_media(
@@ -1218,8 +1227,7 @@ def _save_uncertain(root: Path, post_id: int, editorial: dict[str, Any]) -> None
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "uncertain.json").write_text(
-            json.dumps(
+        atomic_write_text(directory / "uncertain.json", json.dumps(
                 {
                     "post_id": post_id,
                     "status": "uncertain",
@@ -1227,9 +1235,7 @@ def _save_uncertain(root: Path, post_id: int, editorial: dict[str, Any]) -> None
                 },
                 ensure_ascii=False,
                 indent=2,
-            ),
-            encoding="utf-8",
-        )
+            ))
     except OSError:
         pass
 
@@ -1239,10 +1245,7 @@ def _save_editorial_latest(root: Path, post_id: int, editorial: dict[str, Any]) 
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "editorial.latest.json").write_text(
-            json.dumps(editorial, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(directory / "editorial.latest.json", json.dumps(editorial, ensure_ascii=False, indent=2))
     except OSError:
         pass
 
@@ -1260,14 +1263,11 @@ def _save_blocked(root: Path, post_id: int, editorial: dict[str, Any], checklist
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "editorial.blocked.json").write_text(
-            json.dumps(
+        atomic_write_text(directory / "editorial.blocked.json", json.dumps(
                 {**editorial, "blocked_checklist": checklist},
                 ensure_ascii=False,
                 indent=2,
-            ),
-            encoding="utf-8",
-        )
+            ))
     except OSError:
         pass
 
@@ -1285,8 +1285,7 @@ def _record_blocked(root: Path, post_id: int, checklist: dict[str, Any]) -> None
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "editorial.blocked.json").write_text(
-            json.dumps(
+        atomic_write_text(directory / "editorial.blocked.json", json.dumps(
                 {
                     "post_id": post_id,
                     "status": "blocked",
@@ -1297,9 +1296,7 @@ def _record_blocked(root: Path, post_id: int, checklist: dict[str, Any]) -> None
                 },
                 ensure_ascii=False,
                 indent=2,
-            ),
-            encoding="utf-8",
-        )
+            ))
     except OSError:
         pass
 
@@ -1683,12 +1680,7 @@ def build_queue_report(
         effective_state = {**state_info, "state": state}
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
-            # Política do dono: uncertain volta ao trabalho quando o cooldown
-            # expira (ou imediatamente se nunca teve cooldown — legado). Antes
-            # ficava preso para sempre: posts pending antigos nunca eram
-            # trilhados. O cooldown evita loop infinito de re-trilhagem.
-            if cooldown_expired(state_info.get("next_retry_at") or ""):
-                eligible_rework.append(post_id)
+            # Decisão conservadora: só `retry` humano devolve este post à fila.
         elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
@@ -1829,8 +1821,15 @@ def build_cards(
         )
     remaining = per_page - len(posts)
     if remaining > 0:
-        # Fetch amplo e filtra: muitos pending podem ser ready/out-of-queue.
-        posts.extend(client.list_pending(per_page=max(remaining * 5, 20)))
+        # Percorre a fila até encontrar candidatos elegíveis. Consultar só a
+        # página 1 fazia o monitor acordar o agente para trabalho que cards
+        # não conseguia enxergar quando os primeiros pending já eram READY.
+        page_size = max(remaining * 5, 20)
+        for page in range(1, 101):
+            chunk = client.list_pending(page=page, per_page=page_size)
+            posts.extend(chunk)
+            if len(chunk) < page_size:
+                break
     seen: set[int] = set()
     ordered: list[dict[str, Any]] = []
     for post in posts:
@@ -1860,15 +1859,7 @@ def build_cards(
                 state = STATE_READY
             else:
                 state = STATE_NEW
-        if state == STATE_UNCERTAIN:
-            # Política do dono (ba91a43): uncertain volta ao trabalho quando o
-            # cooldown expira (legado sem cooldown = elegível imediatamente).
-            # Espelha o eligible_rework do build_queue_report — senão o monitor
-            # acorda o agente para posts que o cards nunca mostra (loop de
-            # tokens). Em cooldown, continua fora da fila.
-            if not cooldown_expired(state_info.get("next_retry_at") or ""):
-                continue
-        elif state in (STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
+        if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
             continue  # fora da fila de trabalho do agente
         blocked = state == STATE_BLOCKED
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""

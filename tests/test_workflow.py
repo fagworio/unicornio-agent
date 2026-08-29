@@ -195,6 +195,28 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["pending"], 52)
         self.assertEqual(report["unprocessed_ids"][-1], 52)
 
+    def test_cards_finds_eligible_post_after_first_page(self):
+        class PagedClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def list_pending(self, *, page=1, per_page=20, include=None, **_kwargs):
+                if include:
+                    return [post for post in self.posts if post["id"] in include]
+                start = (page - 1) * per_page
+                return self.posts[start:start + per_page]
+
+        with tempfile.TemporaryDirectory() as directory:
+            posts = []
+            for post_id in range(1, 22):
+                post = self.post()
+                post["id"] = post_id
+                post["meta"]["_hermes_state"] = "ready" if post_id <= 20 else "new"
+                posts.append(post)
+            cards = build_cards(PagedClient(posts), self.config(False), Path(directory), per_page=2)
+        self.assertEqual([card["id"] for card in cards["cards"]], [21])
+
     def test_queue_reports_blocked_as_rework_not_edited(self):
         # Fix do loop verificar->corrigir->publicar: post com
         # editorial.blocked.json (publish gate reabriu, ou apply recusou) NAO
@@ -227,9 +249,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 1)
             self.assertEqual(report["unprocessed_ids"], [])
             self.assertEqual(report["recent_blocked_ids"], [42])
-            # uncertain vence para blocked, mas (politica atual) volta ao
-            # trabalho quando o cooldown expira — legado sem cooldown e
-            # elegivel imediatamente.
+            # uncertain vence para blocked e exige retry humano; nunca volta
+            # sozinho para evitar rework infinito.
             (root / "backups" / "42" / "uncertain.json").write_text(
                 json.dumps({"status": "uncertain"}), encoding="utf-8"
             )
@@ -237,7 +258,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 0)
             self.assertEqual(report["uncertain"], 1)
             self.assertEqual(report["blocked_ids"], [])
-            self.assertEqual(report["eligible_rework_ids"], [42])
+            self.assertEqual(report["eligible_rework_ids"], [])
 
     def test_queue_monitor_excludes_old_backlog(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -519,9 +540,7 @@ class WorkflowTests(unittest.TestCase):
 
             report = build_cards(FakeTwo(eligible), self.config(True), root)
             ids = [c["id"] for c in report["cards"]]
-            self.assertEqual(ids, [42])  # legado elegivel imediatamente
-            self.assertEqual(report["cards"][0]["state"], "uncertain")
-            self.assertFalse(report["cards"][0]["blocked"])  # nao e rework com fix
+            self.assertEqual(ids, [])
 
     def test_get_cleaned_content_returns_cleaned_html(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -968,9 +987,10 @@ class WorkflowTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 client = ReuseClient(self.post())
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
-        dl.assert_called_once_with(
-            "https://wp.test/uploads/reuse-source.webp", mock.ANY, max_attempts=3
-        )
+            dl.assert_called_once_with(
+                "https://wp.test/uploads/reuse-source.webp", mock.ANY,
+                max_attempts=3, url_policy="audit", audit=mock.ANY,
+            )
         self.assertEqual(report["featured_media"], 77)
         self.assertEqual(client.updated[0][1]["featured_media"], 77)
 

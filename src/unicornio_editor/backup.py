@@ -13,6 +13,21 @@ class SnapshotError(RuntimeError):
     """Raised for invalid or unreadable snapshots."""
 
 
+def atomic_write_text(path: Path, content: str) -> None:
+    """Durably replace a text file without exposing partial JSON to readers."""
+    path = Path(path)
+    temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 class SnapshotStore:
     def __init__(self, root: Path):
         self.root = Path(root)

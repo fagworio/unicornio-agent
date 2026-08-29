@@ -36,6 +36,7 @@ class Config:
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
     max_posts_per_run: int = 2  # cards por lote / posts processados por run
     max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
+    remote_url_policy: str = "audit"  # off | audit | enforce
     internal_links_enabled: bool = True  # enriquece o conteudo com links internos determinísticos
     # Loop de rework (verificar -> corrigir -> publicar) com backoff:
     max_rework_attempts: int = 3  # 3a falha do apply -> AWAITING_HUMAN
@@ -109,6 +110,13 @@ def _validate_url(name: str, value: str) -> str:
     return value.rstrip("/")
 
 
+def _choice(name: str, default: str, choices: set[str]) -> str:
+    value = _env(name, default).lower()
+    if value not in choices:
+        raise ConfigError(f"{name} must be one of {', '.join(sorted(choices))}")
+    return value
+
+
 def load_config() -> Config:
     content_source = _env("CONTENT_SOURCE", "mock").lower()
     if content_source not in {"mock", "wordpress"}:
@@ -156,6 +164,7 @@ def load_config() -> Config:
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 2, 1, 10),
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
+        remote_url_policy=_choice("EDITOR_REMOTE_URL_POLICY", "audit", {"off", "audit", "enforce"}),
         internal_links_enabled=_bool("EDITOR_INTERNAL_LINKS_ENABLED", True),
         max_rework_attempts=_int("EDITOR_MAX_REWORK_ATTEMPTS", 3, 1, 10),
         max_media_search_attempts=_int("EDITOR_MAX_MEDIA_SEARCH_ATTEMPTS", 2, 1, 10),

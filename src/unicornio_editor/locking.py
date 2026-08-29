@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import time
 from pathlib import Path
 
@@ -13,10 +14,25 @@ class LockError(RuntimeError):
 
 
 class LockHandle:
-    def __init__(self, path: Path, token: str):
+    def __init__(self, path: Path, token: str, ttl: int):
         self.path = path
         self.token = token
+        self.ttl = ttl
         self._released = False
+        self._stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+
+    def refresh(self) -> bool:
+        """Renew only if this handle still owns the lock."""
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data.get("token") != self.token:
+                return False
+            data["created_at"] = time.time()
+            self.path.write_text(json.dumps(data), encoding="utf-8")
+            return True
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
 
     def release(self) -> None:
         if self._released:
@@ -31,9 +47,19 @@ class LockHandle:
         self._released = True
 
     def __enter__(self) -> "LockHandle":
+        interval = max(1.0, self.ttl / 3)
+        def heartbeat() -> None:
+            while not self._stop.wait(interval):
+                if not self.refresh():
+                    return
+        self._heartbeat = threading.Thread(target=heartbeat, daemon=True)
+        self._heartbeat.start()
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join(timeout=1)
         self.release()
 
 
@@ -55,7 +81,7 @@ class LockManager:
             try:
                 with path.open("x", encoding="utf-8") as handle:
                     json.dump(record, handle)
-                return LockHandle(path, token)
+                return LockHandle(path, token, self.ttl)
             except FileExistsError:
                 if not self._is_expired(path):
                     raise LockError(f"post {post_id} is already locked")
