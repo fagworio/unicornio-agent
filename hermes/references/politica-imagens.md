@@ -19,12 +19,13 @@ O Google Images é **somente índice de descoberta** — a fonte é a página
    verificadas) e `unicornio-editor media-search TERMO --limit N` (reuso da
    Media Library). Busque na web só se nenhum dos dois servir. Imagem nova
    verificada -> REGISTRE no cache.
-2. **Google Images com filtro do editor** (determinístico):
+2. **Busca web com rotação Bing/Yandex** (determinístico):
    `unicornio-editor media-search-web TERMO --size xga --ratio w --limit N`.
-   Aplica imgsz=xga (1024x768) e imgar=w (proporção larga) + udm=2, e devolve
-   candidatos com URL direta + página de origem + a `query` usada — sem você
-   montar URL de busca nem parsear resultados (economia de tokens). O Google
-   é apenas ÍNDICE: a fonte é a página ORIGINAL. Use `license: "Uso com
+   Rotaciona ~50/50 Bing/Yandex por query (Google só como último fallback),
+   filtro 1024x768, e devolve candidatos com URL direta + página de origem + a
+   `query` usada — sem você montar URL de busca nem parsear resultados
+   (economia de tokens). O buscador é apenas ÍNDICE: a fonte é a página
+   ORIGINAL. Use `license: "Uso com
    crédito"` com `license_url` = a página original.
 3. **Query como evidência**: registre `search_query` no media_plan (a busca
    que retornou a imagem). O gate de relevância aceita quando a query contém
@@ -113,6 +114,6 @@ busca de imagens.
 `media_exhausted`, o código decide sozinho após `EDITOR_MAX_MEDIA_SEARCH_ATTEMPTS`
 (default 2) applies falhando em imagens com featured presente: artigo waiva
 inline (publica) e listicle vai para `awaiting_human`. Cada apply falho = 1
-busca completa (o `media-search-web` já rotaciona Bing → Google → Yandex
-internamente numa só chamada, + fallback `web_search`). O `media_exhausted`
+busca completa (o `media-search-web` já rotaciona Bing/Yandex internamente
+numa só chamada, + fallback `web_search`). O `media_exhausted`
 apenas adianta a decisão (economiza 1 ciclo).

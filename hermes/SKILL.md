@@ -31,7 +31,7 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    2; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
    direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
-2. Máx. 2 posts/run e pare em ~30 tool calls. Máx. UMA correção por post por
+2. Máx. 5 posts/run (EDITOR_BATCH_LIMIT) e pare em ~30 tool calls. Máx. UMA correção por post por
    run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª falha →
    AWAITING_HUMAN).
 3. REWORK (`blocked:true`): use `blocked_reason` + `fix` do card, carregue o
@@ -45,8 +45,9 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
    direta listada na página de origem; crédito visível em toda imagem; sem imagem
    transparente; sem imagem repetida no post. Busca: `media-search-web TERMO
-   --size xga --ratio w --limit N` — rotaciona automaticamente entre BUSCADORES
-   (Bing primário → Google → Yandex) com filtro de tamanho 1024x768, devolvendo
+ --size xga --ratio w --limit N` — rotaciona automaticamente entre BUSCADORES
+ (Bing/Yandex ~50/50 por query; Google só como último fallback) com filtro de
+ tamanho 1024x768, devolvendo
    candidatos com URL direta + página de origem + query. SE retornar vazio
    (count=0), NÃO conclua que "não há imagem" — os buscadores podem estar
    bloqueando/rate-limited (comum em IP de datacenter) ou ser renderizados via
@@ -56,7 +57,13 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    original. Registre
    `search_query` no media_plan (a busca que retornou a imagem — o gate aceita
    quando a query contém a obra; declare a query REAL, nunca invente). Wikimedia
-   é fallback (rate-limit 429).
+ é fallback (rate-limit 429).
+ **PROIBIDO pré-verificar imagem manualmente** (baixar imagens, ler páginas
+ de origem uma a uma, escrever scripts de verificação): o apply verifica
+ byte-a-byte automaticamente. Monte o media_plan direto dos candidatos,
+ valide com `media-validate editorial.json` (1 chamada) e aplique. Se o
+ apply rejeitar por verificação de origem, troque SÓ a imagem rejeitada —
+ nunca re-verifique a página manualmente.
 6. Mídia nova → valide antes: `media-validate editorial.json` (1 chamada;
    {valid, rejected}).
 7. `apply POST_ID editorial.json --compact` = preflight COMPLETO (resolver
@@ -110,13 +117,13 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 
 - KEY ART CACHE FIRST: `work/keyart_cache.json` + `media-search TERMO` (reuso da
   Media Library) antes de QUALQUER busca web. Imagem nova verificada → registre.
-- UMA busca por obra; verifique por fragmento da página original (não despeje
-  HTML no terminal).
+- UMA busca por obra. NÃO baixe páginas de origem nem inspecione HTML
+  manualmente — o apply verifica; `media-validate` valida em 1 chamada.
 - `apply --compact` SEMPRE; `--dry-run` só sob demanda.
 - `media-validate` antes do apply com mídia nova (1 chamada).
 - `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
 - Decida skip/uncertain SÓ pelo card.
-- Batch: EDITOR_BATCH_LIMIT=2; ~30 tool calls/run.
+- Batch: EDITOR_BATCH_LIMIT=5; ~30 tool calls/run.
 - `list-pending --compact` e `prepare --compact` SEMPRE (~1.3 KB vs ~120 KB).
 - NUNCA leia src/**, pyproject.toml, .env nem testes — o CLI é a interface.
 - Não repita comandos; não re-prepare post já visto.
