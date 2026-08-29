@@ -57,16 +57,16 @@ existente) para que o relatório não some custos de outros crons:
 
 ```env
 HERMES_EDITORIAL_CRON_JOB_ID=ID_DO_JOB_EDITORIAL
-# Exemplo de teto inicial; 0 deixa o freio desligado.
-HERMES_EDITORIAL_DAILY_COST_LIMIT_USD=0.80
+# Teto inicial por 24h; o monitor não acorda o LLM ao atingi-lo.
+HERMES_EDITORIAL_DAILY_COST_LIMIT_USD=1.20
 ```
 
 O monitor é orientado a eventos: ele acorda o agente quando a assinatura da
-fila muda, não a cada polling enquanto houver backlog. Para aplicar essa
+fila muda, não a cada polling enquanto houver backlog. O instalador usa
+`every 2h` por padrão e processa até cinco posts por sessão; para aplicar essa
 alteração ao job instalado, execute novamente `./hermes/cron-install.sh`.
-O freio usa apenas o custo atribuído ao ID informado no `state.db`; se essa
-atribuição não existir na versão instalada do Hermes, ele falha aberto e o
-relatório deixa isso explícito, preservando a operação.
+O freio prefere o ID informado no `state.db`; em versões sem essa coluna, usa
+o diretório do projeto (`cwd`/`git_repo_root`), sem misturar outros crons.
 
 ## Rollback
 Cada `prepare` salva um snapshot JSON completo do post em `backups/` antes do trabalho. O rollback pode ser feito manualmente a partir do `content.raw`, metas e featured media do snapshot.

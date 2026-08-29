@@ -19,7 +19,7 @@ class Config:
     app_user: str = ""
     app_password: str = field(default="", repr=False)
     dry_run: bool = True
-    batch_limit: int = 2
+    batch_limit: int = 5
     http_timeout: float = 15.0
     lock_ttl: int = 900
     min_relevance_confidence: float = 0.80
@@ -34,7 +34,7 @@ class Config:
     vision_detail: str = "low"  # OpenAI image detail: low | high (low = 2833 tok)
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
-    max_posts_per_run: int = 2  # cards por lote / posts processados por run
+    max_posts_per_run: int = 5  # cards por lote / posts processados por run
     max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
     remote_url_policy: str = "audit"  # off | audit | enforce
     internal_links_enabled: bool = True  # enriquece o conteudo com links internos determinísticos
@@ -143,7 +143,7 @@ def load_config() -> Config:
         app_user=app_user,
         app_password=app_password,
         dry_run=dry_run,
-        batch_limit=_int("EDITOR_BATCH_LIMIT", 2, 1, 10),
+        batch_limit=_int("EDITOR_BATCH_LIMIT", 5, 1, 10),
         http_timeout=_float("EDITOR_HTTP_TIMEOUT", 15.0, 1.0, 120.0),
         lock_ttl=_int("EDITOR_LOCK_TTL", 900, 30, 86400),
         min_relevance_confidence=_float(
@@ -162,7 +162,7 @@ def load_config() -> Config:
         vision_model=_env("EDITOR_VISION_MODEL", "gpt-4o-mini"),
         vision_detail=_env("EDITOR_VISION_DETAIL", "low"),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
-        max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 2, 1, 10),
+        max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 5, 1, 10),
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
         remote_url_policy=_choice("EDITOR_REMOTE_URL_POLICY", "audit", {"off", "audit", "enforce"}),
         internal_links_enabled=_bool("EDITOR_INTERNAL_LINKS_ENABLED", True),

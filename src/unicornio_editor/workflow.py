@@ -1518,6 +1518,10 @@ def publish_ready_posts(
                 "reason": str(exc),
             }
         outcomes.append(outcome)
+        if outcome.get("status") == "published" and outcome.get("wordpress_changed"):
+            # Base durável do relatório: custo e publicações usam a mesma
+            # janela móvel de 24h, sem inferir o denominador da janela atual.
+            append_telemetry(root, "post_published", post_id=candidate_id)
     return outcomes
 
 

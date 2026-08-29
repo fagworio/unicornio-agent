@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-SCHEDULE="${1:-every 30m}"
+# Cinco posts por sessão amortizam o prompt/skill do agente; duas horas ainda
+# preservam boa cadência editorial sem manter uma sessão LLM a cada meia hora.
+SCHEDULE="${1:-every 2h}"
 SKILL_NAME="unicorniohater-editor"
 JOB_NAME="UnicornioHater editorial pending"
 SKILL_DIR="$HERMES_HOME/skills/$SKILL_NAME"

@@ -31,7 +31,7 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    2; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
    direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
-2. Máx. ``EDITOR_MAX_POSTS_PER_RUN`` posts/run (padrão: 2; nunca ultrapasse o
+2. Máx. ``EDITOR_MAX_POSTS_PER_RUN`` posts/run (padrão: 5; nunca ultrapasse o
    limite configurado) e pare em ~30 tool calls. Máx. UMA correção por post por
    run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª falha →
    AWAITING_HUMAN).
@@ -124,7 +124,8 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - `media-validate` antes do apply com mídia nova (1 chamada).
 - `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
 - Decida skip/uncertain SÓ pelo card.
-- Batch: respeite ``EDITOR_MAX_POSTS_PER_RUN`` (padrão: 2); ~30 tool calls/run.
+- Batch: respeite ``EDITOR_MAX_POSTS_PER_RUN`` (padrão: 5); mantenha uma única
+  sequência compacta de ferramentas por post para amortizar o custo da sessão.
 - `list-pending --compact` e `prepare --compact` SEMPRE (~1.3 KB vs ~120 KB).
 - NUNCA leia src/**, pyproject.toml, .env nem testes — o CLI é a interface.
 - Não repita comandos; não re-prepare post já visto.

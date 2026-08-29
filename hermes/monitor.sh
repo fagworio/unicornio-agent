@@ -29,6 +29,7 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ]; then
   guard_out="$("$ROOT/.venv/bin/python" "$ROOT/hermes/cost_guard.py" \
     --state-db "${HERMES_STATE_DB:-$HOME/.hermes/state.db}" \
     --job-id "${HERMES_EDITORIAL_CRON_JOB_ID:-}" \
+    --project-root "$ROOT" \
     --limit "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD}" 2>/dev/null)" || guard_status=$?
   if [ "${guard_status:-0}" -eq 10 ]; then
     printf '%s\n' "BUDGET_EXHAUSTED ${guard_out}"

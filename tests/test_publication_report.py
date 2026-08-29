@@ -6,26 +6,36 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hermes import relatorio_publicacao as report
-from hermes.cost_guard import cost_in_last_24h
+from hermes.cost_guard import cost_in_last_24h, cost_measurement_in_last_24h
 
 
 class PublicationReportCostTests(unittest.TestCase):
-    def _database(self, *, with_job_id: bool) -> Path:
+    def _database(self, *, with_job_id: bool, with_project: bool = False) -> Path:
         handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         handle.close()
         path = Path(handle.name)
         db = sqlite3.connect(path)
         job_column = ", job_id TEXT" if with_job_id else ""
+        project_columns = ", cwd TEXT, git_repo_root TEXT" if with_project else ""
         db.execute(
             "CREATE TABLE sessions (source TEXT, started_at INTEGER, "
-            f"estimated_cost_usd REAL{job_column})"
+            f"estimated_cost_usd REAL{job_column}{project_columns})"
         )
         if with_job_id:
+            rows = [
+                ("cron", 9_999_999_999, 0.20, "editorial"),
+                ("cron", 9_999_999_999, 0.80, "other"),
+            ]
             db.executemany(
                 "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                rows,
+            )
+        elif with_project:
+            db.executemany(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
                 [
-                    ("cron", 9_999_999_999, 0.20, "editorial"),
-                    ("cron", 9_999_999_999, 0.80, "other"),
+                    ("cron", 9_999_999_999, 0.20, "/project", "/project"),
+                    ("cron", 9_999_999_999, 0.80, "/other", "/other"),
                 ],
             )
         else:
@@ -47,18 +57,25 @@ class PublicationReportCostTests(unittest.TestCase):
         self.assertEqual((cost, runs), (0.20, 1))
         self.assertEqual(scope, "job editorial editorial")
 
-    def test_cost_declares_aggregate_scope_when_schema_has_no_job(self):
-        path = self._database(with_job_id=False)
+    def test_cost_uses_project_scope_when_schema_has_no_job(self):
+        path = self._database(with_job_id=False, with_project=True)
         with patch.object(report, "STATE_DB", path), patch.dict(
-            os.environ, {"HERMES_EDITORIAL_CRON_JOB_ID": "editorial"}, clear=False
+            os.environ, {"HERMES_EDITORIAL_CRON_JOB_ID": ""}, clear=False
         ):
-            cost, runs, scope = report._custo_24h()
+            with patch.object(report, "ROOT", Path("/project")):
+                cost, runs, scope = report._custo_24h()
         self.assertEqual((cost, runs), (0.20, 1))
-        self.assertEqual(scope, "todos os crons (state.db sem coluna de job)")
+        self.assertEqual(scope, "projeto editorial (cwd/git_repo_root)")
 
     def test_cost_guard_requires_exact_job_attribution(self):
         self.assertIsNone(cost_in_last_24h(self._database(with_job_id=False), "editorial"))
         self.assertEqual(cost_in_last_24h(self._database(with_job_id=True), "editorial"), (0.20, 1))
+
+    def test_cost_guard_uses_project_attribution_without_job_column(self):
+        measured = cost_measurement_in_last_24h(
+            self._database(with_job_id=False, with_project=True), project_root="/project"
+        )
+        self.assertEqual(measured, (0.20, 1, "projeto editorial (cwd/git_repo_root)"))
 
 
 if __name__ == "__main__":

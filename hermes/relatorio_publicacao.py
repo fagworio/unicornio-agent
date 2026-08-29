@@ -4,8 +4,8 @@
 Le o JSON do publish-ready (stdin ou work/publish-window.log), busca os
 titulos dos posts e imprime um relatorio amigavel para o Telegram:
   - lista de posts (id, titulo, data de publicacao, status)
-  - custo real de tokens (state.db do Hermes) da producao editorial nas
-    ultimas 24h — e destaca quando a janela NAO publicou nada mas gastou.
+  - custo real de tokens do cron editorial e publicacoes do mesmo fluxo nas
+    mesmas ultimas 24h (nunca divide uma janela de publicacao pelo custo diário).
 Zero tokens de LLM (script-only).
 """
 import json
@@ -16,8 +16,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path("/www/wwwroot/hermes/unicornio-agent")
-STATE_DB = Path("/root/.hermes/state.db")
+ROOT = Path(os.environ.get("UNICORNIO_EDITOR_ROOT", "/www/wwwroot/hermes/unicornio-agent"))
+STATE_DB = Path(os.environ.get("HERMES_STATE_DB", "/root/.hermes/state.db"))
 LOG = ROOT / "work" / "publish-window.log"
 
 
@@ -63,39 +63,48 @@ def _post_titles(post_ids: list[int]) -> dict[int, str]:
 def _custo_24h() -> tuple[float, int, str]:
     """Custo de cron nas últimas 24h, com atribuição por job quando possível.
 
-    ``sessions.source='cron'`` pode incluir jobs sem relação com o editorial.
-    Para atribuição exata, defina ``HERMES_EDITORIAL_CRON_JOB_ID`` com o ID do
-    job editorial. Versões antigas do state.db sem coluna de job continuam
-    funcionando, mas são identificadas explicitamente como custo agregado.
+    Prefere o ID exato do job editorial. Em bancos Hermes legados, sem essa
+    coluna, filtra por ``cwd``/``git_repo_root`` do projeto — em vez de somar
+    backup, watchdog e outros crons.
     """
     if not STATE_DB.is_file():
         return 0.0, 0, "state.db indisponível"
     try:
-        db = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
-        columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
-        job_id = os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip()
-        job_column = next(
-            (name for name in ("cron_job_id", "job_id") if name in columns),
-            None,
+        try:
+            # Import como pacote nos testes; como script no cron, o diretório
+            # ``hermes/`` já está em sys.path.
+            from hermes.cost_guard import cost_measurement_in_last_24h
+        except ImportError:
+            from cost_guard import cost_measurement_in_last_24h
+
+        measured = cost_measurement_in_last_24h(
+            STATE_DB,
+            os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip(),
+            str(ROOT),
         )
-        query = (
-            "SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*) "
-            "FROM sessions WHERE source='cron' "
-            "AND started_at > strftime('%s','now') - 86400"
-        )
-        params: tuple[str, ...] = ()
-        scope = "todos os crons"
-        if job_id and job_column:
-            query += f" AND {job_column} = ?"
-            params = (job_id,)
-            scope = f"job editorial {job_id}"
-        elif job_id:
-            scope = "todos os crons (state.db sem coluna de job)"
-        row = db.execute(query, params).fetchone()
-        db.close()
-        return float(row[0] or 0), int(row[1] or 0), scope
-    except sqlite3.Error:
+        if measured is None:
+            return 0.0, 0, "atribuição editorial indisponível"
+        return measured
+    except (ImportError, sqlite3.Error):
         return 0.0, 0, "state.db inválido"
+
+
+def _published_by_editorial_last_24h() -> int:
+    """Count only durable publish events written by this pipeline in 24 hours."""
+    path = ROOT / "work" / "telemetry.jsonl"
+    if not path.is_file():
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    count = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+            when = datetime.fromisoformat(str(record.get("ts", "")).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if record.get("event") == "post_published" and when >= cutoff:
+            count += 1
+    return count
 
 
 def _fmt_data(iso: str) -> str:
@@ -143,12 +152,13 @@ def main() -> int:
     else:
         print("⚠️ Bloqueados: 0")
 
-    print(f"\n💰 Custo de cron (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
-    if published and n_runs:
-        per = custo / len(published)
-        print(f"   Custo por post publicado: ${per:.4f}")
-    if not published and custo > 0:
-        print(f"   ⚠️ Gasto sem publicação: ${custo:.3f} (nada saiu nesta janela)")
+    print(f"\n💰 Custo editorial (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
+    published_24h = _published_by_editorial_last_24h()
+    print(f"   Publicados pelo fluxo (24h): {published_24h}")
+    if published_24h:
+        print(f"   Custo por post publicado (mesma janela): ${custo / published_24h:.4f}")
+    elif custo > 0:
+        print("   ℹ️ Sem eventos de publicação editorial na telemetria das últimas 24h.")
     return 0
 
 
