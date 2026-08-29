@@ -127,10 +127,13 @@ def build_trailer_html(trailer: Mapping[str, Any]) -> str:
     """Build a safe, centralized embed with visible credit for the video."""
     if not isinstance(trailer, Mapping):
         raise TrailerError("trailer must be an object")
-    video_id = trailer.get("video_id")
-    if not isinstance(video_id, str) or not VIDEO_ID_RE.fullmatch(video_id):
+    video_id = str(trailer.get("video_id") or "")
+    if not VIDEO_ID_RE.fullmatch(video_id):
         raise TrailerError("invalid YouTube video id")
-    title = escape(str(trailer.get("title") or "Trailer"))
+    # O embed e texto de exibicao: normaliza travessoes do titulo do video
+    # para hifen (o gate de qualidade rejeita —/– no conteudo final).
+    title_raw = re.sub(r"[\u2014\u2013]", "-", str(trailer.get("title") or "Trailer"))
+    title = escape(title_raw)
     watch_url = escape(str(trailer.get("watch_url") or f"https://www.youtube.com/watch?v={video_id}"), quote=True)
     author_name = escape(str(trailer.get("author_name") or "Canal oficial"))
     author_url = escape(str(trailer.get("author_url") or "https://www.youtube.com/"), quote=True)
