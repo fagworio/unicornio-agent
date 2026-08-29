@@ -9,6 +9,7 @@ titulos dos posts e imprime um relatorio amigavel para o Telegram:
 Zero tokens de LLM (script-only).
 """
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -59,21 +60,42 @@ def _post_titles(post_ids: list[int]) -> dict[int, str]:
     return titles
 
 
-def _custo_24h() -> tuple[float, int]:
-    """Custo real (estimated_cost_usd) das sessoes cron nas ultimas 24h."""
+def _custo_24h() -> tuple[float, int, str]:
+    """Custo de cron nas últimas 24h, com atribuição por job quando possível.
+
+    ``sessions.source='cron'`` pode incluir jobs sem relação com o editorial.
+    Para atribuição exata, defina ``HERMES_EDITORIAL_CRON_JOB_ID`` com o ID do
+    job editorial. Versões antigas do state.db sem coluna de job continuam
+    funcionando, mas são identificadas explicitamente como custo agregado.
+    """
     if not STATE_DB.is_file():
-        return 0.0, 0
+        return 0.0, 0, "state.db indisponível"
     try:
         db = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
-        row = db.execute(
+        columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+        job_id = os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip()
+        job_column = next(
+            (name for name in ("cron_job_id", "job_id") if name in columns),
+            None,
+        )
+        query = (
             "SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*) "
             "FROM sessions WHERE source='cron' "
             "AND started_at > strftime('%s','now') - 86400"
-        ).fetchone()
+        )
+        params: tuple[str, ...] = ()
+        scope = "todos os crons"
+        if job_id and job_column:
+            query += f" AND {job_column} = ?"
+            params = (job_id,)
+            scope = f"job editorial {job_id}"
+        elif job_id:
+            scope = "todos os crons (state.db sem coluna de job)"
+        row = db.execute(query, params).fetchone()
         db.close()
-        return float(row[0] or 0), int(row[1] or 0)
+        return float(row[0] or 0), int(row[1] or 0), scope
     except sqlite3.Error:
-        return 0.0, 0
+        return 0.0, 0, "state.db inválido"
 
 
 def _fmt_data(iso: str) -> str:
@@ -92,7 +114,7 @@ def main() -> int:
 
     published = data.get("posts") or []
     blocked = data.get("blocked_posts") or []
-    custo, n_runs = _custo_24h()
+    custo, n_runs, cost_scope = _custo_24h()
 
     print("📰 Relatório de publicação")
     print(f"🕐 Janela: {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y %H:%M')} (-03)")
@@ -121,7 +143,7 @@ def main() -> int:
     else:
         print("⚠️ Bloqueados: 0")
 
-    print(f"\n💰 Custo produção editorial (24h): ${custo:.3f} ({n_runs} runs)")
+    print(f"\n💰 Custo de cron (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
     if published and n_runs:
         per = custo / len(published)
         print(f"   Custo por post publicado: ${per:.4f}")

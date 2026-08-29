@@ -85,7 +85,7 @@ Se `decision=skip` ou a confianca ficar abaixo do limite configurado, o comando 
 ## Pipeline
 
 ```text
-Hermes cron (monitor: so acorda com trabalho elegivel)
+Hermes cron (monitor: so acorda quando a assinatura da fila muda)
   -> cards (UMA chamada, max 2 posts): delta exato de imagens
      (required/valid/missing/irrelevant/non_webp), diagnostico da featured
      (exists/relevant/webp/dimensions/action) e plano fix para rework
@@ -174,7 +174,7 @@ Copie ou linke `hermes/SKILL.md` para a pasta de skills do Hermes usando o nome 
 Depois instale o cron a partir da raiz do projeto:
 
 ```bash
-./hermes/cron-install.sh /opt/unicorniohater-editorial-agent
+./hermes/cron-install.sh
 ```
 
 O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre em sessao isolada; por isso todas as regras criticas estao no projeto/skill e nao dependem da memoria de uma execucao anterior.

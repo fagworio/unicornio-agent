@@ -130,6 +130,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(Path(report["backup"]).exists())
             self.assertEqual(client.updated, [])
 
+    def test_apply_refuses_a_post_held_by_another_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            from unicornio_editor.locking import LockManager
+
+            lock = LockManager(root / "work" / "locks", ttl=900).acquire(42)
+            try:
+                with self.assertRaisesRegex(Exception, "already being processed"):
+                    apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            finally:
+                lock.release()
+
     def test_apply_without_cleaned_html_reuses_prepared_content(self):
         # No-rewrite path (token economy): the model omits cleaned_html and
         # apply must deterministically reuse the cleaned post content,
@@ -159,6 +172,28 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["edited"], 1)
             self.assertEqual(report["unprocessed_ids"], [])
             self.assertEqual(report["recent_unprocessed_ids"], [])
+
+    def test_queue_paginates_beyond_the_first_page(self):
+        class PagedClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def list_pending(self, *, page=1, per_page=50, status="pending", **_kwargs):
+                if status != "pending":
+                    return []
+                start = (page - 1) * per_page
+                return self.posts[start:start + per_page]
+
+        with tempfile.TemporaryDirectory() as directory:
+            posts = []
+            for post_id in range(1, 53):
+                post = self.post()
+                post["id"] = post_id
+                posts.append(post)
+            report = build_queue_report(PagedClient(posts), Path(directory), per_page=50)
+        self.assertEqual(report["pending"], 52)
+        self.assertEqual(report["unprocessed_ids"][-1], 52)
 
     def test_queue_reports_blocked_as_rework_not_edited(self):
         # Fix do loop verificar->corrigir->publicar: post com
@@ -675,9 +710,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(report["media_plan_results"]), 3)
         self.assertTrue(report["media_plan_results"][2]["featured"])
 
-    def test_media_plan_falls_back_to_serial_on_pool_error(self):
-        # Se o pool de threads falhar, o media plan cai para execucao SERIAL
-        # (semantica original preservada) e ainda produz o resultado correto.
+    def test_media_plan_falls_back_to_serial_when_pool_cannot_start(self):
+        # Se o executor nem iniciar, não houve efeito colateral e é seguro
+        # processar o lote em série.
         payload = editorial_payload()
         payload["cleaned_html"] = (
             "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
@@ -718,6 +753,38 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.updated[0][1]["featured_media"], 52)
         self.assertEqual(report["featured_media"], 52)
         self.assertTrue(report["media_plan_results"][2]["featured"])
+
+    def test_media_worker_error_does_not_repeat_successful_uploads(self):
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
+        payload["media_plan"] = [
+            {**self.media_item(paragraph_index=0), "direct_image_url": "https://source.example/a.jpg"},
+            {**self.media_item(paragraph_index=2, is_featured=True), "direct_image_url": "https://source.example/keyart.jpg"},
+        ]
+        uploads: list[str] = []
+
+        def upload_once(_client, _webp, evidence):
+            name = evidence["direct_image_url"].rsplit("/", 1)[-1]
+            uploads.append(name)
+            if name == "keyart.jpg":
+                raise RuntimeError("upload indisponivel")
+            return {"id": 50, "source_url": "https://wp.test/50.webp"}
+
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), mock.patch(
+            "unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/featured.webp")
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch("unicornio_editor.workflow.upload_image", side_effect=upload_once):
+            with tempfile.TemporaryDirectory() as directory:
+                report = apply_editorial(FakeClient(self.post()), self.config(False), Path(directory), 42, payload)
+
+        self.assertEqual(sorted(uploads), ["a.jpg", "keyart.jpg"])
+        failed = [item for item in report["media_plan_results"] if item.get("status") == "error"]
+        self.assertEqual(len(failed), 1)
 
     def test_media_exhausted_listicle_goes_awaiting_human(self):
         # Listicle que esgotou a busca de imagens NAO fica em loop de rework:

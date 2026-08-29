@@ -57,7 +57,18 @@ class HermesAssetsTests(unittest.TestCase):
         script = ROOT / "hermes" / "monitor.sh"
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("@PROJECT_ROOT@", script.read_text())
+        content = script.read_text()
+        self.assertIn("@PROJECT_ROOT@", content)
+        # O monitor precisa refletir somente a fila. Um timestamp/tick muda o
+        # hash em todo polling e acorda o LLM sem que exista trabalho novo.
+        self.assertNotIn("tick=", content)
+        self.assertNotIn("date +%s", content)
+        self.assertIn("cost_guard.py", content)
+
+    def test_cost_guard_is_valid_python(self):
+        script = ROOT / "hermes" / "cost_guard.py"
+        result = subprocess.run(["python3", "-m", "py_compile", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import _repair_orphan_media, clean_html
 from .list_quality import detect_list_format
+from .locking import LockError, LockManager
 from .manifest import (
     META_READY_MANIFEST,
     build_ready_manifest,
@@ -59,13 +60,26 @@ from .wordpress import WordPressClient
 
 
 # Media plan: download/upload/verificacao sao I/O-bound (rede); threads
-# liberam o GIL durante E/S. Em erro, o driver cai para execucao serial,
-# preservando a semantica original.
+# liberam o GIL durante E/S. Falhas de item são registradas no próprio item;
+# nunca reexecutamos um lote parcial, pois upload é efeito colateral.
 _MEDIA_WORKERS = 4
 
 
 class WorkflowError(RuntimeError):
     """Raised when a post cannot safely enter a workflow step."""
+
+
+def _acquire_post_lock(root: Path, config: Config, post_id: int):
+    """Serialize every mutating operation for one post.
+
+    The WordPress status re-fetch protects against a late manual publish, but
+    it cannot prevent two cron sessions from uploading the same media in
+    parallel. The filesystem lock covers that expensive side effect.
+    """
+    try:
+        return LockManager(root / "work" / "locks", ttl=config.lock_ttl).acquire(post_id)
+    except LockError as exc:
+        raise WorkflowError(f"post {post_id} is already being processed") from exc
 
 
 def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str, Any]:
@@ -84,6 +98,18 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
 
 
 def apply_editorial(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply an editorial result while exclusively owning the post."""
+    with _acquire_post_lock(root, config, post_id):
+        return _apply_editorial_unlocked(client, config, root, post_id, payload)
+
+
+def _apply_editorial_unlocked(
     client: WordPressClient,
     config: Config,
     root: Path,
@@ -930,14 +956,33 @@ def _execute_media_plan(
                     "transparency": transparency,
                 }
 
-            # Fase PARALELA (I/O-bound: download/upload/verificacao). Em erro,
-            # re-executa os itens pendentes EM SERIE preservando a semantica
-            # original (a excecao propaga como no fluxo anterior).
+            # Fase paralela (I/O-bound). Somente falha ao CRIAR o executor cai
+            # para serial: nessa altura ainda não há download nem upload. Uma
+            # falha dentro de worker vira rejeição daquele item; reexecutar o
+            # lote inteiro duplicaria anexos que já foram enviados.
             try:
-                with ThreadPoolExecutor(max_workers=_MEDIA_WORKERS) as pool:
-                    processed = list(pool.map(_process_item, pending))
+                pool = ThreadPoolExecutor(max_workers=_MEDIA_WORKERS)
             except Exception:
                 processed = [_process_item(pair) for pair in pending]
+            else:
+                with pool:
+                    futures = [(pair, pool.submit(_process_item, pair)) for pair in pending]
+                    processed = []
+                    for pair, future in futures:
+                        position, item = pair
+                        try:
+                            processed.append(future.result())
+                        except Exception as exc:  # noqa: BLE001 - report one failed item
+                            processed.append(
+                                (
+                                    position,
+                                    {
+                                        "paragraph_index": item.get("paragraph_index"),
+                                        "status": "error",
+                                        "detail": f"processamento de midia: {str(exc)[:160]}",
+                                    },
+                                )
+                            )
 
             for position, result in processed:
                 outcomes[position] = result
@@ -1265,6 +1310,17 @@ def publish_post(
     root: Path,
     post_id: int,
 ) -> dict[str, Any]:
+    """Publish one post while excluding a concurrent editorial mutation."""
+    with _acquire_post_lock(root, config, post_id):
+        return _publish_post_unlocked(client, config, root, post_id)
+
+
+def _publish_post_unlocked(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+) -> dict[str, Any]:
     """Publish de UM post, somente a partir do estado READY.
 
     Caminho barato (determinístico): post READY cujo Ready Manifest (hash
@@ -1557,14 +1613,34 @@ def build_queue_report(
     from .content_quality import word_count
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)
-    posts = client.list_pending(per_page=per_page)
+    # A fila editorial não pode parar na primeira página: um backlog com mais
+    # de ``per_page`` pending deixava posts invisíveis ao monitor para sempre.
+    # O teto protege contra paginação defeituosa no WordPress.
+    def _all_with_status(status: str) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        for page in range(1, 101):
+            try:
+                chunk = client.list_pending(page=page, per_page=per_page, status=status)
+            except TypeError:
+                # Clientes legados/test doubles não aceitavam ``status``;
+                # para pending, preservamos a API antiga. Outros status não
+                # podem ser consultados com segurança nesse cliente.
+                if status != "pending":
+                    return collected
+                chunk = client.list_pending(page=page, per_page=per_page)
+            collected.extend(chunk)
+            if len(chunk) < per_page:
+                break
+        return collected
+
+    posts = _all_with_status("pending")
     # Posts movidos para o status WP "awaiting_human" (decisão humana): saem
     # de pending e deixariam de aparecer no relatório. O relatório continua
     # listando-os como awaiting_human (o monitor/publish nunca os tocam — só
     # o retry humano os devolve ao fluxo). Client sem o param (testes antigos)
     # apenas não busca o status extra.
     try:
-        awaiting_wp = client.list_pending(per_page=per_page, status="awaiting_human")
+        awaiting_wp = _all_with_status("awaiting_human")
     except TypeError:
         awaiting_wp = []
     _pending_ids = {p.get("id") for p in posts if isinstance(p.get("id"), int)}
