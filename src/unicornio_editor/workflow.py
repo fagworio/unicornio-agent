@@ -1820,9 +1820,35 @@ def build_cards(
     rework_ids = _rework_ids(root)
     posts: list[dict[str, Any]] = []
     if rework_ids:
-        posts.extend(
-            client.list_pending(include=rework_ids[:per_page], per_page=len(rework_ids[:per_page]))
+        # Nem todo id com editorial.blocked.json é rework elegível: posts que
+        # o humano devolveu ao status pending (ex.: awaiting_human) mantêm o
+        # arquivo no filesystem, mas a meta _hermes_state manda. Resolve o
+        # estado real de cada candidato e só conta os BLOCKED com cooldown
+        # vencido — espelha o eligible_rework_ids do queue. (Sem isso, o
+        # slice cego rework_ids[:per_page] saturava o lote com awaiting_human
+        # e o trabalho real — rework elegível + posts novos — ficava invisível.)
+        candidates = client.list_pending(
+            include=rework_ids[:100], per_page=min(len(rework_ids[:100]), 100)
         )
+        for cand in candidates:
+            post_id = cand.get("id")
+            if not isinstance(post_id, int):
+                continue
+            backups_dir = root / "backups" / str(post_id)
+            state_info = read_state(cand)
+            state = state_info["state"]
+            if state is None:
+                # Legado: marcadores de filesystem decidem (igual ao queue).
+                if (backups_dir / "uncertain.json").is_file():
+                    state = STATE_UNCERTAIN
+                elif (backups_dir / "editorial.blocked.json").is_file():
+                    state = STATE_BLOCKED
+                elif (backups_dir / "editorial.latest.json").is_file():
+                    state = STATE_READY
+                else:
+                    state = STATE_NEW
+            if state == STATE_BLOCKED and retry_eligible({**state_info, "state": state}):
+                posts.append(cand)
     remaining = per_page - len(posts)
     if remaining > 0:
         # Percorre a fila até encontrar candidatos elegíveis. Consultar só a
