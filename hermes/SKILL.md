@@ -27,14 +27,15 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 
 ## Fluxo editorial (economia de tokens — sucesso = mínimo, falha = só o que corrigir)
 
-1. `unicornio-editor cards` — UMA chamada com o DELTA exato por post (no máximo
-   2; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
+1. `unicornio-editor cards` — UMA chamada com o DELTA exato por post (até 5 =
+   EDITOR_BATCH_LIMIT; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
    direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
-2. Máx. ``EDITOR_MAX_POSTS_PER_RUN`` posts/run (padrão: 5; nunca ultrapasse o
-   limite configurado) e pare em ~30 tool calls. Máx. UMA correção por post por
-   run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª falha →
-   AWAITING_HUMAN).
+2. Máx. 5 posts/run (EDITOR_BATCH_LIMIT; nunca ultrapasse) e pare em ~30 tool
+   calls. **NUNCA gaste o run num único post**: se um post falhou 1 correção,
+   marque e SIGA para os próximos até completar o batch de 5. Máx. UMA correção
+   por post por run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª
+   falha → AWAITING_HUMAN e siga para o próximo).
 3. REWORK (`blocked:true`): use `blocked_reason` + `fix` do card, carregue o
    draft (`draft POST_ID`) e corrija SÓ o componente apontado — nunca reescreva
    texto/SEO bons.
