@@ -42,3 +42,24 @@ add_filter( 'display_post_states', function ( $states, $post ) {
 	}
 	return $states;
 }, 10, 2 );
+
+// Saída do status awaiting_human -> pending (manual no WP ou via `retry`
+// do pipeline) reseta o estado operacional: o post volta a ser trilhado
+// como novo (NEW), sem tentativas/cooldown herdados. Entrada para
+// awaiting_human NÃO limpa nada (o apply acabou de gravar as metas).
+add_action( 'transition_post_status', function ( $new_status, $old_status, $post ) {
+	if ( $post->post_type !== 'post' ) {
+		return;
+	}
+	if ( $new_status === 'pending' && $old_status === 'awaiting_human' ) {
+		foreach ( array(
+			'_hermes_state',
+			'_hermes_attempts',
+			'_hermes_next_retry_at',
+			'_hermes_last_error',
+			'_hermes_processed_at',
+		) as $key ) {
+			delete_post_meta( $post->ID, $key );
+		}
+	}
+}, 10, 3 );

@@ -130,6 +130,23 @@ class WordPressClient:
             self._request("POST", f"/posts/{self._id(post_id)}", body=dict(payload))
         )
 
+    def move_to_status(self, post_id: int, status: str) -> dict[str, Any]:
+        """Move o STATUS de um post (pending <-> awaiting_human) sem tocar no
+        conteudo nem na meta.
+
+        Operacao explicita de fluxo: o apply move para ``awaiting_human`` ao
+        esgotar as tentativas (o post sai da fila de trilhagem e aparece no
+        filtro do WP); o retry/volta manual move para ``pending`` (voltando ao
+        fluxo). Whitelist fechada — nunca publica.
+        """
+        if status not in ("pending", "awaiting_human"):
+            raise SafetyError(f"status {status!r} nao permitido pelo pipeline")
+        if self.config.dry_run:
+            raise SafetyError("dry-run blocks WordPress writes")
+        return self._expect_object(
+            self._request("POST", f"/posts/{self._id(post_id)}", body={"status": status})
+        )
+
     def upload_media(
         self,
         path: str,

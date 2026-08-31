@@ -100,6 +100,10 @@ class FakeClient:
             **payload,
         }
 
+    def move_to_status(self, post_id, status):
+        self.updated.append((post_id, {"status": status}))
+        return {"id": post_id, "status": status}
+
 
 class WorkflowTests(unittest.TestCase):
     def config(self, dry_run):
@@ -1367,6 +1371,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(queue["awaiting_human"], 1)
             self.assertEqual(queue["eligible_rework_ids"], [])
             self.assertIn(42, queue["awaiting_human_ids"])
+            # Fluxo novo (dono): ao esgotar, o pipeline MOVE o status WP para
+            # awaiting_human — o post aparece no filtro do WordPress.
+            status_moves = [m for m in client.updated if "status" in m[1]]
+            self.assertEqual(status_moves, [(42, {"status": "awaiting_human"})])
 
     def test_apply_success_marks_ready_with_manifest(self):
         # Fase 1 + Fase 11: apply com checklist 100% grava _hermes_state=ready

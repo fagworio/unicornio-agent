@@ -297,6 +297,14 @@ def _apply_editorial_unlocked(
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
             )
+            # AWAITING_HUMAN sai da fila de trilhagem: move o status WP para o
+            # filtro "Awaiting Human" (visivel para decisao humana). Falha de
+            # status nao derruba o apply — a meta _hermes_state ja marca.
+            if backoff["state"] == STATE_AWAITING_HUMAN:
+                try:
+                    client.move_to_status(post_id, "awaiting_human")
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
             images_summary = _images_summary(
                 content, _post_title(post) or editorial["seo"]["title"], image_entities
             )
@@ -2148,10 +2156,14 @@ def retry_post(
     BLOCKED para o agente ver o card e corrigir. Nunca força READY.
     """
     post = client.get_post(post_id)
-    if post.get("status") != "pending":
-        raise WorkflowError(f"post {post_id} nao esta pending ({post.get('status')})")
+    if post.get("status") not in ("pending", "awaiting_human"):
+        raise WorkflowError(f"post {post_id} nao esta pending/awaiting_human ({post.get('status')})")
     if config.dry_run:
         raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    if post.get("status") == "awaiting_human":
+        # Devolve ao fluxo: status pending + reset de estado (o hook
+        # transition_post_status do mu-plugin limpa as metas de pipeline).
+        client.move_to_status(post_id, "pending")
     _write_state_markers(
         client,
         config,
