@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .backup import SnapshotStore, atomic_write_text
-from .builder import append_canonical_footer
+from .builder import BuilderError, append_canonical_footer
 from .checklist import _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
@@ -138,6 +138,7 @@ def _apply_editorial_unlocked(
         # NOT final — record it as uncertain so the post stays pending (out of
         # the processing queue, visible for review) instead of being dropped
         # forever via editorial.latest.json.
+        baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
         _save_uncertain(root, post_id, editorial)
         _backoff_u = rework_backoff(
             read_state(post)["attempts"] + 1,
@@ -159,10 +160,11 @@ def _apply_editorial_unlocked(
         )
         return {
             "post_id": post_id,
-            "wordpress_changed": False,
+            "wordpress_changed": baseline_changed,
             "dry_run": config.dry_run,
             "status": "uncertain",
             "state": STATE_UNCERTAIN,
+            "baseline_enriched": baseline_changed,
             "skip_reason": editorial["site_relevance"]["reason"],
             "confidence": confidence,
             "backup": str(backup),
@@ -171,6 +173,7 @@ def _apply_editorial_unlocked(
         editorial = resolve_editorial_defaults(editorial, post)
     _save_editorial_latest(root, post_id, editorial)
     if decision == "skip":
+        baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
         _write_state_markers(
             client,
             config,
@@ -184,10 +187,11 @@ def _apply_editorial_unlocked(
         )
         return {
             "post_id": post_id,
-            "wordpress_changed": False,
+            "wordpress_changed": baseline_changed,
             "dry_run": config.dry_run,
             "status": "skipped",
             "state": STATE_SKIPPED,
+            "baseline_enriched": baseline_changed,
             "skip_reason": editorial["site_relevance"]["reason"],
             "backup": str(backup),
         }
@@ -264,6 +268,13 @@ def _apply_editorial_unlocked(
             if item.get("status") in ("fail", "error") and item.get("name")
         ]
         if failed_items:
+            # O gate continua impedindo READY/publicacao, mas nao descartamos
+            # aprimoramentos mecanicos e seguros do post: CTA, Fonte e links
+            # internos persistem no conteudo original antes de ele entrar em
+            # rework ou AWAITING_HUMAN. O editorial incompleto (texto/midia)
+            # fica somente no draft, para nunca gravar um post que falhou no
+            # checklist.
+            baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
             state_info = read_state(post)
             attempts = state_info["attempts"] + 1
             # Listicle com busca de imagens esgotada -> AWAITING_HUMAN direto
@@ -322,10 +333,11 @@ def _apply_editorial_unlocked(
             )
             return {
                 "post_id": post_id,
-                "wordpress_changed": False,
+                "wordpress_changed": baseline_changed,
                 "dry_run": False,
                 "status": "needs_rework",
                 "state": backoff["state"],
+                "baseline_enriched": baseline_changed,
                 "attempts": backoff["attempts"],
                 "next_retry_at": backoff["next_retry_at"],
                 "backup": str(backup),
@@ -419,6 +431,45 @@ def _clear_processing_markers(root: Path, post_id: int) -> None:
                 marker.unlink()
     except OSError:
         pass
+
+
+def _baseline_content(post: dict[str, Any], config: Config) -> str:
+    """Build deterministic improvements safe for a non-READY post.
+
+    This deliberately starts from the original WordPress content, not from an
+    editorial draft that failed the checklist. It preserves CTA, Fonte and
+    internal links without persisting incomplete text or media.
+    """
+    html = clean_html(_repair_orphan_media(_raw_content(post)))
+    if config.internal_links_enabled:
+        from .internal_links import add_internal_links
+
+        html = add_internal_links(html)
+    from .media.text import dedupe_credit_figures
+
+    html = dedupe_credit_figures(html)
+    try:
+        return append_canonical_footer(html, original_link_of(post))
+    except BuilderError:
+        # Uma origem legado invalida nao pode impedir o CTA e os links
+        # internos; Fonte so e omitida quando nao ha URL segura para exibir.
+        return append_canonical_footer(html, None)
+
+
+def _persist_baseline_enrichment(
+    client: WordPressClient, config: Config, post_id: int, post: dict[str, Any]
+) -> bool:
+    """Persist only safe baseline enrichment for skipped or blocked posts."""
+    if config.dry_run:
+        return False
+    try:
+        content = _baseline_content(post, config)
+        if content == _raw_content(post):
+            return False
+        client.update_post(post_id, {"content": {"raw": content}})
+        return True
+    except Exception:  # noqa: BLE001 - state handling must remain fail-safe
+        return False
 
 
 def _write_state_markers(
@@ -2199,6 +2250,7 @@ def discard_post(
         raise WorkflowError(f"post {post_id} nao esta pending ({post.get('status')})")
     if config.dry_run:
         raise WorkflowError("discard e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
     editorial = {"site_relevance": {"decision": "skip", "confidence": 1.0, "reason": reason or "descartado"}}
     _save_uncertain(root, post_id, editorial)
     _write_state_markers(
@@ -2213,6 +2265,7 @@ def discard_post(
         "status": "discarded",
         "state": STATE_UNCERTAIN,
         "wordpress_changed": True,
+        "baseline_enriched": baseline_changed,
     }
 
 

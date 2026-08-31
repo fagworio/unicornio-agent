@@ -93,6 +93,19 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(result["status"], "uncertain")
         self.assertEqual(result["skip_reason"], "conteudo irrelevante")
 
+    def test_compact_apply_reports_persisted_baseline_for_skipped_post(self):
+        result = _compact_apply(
+            {
+                "post_id": 4,
+                "wordpress_changed": True,
+                "baseline_enriched": True,
+                "status": "skipped",
+                "skip_reason": "conteudo irrelevante",
+            }
+        )
+        self.assertTrue(result["wordpress_changed"])
+        self.assertTrue(result["baseline_enriched"])
+
     def test_monitor_line_idle_is_zero(self):
         # Sem trabalho elegivel a linha e "0" (estavel; nao acorda o agente).
         self.assertEqual(

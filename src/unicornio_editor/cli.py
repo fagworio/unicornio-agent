@@ -360,26 +360,34 @@ def _compact_apply(result: dict) -> dict:
             "state": result.get("state"),
             "attempts": result.get("attempts"),
             "next_retry_at": result.get("next_retry_at"),
-            "wordpress_changed": False,
+            "wordpress_changed": bool(result.get("wordpress_changed")),
             "failed": failed or reasons,
         }
+        if result.get("baseline_enriched"):
+            compact["baseline_enriched"] = True
         if images:
             compact["images"] = images
         return compact
     if result.get("status") == "uncertain":
-        return {
+        compact = {
             "post_id": post_id,
             "status": "uncertain",
-            "wordpress_changed": False,
+            "wordpress_changed": bool(result.get("wordpress_changed")),
             "skip_reason": result.get("skip_reason"),
         }
+        if result.get("baseline_enriched"):
+            compact["baseline_enriched"] = True
+        return compact
     if result.get("status") == "skipped":
-        return {
+        compact = {
             "post_id": post_id,
             "status": "skipped",
-            "wordpress_changed": False,
+            "wordpress_changed": bool(result.get("wordpress_changed")),
             "skip_reason": result.get("skip_reason"),
         }
+        if result.get("baseline_enriched"):
+            compact["baseline_enriched"] = True
+        return compact
     if result.get("dry_run"):
         compact = {
             "post_id": post_id,

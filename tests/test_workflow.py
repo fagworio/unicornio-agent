@@ -359,7 +359,10 @@ class WorkflowTests(unittest.TestCase):
             client = FakeClient(self.post())
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
             self.assertEqual(report["status"], "uncertain")
-            self.assertFalse(report["wordpress_changed"])
+            self.assertTrue(report["wordpress_changed"])
+            self.assertTrue(report["baseline_enriched"])
+            self.assertIn("Confira mais novidades", client.post["content"]["raw"])
+            self.assertIn("Fonte:", client.post["content"]["raw"])
             self.assertTrue(Path(directory, "backups/42/uncertain.json").is_file())
             self.assertFalse(Path(directory, "backups/42/editorial.latest.json").exists())
 
@@ -369,7 +372,8 @@ class WorkflowTests(unittest.TestCase):
             payload["site_relevance"]["confidence"] = 0.99
             client = FakeClient(self.post())
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
-            self.assertFalse(report["wordpress_changed"])
+            self.assertTrue(report["wordpress_changed"])
+            self.assertTrue(report["baseline_enriched"])
             self.assertIn("skip_reason", report)
             self.assertFalse(Path(directory, "backups/42/uncertain.json").exists())
             self.assertTrue(Path(directory, "backups/42/editorial.latest.json").is_file())
@@ -574,17 +578,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["rejected"][0]["index"], 1)
         self.assertIn("sem relacao", result["rejected"][0]["reason"])
 
-    def test_apply_skip_does_not_write_content(self):
+    def test_apply_skip_persists_safe_baseline_but_not_editorial_draft(self):
         with tempfile.TemporaryDirectory() as directory:
-            client = FakeClient(self.post())
+            post = self.post()
+            post["content"] = {"raw": "<h1>Titulo duplicado</h1><p>Notícia sobre Xbox.</p>"}
+            client = FakeClient(post)
             report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload("skip"))
-            self.assertFalse(report["wordpress_changed"])
+            self.assertTrue(report["wordpress_changed"])
             self.assertEqual(report["status"], "skipped")
-            # So telemetria de estado (meta), nunca conteudo.
-            self.assertEqual(len(client.updated), 1)
-            payload = client.updated[0][1]
-            self.assertNotIn("content", payload)
-            self.assertEqual(payload["meta"]["_hermes_state"], "skipped")
+            self.assertEqual(len(client.updated), 2)
+            content = client.updated[0][1]["content"]["raw"]
+            self.assertNotIn("<h1>", content)
+            self.assertIn("Confira mais novidades", content)
+            self.assertIn("Fonte:", content)
+            self.assertIn('href="https://www.unicorniohater.com.br/games/x-box/"', content)
+            self.assertNotIn("Texto revisado", content)
+            self.assertEqual(client.updated[1][1]["meta"]["_hermes_state"], "skipped")
 
     def test_apply_processes_pending_without_sending_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1218,10 +1227,11 @@ class WorkflowTests(unittest.TestCase):
             report = apply_editorial(client, self.config(False), root, 42, payload)
             self.assertEqual(report["status"], "needs_rework")
             self.assertIn("imagens_no_corpo", report["blocked_reasons"])
-            self.assertFalse(report["wordpress_changed"])
-            # Telemetria de estado: o apply grava blocked + attempts (backoff).
-            self.assertEqual(len(client.updated), 1)
-            state_meta = client.updated[0][1]["meta"]
+            self.assertTrue(report["wordpress_changed"])
+            self.assertTrue(report.get("baseline_enriched"))
+            # Baseline de conteudo (CTA/Fonte/links) + telemetria de estado.
+            self.assertEqual(len(client.updated), 2)
+            state_meta = client.updated[1][1]["meta"]
             self.assertEqual(state_meta["_hermes_state"], "blocked")
             self.assertEqual(state_meta["_hermes_attempts"], "1")
             self.assertNotEqual(state_meta["_hermes_next_retry_at"], "")
@@ -1339,9 +1349,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["status"], "needs_rework")
             self.assertIn("imagem_destaque", report["blocked_reasons"])
             self.assertNotIn("imagens_no_corpo", report["blocked_reasons"])
-            self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "blocked")
-            # Nenhuma gravacao de conteudo: so telemetria de estado.
-            self.assertNotIn("content", client.updated[0][1])
+            self.assertEqual(client.updated[1][1]["meta"]["_hermes_state"], "blocked")
+            # Baseline de conteudo (CTA/Fonte/links) e gravado; o editorial
+            # incompleto (texto/midia) fica apenas no draft.
+            self.assertIn("content", client.updated[0][1])
 
     def test_rework_backoff_escalates_to_awaiting_human(self):
         # Fase 8: 1a falha +30m (blocked), 2a +2h (blocked), 3a AWAITING_HUMAN.

@@ -88,7 +88,9 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 9. NÃO rode `checklist` manualmente (apply já valida; publish-ready re-valida por
    manifest). `--dry-run` só sob demanda (rework complexo, mídia nova, JSON que
    falhou, investigar gate).
-10. `skip`/`uncertain`/dry-run devem ter `wordpress_changed=false`.
+10. `skip`/`uncertain`/`awaiting_human` nunca publicam nem marcam READY. Em
+    write mode, podem gravar somente a base determinística segura (CTA, Fonte,
+    links internos e sanitização); o editorial que falhou fica no draft.
 11. Publicação: só o cron (`publish-ready`), SÓ posts READY com manifest íntegro;
     STALE revalida com checklist. Nunca publique manualmente.
 
