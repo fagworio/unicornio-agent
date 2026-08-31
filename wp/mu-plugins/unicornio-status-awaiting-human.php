@@ -25,8 +25,20 @@ add_action( 'init', function () {
 		'public'                    => false,
 		'internal'                  => false,
 		'protected'                 => false,
+		'private'                   => false,
+		'publicly_queryable'        => false,
 		'exclude_from_search'       => true,
 		'show_in_admin_all_list'    => true,
 		'show_in_admin_status_list' => true,
+		'date_floating'             => false,
 	) );
 } );
+
+// Mostra o rótulo "Awaiting Human" ao lado do título na listagem de posts
+// (igual aos estados nativos: Pendente, Rascunho, Privado...).
+add_filter( 'display_post_states', function ( $states, $post ) {
+	if ( get_post_status( $post ) === 'awaiting_human' ) {
+		$states['awaiting_human'] = 'Awaiting Human';
+	}
+	return $states;
+}, 10, 2 );
