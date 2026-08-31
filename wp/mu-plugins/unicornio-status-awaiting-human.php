@@ -85,3 +85,31 @@ add_action( 'admin_menu', function () {
 		'edit.php?post_status=awaiting_human'
 	);
 } );
+
+// Editor CLASSICO: o select de status e o rotulo sao hardcoded no core
+// (so os 4-5 builtin). Este script adiciona a opcao "Awaiting Human" ao
+// select e corrige o rotulo do status atual quando o post esta nele.
+add_action( 'admin_footer', function () {
+	$screen = get_current_screen();
+	if ( ! $screen || $screen->base !== 'post' || $screen->post_type !== 'post' ) {
+		return;
+	}
+	$is_current = get_post_status() === 'awaiting_human';
+	?>
+	<script>
+	(function () {
+		var sel = document.getElementById('post_status');
+		if (!sel) { return; }
+		var opt = document.createElement('option');
+		opt.value = 'awaiting_human';
+		opt.textContent = 'Awaiting Human';
+		<?php if ( $is_current ) { ?>opt.selected = true;<?php } ?>
+		sel.appendChild(opt);
+		<?php if ( $is_current ) { ?>
+		var disp = document.getElementById('post-status-display');
+		if (disp) { disp.textContent = 'Awaiting Human'; }
+		<?php } ?>
+	})();
+	</script>
+	<?php
+}, 99 );
