@@ -107,6 +107,28 @@ def _published_by_editorial_last_24h() -> int:
     return count
 
 
+def _queue_after_window() -> dict[str, int] | None:
+    """Read the live queue summary so ``pending`` is not mistaken for READY.
+
+    WordPress keeps every editorial state under the native ``pending`` status.
+    Only ``ready`` posts are eligible for the next publication window; an
+    ``uncertain`` post intentionally remains pending but requires human review.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "src"))
+        from unicornio_editor.config import load_config
+        from unicornio_editor.wordpress import WordPressClient
+        from unicornio_editor.workflow import build_queue_report
+
+        queue = build_queue_report(WordPressClient(load_config()), ROOT)
+        return {
+            key: int(queue.get(key, 0) or 0)
+            for key in ("pending", "edited", "blocked", "uncertain", "awaiting_human", "skipped")
+        }
+    except Exception:
+        return None
+
+
 def _fmt_data(iso: str) -> str:
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -151,6 +173,23 @@ def main() -> int:
             print(f"  • {pid} | {titles.get(pid, '')[:50]} | blocked | {fails[:60]}")
     else:
         print("⚠️ Bloqueados: 0")
+
+    queue = _queue_after_window()
+    if queue is not None:
+        print(
+            "\n📋 Fila após a janela: "
+            f"{queue['pending']} pending no WP | "
+            f"{queue['edited']} pronta(s) para a próxima janela"
+        )
+        excluded: list[str] = []
+        if queue["uncertain"]:
+            excluded.append(f"{queue['uncertain']} em revisão humana")
+        if queue["awaiting_human"]:
+            excluded.append(f"{queue['awaiting_human']} aguardando decisão humana")
+        if queue["blocked"]:
+            excluded.append(f"{queue['blocked']} em reprocessamento")
+        if excluded:
+            print("   Fora da publicação automática: " + "; ".join(excluded))
 
     print(f"\n💰 Custo editorial (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
     published_24h = _published_by_editorial_last_24h()

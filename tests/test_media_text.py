@@ -2,7 +2,7 @@
 
 import unittest
 
-from unicornio_editor.media.text import dedupe_credit_figures, plain_text
+from unicornio_editor.media.text import dedupe_credit_figures, plain_text, sanitize_title
 
 
 class PlainTextTests(unittest.TestCase):
@@ -22,6 +22,11 @@ class PlainTextTests(unittest.TestCase):
     def test_normalizes_whitespace_and_none(self):
         self.assertEqual(plain_text("  a\n\n  b  "), "a b")
         self.assertEqual(plain_text(None), "")
+
+    def test_sanitize_title_decodes_complete_and_legacy_amp_entities(self):
+        title = "Pokémon Heart &amp; Soul 2.0: freebie gratuito"
+        self.assertEqual(sanitize_title(title), "Pokémon Heart & Soul 2.0: freebie gratuito")
+        self.assertEqual(sanitize_title("Heart &amp Soul"), "Heart & Soul")
 
 
 class DedupeCreditFiguresTests(unittest.TestCase):

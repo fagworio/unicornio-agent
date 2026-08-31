@@ -50,7 +50,9 @@ class _TreeParser(HTMLParser):
         return
 
 
-_DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "select", "textarea"}
+# O tema do WordPress ja renderiza o titulo do post como H1. Um H1 importado
+# no corpo duplica esse titulo e prejudica a hierarquia semantica da pagina.
+_DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "select", "textarea", "h1"}
 _UNWRAP_TAGS = {"article", "div"}
 _VOID_TAGS = {"area", "base", "br", "col", "hr", "link", "meta", "param", "source", "track", "wbr"}
 _ALLOWED_ATTRS = {"class", "id", "title", "alt", "href", "src", "target", "rel", "width", "height"}

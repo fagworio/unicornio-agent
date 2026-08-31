@@ -37,6 +37,7 @@ from .media.converter import (
 from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
 from .media.wordpress_media import upload_image
 from .observability import append_telemetry, build_processing_markers
@@ -1593,9 +1594,9 @@ def _raw_content(post: dict[str, Any]) -> str:
 def _post_title(post: dict[str, Any]) -> str | None:
     title = post.get("title")
     if isinstance(title, dict) and isinstance(title.get("raw"), str):
-        return title["raw"].strip() or None
+        return sanitize_title(title["raw"]) or None
     if isinstance(title, str):
-        return title.strip() or None
+        return sanitize_title(title) or None
     return None
 
 

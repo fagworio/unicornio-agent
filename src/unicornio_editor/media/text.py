@@ -24,6 +24,17 @@ def plain_text(value):
     return text
 
 
+def sanitize_title(value):
+    """Normalize a WordPress title to plain text before editorial decisions.
+
+    Imported titles sometimes retain HTML entities, including the permissive
+    legacy spelling ``&amp`` without a trailing semicolon. ``html.unescape``
+    handles both forms, so titles such as ``Heart &amp; Soul`` are matched and
+    displayed as ``Heart & Soul``.
+    """
+    return plain_text(value)
+
+
 _FIGURE_RE = re.compile(r"<figure\b[^>]*>.*?</figure>", re.IGNORECASE | re.DOTALL)
 
 
@@ -69,4 +80,4 @@ def dedupe_credit_figures(html):
     return _FIGURE_RE.sub(_maybe_drop, html)
 
 
-__all__ = ["plain_text", "dedupe_credit_figures"]
+__all__ = ["plain_text", "sanitize_title", "dedupe_credit_figures"]

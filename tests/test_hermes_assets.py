@@ -13,6 +13,8 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("dry-run", content)
         self.assertIn("status", content)
         self.assertIn("Google Images", content)
+        self.assertIn("5 posts READY", content)
+        self.assertIn("liberam a vaga", content)
 
     def test_cron_installer_has_valid_shell_and_project_workdir(self):
         script = ROOT / "hermes" / "cron-install.sh"
@@ -22,6 +24,8 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("--workdir", content)
         self.assertIn("--skill", content)
         self.assertIn("unicorniohater-editor", content)
+        self.assertIn("until 5 reach READY", content)
+        self.assertIn("does not consume the quota", content)
         self.assertNotIn("EDITOR_DRY_RUN=false", content)
 
     def test_cron_installer_wires_monitor_script_and_references(self):

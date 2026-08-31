@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -76,6 +77,31 @@ class PublicationReportCostTests(unittest.TestCase):
             self._database(with_job_id=False, with_project=True), project_root="/project"
         )
         self.assertEqual(measured, (0.20, 1, "projeto editorial (cwd/git_repo_root)"))
+
+    def test_report_distinguishes_pending_from_posts_ready_to_publish(self):
+        data = {
+            "posts": [],
+            "blocked_posts": [],
+        }
+        with patch.object(report, "_load_window_json", return_value=data), patch.object(
+            report, "_custo_24h", return_value=(0.0, 0, "test")
+        ), patch.object(report, "_published_by_editorial_last_24h", return_value=0), patch.object(
+            report,
+            "_queue_after_window",
+            return_value={
+                "pending": 5,
+                "edited": 0,
+                "blocked": 0,
+                "uncertain": 5,
+                "awaiting_human": 0,
+                "skipped": 0,
+            },
+        ), patch("sys.stdout", new_callable=StringIO) as output:
+            self.assertEqual(report.main(), 0)
+
+        text = output.getvalue()
+        self.assertIn("5 pending no WP | 0 pronta(s) para a próxima janela", text)
+        self.assertIn("5 em revisão humana", text)
 
 
 if __name__ == "__main__":

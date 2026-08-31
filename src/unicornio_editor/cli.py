@@ -33,6 +33,7 @@ from .workflow import (
     validate_media_plan,
 )
 from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED
+from .media.text import sanitize_title
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -248,7 +249,9 @@ def _compact_listing(posts: list[dict]) -> list[dict]:
     """Projecao enxuta para list-pending --compact (economia de tokens)."""
     compact: list[dict] = []
     for post in posts:
-        title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
+        title = sanitize_title(
+            (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
+        )
         rendered = (post.get("content") or {}).get("rendered") or ""
         compact.append(
             {

@@ -30,7 +30,7 @@ fi
 sed "s|@PROJECT_ROOT@|$ROOT|g" "$ROOT/hermes/monitor.sh" > "$MONITOR_SCRIPT"
 chmod +x "$MONITOR_SCRIPT"
 
-PROMPT='Process the next small batch of WordPress posts with status pending. Follow the unicorniohater-editor skill. Operate in write mode: apply the editorial JSON (content + SEO meta), always keeping status pending. Create snapshots, skip irrelevant or uncertain content, validate every editorial JSON result, and report JSON outcomes. Never change a post status and never expose credentials.'
+PROMPT='Process WordPress pending posts until 5 reach READY, or cards reports no more eligible pending posts. Follow the unicorniohater-editor skill. A skipped, uncertain, blocked, or awaiting_human post does not consume the quota: fetch another card and continue. Operate in write mode: apply the editorial JSON (content + SEO meta), always keeping status pending. Create snapshots, skip irrelevant or uncertain content, validate every editorial JSON result, and report JSON outcomes. Never change a post status and never expose credentials.'
 
 # O Hermes exige monitor_script como NOME relativo a $HERMES_HOME/scripts/
 # (caminho absoluto e rejeitado no create). O script ja foi copiado para la.

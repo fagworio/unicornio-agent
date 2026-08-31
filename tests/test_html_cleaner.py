@@ -32,6 +32,10 @@ class HtmlCleanerTests(unittest.TestCase):
         )
         self.assertEqual(result, "<p>Notícia.</p>")
 
+    def test_removes_h1_and_its_duplicate_title_from_content(self):
+        result = clean_html("<h1>Título já exibido pelo WordPress</h1><p>Texto do post.</p>")
+        self.assertEqual(result, "<p>Texto do post.</p>")
+
     def test_keeps_image_inside_figure_with_complete_credit(self):
         result = clean_html(
             '<figure class="aligncenter"><img src="https://s3.example/img.webp" alt="Cena" />'

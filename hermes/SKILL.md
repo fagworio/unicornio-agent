@@ -1,7 +1,7 @@
 ---
 name: unicorniohater-editor
 description: Process WordPress pending posts in write mode, gated by the pre-publish checklist.
-version: 0.2.0
+version: 0.3.0
 metadata:
   hermes:
     tags: [wordpress, editorial, pending, safety]
@@ -31,11 +31,15 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    EDITOR_BATCH_LIMIT; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
    direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
-2. Máx. 5 posts/run (EDITOR_BATCH_LIMIT; nunca ultrapasse) e pare em ~30 tool
-   calls. **NUNCA gaste o run num único post**: se um post falhou 1 correção,
-   marque e SIGA para os próximos até completar o batch de 5. Máx. UMA correção
-   por post por run (falhou → corrija → re-aplique; falhou de novo → PARE; 3ª
-   falha → AWAITING_HUMAN e siga para o próximo).
+2. A meta do run é **5 posts READY** (EDITOR_BATCH_LIMIT), não apenas 5 cards
+   iniciais. `skipped`, `uncertain`, `blocked` em cooldown ou `awaiting_human`
+   liberam a vaga: depois de registrá-los, rode `cards` outra vez e trilhe o
+   próximo `pending` elegível. Só encerre antes de 5 READY quando `cards`
+   retornar `count: 0`. Nunca retome o mesmo post que acabou de sair da fila.
+   **NUNCA gaste o run num único post**: se um post falhou 1 correção, marque e
+   SIGA para os próximos. Máx. UMA correção por post por run (falhou → corrija →
+   re-aplique; falhou de novo → PARE; 3ª falha → AWAITING_HUMAN e siga para o
+   próximo).
 3. REWORK (`blocked:true`): use `blocked_reason` + `fix` do card, carregue o
    draft (`draft POST_ID`) e corrija SÓ o componente apontado — nunca reescreva
    texto/SEO bons.
@@ -125,8 +129,10 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - `media-validate` antes do apply com mídia nova (1 chamada).
 - `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
 - Decida skip/uncertain SÓ pelo card.
-- Batch: respeite ``EDITOR_MAX_POSTS_PER_RUN`` (padrão: 5); mantenha uma única
-  sequência compacta de ferramentas por post para amortizar o custo da sessão.
+- Batch: respeite ``EDITOR_MAX_POSTS_PER_RUN`` (padrão: 5) como teto de posts
+  que chegam a READY. Uma saída definitiva sem READY não consome a vaga: busque
+  outro card enquanto houver `pending` elegível. Mantenha uma sequência compacta
+  de ferramentas por post para amortizar o custo da sessão.
 - `list-pending --compact` e `prepare --compact` SEMPRE (~1.3 KB vs ~120 KB).
 - NUNCA leia src/**, pyproject.toml, .env nem testes — o CLI é a interface.
 - Não repita comandos; não re-prepare post já visto.
