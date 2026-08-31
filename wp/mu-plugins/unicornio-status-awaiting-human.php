@@ -63,3 +63,25 @@ add_action( 'transition_post_status', function ( $new_status, $old_status, $post
 		}
 	}
 }, 10, 3 );
+
+// Disponibiliza "Awaiting Human" no Quick Edit e Bulk Edit da listagem de
+// posts (filtro oficial do core desde 6.9) — atribuição manual sem abrir
+// o editor.
+add_filter( 'quick_edit_statuses', function ( $statuses, $post_type, $bulk, $can_publish ) {
+	if ( $post_type === 'post' ) {
+		$statuses['awaiting_human'] = 'Awaiting Human';
+	}
+	return $statuses;
+}, 10, 4 );
+
+// Atalho no menu lateral: Posts -> Awaiting Human (filtro direto), sempre
+// visível mesmo sem posts no status.
+add_action( 'admin_menu', function () {
+	add_submenu_page(
+		'edit.php',
+		'Posts Awaiting Human',
+		'Awaiting Human',
+		'edit_posts',
+		'edit.php?post_status=awaiting_human'
+	);
+} );
