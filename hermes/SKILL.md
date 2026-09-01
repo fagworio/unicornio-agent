@@ -47,7 +47,11 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
    `game_name` exato (código acha/valida o trailer). `cleaned_html` OPCIONAL
    (omita no no-rewrite; use `content POST_ID` só para reescrever).
 5. IMAGENS: `references/politica-imagens.md` antes do media_plan. Regras-chave:
-   2/4/6 SEMPRE (2<=600, 4<=1000, 6+; listicle=max(2,itens)); toda imagem retrata
+   2/4/6 SEMPRE (2<=600, 4<=1000, 6+; listicle=max(2,itens)); **LISTICLE SOB
+   MEDIDA (auto-melhoria 2026-09-01): 1 item = 1 imagem real — dimensione o
+   nº de itens pelo que a busca devolver (fonte com 4 imagens reais da obra =
+   listicle de 4-6 itens; NUNCA Top 10 prometendo 10 imagens que a fonte não
+   tem — bloqueio garantido `imagens_no_corpo` + tentativas queimadas); toda imagem retrata
    EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
    direta listada na página de origem; crédito visível em toda imagem; sem imagem
    transparente; sem imagem repetida no post. Busca: `media-search-web TERMO
@@ -70,6 +74,25 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
  valide com `media-validate editorial.json` (1 chamada) e aplique. Se o
  apply rejeitar por verificação de origem, troque SÓ a imagem rejeitada —
  nunca re-verifique a página manualmente.
+ **FONTES BYTE-ESTÁVEIS (2026-08-31, verificadas em produção):** o gate
+ `verify_downloaded_against_source` exige que a página de origem liste a
+ URL EXATA (mesmo slug E mesmos bytes). CBR/srcdn/colliderimages falham
+ ~80% das vezes ("CDN serviu conteudo divergente"). Fontes que PASSAM:
+ (a) **anime.com** (`https://anime.com/shows/<slug>`): og:image =
+ `https://image.tmdb.org/t/p/original/<hash>.jpg` listado na página — use
+ essa URL exata como direct_image_url (10/10 aceitas em 2 posts);
+ (b) **JustWatch** (`https://www.justwatch.com/us/tv-show/<slug>`): use o
+ **backdrop** (`https://images.justwatch.com/backdrop/<id>/s640/<slug>.jpg`,
+ listado no início da página) — os posters s718 ficam FORA das primeiras 12
+ URLs que o verifier lê e são rejeitados; o backdrop s640 passa;
+ (c) **bac.moe/ctfassets** e páginas de notícias cujo CDN serve a mesma URL
+ na página (verificar padrão: slug do arquivo presente no HTML). Featured
+ NUNCA pode ser retrato: o gate rejeita "featured source is portrait" —
+ exija paisagem (TMDB/anime.com poster é retrato; use backdrop).
+ S3 self-referential (`source_page_url` = a própria URL da imagem) SEMPRE
+ falha ("pagina de origem inacessivel") — reuso real da Media Library só
+ passa com `media_library_id` + attachment com crédito, ou quando uma página
+ publicada do prod embute a imagem S3.
 6. Mídia nova → valide antes: `media-validate editorial.json` (1 chamada;
    {valid, rejected}).
 7. `apply POST_ID editorial.json --compact` = preflight COMPLETO (resolver
@@ -128,6 +151,7 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - UMA busca por obra. NÃO baixe páginas de origem nem inspecione HTML
   manualmente — o apply verifica; `media-validate` valida em 1 chamada.
 - `apply --compact` SEMPRE; `--dry-run` só sob demanda.
+- **paragraph_index do media_plan**: imagens entram APÓS o parágrafo alvo, exigem >=3 parágrafos de distância entre si e o índice máximo é `len(</p> do conteúdo) - 2` (senão: `media must be inserted between paragraphs`). A featured NÃO entra no insert (vai como featured_media), então não ocupa vaga de spacing — mas o índice dela conta na validação do plano. Conte os blocos com `content POST_ID` antes de montar o plano.
 - `media-validate` antes do apply com mídia nova (1 chamada).
 - `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
 - Decida skip/uncertain SÓ pelo card.
