@@ -136,7 +136,7 @@ class ChecklistTests(unittest.TestCase):
         # The 2/4/6 minimum ALWAYS holds: an image-less post must not pass.
         result = self._run_checklist()
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
-        self.assertEqual(self.statuses(result)["qualidade_texto"], "fail")
+        self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
 
     def test_irrelevant_image_fails_relevance_gate(self):
         # A real bat is NOT a valid image for a videogame news post.
@@ -200,6 +200,20 @@ class ChecklistTests(unittest.TestCase):
 
     def test_trailer_skips_for_non_game_content(self):
         result = self._run_checklist()
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
+
+    def test_trailer_skips_with_audited_unavailable_waiver(self):
+        editorial = editorial_payload(
+            game_name="Meu Jogo",
+            trailer_unavailable=True,
+            trailer_search_evidence={
+                "query": "Meu Jogo trailer",
+                "provider": "youtube",
+                "searched_at": "2026-09-03T12:00:00+00:00",
+                "result": "official_not_found",
+            },
+        )
+        result = self._run_checklist(editorial=editorial)
         self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
 
     def test_cta_fails_when_missing(self):

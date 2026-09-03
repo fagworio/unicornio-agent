@@ -76,6 +76,37 @@ class ObservabilityTests(unittest.TestCase):
             summary = read_telemetry_summary(root)
             self.assertNotIn("cards", summary["context_bytes_by_command"])
 
+    def test_production_and_media_funnel_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_telemetry(root, "apply_started", post_id=1, attempt=1, first_pass=True)
+            append_telemetry(
+                root, "apply_ready", post_id=1, attempts=1,
+                first_pass=True, duration_ms=1200,
+            )
+            append_telemetry(root, "apply_started", post_id=2, attempt=2, first_pass=False)
+            append_telemetry(
+                root, "apply_ready", post_id=2, attempts=2,
+                first_pass=False, duration_ms=1800,
+            )
+            append_telemetry(
+                root, "media_funnel", stage="source_verify", status="passed",
+                source_domain="images.example",
+            )
+            append_telemetry(
+                root, "media_funnel", stage="source_verify", status="rejected",
+                source_domain="images.example",
+            )
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["production"]["unique_ready_posts"], 2)
+            self.assertEqual(summary["production"]["first_pass_ready_rate"], 0.5)
+            self.assertEqual(summary["production"]["average_attempts_per_ready"], 1.5)
+            self.assertEqual(summary["production"]["average_ready_duration_ms"], 1500)
+            self.assertEqual(summary["media_funnel"]["source_verify"]["passed"], 1)
+            self.assertEqual(
+                summary["media_by_domain"]["images.example"]["source_verify:rejected"], 1
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

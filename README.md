@@ -90,13 +90,15 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
      (required/valid/missing/irrelevant/non_webp), diagnostico da featured
      (exists/relevant/webp/dimensions/action) e plano fix para rework
   -> editorial JSON estrito (draft salvo pelo apply ANTES da execucao pesada)
-  -> media-validate (1 chamada) quando ha midia nova
+  -> media-validate --post-id (1 chamada) quando ha midia nova:
+     capacidade media-first do listicle + visão antecipada da featured
   -> apply = PREFLIGHT COMPLETO:
      resolve editorial -> executa midia (download, WebP, upload, credito)
      -> normaliza tecnicamente (featured 1280x720 WebP; inline nao-WebP
         relevante convertida — sem LLM) -> monta conteudo (trailer + CTA + Fonte)
      -> checklist INTEIRO (backup, pending, relevancia, Fonte, 2/4/6, featured,
-        WebP, dimensoes, trailer, CTA, qualidade de texto, estrutura, schema)
+        WebP, dimensoes, trailer/waiver auditado, CTA, qualidade de texto,
+        estrutura, schema)
      -> falha: needs_rework + estado blocked (backoff 30m/2h; 3a falha
         AWAITING_HUMAN) — nada e gravado
      -> sucesso: grava conteudo + meta _hermes_state=ready + Ready Manifest
@@ -113,16 +115,17 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
 
 ## Vision gate (custo controlado, gpt-4o-mini)
 
-O checklist de publicacao tem um gate final de visao que confirma se cada imagem
-publicada e visualmente consistente com o assunto (pega o caso que regex/URL/hash
-nao veem: um CDN servindo imagem errada sob slug certo). Para manter o custo baixo:
+O `media-validate` executa antecipadamente o gate de visão da featured. A decisão
+é transferida pelo cache para a URL final do WordPress, e o checklist confirma o
+mesmo resultado sem uma segunda chamada tardia. Isso pega o caso que
+regex/URL/hash não veem, como um CDN servindo imagem errada sob slug certo. Para
+manter o custo baixo:
 
 - **Prompt restrito**: metadados (ALT/URL/fonte) sao contexto, os PIXELS sao a
   evidencia. O modelo nunca tenta nomear a obra (evita o knowledge cutoff para
   noticias de 2026). Retorna Structured Outputs `{status, confidence, visual_type}`.
-- **detail: low por padrao** (~2833 tok/img). A **featured** escala para
-  `high` (13x) apenas quando AMBIGUOUS; **inline** so `low` (descarta se nao
-  confirmar).
+- **detail: low por padrao** (~2833 tok/img). A **featured** pode escalar para
+  `high` quando ambígua; imagens inline permanecem nos gates determinísticos.
 - **Cache por hash(imagem)+entidade** (`work/vision_cache.json`) evita re-analisar
   a mesma key art em varios posts.
 - **Limites mecanicos** de chamadas por post (`EDITOR_VISION_MAX_LOW`).
@@ -202,6 +205,10 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Escolher novas imagens por contexto da secao.
 - Minimo OBRIGATORIO 2/4/6 (2 <= 600 palavras, 4 <= 1000, 6 acima; listicle =
   max(2, itens)) — sem waiver; o apply recusa abaixo do minimo.
+- Listicle é planejado pela mídia: uma imagem inline distinta e validada por
+  item; a featured não entra na conta. Quatro imagens inline permitem no máximo
+  quatro itens. `media-validate editorial.json --post-id ID` informa capacidade
+  e déficit antes do upload.
 - Inserir apos um paragrafo que introduza visualmente o assunto, normalmente apos 2-4 paragrafos.
 - Minimo de 3 paragrafos entre imagens.
 - Converter para WebP antes do upload (normalizacao tecnica e automatica no apply).
@@ -211,6 +218,22 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Baixar e hospedar a cópia na Media Library do WordPress, sem bucket/CDN externo.
 - Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
 - Sem crédito visível, descartar a imagem e procurar outra.
+
+### Trailer
+
+- Jogos usam somente trailer oficial validado; conteúdo fan-made nunca satisfaz
+  o gate.
+- Quando a busca oficial termina sem resultado, o código persiste query,
+  provedor, horário e `official_not_found`, concedendo waiver auditável.
+- Falha técnica da busca permanece bloqueante e não é tratada como ausência.
+
+### Telemetria de produção
+
+`unicornio-editor telemetry --root .` inclui posts únicos iniciados/bloqueados/
+READY, taxa de READY na primeira tentativa, tentativas e duração médias, além do
+funil de mídia por etapa e domínio: descoberta, preflight, visão da featured,
+download, confirmação na origem, conversão e upload. Falhas do checklist também
+são registradas individualmente, sem depender apenas da combinação de motivos.
 
 ### Links internos (código determinístico, sem IA)
 - O apply adiciona links internos para categorias do portal na PRIMEIRA

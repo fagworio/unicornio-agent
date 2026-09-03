@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .backup import SnapshotStore
 from .checklist import run_pre_publish_checklist
@@ -17,6 +18,7 @@ from .editorial_schema import validate_editorial
 from .maintenance import generate_report
 from .workflow import (
     apply_editorial,
+    attach_trailer_audit,
     build_cards,
     build_queue_report,
     compose_final_content,
@@ -185,10 +187,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     media_validate_parser = subparsers.add_parser(
         "media-validate",
-        help="valida o media_plan de um editorial.json SEM executar download/upload "
-        "(1 chamada compacta; corriga o plano antes do apply)",
+        help="valida relevancia/capacidade do media_plan e a visao da featured, "
+        "sem upload (1 chamada compacta; corrija o plano antes do apply)",
     )
     media_validate_parser.add_argument("editorial_file", type=Path)
+    media_validate_parser.add_argument(
+        "--post-id", type=int,
+        help="ID opcional para validar a promessa do título real do WordPress",
+    )
     media_validate_parser.add_argument("--root", type=Path, default=Path("."))
 
     draft_parser = subparsers.add_parser(
@@ -506,7 +512,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if editorial["site_relevance"]["decision"] == "process":
                 editorial = resolve_editorial_defaults(editorial, post)
             backup = SnapshotStore(args.root).save(args.post_id, post)
-            content, trailer = compose_final_content(editorial, config, original_link_of(post))
+            content, trailer, trailer_status = compose_final_content(
+                editorial, config, original_link_of(post)
+            )
+            editorial = attach_trailer_audit(
+                editorial, trailer, search_status=trailer_status
+            )
             result = run_pre_publish_checklist(
                 post=post,
                 editorial=editorial,
@@ -542,6 +553,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     query=args.termo,
                     size_filter=f"{args.size}|{args.ratio}",
                 )
+            else:
+                for candidate in candidates:
+                    direct_url = str(candidate.get("direct_image_url") or "")
+                    append_telemetry(
+                        args.root,
+                        "media_funnel",
+                        stage="discovery",
+                        status="passed",
+                        source_domain=(urlparse(direct_url).hostname or "").lower(),
+                        engine=str(candidate.get("engine") or "unknown"),
+                    )
             result = {
                 "query": args.termo,
                 "size_filter": f"{args.size}|{args.ratio}",
@@ -552,7 +574,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = get_cleaned_content(client, args.root, args.post_id)
         elif args.command == "media-validate":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
-            result = validate_media_plan(client, payload)
+            post_title = ""
+            existing_featured_id = None
+            if args.post_id:
+                post = client.get_post(args.post_id)
+                title_value = post.get("title") or {}
+                post_title = str(
+                    title_value.get("raw") or title_value.get("rendered") or ""
+                )
+                existing_featured_id = int(post.get("featured_media") or 0) or None
+            result = validate_media_plan(
+                client,
+                payload,
+                config=config,
+                root=args.root,
+                post_title=post_title,
+                existing_featured_id=existing_featured_id,
+            )
         elif args.command == "draft":
             result = load_draft(args.root, args.post_id)
         elif args.command == "retry-all":

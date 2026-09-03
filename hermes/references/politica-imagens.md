@@ -38,8 +38,9 @@ O Google Images é **somente índice de descoberta** — a fonte é a página
 
 - **(a) Mínimo 2/4/6 SEMPRE**: 2 <= 600 palavras, 4 <= 1000, 6 acima;
   listicle = `max(2, nº itens)` — **1 item = 1 imagem real: dimensione o
-  listicle pela disponibilidade real (fonte com 4 imagens reais da obra =
-  4-6 itens, nunca Top 10 sem 10 imagens)**. Post sem o mínimo **NÃO vira READY**.
+  listicle pela disponibilidade real (4 imagens inline reais e distintas =
+  no máximo 4 itens; a featured não entra na conta; nunca Top 10 sem 10 imagens)**.
+  Post sem o mínimo **NÃO vira READY**.
 - **(b) Toda imagem retrata EXATAMENTE a obra citada** — nunca conceito
   genérico (um morcego real NÃO vale para um jogo de vampiro; uma multidão de
   convenção NÃO vale para um anime específico).

@@ -2,6 +2,7 @@ import io
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -154,6 +155,36 @@ class SourceVerifyTests(unittest.TestCase):
             cache=cache,
         )
         self.assertEqual(SourcePageHandler.page_hits, 1)
+
+    def test_exact_image_after_first_twelve_is_still_verified(self):
+        target = _png_bytes((40, 50, 60))
+        SourcePageHandler.images["/img/gallery/late-target.jpg"] = target
+        original_get = SourcePageHandler.do_GET
+
+        def do_get(handler):
+            if handler.path == "/many.html":
+                decoys = "".join(
+                    f'<img src="/img/decoy-{index}.jpg" />' for index in range(12)
+                )
+                html = f"<html><body>{decoys}<img src=\"/img/gallery/late-target.jpg\" /></body></html>"
+                data = html.encode()
+                handler.send_response(200)
+                handler.send_header("Content-Length", str(len(data)))
+                handler.end_headers()
+                handler.wfile.write(data)
+                return
+            original_get(handler)
+
+        path = Path(self._tmp_dir) / "late.png"
+        path.write_bytes(target)
+        with mock.patch.object(SourcePageHandler, "do_GET", do_get):
+            ok, reason = verify_downloaded_against_source(
+                source_page_url=f"{self.base}/many.html",
+                downloaded=path,
+                direct_image_url=f"{self.base}/img/gallery/late-target.jpg",
+            )
+        self.assertTrue(ok, reason)
+        self.assertIn("URL exata", reason)
 
 
 if __name__ == "__main__":

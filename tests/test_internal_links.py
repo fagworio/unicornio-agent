@@ -86,7 +86,7 @@ class InternalLinksTests(unittest.TestCase):
 
     def test_disabled_config_keeps_body_unchanged(self):
         html = "<p>PlayStation 5 e Netflix.</p>"
-        content, trailer = compose_final_content(
+        content, trailer, _status = compose_final_content(
             editorial(html), self.config(enabled=False), None
         )
         # Sem links internos no corpo; o footer canonico do CTA continua la.
@@ -96,7 +96,7 @@ class InternalLinksTests(unittest.TestCase):
 
     def test_enabled_config_adds_internal_links_in_final_content(self):
         html = "<p>PlayStation 5 e Netflix.</p>"
-        content, trailer = compose_final_content(
+        content, trailer, _status = compose_final_content(
             editorial(html), self.config(enabled=True), None
         )
         self.assertIn(f'href="{PS5}"', content)

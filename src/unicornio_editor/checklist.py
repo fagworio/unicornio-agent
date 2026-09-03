@@ -366,7 +366,25 @@ def run_pre_publish_checklist(
     game_name = editorial.get("game_name")
     if isinstance(game_name, str) and game_name.strip():
         has_trailer = bool(_IFRAME_RE.search(content))
-        check("trailer_youtube", has_trailer, f"game_name={game_name!r}; embed {'presente' if has_trailer else 'AUSENTE'}")
+        unavailable = bool(editorial.get("trailer_unavailable"))
+        evidence = editorial.get("trailer_search_evidence")
+        audited_waiver = (
+            unavailable
+            and isinstance(evidence, Mapping)
+            and evidence.get("result") == "official_not_found"
+            and bool(evidence.get("searched_at"))
+        )
+        if has_trailer:
+            check("trailer_youtube", True, f"game_name={game_name!r}; embed presente")
+        elif audited_waiver:
+            check(
+                "trailer_youtube",
+                True,
+                f"waived: busca oficial auditada sem resultado em {evidence.get('searched_at')}",
+                skipped=True,
+            )
+        else:
+            check("trailer_youtube", False, f"game_name={game_name!r}; embed AUSENTE e sem waiver auditado")
     else:
         check("trailer_youtube", True, "conteudo nao e de jogo; trailer nao exigido", skipped=True)
 
@@ -379,10 +397,8 @@ def run_pre_publish_checklist(
             content,
             title=str(editorial.get("seo", {}).get("title") or ""),
             focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
-            image_count=image_count,
             matched_topics=relevance.get("matched_topics") or [],
             allowed_topics=config.site_topics,
-            required_images=0 if waive_inline else required,
         )
         check("qualidade_texto", True, f"{quality['words']} palavras, qualidade ok")
     except ContentQualityError as exc:

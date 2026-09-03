@@ -75,6 +75,15 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
     cmd_bytes: dict[str, int] = {}
     total_cmd_bytes = 0
     last_ts: str | None = None
+    started_posts: set[int] = set()
+    blocked_posts: set[int] = set()
+    ready_posts: set[int] = set()
+    ready_with_first_pass = 0
+    first_pass_ready = 0
+    ready_attempts = 0
+    ready_durations: list[int] = []
+    media_funnel: dict[str, dict[str, int]] = {}
+    media_by_domain: dict[str, dict[str, int]] = {}
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -95,6 +104,36 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
                 if isinstance(command, str) and isinstance(size, int):
                     cmd_bytes[command] = cmd_bytes.get(command, 0) + size
                     total_cmd_bytes += size
+            post_id = record.get("post_id")
+            if isinstance(post_id, int):
+                if event == "apply_started":
+                    started_posts.add(post_id)
+                elif event == "apply_blocked":
+                    blocked_posts.add(post_id)
+                elif event == "apply_ready":
+                    ready_posts.add(post_id)
+            if event == "apply_ready":
+                first_pass = record.get("first_pass")
+                if isinstance(first_pass, bool):
+                    ready_with_first_pass += 1
+                    first_pass_ready += int(first_pass)
+                attempts = record.get("attempts")
+                if isinstance(attempts, int):
+                    ready_attempts += attempts
+                duration = record.get("duration_ms")
+                if isinstance(duration, int):
+                    ready_durations.append(duration)
+            if event == "media_funnel":
+                stage = record.get("stage")
+                status = record.get("status")
+                domain = record.get("source_domain")
+                if isinstance(stage, str) and isinstance(status, str):
+                    stage_bucket = media_funnel.setdefault(stage, {})
+                    stage_bucket[status] = stage_bucket.get(status, 0) + 1
+                    if isinstance(domain, str) and domain:
+                        domain_bucket = media_by_domain.setdefault(domain, {})
+                        key = f"{stage}:{status}"
+                        domain_bucket[key] = domain_bucket.get(key, 0) + 1
             ts = record.get("ts")
             if isinstance(ts, str):
                 last_ts = ts
@@ -105,6 +144,26 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
         "by_reason": reasons,
         "context_bytes_by_command": cmd_bytes,
         "context_bytes_total": total_cmd_bytes,
+        "production": {
+            "unique_started_posts": len(started_posts),
+            "unique_blocked_posts": len(blocked_posts),
+            "unique_ready_posts": len(ready_posts),
+            "first_pass_ready": first_pass_ready,
+            "first_pass_ready_rate": (
+                round(first_pass_ready / ready_with_first_pass, 4)
+                if ready_with_first_pass else None
+            ),
+            "average_attempts_per_ready": (
+                round(ready_attempts / ready_with_first_pass, 2)
+                if ready_with_first_pass else None
+            ),
+            "average_ready_duration_ms": (
+                round(sum(ready_durations) / len(ready_durations))
+                if ready_durations else None
+            ),
+        },
+        "media_funnel": media_funnel,
+        "media_by_domain": media_by_domain,
         "last_event_at": last_ts,
     }
 

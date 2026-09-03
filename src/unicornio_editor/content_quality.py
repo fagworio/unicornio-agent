@@ -64,11 +64,9 @@ def validate_content_quality(
     *,
     title: str,
     focus_keyword: str,
-    image_count: int,
     matched_topics: Iterable[str],
     allowed_topics: Iterable[str] = (),
     related_terms: Iterable[str] = (),
-    required_images: int | None = None,
 ) -> dict[str, int | bool]:
     if not isinstance(html, str) or not html.strip():
         raise ContentQualityError("content must contain readable text")
@@ -77,20 +75,10 @@ def validate_content_quality(
     if not isinstance(focus_keyword, str) or not focus_keyword.strip():
         raise ContentQualityError("focus keyword is required")
     words = word_count(html)
-    required_images = (
-        required_images
-        if required_images is not None
-        else minimum_image_count(words)
-    )
-    # The 2/4/6 minimum ALWAYS holds: an image-less post is a low-quality
-    # post and must not be published. The relevance-first policy still
-    # applies to the images themselves (a wrong image is rejected by the
-    # relevance gate) — it never waives the count. Listicles get their own
-    # minimum (max(2, item count)) from the checklist via required_images.
-    if image_count < required_images:
-        raise ContentQualityError(
-            f"content with {words} words requires at least {required_images} relevant images"
-        )
+    # Quantidade de imagens pertence exclusivamente ao gate
+    # ``imagens_no_corpo``. Mantê-la aqui também produzia duas falhas para a
+    # mesma causa e tornava ``qualidade_texto`` impossível de interpretar na
+    # telemetria.
     topics = {item.strip().casefold() for item in matched_topics if isinstance(item, str) and item.strip()}
     allowed = {item.strip().casefold() for item in allowed_topics if isinstance(item, str) and item.strip()}
     if not topics:
@@ -111,7 +99,7 @@ def validate_content_quality(
         raise ContentQualityError("generic AI-like phrasing detected")
     if words > 600 and not re.search(r"<h[2-4]\b", html, re.IGNORECASE):
         raise ContentQualityError("long content requires descriptive subheadings")
-    return {"words": words, "required_images": required_images, "image_count": image_count, "passed": True}
+    return {"words": words, "passed": True}
 
 
 def validate_centered_images(html: str) -> None:

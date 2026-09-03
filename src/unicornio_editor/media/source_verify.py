@@ -15,7 +15,7 @@ import hashlib
 import re
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from .url_safety import inspect_remote_url
 
@@ -90,7 +90,19 @@ def _image_urls_in_page(html: str, base_url: str) -> list[str]:
             continue
         seen.add(full)
         resolved.append(full)
-    return resolved[: _MAX_DOWNLOADS * 2]
+    # Preserve the complete set found inside the bounded 2 MiB page. The old
+    # first-12 truncation rejected a valid direct_image_url merely because a
+    # theme placed it later in the markup. Download limits are enforced when
+    # comparing candidates, not while discovering the exact URL.
+    return resolved
+
+
+def _normalized_url(url: str) -> str:
+    """Normalize harmless URL differences for exact source-page matching."""
+    parsed = urlparse(unquote(url.strip()))
+    return urlunparse(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", parsed.query, "")
+    )
 
 
 def _md5(data: bytes) -> str:
@@ -132,12 +144,29 @@ def verify_downloaded_against_source(
     except OSError as exc:
         return False, f"falha ao ler o arquivo baixado: {exc}"
 
-    slug = _slug(direct_image_url)
-    same_slug = [url for url in listed if _slug(url) == slug]
-    for url in same_slug:
+    direct_normalized = _normalized_url(direct_image_url)
+    exact = [url for url in listed if _normalized_url(url) == direct_normalized]
+    for url in exact:
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if data is not None and _md5(data) == downloaded_hash:
-            return True, "imagem confirmada na pagina de origem (bytes iguais)"
+            return True, "URL exata confirmada na pagina de origem (bytes iguais)"
+    if exact:
+        return (
+            False,
+            "CDN serviu conteudo divergente da URL exata listada na pagina de origem "
+            "(bytes diferentes); fonte instavel — troque a URL da imagem",
+        )
+
+    slug = _slug(direct_image_url)
+    same_slug = [url for url in listed if _slug(url) == slug]
+    downloads = 0
+    for url in same_slug:
+        if downloads >= _MAX_DOWNLOADS:
+            break
+        downloads += 1
+        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        if data is not None and _md5(data) == downloaded_hash:
+            return True, "imagem confirmada na pagina de origem por slug e bytes"
     if same_slug:
         return (
             False,
@@ -145,6 +174,9 @@ def verify_downloaded_against_source(
             "(bytes diferentes); fonte instavel — troque a URL da imagem",
         )
     for url in listed:
+        if downloads >= _MAX_DOWNLOADS:
+            break
+        downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if data is not None and _md5(data) == downloaded_hash:
             return True, "imagem confirmada na pagina de origem (bytes iguais)"

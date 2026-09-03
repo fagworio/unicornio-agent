@@ -93,10 +93,25 @@ def find_game_trailer(
 
     Fail-closed: returns ``None`` when nothing relevant can be confirmed.
     """
+    trailer, _status = find_game_trailer_with_status(
+        game_name, timeout=timeout, max_candidates=max_candidates
+    )
+    return trailer
+
+
+def find_game_trailer_with_status(
+    game_name: str,
+    *,
+    timeout: float = 15.0,
+    max_candidates: int = 5,
+) -> tuple[dict[str, str] | None, str]:
+    """Discover a trailer and distinguish absence from a failed search."""
     if not isinstance(game_name, str) or not game_name.strip():
         raise TrailerError("game_name is required")
     name = game_name.strip()
     candidates = _search_youtube(f"{name} trailer", limit=max_candidates, timeout=timeout)
+    if candidates is None:
+        return None, "search_failed"
     for candidate in candidates:
         title = candidate.get("title") or ""
         if not _looks_like_trailer(title):
@@ -119,8 +134,8 @@ def find_game_trailer(
             "embed_url": f"https://www.youtube-nocookie.com/embed/{video_id}",
             "thumbnail_url": meta.get("thumbnail_url") or "",
             "matched_title": title,
-        }
-    return None
+        }, "found"
+    return None, "official_not_found"
 
 
 def build_trailer_html(trailer: Mapping[str, Any]) -> str:
@@ -149,14 +164,14 @@ def build_trailer_html(trailer: Mapping[str, Any]) -> str:
     )
 
 
-def _search_youtube(query: str, *, limit: int, timeout: float) -> list[dict[str, str]]:
+def _search_youtube(query: str, *, limit: int, timeout: float) -> list[dict[str, str]] | None:
     url = f"{_YT_SEARCH_URL}?{urlencode({'search_query': query, 'hl': 'en', 'gl': 'US'})}"
     request = Request(url, headers=_BROWSER_HEADERS)
     try:
         with urlopen(request, timeout=timeout) as response:
             html = response.read(2_000_000).decode("utf-8", errors="replace")
     except (HTTPError, URLError, TimeoutError, OSError):
-        return []
+        return None
     videos = _parse_initial_data(html)
     if not videos:
         videos = _parse_video_ids_fallback(html)

@@ -8,8 +8,10 @@ import datetime
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .backup import SnapshotStore, atomic_write_text
 from .builder import BuilderError, append_canonical_footer
@@ -39,6 +41,8 @@ from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
+from .media.vision_cache import get_cached_decision, set_cached_decision
+from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
 from .media.wordpress_media import upload_image
 from .observability import append_telemetry, build_processing_markers
 from .seo.rank_math import build_meta
@@ -56,7 +60,7 @@ from .state import (
     retry_eligible,
     rework_backoff,
 )
-from .trailer import TrailerError, build_trailer_html, find_game_trailer
+from .trailer import TrailerError, build_trailer_html, find_game_trailer_with_status
 from .wordpress import WordPressClient
 
 
@@ -127,8 +131,14 @@ def _apply_editorial_unlocked(
     30m/2h, 3ª falha vira AWAITING_HUMAN). Nenhum post quebrado chega ao
     publish: o publish-ready apenas confirma o hash.
     """
+    started_at = time.monotonic()
     post = client.get_post(post_id)
     _require_pending(post)
+    attempts_before = read_state(post)["attempts"]
+    append_telemetry(
+        root, "apply_started", post_id=post_id,
+        attempt=attempts_before + 1, first_pass=attempts_before == 0,
+    )
     backup = SnapshotStore(root).save(post_id, post)
     editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
     decision = editorial["site_relevance"]["decision"]
@@ -202,7 +212,17 @@ def _apply_editorial_unlocked(
     # SEO do zero).
     _save_draft(root, post_id, editorial)
 
-    media_results, featured_id, featured_credit = _execute_media_plan(editorial, config, client)
+    media_preflight = validate_media_plan(
+        client,
+        editorial,
+        config=config,
+        root=root,
+        post_title=_post_title(post),
+        existing_featured_id=int(post.get("featured_media") or 0) or None,
+    )
+    media_results, featured_id, featured_credit = _execute_media_plan(
+        editorial, config, client, root, preflight=media_preflight
+    )
     if featured_id is None and not config.dry_run:
         featured_id = _normalize_existing_featured(client, config, post, editorial)
     html = editorial["cleaned_html"]
@@ -227,7 +247,15 @@ def _apply_editorial_unlocked(
             )
             html = insert_media(html, plan, listicle=is_list)
     editorial_with_media = {**editorial, "cleaned_html": html}
-    content, trailer = compose_final_content(editorial_with_media, config, original_link_of(post))
+    content, trailer, trailer_status = compose_final_content(
+        editorial_with_media, config, original_link_of(post)
+    )
+    editorial_with_media = attach_trailer_audit(
+        editorial_with_media, trailer, search_status=trailer_status
+    )
+    # Atualiza o artefato durável com o resultado determinístico da busca. Em
+    # uma revalidação STALE, o checklist consegue auditar por que não há embed.
+    _save_editorial_latest(root, post_id, editorial_with_media)
     if featured_credit and not config.dry_run:
         content = append_featured_credit(content, featured_credit)
     inline_normalization: list[dict[str, Any]] = []
@@ -246,7 +274,6 @@ def _apply_editorial_unlocked(
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
     # Tentativas anteriores (antes desta): base do teto deterministico de
     # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
-    attempts_before = read_state(post)["attempts"]
     checklist = run_pre_publish_checklist(
         post={**post, "featured_media": featured_id or post.get("featured_media")},
         editorial=editorial_with_media,
@@ -330,7 +357,19 @@ def _apply_editorial_unlocked(
                 blocked_detail=(
                     "; ".join(str(item.get("detail") or "")[:120] for item in failed_items[:3])
                 ),
+                failure_reasons=[item["name"] for item in failed_items],
+                first_pass=attempts_before == 0,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
             )
+            for item in failed_items:
+                append_telemetry(
+                    root,
+                    "checklist_block",
+                    post_id=post_id,
+                    attempt=backoff["attempts"],
+                    reason=item["name"],
+                    detail=str(item.get("detail") or "")[:200],
+                )
             return {
                 "post_id": post_id,
                 "wordpress_changed": baseline_changed,
@@ -397,7 +436,14 @@ def _apply_editorial_unlocked(
     # continuar listando blocked/uncertain (senao o monitor acordaria o agente
     # em loop para "corrigir" um post ja corrigido).
     _clear_processing_markers(root, post_id)
-    append_telemetry(root, "apply_ready", post_id=post_id)
+    append_telemetry(
+        root,
+        "apply_ready",
+        post_id=post_id,
+        attempts=attempts_before + 1,
+        first_pass=attempts_before == 0,
+        duration_ms=round((time.monotonic() - started_at) * 1000),
+    )
     return {
         "post_id": post_id,
         "wordpress_changed": True,
@@ -797,6 +843,11 @@ def _duplicate_source_reason(plan: list[dict[str, Any]], index: int, seen: set[s
 def validate_media_plan(
     client: WordPressClient,
     editorial: dict[str, Any],
+    *,
+    config: Config | None = None,
+    root: Path | None = None,
+    post_title: str = "",
+    existing_featured_id: int | None = None,
 ) -> dict[str, Any]:
     """Valida o media_plan de um editorial SEM executar download/upload.
 
@@ -805,8 +856,6 @@ def validate_media_plan(
     rejeitados no resultado). Deterministico e somente leitura.
     """
     plan = editorial.get("media_plan") or []
-    if not plan:
-        return {"valid": 0, "rejected": []}
     entities = extract_entities(
         title=str((editorial.get("seo") or {}).get("title") or ""),
         content_html=str(editorial.get("cleaned_html") or ""),
@@ -816,16 +865,222 @@ def validate_media_plan(
     cache: dict[int, dict[str, Any]] = {}
     valid = 0
     rejected: list[dict[str, Any]] = []
+    featured_vision: list[dict[str, Any]] = []
     seen_sources: set[str] = set()
     for index, item in enumerate(plan):
+        if root is not None:
+            append_telemetry(
+                root,
+                "media_funnel",
+                stage="candidate",
+                status="seen",
+                item_index=index,
+                featured=bool(item.get("is_featured")),
+                source_domain=(
+                    urlparse(str(item.get("direct_image_url") or "")).hostname or ""
+                ).lower(),
+            )
         reason = _media_item_rejection(item, entities, client, cache)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
+        if reason is None and bool(item.get("is_featured")):
+            vision = _validate_featured_candidate_vision(
+                item, editorial, client, cache, config=config, root=root
+            )
+            featured_vision.append({"index": index, **vision})
+            if root is not None:
+                append_telemetry(
+                    root,
+                    "media_funnel",
+                    stage="featured_vision",
+                    status=vision["status"],
+                    item_index=index,
+                    featured=True,
+                    source_domain=(
+                        urlparse(str(item.get("direct_image_url") or "")).hostname or ""
+                    ).lower(),
+                    detail=str(vision.get("reason") or "")[:160],
+                )
+            if vision["status"] == "rejected":
+                reason = str(vision["reason"])
         if reason:
             rejected.append({"index": index, "reason": reason})
         else:
             valid += 1
-    return {"valid": valid, "rejected": rejected}
+        if root is not None:
+            append_telemetry(
+                root,
+                "media_funnel",
+                stage="preflight",
+                status="rejected" if reason else "passed",
+                item_index=index,
+                featured=bool(item.get("is_featured")),
+                source_domain=(
+                    urlparse(str(item.get("direct_image_url") or "")).hostname or ""
+                ).lower(),
+                detail=str(reason or "")[:160],
+            )
+    if existing_featured_id and not any(bool(item.get("is_featured")) for item in plan):
+        existing_item = {
+            "media_library_id": existing_featured_id,
+            "is_featured": True,
+            "alt_text": "",
+        }
+        vision = _validate_featured_candidate_vision(
+            existing_item, editorial, client, cache, config=config, root=root
+        )
+        featured_vision.append(
+            {"index": None, "existing_featured_id": existing_featured_id, **vision}
+        )
+        if root is not None:
+            attachment = cache.get(existing_featured_id) or {}
+            append_telemetry(
+                root,
+                "media_funnel",
+                stage="featured_vision",
+                status=vision["status"],
+                item_index=-1,
+                featured=True,
+                existing=True,
+                source_domain=(
+                    urlparse(str(attachment.get("source_url") or "")).hostname or ""
+                ).lower(),
+                detail=str(vision.get("reason") or "")[:160],
+            )
+    rejected_indexes = {row["index"] for row in rejected}
+    accepted = {index for index in range(len(plan)) if index not in rejected_indexes}
+    listicle = _listicle_media_capacity(
+        editorial, entities, accepted, post_title=post_title
+    )
+    return {
+        "valid": valid,
+        "rejected": rejected,
+        "listicle": listicle,
+        "featured_vision": featured_vision,
+    }
+
+
+def _validate_featured_candidate_vision(
+    item: dict[str, Any],
+    editorial: dict[str, Any],
+    client: WordPressClient,
+    attachment_cache: dict[int, dict[str, Any]],
+    *,
+    config: Config | None,
+    root: Path | None,
+) -> dict[str, Any]:
+    """Run the expensive featured pixel gate during ``media-validate``.
+
+    The decision is cached before upload, so share cards, logos and unrelated
+    banners are rejected while the media plan is still cheap to replace.
+    """
+    if config is None:
+        return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
+    ready, message = vision_config_ready(
+        enabled=config.vision_enabled, api_key=config.vision_api_key
+    )
+    if not ready:
+        return {"status": "skipped", "reason": message}
+    subject = str((editorial.get("seo") or {}).get("title") or "").strip()
+    media_id = item.get("media_library_id")
+    if media_id:
+        attachment = attachment_cache.get(media_id)
+        if attachment is None:
+            attachment = client.get_media(media_id)
+            attachment_cache[media_id] = attachment
+        image_url = str(attachment.get("source_url") or "").strip()
+    else:
+        image_url = str(item.get("direct_image_url") or "").strip()
+    if not image_url or not subject:
+        return {"status": "rejected", "reason": "featured sem URL ou assunto para validar por visao"}
+
+    cache_root = root or Path(".")
+    cached = get_cached_decision(cache_root, image_url, subject)
+    if cached is not None:
+        ok = cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.85
+        return {
+            "status": "passed" if ok else "rejected",
+            "reason": "decisao visual reutilizada do cache",
+            "cached": True,
+        }
+    try:
+        ok, reason = verify_image_subject(
+            image_url=image_url,
+            subject=subject,
+            api_key=config.vision_api_key,
+            base_url=config.vision_base_url,
+            model=config.vision_model,
+            timeout=config.http_timeout,
+            context="preflight da imagem de destaque do artigo",
+            category="game_artwork",
+            alt=str(item.get("alt_text") or subject),
+            detail=config.vision_detail,
+            allow_high=True,
+            require_key_art=True,
+        )
+    except (VisionGateError, Exception) as exc:  # noqa: BLE001 - fail closed
+        return {"status": "rejected", "reason": f"visao da featured falhou: {exc}", "cached": False}
+    set_cached_decision(
+        cache_root,
+        image_url,
+        subject,
+        {
+            "status": "MATCH" if ok else "UNRELATED",
+            "confidence": 1.0,
+            "visual_type": "other",
+        },
+    )
+    return {"status": "passed" if ok else "rejected", "reason": reason, "cached": False}
+
+
+def _listicle_media_capacity(
+    editorial: dict[str, Any],
+    entities: set[str],
+    accepted_plan_indexes: set[int] | None = None,
+    *,
+    post_title: str = "",
+) -> dict[str, Any]:
+    """Return the verified inline-image capacity before listicle authoring.
+
+    A listicle may promise only as many items as it can cover with distinct,
+    relevant inline images. Featured media is deliberately excluded.
+    """
+    html = str(editorial.get("cleaned_html") or "")
+    title = post_title or str((editorial.get("seo") or {}).get("title") or "")
+    promised = detect_list_format(title, html)
+    if promised is None:
+        return {"applicable": False}
+
+    sources: set[str] = set()
+    for image in iter_content_images(html):
+        source = str(image.get("src") or "").strip()
+        if source and image_is_relevant(
+            alt_text=str(image.get("alt") or ""),
+            credit_text=str(image.get("caption") or ""),
+            source_url=source,
+            entities=entities,
+        ):
+            sources.add(f"content:{source}")
+
+    plan = editorial.get("media_plan") or []
+    for index, item in enumerate(plan):
+        if bool(item.get("is_featured")):
+            continue
+        if accepted_plan_indexes is not None and index not in accepted_plan_indexes:
+            continue
+        key = _plan_source_key(item)
+        if key and not key.endswith(":"):
+            sources.add(f"plan:{key}")
+
+    available = len(sources)
+    return {
+        "applicable": True,
+        "promised_items": promised,
+        "verified_inline_capacity": available,
+        "missing": max(0, promised - available),
+        "feasible": available >= promised,
+        "featured_counted": False,
+    }
 
 
 def get_cleaned_content(
@@ -858,6 +1113,9 @@ def _execute_media_plan(
     editorial: dict[str, Any],
     config: Config,
     client: WordPressClient,
+    root: Path,
+    *,
+    preflight: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -872,6 +1130,21 @@ def _execute_media_plan(
     plan = editorial.get("media_plan") or []
     if not plan:
         return [], None, None
+    planning = (preflight or {}).get("listicle") or {}
+    if planning.get("applicable") and not planning.get("feasible"):
+        detail = (
+            f"planejamento media-first: listicle promete {planning.get('promised_items')} itens, "
+            f"mas possui capacidade validada para {planning.get('verified_inline_capacity')} "
+            "imagem(ns) inline distinta(s); reduza itens ou encontre uma imagem por item"
+        )
+        return [
+            {
+                "paragraph_index": item.get("paragraph_index"),
+                "status": "rejected",
+                "detail": detail,
+            }
+            for item in plan
+        ], None, None
     entities = extract_entities(
         title=str((editorial.get("seo") or {}).get("title") or ""),
         content_html=str(editorial.get("cleaned_html") or ""),
@@ -880,6 +1153,25 @@ def _execute_media_plan(
     )
 
     attachment_cache: dict[int, dict[str, Any]] = {}
+
+    def _funnel(
+        stage: str,
+        status: str,
+        item: dict[str, Any],
+        position: int,
+        detail: str = "",
+    ) -> None:
+        source = str(item.get("direct_image_url") or "")
+        append_telemetry(
+            root,
+            "media_funnel",
+            stage=stage,
+            status=status,
+            item_index=position,
+            featured=bool(item.get("is_featured")),
+            source_domain=(urlparse(source).hostname or "").lower(),
+            detail=detail[:160],
+        )
 
     def _attachment_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         """Resolve a Media Library attachment referenced by ``media_library_id``.
@@ -926,8 +1218,18 @@ def _execute_media_plan(
     # attachment_cache e populado aqui (get_media), por isso fica fora do
     # paralelismo.
     pending: list[tuple[int, dict[str, Any]]] = []
+    preflight_rejections = {
+        int(row["index"]): str(row.get("reason") or "media-validate rejeitou o item")
+        for row in ((preflight or {}).get("rejected") or [])
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    preflight_vision = {
+        int(row["index"]): row
+        for row in ((preflight or {}).get("featured_vision") or [])
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
     for position, item in enumerate(plan):
-        reason = _rejection_reason(item)
+        reason = preflight_rejections.get(position) or _rejection_reason(item)
         if reason is None:
             reason = _duplicate_source_reason(plan, position, seen_sources)
         if reason:
@@ -972,6 +1274,7 @@ def _execute_media_plan(
                         root, "remote_url_audit", url=finding.url, reason=finding.reason
                     ),
                 )
+                _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
                 ok, verify_reason = verify_downloaded_against_source(
@@ -984,11 +1287,13 @@ def _execute_media_plan(
                     ),
                 )
                 if not ok:
+                    _funnel("source_verify", "rejected", item, position, verify_reason)
                     return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
                         "detail": f"verificacao de origem: {verify_reason}",
                     }
+                _funnel("source_verify", "passed", item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))
                 transparency = "flattened" if image_has_transparency(source) else "none"
                 if is_featured:
@@ -997,6 +1302,7 @@ def _execute_media_plan(
                     webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
                 # Featured "so texto" nao e key art: rejeita.
                 if is_featured and image_is_mostly_flat(webp):
+                    _funnel("conversion", "rejected", item, position, "featured plana")
                     return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
@@ -1004,11 +1310,26 @@ def _execute_media_plan(
                         "escolha uma key art/imagem real da obra",
                     }
                 width, height = image_dimensions(webp)
+                _funnel("conversion", "passed", item, position, f"{width}x{height}")
                 media = upload_image(client, webp, evidence)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
                     raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                # A visão cara já ocorreu no media-validate. Transfere a
+                # aprovação para a URL hospedada no WordPress; o checklist
+                # final continua fail-closed, mas consome o cache em vez de
+                # criar uma segunda chamada tardia.
+                vision = preflight_vision.get(position)
+                if is_featured and vision and vision.get("status") == "passed":
+                    subject = str((editorial.get("seo") or {}).get("title") or "").strip()
+                    set_cached_decision(
+                        root,
+                        str(media_url),
+                        subject,
+                        {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
+                    )
+                _funnel("upload", "passed", item, position)
                 return position, {
                     "paragraph_index": item["paragraph_index"],
                     "media_id": media_id,
@@ -1038,6 +1359,7 @@ def _execute_media_plan(
                         try:
                             processed.append(future.result())
                         except Exception as exc:  # noqa: BLE001 - report one failed item
+                            _funnel("worker", "error", item, position, str(exc))
                             processed.append(
                                 (
                                     position,
@@ -1585,22 +1907,52 @@ def publish_ready_posts(
     return outcomes
 
 
-def _discover_trailer(editorial: dict[str, Any], config: Config) -> dict[str, str] | None:
+def _discover_trailer(
+    editorial: dict[str, Any], config: Config
+) -> tuple[dict[str, str] | None, str]:
     """Discover a YouTube trailer for game content; fail-closed to None."""
     game_name = editorial.get("game_name")
     if not isinstance(game_name, str) or not game_name.strip():
-        return None
+        return None, "not_applicable"
     try:
-        return find_game_trailer(game_name, timeout=config.http_timeout)
+        return find_game_trailer_with_status(game_name, timeout=config.http_timeout)
     except TrailerError:
-        return None
+        return None, "search_failed"
+
+
+def attach_trailer_audit(
+    editorial: dict[str, Any],
+    trailer: dict[str, str] | None,
+    *,
+    search_status: str = "official_not_found",
+) -> dict[str, Any]:
+    """Attach code-generated evidence when no official trailer is found."""
+    result = dict(editorial)
+    game_name = editorial.get("game_name")
+    if (
+        isinstance(game_name, str)
+        and game_name.strip()
+        and trailer is None
+        and search_status == "official_not_found"
+    ):
+        result["trailer_unavailable"] = True
+        result["trailer_search_evidence"] = {
+            "query": f"{game_name.strip()} trailer",
+            "provider": "youtube",
+            "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "result": "official_not_found",
+        }
+    else:
+        result.pop("trailer_unavailable", None)
+        result.pop("trailer_search_evidence", None)
+    return result
 
 
 def compose_final_content(
     editorial: dict[str, Any],
     config: Config,
     original_link: str | None,
-) -> tuple[str, dict[str, str] | None]:
+) -> tuple[str, dict[str, str] | None, str]:
     """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
 
     Returns ``(content, trailer)`` so callers can report what was embedded.
@@ -1619,10 +1971,10 @@ def compose_final_content(
     from .media.text import dedupe_credit_figures
 
     html = dedupe_credit_figures(html)
-    trailer = _discover_trailer(editorial, config)
+    trailer, trailer_status = _discover_trailer(editorial, config)
     if trailer is not None:
         html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
-    return append_canonical_footer(html, original_link), trailer
+    return append_canonical_footer(html, original_link), trailer, trailer_status
 
 
 def original_link_of(post: dict[str, Any]) -> str | None:

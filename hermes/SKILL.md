@@ -49,8 +49,8 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 5. IMAGENS: `references/politica-imagens.md` antes do media_plan. Regras-chave:
    2/4/6 SEMPRE (2<=600, 4<=1000, 6+; listicle=max(2,itens)); **LISTICLE SOB
    MEDIDA (auto-melhoria 2026-09-01): 1 item = 1 imagem real — dimensione o
-   nº de itens pelo que a busca devolver (fonte com 4 imagens reais da obra =
-   listicle de 4-6 itens; NUNCA Top 10 prometendo 10 imagens que a fonte não
+   nº de itens pelo que a busca devolver (4 imagens inline reais e distintas =
+   NO MAXIMO 4 itens; a featured não entra nessa conta; NUNCA Top 10 prometendo 10 imagens que a fonte não
    tem — bloqueio garantido `imagens_no_corpo` + tentativas queimadas); toda imagem retrata
    EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
    direta listada na página de origem; crédito visível em toda imagem; sem imagem
@@ -93,8 +93,10 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
  falha ("pagina de origem inacessivel") — reuso real da Media Library só
  passa com `media_library_id` + attachment com crédito, ou quando uma página
  publicada do prod embute a imagem S3.
-6. Mídia nova → valide antes: `media-validate editorial.json` (1 chamada;
-   {valid, rejected}).
+6. Mídia nova → valide antes: `media-validate editorial.json --post-id POST_ID`
+   (1 chamada; `{valid,rejected,listicle,featured_vision}`). O preflight usa o
+   título real do WordPress, exclui a featured da capacidade do listicle e roda
+   a visão da featured antes do upload.
 7. `apply POST_ID editorial.json --compact` = preflight COMPLETO (resolver
    editorial → mídia → conteúdo → checklist INTEIRO → só então grava). PASS →
    `status:ready` (manifest SHA-256; publish-ready confirma o hash). FAIL →
@@ -152,7 +154,8 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
   manualmente — o apply verifica; `media-validate` valida em 1 chamada.
 - `apply --compact` SEMPRE; `--dry-run` só sob demanda.
 - **paragraph_index do media_plan**: imagens entram APÓS o parágrafo alvo, exigem >=3 parágrafos de distância entre si e o índice máximo é `len(</p> do conteúdo) - 2` (senão: `media must be inserted between paragraphs`). A featured NÃO entra no insert (vai como featured_media), então não ocupa vaga de spacing — mas o índice dela conta na validação do plano. Conte os blocos com `content POST_ID` antes de montar o plano.
-- `media-validate` antes do apply com mídia nova (1 chamada).
+- `media-validate editorial.json --post-id POST_ID` antes do apply com mídia
+  nova (1 chamada); ajuste o número de itens ao `verified_inline_capacity`.
 - `prepare`/`content` SÓ para reescrever (no-rewrite não precisa).
 - Decida skip/uncertain SÓ pelo card.
 - Batch: respeite ``EDITOR_MAX_POSTS_PER_RUN`` (padrão: 5) como teto de posts
@@ -168,6 +171,9 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - Skip conservador: só com confidence >= 0.9; abaixo, o apply grava uncertain.
 - Tópicos: `matched_topics` precisa intersectar SITE_TOPICS.
 - Alt de imagem SEMPRE nomeia a obra, nunca genérico.
+- Jogo sem trailer oficial: nunca use fan-made; o código registra a busca e só
+  concede waiver quando o resultado auditado é `official_not_found`. Falha da
+  busca não concede waiver.
 - IMAGENS SÃO OBRIGATÓRIAS (2/4/6 SEM waiver): sem imagens reais até o mínimo,
   o apply recusa. Se após busca honesta não houver imagem, registre `uncertain`.
 

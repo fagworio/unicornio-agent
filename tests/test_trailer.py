@@ -5,6 +5,7 @@ from unicornio_editor.trailer import (
     TrailerError,
     build_trailer_html,
     find_game_trailer,
+    find_game_trailer_with_status,
     validate_trailer,
 )
 
@@ -99,6 +100,12 @@ class TrailerDiscoveryTests(unittest.TestCase):
     def test_returns_none_when_search_fails(self):
         with mock.patch("unicornio_editor.trailer._search_youtube", return_value=[]):
             self.assertIsNone(find_game_trailer("Hellraiser: Revival"))
+
+    def test_audited_discovery_distinguishes_transport_failure(self):
+        with mock.patch("unicornio_editor.trailer._search_youtube", return_value=None):
+            trailer, status = find_game_trailer_with_status("Hellraiser: Revival")
+        self.assertIsNone(trailer)
+        self.assertEqual(status, "search_failed")
 
     def test_rejects_empty_game_name(self):
         with self.assertRaises(TrailerError):

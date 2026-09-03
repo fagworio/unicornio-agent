@@ -42,6 +42,25 @@ class EditorialSchemaTests(unittest.TestCase):
         with self.assertRaises(EditorialValidationError):
             validate_editorial(payload)
 
+    def test_accepts_audited_trailer_unavailable_waiver(self):
+        payload = valid_payload()
+        payload["game_name"] = "Jogo sem trailer"
+        payload["trailer_unavailable"] = True
+        payload["trailer_search_evidence"] = {
+            "query": "Jogo sem trailer trailer",
+            "provider": "youtube",
+            "searched_at": "2026-09-03T12:00:00+00:00",
+            "result": "official_not_found",
+        }
+        self.assertTrue(validate_editorial(payload)["trailer_unavailable"])
+
+    def test_rejects_unaudited_trailer_waiver(self):
+        payload = valid_payload()
+        payload["game_name"] = "Jogo sem trailer"
+        payload["trailer_unavailable"] = True
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
     def test_rejects_unknown_top_level_field(self):
         payload = valid_payload()
         payload["publish"] = True

@@ -19,6 +19,10 @@ _TOP_LEVEL = {
     "needs_trailer",
     "trailer_url",
     "game_name",
+    # Evidência gerada pelo código após uma busca oficial sem resultado. O
+    # modelo não pode declarar apenas o waiver: ambos os campos são validados.
+    "trailer_unavailable",
+    "trailer_search_evidence",
     # Busca de imagens esgotada (media-search-web devolveu count=0):
     # autoriza o waiver do minimo de imagens inline (artigo publica com
     # featured + texto). Listicle NAO dispensa — vai para awaiting_human.
@@ -53,7 +57,15 @@ _MEDIA = {
 def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.8) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise EditorialValidationError("editorial result must be an object")
-    _keys(payload, _TOP_LEVEL, "top-level", optional={"cleaned_html", "seo", "media_exhausted"})
+    _keys(
+        payload,
+        _TOP_LEVEL,
+        "top-level",
+        optional={
+            "cleaned_html", "seo", "media_exhausted",
+            "trailer_unavailable", "trailer_search_evidence",
+        },
+    )
     relevance = _object(payload["site_relevance"], "site_relevance")
     _keys(relevance, _RELEVANCE, "site_relevance")
     decision = relevance["decision"]
@@ -134,6 +146,30 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     game_name = payload["game_name"]
     if game_name is not None and (not isinstance(game_name, str) or not game_name.strip()):
         raise EditorialValidationError("game_name must be null or a non-empty string")
+
+    trailer_unavailable = payload.get("trailer_unavailable", False)
+    if not isinstance(trailer_unavailable, bool):
+        raise EditorialValidationError("trailer_unavailable must be boolean")
+    evidence = payload.get("trailer_search_evidence")
+    if trailer_unavailable:
+        if not game_name:
+            raise EditorialValidationError("trailer_unavailable requires game_name")
+        evidence_obj = _object(evidence, "trailer_search_evidence")
+        _keys(
+            evidence_obj,
+            {"query", "provider", "searched_at", "result"},
+            "trailer_search_evidence",
+        )
+        for name in ("query", "provider", "searched_at"):
+            _nonempty_string(evidence_obj[name], f"trailer_search_evidence.{name}")
+        if evidence_obj["result"] != "official_not_found":
+            raise EditorialValidationError(
+                "trailer_search_evidence.result must be official_not_found"
+            )
+    elif evidence is not None:
+        raise EditorialValidationError(
+            "trailer_search_evidence requires trailer_unavailable=true"
+        )
 
     media_exhausted = payload.get("media_exhausted", False)
     if media_exhausted is not None and not isinstance(media_exhausted, bool):

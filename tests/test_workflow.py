@@ -578,6 +578,67 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["rejected"][0]["index"], 1)
         self.assertIn("sem relacao", result["rejected"][0]["reason"])
 
+    def test_media_validate_reports_listicle_capacity_without_counting_featured(self):
+        payload = editorial_payload()
+        payload["seo"]["title"] = "4 melhores jogos para fãs de Redfall"
+        payload["cleaned_html"] = "".join(
+            f"<h2>{n}. Jogo {n}: destaque</h2><p>Videogame e lançamento.</p>"
+            for n in range(1, 5)
+        )
+        payload["media_plan"] = [
+            {
+                **self.media_item(paragraph_index=index),
+                "direct_image_url": f"https://source.example/redfall-{index}.jpg",
+                "source_page_url": f"https://source.example/redfall-{index}",
+                "search_query": "Redfall jogos",
+                "is_featured": index == 3,
+            }
+            for index in range(4)
+        ]
+        result = validate_media_plan(FakeClient(self.post()), payload)
+        self.assertTrue(result["listicle"]["applicable"])
+        self.assertFalse(result["listicle"]["feasible"])
+        self.assertEqual(result["listicle"]["verified_inline_capacity"], 3)
+        self.assertEqual(result["listicle"]["missing"], 1)
+
+    def test_media_validate_rejects_featured_denied_by_vision(self):
+        payload = editorial_payload()
+        payload["media_plan"] = [self.media_item(paragraph_index=0, is_featured=True)]
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2",
+            vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.verify_image_subject",
+            return_value=(False, "imagem e share card"),
+        ):
+            result = validate_media_plan(
+                FakeClient(self.post()), payload, config=config, root=Path(directory)
+            )
+        self.assertEqual(result["valid"], 0)
+        self.assertEqual(result["featured_vision"][0]["status"], "rejected")
+        self.assertIn("share card", result["rejected"][0]["reason"])
+
+    def test_media_validate_checks_existing_featured_when_plan_has_none(self):
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2",
+            vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.verify_image_subject",
+            return_value=(True, "key art confirmada"),
+        ) as vision:
+            result = validate_media_plan(
+                FakeClient(self.post()),
+                editorial_payload(),
+                config=config,
+                root=Path(directory),
+                existing_featured_id=7,
+            )
+        vision.assert_called_once()
+        self.assertEqual(result["featured_vision"][0]["existing_featured_id"], 7)
+        self.assertEqual(result["featured_vision"][0]["status"], "passed")
+
     def test_apply_skip_persists_safe_baseline_but_not_editorial_draft(self):
         with tempfile.TemporaryDirectory() as directory:
             post = self.post()
@@ -642,7 +703,7 @@ class WorkflowTests(unittest.TestCase):
         }
         payload = editorial_payload()
         payload["game_name"] = "Hellraiser: Revival"
-        with mock.patch("unicornio_editor.workflow.find_game_trailer", return_value=trailer):
+        with mock.patch("unicornio_editor.workflow.find_game_trailer_with_status", return_value=(trailer, "found")):
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
@@ -653,12 +714,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["trailer"]["video_id"], "abcDEF12345")
 
     def test_apply_without_game_name_does_not_search(self):
-        with mock.patch("unicornio_editor.workflow.find_game_trailer") as discovery:
+        with mock.patch("unicornio_editor.workflow.find_game_trailer_with_status") as discovery:
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
                 report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
         discovery.assert_not_called()
         self.assertIsNone(report["trailer"])
+
+    def test_apply_persists_audited_waiver_when_official_trailer_is_absent(self):
+        payload = editorial_payload()
+        payload["game_name"] = "Jogo sem trailer"
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.find_game_trailer_with_status",
+            return_value=(None, "official_not_found"),
+        ):
+            root = Path(directory)
+            report = apply_editorial(FakeClient(self.post()), self.config(False), root, 42, payload)
+            saved = json.loads((root / "backups/42/editorial.latest.json").read_text())
+        self.assertEqual(report["status"], "ready")
+        self.assertTrue(saved["trailer_unavailable"])
+        self.assertEqual(saved["trailer_search_evidence"]["result"], "official_not_found")
+
+    def test_apply_does_not_waive_trailer_when_search_failed(self):
+        payload = editorial_payload()
+        payload["game_name"] = "Jogo sem trailer"
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.find_game_trailer_with_status",
+            return_value=(None, "search_failed"),
+        ):
+            report = apply_editorial(
+                FakeClient(self.post()), self.config(False), Path(directory), 42, payload
+            )
+        self.assertEqual(report["status"], "needs_rework")
+        self.assertIn("trailer_youtube", report["blocked_reasons"])
 
     def test_apply_dry_run_reports_trailer_in_preview(self):
         trailer = {
@@ -673,7 +761,7 @@ class WorkflowTests(unittest.TestCase):
         }
         payload = editorial_payload()
         payload["game_name"] = "Hellraiser: Revival"
-        with mock.patch("unicornio_editor.workflow.find_game_trailer", return_value=trailer):
+        with mock.patch("unicornio_editor.workflow.find_game_trailer_with_status", return_value=(trailer, "found")):
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
                 report = apply_editorial(client, self.config(True), Path(directory), 42, payload)
