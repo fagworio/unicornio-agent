@@ -197,6 +197,10 @@ class WordPressClient:
             headers={
                 "Accept": "application/json",
                 "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
                 **self._auth_header(),
             },
             method="POST",
@@ -224,7 +228,15 @@ class WordPressClient:
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{urlencode(query)}"
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            # UA de navegador: o WAF do Cloudflare em prod desafia/bloqueia
+            # o default do urllib (Python-urllib/3.11) com HTTP 522/timeout.
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
         if self.config.app_user and self.config.app_password:
             token = f"{self.config.app_user}:{self.config.app_password}".encode()
             headers["Authorization"] = f"Basic {base64.b64encode(token).decode()}"
