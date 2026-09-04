@@ -5,10 +5,12 @@
 # neste script; o .env continua dry-run para o pipeline editorial).
 # Silencioso quando nao ha nada a publicar (padrao watchdog).
 #
-# Plano de publicacao (America/Sao_Paulo): 5 posts em todas as janelas
-#   00:00 -> 5 | 08:00 -> 5 | 12:00 -> 5 | 18:00 -> 5 | 21:00 -> 5
-# (backlog novo chega entre 03:30 e 05:00; as janelas da manha/noite
-#  publicam o lote fresco, e 00:00 drena o resto do dia anterior)
+# Plano de publicacao (America/Sao_Paulo): janelas efetivas de publicacao.
+#   00:00 | 08:00 | 12:00 | 18:00 | 21:00
+# A janela publica TODOS os posts READY disponiveis (o publish-ready itera
+# em ciclos ate esgotar a fila; PUBLISH_LIMIT=0 = sem teto por janela).
+# O numero 5 (EDITOR_BATCH_LIMIT) e apenas o tamanho do LOTE de processamento
+# do editorial, nao o teto de publicacao da janela.
 #
 # Robustez (janelas nao falham): falha transitória de API/Cloudflare nao
 # derruba a janela — o comando e re-executado com backoff (3 tentativas) e o
@@ -22,12 +24,10 @@ set +a
 export EDITOR_DRY_RUN=false
 export PUBLISH_ENABLED=true
 
-HOUR="$(date +%H)"
-case "$HOUR" in
-  00|08|12|18|21) PUBLISH_LIMIT=5 ;;
-  *)  PUBLISH_LIMIT=0 ;;
-esac
-export PUBLISH_LIMIT
+# PUBLISH_LIMIT=0 = sem teto por janela: o publish-ready publica TODOS os
+# posts READY disponiveis (pagina a fila completa). O cron so dispara nos
+# horarios de janela (00|08|12|18|21) — fora deles o script nao roda.
+export PUBLISH_LIMIT=0
 
 LOG="work/publish-window.log"
 ATTEMPT=1
