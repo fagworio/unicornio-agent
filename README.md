@@ -166,6 +166,8 @@ unicornio-editor telemetry --root .
 # Descoberta de imagens via Google Images com filtro do editor
 # (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2):
 unicornio-editor media-search-web "redfall xbox series" --size xga --ratio w --limit 5
+# Para listas: uma chamada compacta, com uma busca exata por obra em paralelo.
+unicornio-editor media-search-listicle "Blue Box temporada 2" "Psyren anime" --limit 3
 ```
 
 A manutenção é somente relatório e nunca atualiza o WordPress. Para testes locais do Devilbox, consulte `tests/wordpress/README.md`.

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Freio diário de custo para o cron editorial.
 
-É propositalmente opt-in. A atribuição prefere o ID exato do job e, em versões
-do Hermes que ainda não persistem esse ID, usa o ``cwd``/``git_repo_root`` do
-projeto. Sem uma dessas atribuições seguras retorna ``allow``. Quando
-configurado e o limite é atingido, retorna ``block`` para o monitor manter uma
-saída estável e não acordar o LLM.
+É propositalmente opt-in. Quando o banco Hermes persiste o ID do cron, a
+atribuição exige o ID exato do job; usar ``cwd`` nesse caso pode ocultar custo
+quando o diretório armazenado pelo Hermes diverge do diretório do deploy. Em
+versões legadas sem essa coluna, usa ``cwd``/``git_repo_root`` do projeto.
+Sem uma atribuição segura retorna ``allow``. Quando configurado e o limite é
+atingido, retorna ``block`` para o monitor manter uma saída estável e não
+acordar o LLM.
 """
 
 from __future__ import annotations
@@ -42,7 +44,13 @@ def cost_measurement_in_last_24h(
         )
         where = ["source='cron'", "started_at > strftime('%s','now') - 86400"]
         params: tuple[str, ...] = ()
-        if job_id and job_column:
+        if job_column:
+            # Um banco moderno permite a medição exata. Não faça fallback por
+            # diretório quando o ID não foi configurado: uma divergência de cwd
+            # transformaria gasto desconhecido em um enganoso "$0.000".
+            if not job_id:
+                db.close()
+                return None
             where.append(f"{job_column} = ?")
             params = (job_id,)
             scope = f"job editorial {job_id}"

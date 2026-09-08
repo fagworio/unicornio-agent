@@ -52,8 +52,9 @@ Copie/linke `hermes/SKILL.md` para a pasta de skills do Hermes com o nome `unico
 ./hermes/cron-install.sh
 ```
 
-Após o install, registre no `.env` o ID do job editorial criado (ou já
-existente) para que o relatório não some custos de outros crons:
+O instalador registra automaticamente no `.env` o ID do job editorial criado
+(ou já existente), para que o relatório e o teto diário usem atribuição exata.
+Confira o valor após a instalação; só o altere manualmente em uma recuperação:
 
 ```env
 HERMES_EDITORIAL_CRON_JOB_ID=ID_DO_JOB_EDITORIAL

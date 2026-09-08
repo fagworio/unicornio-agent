@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
+from pathlib import Path
 from html import escape
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -45,6 +47,9 @@ _STOPWORDS = {
     "de", "do", "da", "dos", "das", "em", "no", "na", "para", "com", "por",
     "um", "uma", "uns", "umas", "e", "o", "os", "as", "a", "of", "vs", "x",
 }
+_TRAILER_CACHE_FILENAME = "trailer_cache.json"
+_TRAILER_FOUND_TTL = timedelta(days=30)
+_TRAILER_ABSENT_TTL = timedelta(hours=6)
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +141,69 @@ def find_game_trailer_with_status(
             "matched_title": title,
         }, "found"
     return None, "official_not_found"
+
+
+def find_cached_game_trailer_with_status(
+    game_name: str, *, root: Path | None, timeout: float = 15.0, max_candidates: int = 5,
+    discover=None,
+) -> tuple[dict[str, str] | None, str]:
+    """Reuse only verified trailer results; transport failures are never cached."""
+    discover = discover or find_game_trailer_with_status
+    if root is None:
+        return discover(game_name, timeout=timeout, max_candidates=max_candidates)
+    key = _cache_key(game_name)
+    cache = _read_trailer_cache(root)
+    entry = cache.get(key)
+    if isinstance(entry, dict) and _cache_fresh(entry):
+        if entry.get("status") == "found" and isinstance(entry.get("trailer"), dict):
+            return {str(k): str(v) for k, v in entry["trailer"].items()}, "found"
+        if entry.get("status") == "official_not_found":
+            return None, "official_not_found"
+    trailer, status = discover(game_name, timeout=timeout, max_candidates=max_candidates)
+    if status in {"found", "official_not_found"}:
+        cache[key] = {
+            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "status": status,
+            "trailer": trailer,
+        }
+        _write_trailer_cache(root, cache)
+    return trailer, status
+
+
+def _cache_key(game_name: str) -> str:
+    return "-".join(sorted(_normalize(game_name))) or "unknown"
+
+
+def _trailer_cache_path(root: Path) -> Path:
+    return root / "work" / _TRAILER_CACHE_FILENAME
+
+
+def _read_trailer_cache(root: Path) -> dict[str, object]:
+    try:
+        data = json.loads(_trailer_cache_path(root).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_trailer_cache(root: Path, cache: dict[str, object]) -> None:
+    try:
+        path = _trailer_cache_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _cache_fresh(entry: dict) -> bool:
+    try:
+        checked = datetime.fromisoformat(str(entry.get("checked_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if checked.tzinfo is None:
+        return False
+    ttl = _TRAILER_FOUND_TTL if entry.get("status") == "found" else _TRAILER_ABSENT_TTL
+    return checked + ttl > datetime.now(timezone.utc)
 
 
 def build_trailer_html(trailer: Mapping[str, Any]) -> str:

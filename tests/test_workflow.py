@@ -619,6 +619,47 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["featured_vision"][0]["status"], "rejected")
         self.assertIn("share card", result["rejected"][0]["reason"])
 
+    def test_media_validate_skips_paid_vision_for_strong_official_featured_evidence(self):
+        payload = editorial_payload()
+        payload["seo"]["title"] = "Blue Box temporada 2"
+        payload["media_plan"] = [{
+            **self.media_item(paragraph_index=0, is_featured=True),
+            "direct_image_url": "https://image.tmdb.org/t/p/original/abc123.jpg",
+            "source_page_url": "https://anime.com/shows/blue-box",
+            "search_query": "Blue Box temporada 2 anime",
+        }]
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2",
+            vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.verify_image_subject"
+        ) as vision:
+            result = validate_media_plan(
+                FakeClient(self.post()), payload, config=config, root=Path(directory)
+            )
+        vision.assert_not_called()
+        self.assertEqual(result["valid"], 1)
+        self.assertTrue(result["featured_vision"][0]["deterministic"])
+
+    def test_media_validate_keeps_paid_vision_for_untrusted_featured_source(self):
+        payload = editorial_payload()
+        payload["media_plan"] = [{
+            **self.media_item(paragraph_index=0, is_featured=True),
+            "direct_image_url": "https://cdn.example/keyart.jpg",
+            "source_page_url": "https://news.example/redfall",
+            "search_query": "videogame lancamento importante",
+        }]
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2",
+            vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.verify_image_subject", return_value=(True, "confirmada")
+        ) as vision:
+            validate_media_plan(FakeClient(self.post()), payload, config=config, root=Path(directory))
+        vision.assert_called_once()
+
     def test_media_validate_checks_existing_featured_when_plan_has_none(self):
         config = Config(
             "wordpress", "http://wp.test", "/wp-json/wp/v2",
@@ -943,6 +984,45 @@ class WorkflowTests(unittest.TestCase):
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         self.assertEqual(report["state"], "awaiting_human")
         self.assertEqual(report["status"], "needs_rework")
+
+    def test_awaiting_human_normalizes_existing_featured_before_human_review(self):
+        post = self.post()
+        post["featured_media"] = 7
+        payload = editorial_payload()
+        payload["media_exhausted"] = True
+        payload["seo"] = {
+            "title": "2 melhores jogos de videogame",
+            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+            "focus_keyword": "videogame",
+        }
+        payload["cleaned_html"] = (
+            "<h2>1. Jogo: titulo</h2><p>Descricao do primeiro jogo.</p>"
+            "<h2>2. Jogo: titulo</h2><p>Descricao do segundo jogo.</p>"
+        )
+
+        class MediaClient(FakeClient):
+            def get_media(self, _media_id):
+                return {
+                    "id": 7,
+                    "source_url": "https://wp.test/uploads/melhores-jogos-de-videogame.jpg",
+                    "media_details": {"width": 1920, "height": 1080},
+                    "alt_text": "Melhores jogos de videogame",
+                    "title": {"rendered": "Melhores jogos de videogame"},
+                    "caption": {"rendered": "Crédito da imagem: Autor."},
+                }
+
+            def upload_media(self, *_args, **_kwargs):
+                return {"id": 88, "source_url": "https://wp.test/uploads/melhores-jogos-de-videogame-1280x720.webp"}
+
+        with mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/old.jpg")), mock.patch(
+            "unicornio_editor.workflow.prepare_featured_webp", return_value=Path("/tmp/new.webp")
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                client = MediaClient(post)
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        self.assertEqual(report["state"], "awaiting_human")
+        self.assertEqual(client.post["featured_media"], 88)
+        self.assertTrue(report["featured_normalized"])
 
     def test_article_deterministic_waiver_on_second_apply(self):
         # SEM media_exhausted do LLM: um ARTIGO falhando em imagens + featured

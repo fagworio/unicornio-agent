@@ -7,10 +7,30 @@ arquivo (apply.latest.json) para auditoria.
 
 import unittest
 
-from unicornio_editor.cli import _compact_apply, _compact_checklist, _compact_queue, _monitor_line, _record_cmd_output
+from unicornio_editor.cli import (
+    _compact_apply,
+    _compact_cards,
+    _compact_checklist,
+    _compact_queue,
+    _monitor_line,
+    _record_cmd_output,
+)
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_compact_cards_keeps_only_the_next_action(self):
+        result = _compact_cards({"cards": [{
+            "id": 9, "title": "Post", "state": "BLOCKED", "attempts": 2,
+            "seo_exists": True, "images": {"missing": 2}, "featured": {"action": "replace"},
+            "game_hint": "Jogo", "blocked": True, "blocked_reason": "imagens_no_corpo",
+            "fix": {"find_inline_images": 2}, "draft": "work/drafts/9.json",
+            "word_count": 900, "content": "nao deve aparecer",
+        }]})
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["cards"][0]["fix"], {"find_inline_images": 2})
+        self.assertNotIn("word_count", result["cards"][0])
+        self.assertNotIn("content", result["cards"][0])
+
     def test_compact_apply_success_is_minimal(self):
         result = _compact_apply(
             {
@@ -208,6 +228,16 @@ class CompactOutputTests(unittest.TestCase):
 
         args = build_parser().parse_args(["retry-all", "--states", "blocked", "--root", "."])
         self.assertEqual(args.states, "blocked")
+
+    def test_media_search_listicle_parser_accepts_quoted_titles(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["media-search-listicle", "Blue Box temporada 2", "Psyren anime", "--limit", "2"]
+        )
+        self.assertEqual(args.command, "media-search-listicle")
+        self.assertEqual(args.titulos, ["Blue Box temporada 2", "Psyren anime"])
+        self.assertEqual(args.limit, 2)
 
     def test_compact_queue_drops_redundant_fields(self):
         # A projecao compacta mantem o resumo (contagens/ids) e reduz cada post

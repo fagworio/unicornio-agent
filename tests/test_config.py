@@ -74,6 +74,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config()
         self.assertTrue(config.vision_enabled)
         self.assertEqual(config.vision_detail, "low")
+        self.assertEqual(config.vision_mode, "ambiguous")
         self.assertEqual(config.vision_max_low, 12)
 
     def test_vision_key_falls_back_to_openai_api_key(self):
@@ -102,6 +103,11 @@ class ConfigTests(unittest.TestCase):
         }
         with patch.dict(os.environ, values, clear=True):
             self.assertFalse(load_config().vision_enabled)
+
+    def test_vision_mode_rejects_unknown_value(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test", "EDITOR_VISION_MODE": "never"}, clear=True):
+            with self.assertRaises(ConfigError):
+                load_config()
 
 
 if __name__ == "__main__":

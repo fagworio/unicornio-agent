@@ -88,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cards_parser.add_argument("--root", type=Path, default=Path("."))
     cards_parser.add_argument("--limit", type=int, default=None, help="maximo de cartoes (default: EDITOR_BATCH_LIMIT)")
+    cards_parser.add_argument(
+        "--compact", action="store_true",
+        help="mantem apenas campos de decisao/acao por post (economia de contexto)",
+    )
 
     prepare_parser = subparsers.add_parser("prepare", help="cria snapshot e relatório")
     prepare_parser.add_argument("post_id", type=int)
@@ -176,6 +180,24 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: auto)",
     )
     media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
+
+    media_search_listicle_parser = subparsers.add_parser(
+        "media-search-listicle",
+        help="busca em lote candidatos para obras de uma lista; cada titulo recebe uma busca "
+        "independente em paralelo (uma chamada compacta, somente leitura)",
+    )
+    media_search_listicle_parser.add_argument(
+        "titulos", nargs="+", type=str,
+        help='titulos/consultas entre aspas, ex.: "Blue Box temporada 2" "Psyren anime"',
+    )
+    media_search_listicle_parser.add_argument("--size", default="xga")
+    media_search_listicle_parser.add_argument("--ratio", default="w")
+    media_search_listicle_parser.add_argument(
+        "--limit", type=int, default=3,
+        help="maximo de candidatos por titulo (default: 3; mantem a resposta compacta)",
+    )
+    media_search_listicle_parser.add_argument("--engine", default="auto")
+    media_search_listicle_parser.add_argument("--root", type=Path, default=Path("."))
 
     content_parser = subparsers.add_parser(
         "content",
@@ -294,6 +316,27 @@ def _compact_queue(report: dict) -> dict:
         for p in posts
     ]
     return compact
+
+
+def _compact_cards(report: dict) -> dict:
+    """Action-only cards; ``apply`` re-fetches all authoritative WP fields."""
+    cards: list[dict] = []
+    for card in report.get("cards") or []:
+        row = {
+            key: card.get(key)
+            for key in (
+                "id", "title", "state", "attempts", "seo_exists", "images",
+                "featured", "game_hint", "blocked",
+            )
+        }
+        if card.get("blocked"):
+            row.update({
+                "blocked_reason": card.get("blocked_reason"),
+                "fix": card.get("fix"),
+                "draft": card.get("draft"),
+            })
+        cards.append(row)
+    return {"count": len(cards), "cards": cards}
 
 
 def _media_search_item(item: dict) -> dict:
@@ -488,6 +531,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _compact_queue(report) if args.compact else report
         elif args.command == "cards":
             result = build_cards(client, config, args.root, per_page=args.limit)
+            if args.compact:
+                result = _compact_cards(result)
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
             if args.compact:
@@ -513,7 +558,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 editorial = resolve_editorial_defaults(editorial, post)
             backup = SnapshotStore(args.root).save(args.post_id, post)
             content, trailer, trailer_status = compose_final_content(
-                editorial, config, original_link_of(post)
+                editorial, config, original_link_of(post), root=args.root
             )
             editorial = attach_trailer_audit(
                 editorial, trailer, search_status=trailer_status
@@ -569,6 +614,53 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "size_filter": f"{args.size}|{args.ratio}",
                 "count": len(candidates),
                 "candidates": candidates,
+            }
+        elif args.command == "media-search-listicle":
+            from .media.search import search_web_images_batch
+            from .observability import append_telemetry
+
+            rows = search_web_images_batch(
+                args.titulos,
+                size=args.size,
+                ratio=args.ratio,
+                limit=args.limit,
+                engine=args.engine,
+            )
+            items = []
+            missing: list[str] = []
+            for row in rows:
+                query = str(row["query"])
+                candidates = list(row.get("candidates") or [])
+                if not candidates:
+                    missing.append(query)
+                    append_telemetry(
+                        args.root, "media_search_empty",
+                        query=query, size_filter=f"{args.size}|{args.ratio}", batch=True,
+                    )
+                else:
+                    for candidate in candidates:
+                        direct_url = str(candidate.get("direct_image_url") or "")
+                        append_telemetry(
+                            args.root, "media_funnel", stage="discovery", status="passed",
+                            source_domain=(urlparse(direct_url).hostname or "").lower(),
+                            engine=str(candidate.get("engine") or "unknown"), batch=True,
+                        )
+                # Thumbnail and repeated size metadata are useful to a visual
+                # browser, but not to the editorial JSON. Omit them here to
+                # keep the single batch response small enough for a 10-item list.
+                compact = [
+                    {
+                        key: candidate.get(key, "")
+                        for key in ("query", "engine", "title", "direct_image_url", "source_page_url")
+                    }
+                    for candidate in candidates
+                ]
+                items.append({"query": query, "count": len(compact), "candidates": compact})
+            result = {
+                "requested": len(rows),
+                "found": len(rows) - len(missing),
+                "missing_queries": missing,
+                "items": items,
             }
         elif args.command == "content":
             result = get_cleaned_content(client, args.root, args.post_id)
@@ -684,7 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 # proprios na telemetria e nao entram aqui.
 _CONTEXT_CMDS = frozenset(
     {"list-pending", "queue", "cards", "prepare", "draft", "content",
-     "media-search", "media-search-web", "checklist", "telemetry"}
+     "media-search", "media-search-web", "media-search-listicle", "checklist", "telemetry"}
 )
 
 

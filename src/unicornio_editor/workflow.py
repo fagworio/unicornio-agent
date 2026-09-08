@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import datetime
 import json
@@ -43,6 +44,7 @@ from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
 from .media.vision_cache import get_cached_decision, set_cached_decision
 from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
+from .media.vision_policy import trusted_featured_evidence, vision_cache_subject
 from .media.wordpress_media import upload_image
 from .observability import append_telemetry, build_processing_markers
 from .seo.rank_math import build_meta
@@ -60,7 +62,10 @@ from .state import (
     retry_eligible,
     rework_backoff,
 )
-from .trailer import TrailerError, build_trailer_html, find_game_trailer_with_status
+from .trailer import (
+    TrailerError, build_trailer_html, find_cached_game_trailer_with_status,
+    find_game_trailer_with_status,
+)
 from .wordpress import WordPressClient
 
 
@@ -224,7 +229,7 @@ def _apply_editorial_unlocked(
         editorial, config, client, root, preflight=media_preflight
     )
     if featured_id is None and not config.dry_run:
-        featured_id = _normalize_existing_featured(client, config, post, editorial)
+        featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
     html = editorial["cleaned_html"]
     if media_results and not config.dry_run:
         plan = [
@@ -248,7 +253,7 @@ def _apply_editorial_unlocked(
             html = insert_media(html, plan, listicle=is_list)
     editorial_with_media = {**editorial, "cleaned_html": html}
     content, trailer, trailer_status = compose_final_content(
-        editorial_with_media, config, original_link_of(post)
+        editorial_with_media, config, original_link_of(post), root=root
     )
     editorial_with_media = attach_trailer_audit(
         editorial_with_media, trailer, search_status=trailer_status
@@ -336,10 +341,31 @@ def _apply_editorial_unlocked(
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
             )
+            featured_normalized = False
             # AWAITING_HUMAN sai da fila de trilhagem: move o status WP para o
             # filtro "Awaiting Human" (visivel para decisao humana). Falha de
             # status nao derruba o apply — a meta _hermes_state ja marca.
             if backoff["state"] == STATE_AWAITING_HUMAN:
+                # A imagem de destaque já pode ter sido normalizada durante o
+                # preflight, mas um apply bloqueado não chega ao payload READY
+                # que a associa ao post. Preserve essa correção técnica agora;
+                # ela não torna o post publicável nem altera seu estado humano.
+                # Se a featured era irrelevante ao editorial, ainda assim
+                # convertemos a imagem existente para WebP: a revisão humana
+                # decide depois se ela permanece ou é substituída.
+                awaiting_featured_id = featured_id or _normalize_existing_featured(
+                    client, config, post, root=root
+                )
+                if (
+                    isinstance(awaiting_featured_id, int)
+                    and awaiting_featured_id > 0
+                    and awaiting_featured_id != int(post.get("featured_media") or 0)
+                ):
+                    try:
+                        client.update_post(post_id, {"featured_media": awaiting_featured_id})
+                        featured_normalized = True
+                    except Exception:  # noqa: BLE001 - best-effort tecnico
+                        pass
                 try:
                     client.move_to_status(post_id, "awaiting_human")
                 except Exception:  # noqa: BLE001 - best-effort
@@ -372,7 +398,7 @@ def _apply_editorial_unlocked(
                 )
             return {
                 "post_id": post_id,
-                "wordpress_changed": baseline_changed,
+                "wordpress_changed": baseline_changed or featured_normalized,
                 "dry_run": False,
                 "status": "needs_rework",
                 "state": backoff["state"],
@@ -383,6 +409,7 @@ def _apply_editorial_unlocked(
                 "checklist": checklist,
                 "media_plan_results": media_results,
                 "inline_normalization": inline_normalization,
+                "featured_normalized": featured_normalized,
                 "blocked_reasons": [item["name"] for item in failed_items],
                 "blocked_detail": "; ".join(
                     str(item.get("detail") or "")[:200] for item in failed_items[:3]
@@ -976,13 +1003,10 @@ def _validate_featured_candidate_vision(
     """
     if config is None:
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
-    ready, message = vision_config_ready(
-        enabled=config.vision_enabled, api_key=config.vision_api_key
-    )
-    if not ready:
-        return {"status": "skipped", "reason": message}
     subject = str((editorial.get("seo") or {}).get("title") or "").strip()
+    cache_subject = vision_cache_subject(editorial)
     media_id = item.get("media_library_id")
+    attachment: dict[str, Any] | None = None
     if media_id:
         attachment = attachment_cache.get(media_id)
         if attachment is None:
@@ -994,8 +1018,29 @@ def _validate_featured_candidate_vision(
     if not image_url or not subject:
         return {"status": "rejected", "reason": "featured sem URL ou assunto para validar por visao"}
 
+    if config.vision_mode == "ambiguous" and not media_id:
+        deterministic_reason = trusted_featured_evidence(
+            image_url=image_url,
+            source_page_url=str(item.get("source_page_url") or ""),
+            subject=subject,
+            search_query=str(item.get("search_query") or ""),
+        )
+        if deterministic_reason:
+            return {
+                "status": "passed",
+                "reason": f"visao dispensada: {deterministic_reason}",
+                "cached": False,
+                "deterministic": True,
+            }
+
+    ready, message = vision_config_ready(
+        enabled=config.vision_enabled, api_key=config.vision_api_key
+    )
+    if not ready:
+        return {"status": "skipped", "reason": message}
+
     cache_root = root or Path(".")
-    cached = get_cached_decision(cache_root, image_url, subject)
+    cached = get_cached_decision(cache_root, image_url, cache_subject)
     if cached is not None:
         ok = cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.85
         return {
@@ -1023,7 +1068,7 @@ def _validate_featured_candidate_vision(
     set_cached_decision(
         cache_root,
         image_url,
-        subject,
+        cache_subject,
         {
             "status": "MATCH" if ok else "UNRELATED",
             "confidence": 1.0,
@@ -1207,10 +1252,10 @@ def _execute_media_plan(
             )
         return results, None, None
     outcomes: dict[int, dict[str, Any]] = {}
-    # Compartilhado entre threads: a verificacao de origem faz read-modify-write
-    # ("se ausente, busca e grava"); sob GIL o pior caso e uma busca duplicada
-    # da mesma pagina (idempotente), sem corromper o cache.
+    # Compartilhado entre threads; o lock elimina buscas duplicadas da mesma
+    # pagina de origem e conserva a verificacao byte-a-byte por imagem.
     page_cache: dict[str, list[str] | None] = {}
+    page_cache_lock = Lock()
     seen_sources: set[str] = set()
 
     # Pre-passe SERIAL: rejeicao (relevancia/reuso) + deteccao de duplicatas.
@@ -1282,6 +1327,7 @@ def _execute_media_plan(
                     downloaded=source,
                     direct_image_url=str(download_url),
                     cache=page_cache,
+                    cache_lock=page_cache_lock,
                     audit=lambda finding: append_telemetry(
                         root, "remote_url_audit", url=finding.url, reason=finding.reason
                     ),
@@ -1322,7 +1368,7 @@ def _execute_media_plan(
                 # criar uma segunda chamada tardia.
                 vision = preflight_vision.get(position)
                 if is_featured and vision and vision.get("status") == "passed":
-                    subject = str((editorial.get("seo") or {}).get("title") or "").strip()
+                    subject = vision_cache_subject(editorial)
                     set_cached_decision(
                         root,
                         str(media_url),
@@ -1392,6 +1438,8 @@ def _normalize_existing_featured(
     config: Config,
     post: dict[str, Any],
     editorial: dict[str, Any] | None = None,
+    *,
+    root: Path | None = None,
 ) -> int | None:
     """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
@@ -1467,8 +1515,12 @@ def _normalize_existing_featured(
                 tmp / "featured_source.jpg",
                 max_attempts=config.max_source_retries + 1,
                 url_policy=config.remote_url_policy,
-                audit=lambda finding: append_telemetry(
-                    root, "remote_url_audit", url=finding.url, reason=finding.reason
+                audit=(
+                    lambda finding: append_telemetry(
+                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    )
+                    if root is not None
+                    else None
                 ),
             )
             webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
@@ -1908,14 +1960,17 @@ def publish_ready_posts(
 
 
 def _discover_trailer(
-    editorial: dict[str, Any], config: Config
+    editorial: dict[str, Any], config: Config, *, root: Path | None = None
 ) -> tuple[dict[str, str] | None, str]:
     """Discover a YouTube trailer for game content; fail-closed to None."""
     game_name = editorial.get("game_name")
     if not isinstance(game_name, str) or not game_name.strip():
         return None, "not_applicable"
     try:
-        return find_game_trailer_with_status(game_name, timeout=config.http_timeout)
+        return find_cached_game_trailer_with_status(
+            game_name, root=root, timeout=config.http_timeout,
+            discover=find_game_trailer_with_status,
+        )
     except TrailerError:
         return None, "search_failed"
 
@@ -1952,6 +2007,8 @@ def compose_final_content(
     editorial: dict[str, Any],
     config: Config,
     original_link: str | None,
+    *,
+    root: Path | None = None,
 ) -> tuple[str, dict[str, str] | None, str]:
     """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
 
@@ -1971,7 +2028,7 @@ def compose_final_content(
     from .media.text import dedupe_credit_figures
 
     html = dedupe_credit_figures(html)
-    trailer, trailer_status = _discover_trailer(editorial, config)
+    trailer, trailer_status = _discover_trailer(editorial, config, root=root)
     if trailer is not None:
         html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
     return append_canonical_footer(html, original_link), trailer, trailer_status

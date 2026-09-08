@@ -68,6 +68,12 @@ class PublicationReportCostTests(unittest.TestCase):
         self.assertEqual((cost, runs), (0.20, 1))
         self.assertEqual(scope, "projeto editorial (cwd/git_repo_root)")
 
+    def test_cost_requires_job_id_when_schema_supports_it(self):
+        measured = cost_measurement_in_last_24h(
+            self._database(with_job_id=True), project_root="/project"
+        )
+        self.assertIsNone(measured)
+
     def test_cost_guard_requires_exact_job_attribution(self):
         self.assertIsNone(cost_in_last_24h(self._database(with_job_id=False), "editorial"))
         self.assertEqual(cost_in_last_24h(self._database(with_job_id=True), "editorial"), (0.20, 1))
@@ -102,6 +108,16 @@ class PublicationReportCostTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("5 pending no WP | 0 pronta(s) para a próxima janela", text)
         self.assertIn("5 em revisão humana", text)
+
+    def test_report_does_not_present_unknown_cost_as_zero(self):
+        with patch.object(report, "_load_window_json", return_value={"posts": [], "blocked_posts": []}), patch.object(
+            report, "_custo_24h", return_value=None
+        ), patch.object(report, "_published_by_editorial_last_24h", return_value=0), patch.object(
+            report, "_queue_after_window", return_value=None
+        ), patch("sys.stdout", new_callable=StringIO) as output:
+            self.assertEqual(report.main(), 0)
+
+        self.assertIn("Custo editorial (24h): indisponível", output.getvalue())
 
 
 if __name__ == "__main__":

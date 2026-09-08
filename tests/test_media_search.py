@@ -4,7 +4,10 @@ import unittest
 from unittest import mock
 
 from unicornio_editor.media.relevance import image_is_relevant
-from unicornio_editor.media.search import build_bing_url, build_search_url, search_bing_images, search_web_images, search_yandex_images
+from unicornio_editor.media.search import (
+    build_bing_url, build_search_url, search_bing_images, search_web_images,
+    search_web_images_batch, search_yandex_images,
+)
 
 
 class SearchUrlTests(unittest.TestCase):
@@ -27,6 +30,19 @@ class SearchUrlTests(unittest.TestCase):
 
 
 class SearchWebImagesTests(unittest.TestCase):
+    def test_batch_search_keeps_titles_isolated_ordered_and_deduplicated(self):
+        def fake_search(query, **_kwargs):
+            return [{"query": query, "direct_image_url": f"https://cdn.example/{query}.jpg"}]
+
+        with mock.patch("unicornio_editor.media.search.search_web_images", side_effect=fake_search) as search:
+            rows = search_web_images_batch(["Blue Box", "Psyren", "blue box"])
+        self.assertEqual([row["query"] for row in rows], ["Blue Box", "Psyren"])
+        self.assertEqual(rows[0]["candidates"][0]["query"], "Blue Box")
+        self.assertEqual(search.call_count, 2)
+
+    def test_batch_search_rejects_more_than_twenty_distinct_titles(self):
+        with self.assertRaisesRegex(ValueError, "at most 20"):
+            search_web_images_batch([f"Anime {i}" for i in range(21)])
     def test_empty_query_returns_empty(self):
         self.assertEqual(search_web_images("   "), [])
 

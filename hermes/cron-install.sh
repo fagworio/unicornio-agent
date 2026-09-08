@@ -85,3 +85,37 @@ else
     --monitor-script "$MONITOR_BASENAME"
   echo "cron: job \"$JOB_NAME\" atualizado ($PRIMARY)"
 fi
+
+# O state.db atual persiste o ID do cron. Mantê-lo no .env torna o teto diário
+# e o relatório exatos; o fallback por cwd só é seguro em instalações Hermes
+# legadas. Resolve novamente após create porque o ID não existia no JSON inicial.
+EDITORIAL_JOB_ID="$(OPENAI_JOBS_FILE="$JOBS_FILE" OPENAI_JOB_NAME="$JOB_NAME" python3 - <<'PYEOF'
+import json
+import os
+from pathlib import Path
+
+try:
+    data = json.loads(Path(os.environ["OPENAI_JOBS_FILE"]).read_text())
+except (OSError, ValueError):
+    data = {}
+name = os.environ["OPENAI_JOB_NAME"]
+ids = [str(job.get("id", "")) for job in (data.get("jobs") or []) if job.get("name") == name]
+print(ids[0] if ids else "")
+PYEOF
+)"
+
+if [[ "$EDITORIAL_JOB_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  ENV_FILE="$ROOT/.env"
+  if [ -f "$ENV_FILE" ]; then
+    if grep -q '^HERMES_EDITORIAL_CRON_JOB_ID=' "$ENV_FILE"; then
+      sed -i "s|^HERMES_EDITORIAL_CRON_JOB_ID=.*|HERMES_EDITORIAL_CRON_JOB_ID=$EDITORIAL_JOB_ID|" "$ENV_FILE"
+    else
+      printf '\nHERMES_EDITORIAL_CRON_JOB_ID=%s\n' "$EDITORIAL_JOB_ID" >> "$ENV_FILE"
+    fi
+    echo "cron: ID editorial registrado para medição e teto de custo ($EDITORIAL_JOB_ID)"
+  else
+    echo "cron: .env ausente; não foi possível registrar o ID editorial" >&2
+  fi
+else
+  echo "cron: não foi possível resolver o ID editorial; custo continuará sem atribuição exata" >&2
+fi

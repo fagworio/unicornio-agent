@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -115,6 +116,7 @@ def verify_downloaded_against_source(
     downloaded: Path,
     direct_image_url: str,
     cache: dict[str, list[str] | None] | None = None,
+    cache_lock: Lock | None = None,
     audit=None,
 ) -> tuple[bool, str]:
     """Confirma que ``downloaded`` corresponde a uma imagem listada na pagina.
@@ -126,13 +128,24 @@ def verify_downloaded_against_source(
         return False, "source_page_url ausente; impossivel verificar a imagem contra a origem"
     cache = cache if cache is not None else {}
     budget = [_VERIFY_TOTAL_MAX_BYTES]
-    if source_page_url not in cache:
+    def populate_page_cache() -> None:
+        if source_page_url in cache:
+            return
         page_html = _fetch(source_page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
         cache[source_page_url] = (
             _image_urls_in_page(page_html.decode("utf-8", "ignore"), source_page_url)
             if page_html is not None
             else None
         )
+
+    # Varios itens do plano podem apontar para a mesma galeria. O lock protege
+    # o "ausente -> baixar -> gravar": evita requests duplicadas, sem pular a
+    # comparacao byte-a-byte da imagem individual logo abaixo.
+    if cache_lock is None:
+        populate_page_cache()
+    else:
+        with cache_lock:
+            populate_page_cache()
     listed = cache[source_page_url]
     if not listed:
         return False, (

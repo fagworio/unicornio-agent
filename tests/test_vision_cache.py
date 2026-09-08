@@ -11,9 +11,15 @@ from unicornio_editor.media.vision_cache import (
     set_cached_decision,
     vision_cache_path,
 )
+from unicornio_editor.media.vision_policy import vision_cache_subject
 
 
 class VisionCacheTests(unittest.TestCase):
+    def test_work_identity_reuses_cache_across_different_headlines(self):
+        first = {"game_name": "Cyberpunk: Edgerunners", "seo": {"title": "Trailer novo"}}
+        second = {"game_name": "Cyberpunk: Edgerunners", "seo": {"title": "Elenco confirmado"}}
+        self.assertEqual(vision_cache_subject(first), vision_cache_subject(second))
+
     def test_cache_key_differs_by_entity_and_version(self):
         url = "https://media.example/keyart.jpg"
         self.assertNotEqual(cache_key(url, "gta 6"), cache_key(url, "redfall"))

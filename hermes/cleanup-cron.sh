@@ -47,11 +47,11 @@ if [ -d work/drafts ]; then
 fi
 
 # 2. Artefatos de apply/logs na raiz de work/ (nao entra em subdiretorios).
-#    Preserva work/keyart_cache.json (cache de key arts reutilizaveis).
+#    Preserva caches duraveis de key art, visao e trailer.
 if [ -d work ]; then
     while IFS= read -r f; do
         case "$f" in
-            work/keyart_cache.json) continue ;;
+            work/keyart_cache.json|work/vision_cache.json|work/trailer_cache.json) continue ;;
         esac
         remove_if_old "$WORK_DAYS" "$f"
     done < <(find work -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' \) 2>/dev/null)

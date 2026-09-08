@@ -45,6 +45,8 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("cron remove", content)        # remove duplicados
         self.assertIn("jobs.json", content)          # le o estado real dos crons
         self.assertIn("MATCH_IDS", content)
+        self.assertIn("HERMES_EDITORIAL_CRON_JOB_ID", content)
+        self.assertIn("ID editorial registrado", content)
 
     def test_skill_assets_referenced_actually_exist(self):
         skill = (ROOT / "hermes" / "SKILL.md").read_text()

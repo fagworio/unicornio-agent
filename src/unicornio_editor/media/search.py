@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, unquote, urlencode, urlparse
@@ -38,6 +39,8 @@ _UA = (
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 _MAX_BYTES = 3 * 1024 * 1024
+_MAX_BATCH_QUERIES = 20
+_BATCH_WORKERS = 4
 
 # Allowed Google size / aspect tokens (fail-closed on unknown values).
 _SIZES = {"ic", "xga", "vga", "qsvga", "m", "n", "l", "xxl", "qhd"}
@@ -320,8 +323,56 @@ def search_web_images(
     return []
 
 
+def search_web_images_batch(
+    queries: list[str],
+    *,
+    size: str = "xga",
+    ratio: str = "w",
+    limit: int = 3,
+    timeout: float = 30.0,
+    engine: str = "auto",
+) -> list[dict[str, Any]]:
+    """Discover candidates for several distinct works concurrently.
+
+    This is deliberately a *batch of exact queries*, not one broad query with
+    all titles joined together. A broad query mixes franchises and makes it
+    easy to attach the wrong artwork to a listicle item. Results preserve the
+    input order and keep each work isolated while requiring only one CLI/tool
+    interaction from the editorial agent.
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in queries:
+        query = str(value or "").strip()
+        key = query.casefold()
+        if query and key not in seen:
+            seen.add(key)
+            unique.append(query)
+    if len(unique) > _MAX_BATCH_QUERIES:
+        raise ValueError(f"media-search-listicle accepts at most {_MAX_BATCH_QUERIES} distinct titles")
+    if not unique:
+        return []
+
+    def _search(query: str) -> list[dict[str, Any]]:
+        return search_web_images(
+            query, size=size, ratio=ratio, limit=limit, timeout=timeout, engine=engine
+        )
+
+    found: dict[str, list[dict[str, Any]]] = {}
+    workers = min(_BATCH_WORKERS, len(unique))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_search, query): query for query in unique}
+        for future in as_completed(futures):
+            query = futures[future]
+            try:
+                found[query] = future.result()
+            except Exception:  # noqa: BLE001 - one failed engine must not lose the batch
+                found[query] = []
+    return [{"query": query, "candidates": found.get(query, [])} for query in unique]
+
+
 __all__ = [
     "build_search_url", "build_bing_url", "build_yandex_url",
-    "search_web_images", "search_bing_images", "search_google_images",
+    "search_web_images", "search_web_images_batch", "search_bing_images", "search_google_images",
     "search_yandex_images",
 ]

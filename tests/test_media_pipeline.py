@@ -16,7 +16,7 @@ from unicornio_editor.media.converter import (
     prepare_featured_webp,
 )
 from unicornio_editor.media.downloader import MediaDownloadError, _retry_delay, download_image, select_reupload_source
-from unicornio_editor.media.wordpress_media import upload_image
+from unicornio_editor.media.wordpress_media import friendly_media_filename, upload_image
 
 
 class ImageHandler(BaseHTTPRequestHandler):
@@ -40,6 +40,18 @@ class FakeClient:
     def upload_media(self, path, *, filename, alt_text, title, caption=None):
         self.calls.append((Path(path), filename, alt_text, title, caption))
         return {"id": 7, "source_url": "http://wordpress.local/media/image.webp"}
+
+
+class FriendlyMediaFilenameTests(unittest.TestCase):
+    def test_friendly_media_filename_uses_image_alt_not_temporary_name(self):
+        filename = friendly_media_filename(
+            Path("/tmp/inline_0.webp"),
+            {
+                "alt_text": "Cena de Ocarina of Time no Nintendo Switch",
+                "direct_image_url": "https://source.example/opaque-file.jpg",
+            },
+        )
+        self.assertEqual(filename, "cena-de-ocarina-of-time-no-nintendo-switch.webp")
 
 
 class MediaPipelineTests(unittest.TestCase):

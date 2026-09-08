@@ -27,7 +27,7 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 
 ## Fluxo editorial (economia de tokens — sucesso = mínimo, falha = só o que corrigir)
 
-1. `unicornio-editor cards` — UMA chamada com o DELTA exato por post (até 5 =
+1. `unicornio-editor cards --compact` — UMA chamada com o DELTA exato por post (até 5 =
    EDITOR_BATCH_LIMIT; rework primeiro): `images:{required,valid,missing,irrelevant,non_webp}`,
    diagnóstico da `featured` e plano `fix` para bloqueados. Escreva os editoriais
    direto dos cards; não abra blocked.json/logs/source. Fila geral: `queue --compact`.
@@ -46,57 +46,21 @@ ao reescrever) e `references/operacao.md` (pitfalls — quando algo falhar).
 4. Editorial estrito com `site_relevance`, `seo`, `media_plan`, trailer. Jogo →
    `game_name` exato (código acha/valida o trailer). `cleaned_html` OPCIONAL
    (omita no no-rewrite; use `content POST_ID` só para reescrever).
-5. IMAGENS: `references/politica-imagens.md` antes do media_plan. Regras-chave:
-   2/4/6 SEMPRE (2<=600, 4<=1000, 6+; listicle=max(2,itens)); **LISTICLE SOB
-   MEDIDA (auto-melhoria 2026-09-01): 1 item = 1 imagem real — dimensione o
-   nº de itens pelo que a busca devolver (4 imagens inline reais e distintas =
-   NO MAXIMO 4 itens; a featured não entra nessa conta; NUNCA Top 10 prometendo 10 imagens que a fonte não
-   tem — bloqueio garantido `imagens_no_corpo` + tentativas queimadas); toda imagem retrata
-   EXATAMENTE a obra citada; featured = key art da obra; inline 640-1280px; URL
-   direta listada na página de origem; crédito visível em toda imagem; sem imagem
-   transparente; sem imagem repetida no post. Busca: `media-search-web TERMO
- --size xga --ratio w --limit N` — rotaciona automaticamente entre BUSCADORES
- (Bing/Yandex ~50/50 por query; Google só como último fallback) com filtro de
- tamanho 1024x768, devolvendo
-   candidatos com URL direta + página de origem + query. SE retornar vazio
-   (count=0), NÃO conclua que "não há imagem" — os buscadores podem estar
-   bloqueando/rate-limited (comum em IP de datacenter) ou ser renderizados via
-   JS (o Yandex agora tambem e parseado: extrai a URL direta via img_url param, costuma funcionar): caia IMEDIATAMENTE para `web_search` manual (Google Images/web)
-   e extraia a URL direta da página original. Não perca tempo re-tentando um
-   buscador que retornou vazio. O buscador é só índice, a fonte é a página
-   original. Registre
-   `search_query` no media_plan (a busca que retornou a imagem — o gate aceita
-   quando a query contém a obra; declare a query REAL, nunca invente). Wikimedia
- é fallback (rate-limit 429).
- **PROIBIDO pré-verificar imagem manualmente** (baixar imagens, ler páginas
- de origem uma a uma, escrever scripts de verificação): o apply verifica
- byte-a-byte automaticamente. Monte o media_plan direto dos candidatos,
- valide com `media-validate editorial.json` (1 chamada) e aplique. Se o
- apply rejeitar por verificação de origem, troque SÓ a imagem rejeitada —
- nunca re-verifique a página manualmente.
- **FONTES BYTE-ESTÁVEIS (2026-08-31, verificadas em produção):** o gate
- `verify_downloaded_against_source` exige que a página de origem liste a
- URL EXATA (mesmo slug E mesmos bytes). CBR/srcdn/colliderimages falham
- ~80% das vezes ("CDN serviu conteudo divergente"). Fontes que PASSAM:
- (a) **anime.com** (`https://anime.com/shows/<slug>`): og:image =
- `https://image.tmdb.org/t/p/original/<hash>.jpg` listado na página — use
- essa URL exata como direct_image_url (10/10 aceitas em 2 posts);
- (b) **JustWatch** (`https://www.justwatch.com/us/tv-show/<slug>`): use o
- **backdrop** (`https://images.justwatch.com/backdrop/<id>/s640/<slug>.jpg`,
- listado no início da página) — os posters s718 ficam FORA das primeiras 12
- URLs que o verifier lê e são rejeitados; o backdrop s640 passa;
- (c) **bac.moe/ctfassets** e páginas de notícias cujo CDN serve a mesma URL
- na página (verificar padrão: slug do arquivo presente no HTML). Featured
- NUNCA pode ser retrato: o gate rejeita "featured source is portrait" —
- exija paisagem (TMDB/anime.com poster é retrato; use backdrop).
- S3 self-referential (`source_page_url` = a própria URL da imagem) SEMPRE
- falha ("pagina de origem inacessivel") — reuso real da Media Library só
- passa com `media_library_id` + attachment com crédito, ou quando uma página
- publicada do prod embute a imagem S3.
+5. IMAGENS: antes de montar qualquer `media_plan`, leia UMA vez
+   `references/politica-imagens.md`. Ela é a fonte completa para contagem
+   2/4/6, listicles (1 item = 1 imagem), fonte/licença/crédito, dimensões,
+   busca, reuso, fontes byte-estáveis e fallback. Regras curtas: obra exata,
+   featured paisagem/key art, URL direta listada na página original, crédito
+   visível, sem repetição/transparência. Busca normal: `media-search-web`;
+   listicle: UMA chamada `media-search-listicle "OBRA 1" "OBRA 2" ...`.
+   Não faça pré-verificação manual: `media-validate` e `apply` confirmam
+   origem byte-a-byte. Google Images é só índice; a página original é a fonte.
 6. Mídia nova → valide antes: `media-validate editorial.json --post-id POST_ID`
    (1 chamada; `{valid,rejected,listicle,featured_vision}`). O preflight usa o
    título real do WordPress, exclui a featured da capacidade do listicle e roda
-   a visão da featured antes do upload.
+   visão da featured somente quando a fonte for ambígua. Pares oficiais
+   fortemente evidenciados (anime.com→TMDB, JustWatch→images.justwatch) passam
+   pelo gate determinístico e não consomem visão.
 7. `apply POST_ID editorial.json --compact` = preflight COMPLETO (resolver
    editorial → mídia → conteúdo → checklist INTEIRO → só então grava). PASS →
    `status:ready` (manifest SHA-256; publish-ready confirma o hash). FAIL →
@@ -150,7 +114,11 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 
 - KEY ART CACHE FIRST: `work/keyart_cache.json` + `media-search TERMO` (reuso da
   Media Library) antes de QUALQUER busca web. Imagem nova verificada → registre.
-- UMA busca por obra. NÃO baixe páginas de origem nem inspecione HTML
+- UMA busca por obra. Em listicles, agrupe essas buscas numa única chamada
+  `media-search-listicle "OBRA 1" "OBRA 2" ... --limit 3`: o comando executa
+  uma consulta EXATA por obra em paralelo e devolve uma resposta compacta.
+  Nunca junte todos os títulos numa única query ampla, pois ela mistura obras.
+  NÃO baixe páginas de origem nem inspecione HTML
   manualmente — o apply verifica; `media-validate` valida em 1 chamada.
 - `apply --compact` SEMPRE; `--dry-run` só sob demanda.
 - **paragraph_index do media_plan**: imagens entram APÓS o parágrafo alvo, exigem >=3 parágrafos de distância entre si e o índice máximo é `len(</p> do conteúdo) - 2` (senão: `media must be inserted between paragraphs`). A featured NÃO entra no insert (vai como featured_media), então não ocupa vaga de spacing — mas o índice dela conta na validação do plano. Conte os blocos com `content POST_ID` antes de montar o plano.

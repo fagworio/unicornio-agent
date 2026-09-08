@@ -60,7 +60,7 @@ def _post_titles(post_ids: list[int]) -> dict[int, str]:
     return titles
 
 
-def _custo_24h() -> tuple[float, int, str]:
+def _custo_24h() -> tuple[float, int, str] | None:
     """Custo de cron nas últimas 24h, com atribuição por job quando possível.
 
     Prefere o ID exato do job editorial. Em bancos Hermes legados, sem essa
@@ -82,11 +82,9 @@ def _custo_24h() -> tuple[float, int, str]:
             os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip(),
             str(ROOT),
         )
-        if measured is None:
-            return 0.0, 0, "atribuição editorial indisponível"
         return measured
     except (ImportError, sqlite3.Error):
-        return 0.0, 0, "state.db inválido"
+        return None
 
 
 def _published_by_editorial_last_24h() -> int:
@@ -145,7 +143,7 @@ def main() -> int:
 
     published = data.get("posts") or []
     blocked = data.get("blocked_posts") or []
-    custo, n_runs, cost_scope = _custo_24h()
+    cost_measurement = _custo_24h()
 
     print("📰 Relatório de publicação")
     print(f"🕐 Janela: {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y %H:%M')} (-03)")
@@ -191,13 +189,18 @@ def main() -> int:
         if excluded:
             print("   Fora da publicação automática: " + "; ".join(excluded))
 
-    print(f"\n💰 Custo editorial (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
     published_24h = _published_by_editorial_last_24h()
-    print(f"   Publicados pelo fluxo (24h): {published_24h}")
-    if published_24h:
-        print(f"   Custo por post publicado (mesma janela): ${custo / published_24h:.4f}")
-    elif custo > 0:
-        print("   ℹ️ Sem eventos de publicação editorial na telemetria das últimas 24h.")
+    if cost_measurement is None:
+        print("\n⚠️ Custo editorial (24h): indisponível — configure HERMES_EDITORIAL_CRON_JOB_ID")
+        print(f"   Publicados pelo fluxo (24h): {published_24h}")
+    else:
+        custo, n_runs, cost_scope = cost_measurement
+        print(f"\n💰 Custo editorial (24h): ${custo:.3f} ({n_runs} runs; escopo: {cost_scope})")
+        print(f"   Publicados pelo fluxo (24h): {published_24h}")
+        if published_24h:
+            print(f"   Custo por post publicado (mesma janela): ${custo / published_24h:.4f}")
+        elif custo > 0:
+            print("   ℹ️ Sem eventos de publicação editorial na telemetria das últimas 24h.")
     return 0
 
 

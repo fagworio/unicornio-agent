@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from unicornio_editor.trailer import (
@@ -6,6 +8,7 @@ from unicornio_editor.trailer import (
     build_trailer_html,
     find_game_trailer,
     find_game_trailer_with_status,
+    find_cached_game_trailer_with_status,
     validate_trailer,
 )
 
@@ -40,6 +43,29 @@ class TrailerTests(unittest.TestCase):
 
 
 class TrailerDiscoveryTests(unittest.TestCase):
+    def test_verified_trailer_is_reused_from_persistent_cache(self):
+        trailer = {"video_id": "abcDEF12345", "title": "Official Trailer"}
+        discover = mock.Mock(return_value=(trailer, "found"))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = find_cached_game_trailer_with_status(
+                "Example Game", root=root, discover=discover
+            )
+            second = find_cached_game_trailer_with_status(
+                "Game: Example", root=root, discover=discover
+            )
+        self.assertEqual(first, (trailer, "found"))
+        self.assertEqual(second, (trailer, "found"))
+        discover.assert_called_once()
+
+    def test_search_failure_is_never_cached(self):
+        discover = mock.Mock(return_value=(None, "search_failed"))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            find_cached_game_trailer_with_status("Example Game", root=root, discover=discover)
+            find_cached_game_trailer_with_status("Example Game", root=root, discover=discover)
+        self.assertEqual(discover.call_count, 2)
+
     def _candidate(self, video_id="abcDEF12345", title="Hellraiser: Revival - Official Trailer", channel="Boss Team Games"):
         return {"video_id": video_id, "title": title, "channel": channel}
 
