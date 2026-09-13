@@ -776,7 +776,7 @@ def _media_item_rejection(
         alt = str(attachment.get("alt_text") or "")
         caption = str((attachment.get("caption") or {}).get("rendered") or "")
         url = str(attachment.get("source_url") or "")
-        credit = title or caption
+        credit = " ".join(part for part in (title, caption) if part)
         if "crédito da imagem" not in credit.lower():
             return (
                 "reuso da midia library exige credito visivel no attachment original "
