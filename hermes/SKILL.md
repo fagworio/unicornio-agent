@@ -144,6 +144,13 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
   busca não concede waiver.
 - IMAGENS SÃO OBRIGATÓRIAS (2/4/6 SEM waiver): sem imagens reais até o mínimo,
   o apply recusa. Se após busca honesta não houver imagem, registre `uncertain`.
+- CADA imagem do corpo deve ser DISTINTA: nunca repita a mesma imagem no mesmo
+  post — nem em tamanhos/crops diferentes (`gta6leak06.webp` e
+  `gta6leak06-1024x576.webp` são a MESMA imagem; o gate `imagens_duplicadas`
+  compara o arquivo base e bloqueia). Faltando imagem distinta, busque outra
+  da mesma obra; sem opção real, registre `uncertain`.
+- A imagem de DESTAQUE não deve reaparecer no corpo (mesma obra/lance): use
+  imagens diferentes da capa para ilustrar o conteúdo.
 
 ## Diagnóstico barato (interativo)
 
