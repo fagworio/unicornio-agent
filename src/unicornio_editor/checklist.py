@@ -212,7 +212,15 @@ def run_pre_publish_checklist(
     #     replaces the duplicates with distinct imagery of the same work.
     from collections import Counter as _Counter
 
-    src_counts = _Counter(str(item.get("src") or "").strip() for item in content_images)
+    # Comparacao pelo ARQUIVO BASE (sem o sufixo de tamanho do WordPress
+    # "-1024x576"): a mesma imagem em tamanhos diferentes e a MESMA imagem
+    # para o leitor — o gate precisa pegar esse caso (falso negativo
+    # observado em producao: a mesma key art em variantes de tamanho).
+    def _img_fingerprint(src: str | None) -> str:
+        base = str(src or "").strip().split("?", 1)[0]
+        return re.sub(r"-\d+x\d+(\.[A-Za-z0-9]+)$", r"\1", base)
+
+    src_counts = _Counter(_img_fingerprint(item.get("src")) for item in content_images)
     repeated = [f"{src} (x{count})" for src, count in src_counts.items() if count > 1 and src]
     if content_images:
         check(
