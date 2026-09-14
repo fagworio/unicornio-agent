@@ -141,6 +141,30 @@ def run_pre_publish_checklist(
     inline_images = _IMG_RE.findall(content)
     image_count = len(inline_images)
 
+    # Opcao A: o minimo e dimensionado pela DISPONIBILIDADE REAL de frames
+    # visualmente distintos. O gate imagens_similares bloqueia as repetidas; o
+    # minimo efetivo cai para o que existe (obras com poucos frames reais nao
+    # devem repetir o mesmo frame so para atingir a cota).
+    from .media.relevance import iter_content_images
+
+    img_items = iter_content_images(content)
+    img_urls = [str(item.get("src") or "").strip() for item in img_items]
+    img_urls = [u for u in img_urls if u]
+    img_hashes = None
+    distinct_frames = None
+    required_effective = required
+    if len(img_urls) >= 2:
+        try:
+            from .media.visual_hash import distinct_image_count, image_hashes
+
+            img_hashes = image_hashes(img_urls)
+            distinct_frames = distinct_image_count(img_urls, hashes=img_hashes)
+        except Exception:  # noqa: BLE001 - deps/rede: mantem a politica cheia
+            img_hashes = None
+            distinct_frames = None
+    if distinct_frames is not None and distinct_frames < required_effective:
+        required_effective = distinct_frames
+
     # Waiver "media_exhausted": quando a busca de imagens foi honestamente
     # esgotada (media-search-web devolveu count=0) E existe featured E NAO e
     # listicle, dispensa o minimo de imagens inline — artigo publica com
@@ -167,10 +191,13 @@ def run_pre_publish_checklist(
             f"({image_count} inline; minimo {required} dispensado)",
         )
     else:
+        _motivo = f"{words} palavras exigem >= {required_effective} imagens"
+        if distinct_frames is not None and distinct_frames < required:
+            _motivo += f" (politica {required}; {distinct_frames} frames distintos disponiveis)"
         check(
             "imagens_no_corpo",
-            image_count >= required,
-            f"{words} palavras exigem >= {required} imagens; conteudo tem {image_count}",
+            image_count >= required_effective,
+            f"{_motivo}; conteudo tem {image_count}",
         )
 
     # 6b. Every inline image must be semantically related to the cited subject
@@ -239,13 +266,14 @@ def run_pre_publish_checklist(
     #     fontes diferentes tem URL/bytes diferentes (recompressao) mas e a
     #     MESMA imagem para o leitor — o checklist de URL nao pega (falso
     #     negativo observado: 3 prints identicos de fontes distintas).
-    urls = [str(item.get("src") or "").strip() for item in content_images]
-    urls = [u for u in urls if u]
+    urls = img_urls
     if len(urls) >= 2:
         try:
-            from .media.visual_hash import similar_image_pairs
+            from .media.visual_hash import image_hashes, similar_image_pairs
 
-            similares = similar_image_pairs(urls)
+            if img_hashes is None:
+                img_hashes = image_hashes(urls)
+            similares = similar_image_pairs(urls, hashes=img_hashes)
         except Exception:  # noqa: BLE001 - deps/rede: nao bloqueia o pipeline
             similares = []
         check(
