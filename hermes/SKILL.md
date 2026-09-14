@@ -147,7 +147,12 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - CADA imagem do corpo deve ser DISTINTA: nunca repita a mesma imagem no mesmo
   post — nem em tamanhos/crops diferentes (`gta6leak06.webp` e
   `gta6leak06-1024x576.webp` são a MESMA imagem; o gate `imagens_duplicadas`
-  compara o arquivo base e bloqueia). Faltando imagem distinta, busque outra
+  compara o arquivo base e bloqueia). FEED DE FONTES DIFERENTES COSTUMA REPLICAR
+  O MESMO FRAME (mesmo screenshot com nome/bytes diferentes): antes de escrever o
+  HTML rode `unicornio-editor media-similar <url1> <url2> ...` e mantenha UMA
+  imagem de cada grupo em `pares_mesmo_frame` (ver
+  references/hash-imagens-analise.md). O gate `imagens_similares` (pHash) bloqueia
+  o apply se alguma repetida escapar. Faltando imagem distinta, busque outra
   da mesma obra; sem opção real, registre `uncertain`.
 - A imagem de DESTAQUE não deve reaparecer no corpo (mesma obra/lance): use
   imagens diferentes da capa para ilustrar o conteúdo.
