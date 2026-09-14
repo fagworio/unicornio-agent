@@ -235,6 +235,32 @@ def run_pre_publish_checklist(
     else:
         check("imagens_duplicadas", True, "sem imagens para validar", skipped=True)
 
+    # 6d. Imagens visualmente repetidas (pHash): o MESMO frame replicado por
+    #     fontes diferentes tem URL/bytes diferentes (recompressao) mas e a
+    #     MESMA imagem para o leitor — o checklist de URL nao pega (falso
+    #     negativo observado: 3 prints identicos de fontes distintas).
+    urls = [str(item.get("src") or "").strip() for item in content_images]
+    urls = [u for u in urls if u]
+    if len(urls) >= 2:
+        try:
+            from .media.visual_hash import similar_image_pairs
+
+            similares = similar_image_pairs(urls)
+        except Exception:  # noqa: BLE001 - deps/rede: nao bloqueia o pipeline
+            similares = []
+        check(
+            "imagens_similares",
+            not similares,
+            (
+                "; ".join(f"{a.split('/')[-1]} = {b.split('/')[-1]} (dist {d})"
+                          for a, b, d in similares[:2])
+                if similares
+                else f"{len(urls)} imagem(ns) visualmente distintas"
+            ),
+        )
+    else:
+        check("imagens_similares", True, "sem imagens para validar", skipped=True)
+
     # 7. Featured image is mandatory before publishing.
     featured_raw = post.get("featured_media")
     featured = featured_raw if isinstance(featured_raw, int) and featured_raw > 0 else None
