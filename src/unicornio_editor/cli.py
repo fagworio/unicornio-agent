@@ -158,6 +158,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
 
+    media_similar_parser = subparsers.add_parser(
+        "media-similar",
+        help="compara imagens por hash perceptual (pHash): aponta quais sao o MESMO frame mesmo com URL/bytes diferentes (somente leitura)",
+    )
+    media_similar_parser.add_argument("urls", nargs="+", type=str, help="URLs das imagens a comparar")
+    media_similar_parser.add_argument(
+        "--threshold", type=int, default=6, help="distancia Hamming p/ considerar a MESMA imagem (default: 6)"
+    )
+
     media_search_web_parser = subparsers.add_parser(
         "media-search-web",
         help="descobre candidatos de imagem via buscadores (Bing primario, Google/Yandex "
@@ -579,6 +588,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "media-search":
             items = client.search_media(args.termo, per_page=args.limit)
             result = [_media_search_item(item) for item in items]
+        elif args.command == "media-similar":
+            from .media.visual_hash import similar_image_pairs
+
+            pares = similar_image_pairs(args.urls, threshold=args.threshold)
+            result = {
+                "threshold": args.threshold,
+                "imagens_comparadas": len(args.urls),
+                "pares_mesmo_frame": [
+                    {"a": a, "b": b, "distancia": d} for a, b, d in pares
+                ],
+                "veredito": "REPETIDAS" if pares else "todas distintas",
+            }
         elif args.command == "media-search-web":
             from .media.search import search_web_images
             from .observability import append_telemetry
