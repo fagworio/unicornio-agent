@@ -98,3 +98,22 @@ imagens distintas da mesma obra → 20-34 (não bloqueia).
   repetida no corpo foi corrigida nos 11 posts por script separado).
 - **Auto-substituição**: ao bloquear, buscar o próximo candidato distinto e
   substituir sem intervenção humana.
+
+## 9. Dimensionamento do mínimo (opção A — implementada)
+
+O pHash resolve dois problemas ligados:
+
+1. **Bloqueio das repetidas** (`imagens_similares`): o apply recusa enquanto
+   houver par com distância ≤ 6.
+2. **Mínimo proporcional à realidade** (`imagens_no_corpo`): o mínimo exigido
+   passa a ser `min(política 2/4/6, frames distintos disponíveis)`. Assim uma
+   obra com 3 frames reais publica com 3 imagens distintas em vez de repetir a
+   mesma 6x — elimina o incentivo a repetir para atingir a cota.
+
+Implementação (`checklist.py`): os hashes são calculados **uma vez** por apply
+(`image_hashes`), a contagem de grupos distintos vem de `distinct_image_count`
+(union-find) e os dois checks reusam o mesmo mapa — custo de download único.
+
+Exemplo real (post 113634): 5 imagens → 3 pares repetidos → **3 frames
+distintos** → mínimo efetivo `min(6, 3) = 3`; as duas cópias extras são
+removidas antes de publicar.

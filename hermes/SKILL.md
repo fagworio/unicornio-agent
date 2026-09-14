@@ -152,8 +152,11 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
   HTML rode `unicornio-editor media-similar <url1> <url2> ...` e mantenha UMA
   imagem de cada grupo em `pares_mesmo_frame` (ver
   references/hash-imagens-analise.md). O gate `imagens_similares` (pHash) bloqueia
-  o apply se alguma repetida escapar. Faltando imagem distinta, busque outra
-  da mesma obra; sem opção real, registre `uncertain`.
+  o apply se alguma repetida escapar. Bloqueado por `imagens_similares`: REMOVA
+  as cópias (mantenha 1 de cada frame) e siga — o mínimo efetivo é dimensionado
+  pela disponibilidade real de frames distintos (política 2/4/6 até o que a obra
+  oferece), então NUNCA repita para atingir a cota. Faltando imagem distinta,
+  busque outra da mesma obra; sem opção real, registre `uncertain`.
 - A imagem de DESTAQUE não deve reaparecer no corpo (mesma obra/lance): use
   imagens diferentes da capa para ilustrar o conteúdo.
 
