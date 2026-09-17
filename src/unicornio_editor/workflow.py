@@ -2660,14 +2660,23 @@ def discard_post(
     if config.dry_run:
         raise WorkflowError("discard e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
     baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
-    editorial = {"site_relevance": {"decision": "skip", "confidence": 1.0, "reason": reason or "descartado"}}
+    # Preserva o motivo ANTERIOR: o discard nao pode apagar o historico do
+    # bloqueio. Um rotulo generico ("off-topic") sobrescrevia o motivo real
+    # (imagens_no_corpo/estrutura_lista/trailer) na meta do WP — depois disso o
+    # post parecia "fora da pauta" para sempre e o conserto ficava invisivel.
+    meta = post.get("meta") or {}
+    anterior = str(meta.get("_hermes_last_error") or "").strip()
+    motivo = reason or "descartado"
+    if anterior and anterior != motivo and anterior not in motivo:
+        motivo = f"{motivo} | motivo anterior do pipeline: {anterior}"
+    editorial = {"site_relevance": {"decision": "skip", "confidence": 1.0, "reason": motivo}}
     _save_uncertain(root, post_id, editorial)
     _write_state_markers(
         client,
         config,
         post_id,
         STATE_UNCERTAIN,
-        last_error=reason or "descartado",
+        last_error=motivo,
     )
     return {
         "post_id": post_id,
