@@ -266,6 +266,20 @@ def build_parser() -> argparse.ArgumentParser:
     discard_parser.add_argument("--root", type=Path, default=Path("."))
     discard_parser.add_argument("--reason", type=str, default="")
 
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="compara status WP x _hermes_state x artefatos do filesystem "
+        "(somente leitura): reporta divergencias de estado com o reparo sugerido",
+    )
+    reconcile_parser.add_argument("--root", type=Path, default=Path("."))
+    reconcile_parser.add_argument("--limit", type=int, default=100)
+    reconcile_parser.add_argument(
+        "--statuses",
+        type=str,
+        default="pending,awaiting_human",
+        help="statuses WP a varrer (separados por virgula)",
+    )
+
     uncertain_parser = subparsers.add_parser(
         "uncertain",
         help="registra a decisao do agente de nao processar o post agora (motivo obrigatorio)",
@@ -530,6 +544,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .observability import read_telemetry_summary
 
             result = read_telemetry_summary(args.root)
+        elif args.command == "reconcile":
+            from .reconcile import reconcile_state
+
+            statuses = tuple(
+                s.strip() for s in str(getattr(args, "statuses", "") or "").split(",") if s.strip()
+            )
+            result = reconcile_state(
+                client,
+                config,
+                args.root,
+                statuses=statuses or ("pending", "awaiting_human"),
+                limit=int(getattr(args, "limit", 100) or 100),
+            )
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
