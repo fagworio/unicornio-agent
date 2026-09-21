@@ -583,6 +583,27 @@ def _enriquecer_candidatos(
     rejeitados: list[dict] = []
     cache_paginas: dict = {}
     cache_html: dict = {}
+
+    # SourceResolver: o candidato sem origem (Yandex) NÃO é descartado de saída —
+    # ele tenta localizar a página de publicação (domínio oficial -> filename ->
+    # busca textual). O que o resolver acha é apenas LOCALIZADOR: a prova
+    # continua sendo a validação determinística logo abaixo.
+    if any(not str(c.get("source_page_url") or "").strip() for c in candidates):
+        try:
+            from .media.source_resolver import resolve_candidate_source
+
+            for indice, cand in enumerate(candidates):
+                if str(cand.get("source_page_url") or "").strip():
+                    continue
+                resolvido = resolve_candidate_source(cand, subject)
+                if str(resolvido.get("source_page_url") or "").strip():
+                    resolvido["usable"] = True
+                    resolvido["discovery_only"] = False
+                    resolvido.pop("rejected_reason", None)
+                    candidates[indice] = resolvido
+        except Exception:  # noqa: BLE001 - resolver é best-effort
+            pass
+
     for cand in candidates:
         cand["subject"] = subject
         if not cand.get("usable"):
