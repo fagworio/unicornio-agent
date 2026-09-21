@@ -2193,41 +2193,72 @@ def migrate_legacy_state(
     Só roda com ``apply=True`` (dry-run por padrão) e nunca sobrescreve um estado
     existente.
     """
+    # Mapa explícito WP -> estado (o awaiting_human NÃO pode virar NEW: o
+    # próprio reconcile apontaria a divergência depois).
+    mapa = {
+        "publish": STATE_PUBLISHED,
+        "pending": STATE_NEW,
+        "awaiting_human": STATE_AWAITING_HUMAN,
+        "draft": STATE_NEW,
+    }
     vistos = 0
     migrados: list[dict[str, Any]] = []
+    aplicados = 0
+    falhas = 0
     erros: list[str] = []
     for status_wp in ("publish", "pending", "draft", "awaiting_human"):
-        try:
-            posts = client.list_pending(status=status_wp, per_page=100) or []
-        except Exception as exc:  # noqa: BLE001
-            # Não engolir: "0 legados" por falha de conexão seria lido como
-            # "nada a migrar" e a migração seria dada por concluída.
-            erros.append(f"{status_wp}: {type(exc).__name__}: {exc}")
-            continue
-        for post in posts:
+        pagina = 1
+        while True:
             if limit and vistos >= limit:
                 break
-            post_id = post.get("id")
-            if not isinstance(post_id, int):
-                continue
-            vistos += 1
-            info = read_state(post)
-            if info.get("state") is not None:
-                continue  # já tem estado: nunca sobrescreve
-            destino = STATE_PUBLISHED if status_wp == "publish" else STATE_NEW
-            registro = {"post_id": post_id, "wp_status": status_wp, "state": destino}
-            migrados.append(registro)
-            if apply:
-                _write_state_markers(
-                    client, config, post_id, destino, root=root,
-                    attempts=int(info.get("attempts") or 0),
-                )
+            try:
+                posts = client.list_pending(status=status_wp, per_page=100, page=pagina) or []
+            except Exception as exc:  # noqa: BLE001
+                # Não engolir: "0 legados" por falha de conexão seria lido como
+                # "nada a migrar" e a migração seria dada por concluída.
+                erros.append(f"{status_wp} p{pagina}: {type(exc).__name__}: {exc}")
+                break
+            if not posts:
+                break
+            for post in posts:
+                if limit and vistos >= limit:
+                    break
+                post_id = post.get("id")
+                if not isinstance(post_id, int):
+                    continue
+                vistos += 1
+                info = read_state(post)
+                if info.get("state") is not None:
+                    continue  # já tem estado: nunca sobrescreve
+                destino = mapa[status_wp]
+                registro = {"post_id": post_id, "wp_status": status_wp, "state": destino}
+                if apply:
+                    gravou = _write_state_markers(
+                        client, config, post_id, destino, root=root,
+                        attempts=int(info.get("attempts") or 0),
+                    )
+                    registro["written"] = bool(gravou)
+                    if gravou:
+                        aplicados += 1
+                    else:
+                        falhas += 1
+                        registro["write_error"] = "estado nao persistiu no WordPress"
+                migrados.append(registro)
+            if len(posts) < 100:
+                break  # última página
+            pagina += 1
+            if pagina > 200:
+                break  # limite de segurança
         if limit and vistos >= limit:
             break
     return {
         "scanned": vistos,
         "legacy_found": len(migrados),
         "applied": bool(apply),
+        "applied_count": aplicados,
+        "failed_count": falhas,
+        # Só se pode dizer "migração concluída" quando tudo foi gravado.
+        "complete": bool(apply) and falhas == 0 and not erros,
         "items": migrados[:50],
         "errors": erros,
     }

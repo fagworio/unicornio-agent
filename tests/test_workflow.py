@@ -1936,5 +1936,49 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(gravados, [42])
 
 
+    def test_migrate_awaiting_human_legado_vira_awaiting_human(self):
+        """Acceptance 11: `awaiting_human` legado NÃO pode virar `new`.
+
+        Mapear para NEW criava uma divergência que o próprio reconcile acusaria
+        (status WP diz espera humana, estado diz fila de automação).
+        """
+        from unicornio_editor.workflow import migrate_legacy_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            legado = self.post()
+            legado["status"] = "awaiting_human"
+            legado.pop("meta", None)
+            client = FakeClient(legado)
+            client.list_pending = lambda **kw: (
+                [legado] if kw.get("status") == "awaiting_human" else []
+            )
+            report = migrate_legacy_state(client, self.config(False), Path(directory), apply=True)
+            self.assertTrue(report["applied"])
+            self.assertEqual(report["applied_count"], 1)
+            gravados = [
+                payload["meta"].get("_hermes_state")
+                for _pid, payload in client.updated
+                if isinstance((payload or {}).get("meta"), dict)
+            ]
+            self.assertEqual(gravados, ["awaiting_human"])
+            self.assertTrue(report["complete"])
+
+    def test_migrate_reporta_falha_de_escrita(self):
+        """Acceptance 12: falha ao gravar não pode aparecer como sucesso."""
+        from unicornio_editor.workflow import migrate_legacy_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            legado = self.post()
+            legado["status"] = "publish"
+            legado.pop("meta", None)
+            client = FakeClient(legado)
+            client.list_pending = lambda **kw: [legado] if kw.get("status") == "publish" else []
+            with mock.patch.object(client, "update_post", side_effect=RuntimeError("HTTP 500")):
+                report = migrate_legacy_state(client, self.config(False), Path(directory), apply=True)
+            self.assertEqual(report["failed_count"], 1)
+            self.assertEqual(report["applied_count"], 0)
+            self.assertFalse(report["complete"])
+
+
 if __name__ == "__main__":
     unittest.main()
