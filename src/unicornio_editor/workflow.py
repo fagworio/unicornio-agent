@@ -822,6 +822,46 @@ def _images_summary(content: str, title: str, entities: set[str] | None = None) 
     }
 
 
+
+def _item_entities(item: dict[str, Any], entities: set[str]) -> set[str]:
+    """Entidades que valem para ESTE item (P1 da auditoria).
+
+    Se o media_plan traz o subject determinado na descoberta (entidade principal
+    do post ou H2 do item), é ele que manda — e não o conjunto global do artigo.
+    Sem subject, cai no comportamento anterior (entidades do artigo).
+    """
+    subject = " ".join(str(item.get("subject") or "").split()).strip().lower()
+    if not subject:
+        return set(entities)
+    locais = {subject}
+    locais.update(e for e in entities if e and e.lower() in subject)
+    return locais
+
+
+def _item_evidence_relevant(item: dict[str, Any], entities: set[str]) -> bool:
+    """Relevância por EVIDÊNCIA DE ORIGEM (nunca alt/credit/search_query).
+
+    Compartilhada entre ``_execute_media_plan`` (apply) e ``validate_media_plan``
+    (media-validate): uma única política de imagem para o pipeline inteiro.
+    """
+    # A evidência é o que a ORIGEM diz (arquivo + página). O subject NÃO entra
+    # aqui: ele é o alvo da checagem (entra como entities), e incluí-lo na
+    # própria evidência o faria casar consigo mesmo — qualquer item passaria.
+    evidencia = " ".join(
+        str(item.get(key) or "")
+        for key in ("direct_image_url", "source_page_url")
+    )
+    return bool(
+        image_is_relevant(
+            alt_text="",
+            credit_text="",
+            source_url=evidencia,
+            search_query="",
+            entities=_item_entities(item, entities),
+        )
+    )
+
+
 def _media_item_rejection(
     item: dict[str, Any],
     entities: set[str],
@@ -867,14 +907,13 @@ def _media_item_rejection(
                     f"(attachment sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
                 )
             return None
+        # Reuso: aqui alt/título/caption vem do ATTACHMENT ORIGINAL (não do
+        # agente), então contam como evidência legítima do que a imagem é.
         if not image_is_relevant(
-            alt_text=str(item.get("alt_text") or ""),
-            credit_text=str(item.get("credit_text") or ""),
-            source_url=source,
-            search_query=str(item.get("search_query") or ""),
-            entities=entities,
+            alt_text="", credit_text="", source_url=source,
+            search_query="", entities=_item_entities(item, entities),
         ):
-            listed = ", ".join(sorted(entities)) or "nenhuma"
+            listed = ", ".join(sorted(_item_entities(item, entities))) or "nenhuma"
             return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
         return None
     if is_featured:
@@ -899,16 +938,13 @@ def _media_item_rejection(
                 f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
             )
         return None
-    if not image_is_relevant(
-        alt_text=str(item.get("alt_text") or ""),
-        credit_text=str(item.get("credit_text") or ""),
-        source_url=" ".join(
-            str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
-        ),
-        search_query=str(item.get("search_query") or ""),
-        entities=entities,
-    ):
-        listed = ", ".join(sorted(entities)) or "nenhuma"
+    # P1 (auditoria): alt/credit/search_query escritos pelo AGENTE não são
+    # evidência — uma imagem errada com alt "Bleach anime" passava no apply
+    # embora a descoberta já a tivesse rejeitado (o agente provava a si mesmo).
+    # Aplicado aqui: só a evidência de ORIGEM (arquivo + página) e o subject que
+    # a descoberta carimbou no item (entidades LOCAIS, não o conjunto do artigo).
+    if not _item_evidence_relevant(item, entities):
+        listed = ", ".join(sorted(_item_entities(item, entities))) or "nenhuma"
         return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
     return None
 

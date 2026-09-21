@@ -1980,5 +1980,57 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(report["complete"])
 
 
+    def test_apply_rejeita_imagem_de_outro_item_do_listicle(self):
+        """Acceptance 3: alt/caption do agente NÃO convencem o apply.
+
+        media_plan do item "Bleach" apontando uma imagem do Naruto COM
+        alt/credit/search_query escritos "Bleach". Antes o apply consultava
+        esses campos (o agente provava a si mesmo); agora só a evidência de
+        origem + subject do item contam — e o item é rejeitado.
+        """
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<h2>1. Bleach</h2><p>Texto sobre o anime.</p>"
+        item = self.media_item(paragraph_index=1)
+        item.update({
+            "direct_image_url": "https://cdn.x/naruto-keyart.jpg",
+            "source_page_url": "https://site.com/naruto/",
+            "subject": "Bleach",
+            "alt_text": "Bleach anime",
+            "credit_text": "Crédito da imagem: Bleach",
+            "search_query": "Bleach anime",
+        })
+        payload["media_plan"] = [item]
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            # A rede não importa: o teste é sobre a RELEVÂNCIA, e um reject tem
+            # de acontecer sem depender de download.
+            with mock.patch("unicornio_editor.workflow.download_image") as baixar:
+                report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        resultado = report["media_plan_results"][0]
+        self.assertIn(resultado["status"], ("rejected", "error"))
+        self.assertIn("relacao com o conteudo", str(resultado.get("detail") or ""))
+        # e o download nem foi tentado para uma imagem sem relação
+        self.assertFalse(baixar.called)
+
+    def test_apply_aceita_key_art_do_proprio_item(self):
+        """Contraprova: a imagem do PRÓPRIO subject continua passando."""
+        payload = editorial_payload()
+        payload["cleaned_html"] = "<h2>1. Bleach</h2><p>Texto sobre o anime.</p>"
+        item = self.media_item(paragraph_index=1)
+        item.update({
+            "direct_image_url": "https://cdn.x/bleach-thousand-year-blood-war-keyart.jpg",
+            "source_page_url": "https://site.com/bleach/",
+            "subject": "Bleach",
+        })
+        payload["media_plan"] = [item]
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            with mock.patch("unicornio_editor.workflow.download_image") as baixar:
+                baixar.side_effect = RuntimeError("parou aqui de proposito")
+                apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        # passou da relevância (o download só falhou DEPOIS da validação)
+        baixar.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()
