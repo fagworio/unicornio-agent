@@ -92,6 +92,25 @@ def _queries(candidate: dict[str, Any], subject: str, extra: str = "") -> list[s
     return queries
 
 
+def _mesma_url(a: str, b: str) -> bool:
+    """Mesma URL ignorando esquema/host-casing e barra final."""
+    def _norm(u: str) -> str:
+        try:
+            partes = urlparse(str(u or "").strip())
+        except ValueError:
+            return ""
+        caminho = (partes.path or "").rstrip("/")
+        return f"{(partes.hostname or '').lower()}{caminho}"
+
+    return bool(a) and _norm(a) == _norm(b)
+
+
+def _parece_arquivo_bruto(url: str) -> bool:
+    """A "página" é o próprio arquivo de imagem (não prova nada)."""
+    caminho = (urlparse(str(url or "")).path or "").lower()
+    return bool(re.search(r"\.(jpe?g|png|webp|gif|avif|bmp)$", caminho))
+
+
 def resolve_candidate_source(
     candidate: dict[str, Any],
     subject: str,
@@ -99,12 +118,24 @@ def resolve_candidate_source(
     extra: str = "",
     busca: _Busca | None = None,
     max_paginas: int = 5,
+    verifier: Any = None,
 ) -> dict[str, Any]:
     """Tenta resolver a origem de um candidato (discovery_only ou não).
 
     Devolve o candidato (cópia enriquecida) com ``source_page_url`` e
-    ``source_resolution`` quando conseguir localizar uma página plausível.
-    **Não** prova nada: quem prova é a validação determinística depois.
+    ``source_resolution`` quando conseguir localizar uma página plausível, e
+    sempre com ``candidate_pages`` (todas as páginas plausíveis encontradas).
+
+    Duas correções da auditoria:
+
+    * **múltiplas páginas**: antes o resolver devolvia a PRIMEIRA página e, se
+      ela não contivesse a imagem, o candidato era rejeitado — mesmo havendo
+      uma segunda página que provava a imagem. Com ``verifier`` (a validação
+      determinística) o resolver testa as páginas em ordem e fica com a
+      primeira que realmente contém a imagem.
+    * **mesmo host**: página e imagem no mesmo domínio
+      (``example.com/materia`` + ``example.com/imagem.jpg``) é origem
+      excelente; o que não vale é a página SER a imagem.
     """
     resultado = dict(candidate)
     if str(candidate.get("source_page_url") or "").strip():
@@ -112,6 +143,8 @@ def resolve_candidate_source(
         return resultado
 
     buscar = busca or _buscador_padrao
+    paginas_candidatas: list[str] = []
+    query_origem = ""
     for query in _queries(candidate, subject, extra):
         try:
             paginas = buscar(query) or []
@@ -119,17 +152,42 @@ def resolve_candidate_source(
             paginas = []
         for pagina in paginas[:max_paginas]:
             url = str(pagina.get("source_page_url") or "").strip()
-            if not url or _host(url) == _host(str(candidate.get("direct_image_url") or "")):
+            if not url or url in paginas_candidatas:
                 continue
-            resultado["source_page_url"] = url
-            resultado["source_resolution"] = (
-                "official_domain" if query.startswith("site:") else "filename_search"
-            )
-            resultado["source_resolution_query"] = query
-            return resultado
+            if _mesma_url(url, str(candidate.get("direct_image_url") or "")):
+                continue
+            if _parece_arquivo_bruto(url):
+                continue
+            paginas_candidatas.append(url)
+            if not query_origem:
+                query_origem = query
+    resultado["candidate_pages"] = paginas_candidatas[: max_paginas * 2]
+    if not paginas_candidatas:
+        resultado["source_resolution"] = "unresolved"
+        resultado["source_resolution_query"] = ""
+        return resultado
 
-    resultado["source_resolution"] = "unresolved"
-    resultado["source_resolution_query"] = ""
+    # Com verifier: escolhe a primeira página que REALMENTE contém a imagem.
+    if verifier is not None:
+        for pagina in paginas_candidatas:
+            try:
+                veredito = verifier({**candidate, "source_page_url": pagina})
+            except Exception:  # noqa: BLE001 - verificação é best-effort aqui
+                continue
+            if veredito.get("valid"):
+                resultado["source_page_url"] = pagina
+                resultado["source_resolution"] = "verified_page"
+                resultado["source_resolution_query"] = query_origem
+                return resultado
+        resultado["source_resolution"] = "unresolved"
+        resultado["source_resolution_query"] = query_origem
+        return resultado
+
+    resultado["source_page_url"] = paginas_candidatas[0]
+    resultado["source_resolution"] = (
+        "official_domain" if query_origem.startswith("site:") else "filename_search"
+    )
+    resultado["source_resolution_query"] = query_origem
     return resultado
 
 

@@ -13,10 +13,18 @@ mu-plugin para isso.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
 _CAMINHO_RELATIVO = Path("work") / "media_index.json"
+
+# O media plan roda em ThreadPoolExecutor(max_workers=4) e cada worker pode
+# registrar mídia: sem lock, dois workers leem 10 entradas, cada um grava a sua
+# 11ª e a primeira atualização é PERDIDA. Também protege contra duas execuções
+# CLI simultâneas (select+replace é atômico no filesystem).
+_LOCK = threading.Lock()
 
 
 def _caminho(root: Path | str) -> Path:
@@ -35,10 +43,14 @@ def load_index(root: Path | str) -> dict[str, Any]:
 
 
 def _salvar(root: Path | str, dados: dict[str, Any]) -> None:
+    """Escrita ATÔMICA (tmp + replace): leitor concorrente nunca vê JSON pela
+    metade e um crash no meio não corrompe o índice."""
     caminho = _caminho(root)
     try:
         caminho.parent.mkdir(parents=True, exist_ok=True)
-        caminho.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+        temporario = caminho.with_name(caminho.name + f".{os.getpid()}.tmp")
+        temporario.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporario, caminho)
     except Exception:  # noqa: BLE001 - deduplicação é otimização, não gate
         pass
 
@@ -63,6 +75,22 @@ def register(
     """Registra um upload (ou reaproveitamento) no índice."""
     if not (phash or source_url or subject):
         return
+    with _LOCK:
+        _registrar_sem_lock(root, phash=phash, source_url=source_url,
+                            source_page=source_page, subject=subject,
+                            media_id=media_id, article_id=article_id)
+
+
+def _registrar_sem_lock(
+    root: Path | str,
+    *,
+    phash: str = "",
+    source_url: str = "",
+    source_page: str = "",
+    subject: str = "",
+    media_id: int | None = None,
+    article_id: int | None = None,
+) -> None:
     dados = load_index(root)
     entradas = dados["entries"]
     for entrada in entradas:

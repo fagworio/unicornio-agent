@@ -606,7 +606,17 @@ def _enriquecer_candidatos(
             for indice, cand in enumerate(candidates):
                 if str(cand.get("source_page_url") or "").strip():
                     continue
-                resolvido = resolve_candidate_source(cand, subject)
+                # O verifier é a MESMA validação determinística: o resolver
+                # testa as páginas em ordem e fica com a primeira que realmente
+                # contém a imagem (antes ele devolvia a primeira e o candidato
+                # era rejeitado mesmo havendo uma segunda página válida).
+                resolvido = resolve_candidate_source(
+                    cand,
+                    subject,
+                    verifier=lambda c: validate_discovered_candidate(
+                        c, cache=cache_paginas, cache_html=cache_html
+                    ),
+                )
                 if str(resolvido.get("source_page_url") or "").strip():
                     resolvido["usable"] = True
                     resolvido["discovery_only"] = False

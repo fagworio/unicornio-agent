@@ -52,13 +52,52 @@ class ResolverTests(unittest.TestCase):
         )
         self.assertEqual(pontos["verdict"], "unresolved_source")
 
-    def test_nao_aceita_pagina_do_mesmo_host_da_imagem(self):
+    def test_aceita_pagina_no_mesmo_host_da_imagem(self):
+        """Acceptance 6: página e imagem no MESMO domínio é origem válida.
+
+        example.com/materia + example.com/imagem.jpg é uma origem excelente —
+        antes o resolver descartava por compartilhar host. O que continua
+        inválido é a página SER a própria imagem (URL crua de arquivo).
+        """
         out = resolve_candidate_source(
             self._cand(),
             "metroid prime 4",
-            busca=lambda q: [{"source_page_url": "https://cdn.aggregator.com/x"}],
+            busca=lambda q: [{"source_page_url": "https://cdn.aggregator.com/materia/metroid"}],
         )
-        self.assertEqual(out["source_resolution"], "unresolved")
+        self.assertEqual(out["source_page_url"], "https://cdn.aggregator.com/materia/metroid")
+
+    def test_rejeita_pagina_que_e_a_propria_imagem(self):
+        out = resolve_candidate_source(
+            self._cand(),
+            "metroid prime 4",
+            busca=lambda q: [
+                {"source_page_url": "https://cdn.aggregator.com/metroid.jpg"},
+                {"source_page_url": "https://outro.com/materia"},
+            ],
+        )
+        # a URL crua da imagem é descartada; a matéria permanece
+        self.assertEqual(out["source_page_url"], "https://outro.com/materia")
+
+    def test_verifier_escolhe_a_pagina_que_realmente_contem_a_imagem(self):
+        """Acceptance 5: a 1ª página não tem a imagem, a 2ª tem -> usa a 2ª."""
+        chamadas: list[str] = []
+
+        def verifier(cand):
+            chamadas.append(cand["source_page_url"])
+            return {"valid": cand["source_page_url"].endswith("/jogo/")}
+
+        def busca(q):
+            return [
+                {"source_page_url": "https://nintendo.com/news/metroid"},
+                {"source_page_url": "https://nintendo.com/games/metroid/jogo/"},
+            ]
+
+        out = resolve_candidate_source(
+            self._cand(), "metroid prime 4", busca=busca, verifier=verifier
+        )
+        self.assertEqual(out["source_page_url"], "https://nintendo.com/games/metroid/jogo/")
+        self.assertEqual(out["source_resolution"], "verified_page")
+        self.assertEqual(len(chamadas), 2)  # tentou as duas, na ordem
 
 
 class FluxoPontaAPontaTests(unittest.TestCase):

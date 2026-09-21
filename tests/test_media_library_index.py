@@ -1,6 +1,7 @@
 """Fase 13 — índice local de mídia (deduplicação da Media Library)."""
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -50,6 +51,32 @@ class LibraryIndexTests(unittest.TestCase):
         (self.root / "work" / "media_index.json").write_text("{lixo", encoding="utf-8")
         self.assertEqual(library_index.count(self.root), 0)
         self.assertIsNone(library_index.find_by_source_url(self.root, "https://x/y.jpg"))
+
+
+    def test_registro_concorrente_nao_perde_entrada(self):
+        """Acceptance 8: o media plan roda em 4 threads — nenhuma pode sumir.
+
+        Sem lock, dois workers leem as mesmas N entradas, cada um grava a sua e
+        a primeira atualização é perdida (o índice termina menor do que o real).
+        """
+        def worker(marca):
+            for i in range(10):
+                library_index.register(
+                    self.root, phash=f"{marca}{i}",
+                    source_url=f"https://cdn/{marca}/{i}.jpg", subject=f"s{marca}",
+                )
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(library_index.count(self.root), 40)
+
+    def test_escrita_e_atomica_e_nao_deixa_temporario(self):
+        library_index.register(self.root, phash="1", source_url="https://x/a.jpg")
+        temporarios = list((self.root / "work").glob("*.tmp"))
+        self.assertEqual(temporarios, [])
 
 
 if __name__ == "__main__":
