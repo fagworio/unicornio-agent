@@ -105,10 +105,11 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
         (SHA-256) — SOMENTE ready significa apto a publicar
   -> estados no WordPress (_hermes_state/_hermes_attempts/_hermes_next_retry_at/
      _hermes_last_error/_hermes_ready_hash/_hermes_policy_version)
-  -> publicacao (cron, 00h=5/08h=7/12h=8/18h=10/21h=10, ~40/dia):
-     publish-ready consulta SOMENTE READY; hash do manifest intacto -> publica
-     sem revalidar; mudou (STALE) -> revalida com o checklist; falhou -> blocked
-     (volta para rework do agente)
+  -> publicacao (cron, janelas 00/08/12/18/21): cada janela publica TODOS os
+     posts READY disponiveis (PUBLISH_LIMIT=0 = sem teto; um numero e LOTE, nao
+     cota diaria); publish-ready consulta SOMENTE READY; hash do manifest intacto
+     -> publica sem revalidar; mudou (STALE) -> revalida com o checklist; falhou
+     -> blocked (volta para rework do agente)
   -> qualidade garantida por codigo, nao por diligencia do LLM: o apply nunca
      grava post que o publish bloquearia; o publish apenas confirma
 ```
@@ -288,10 +289,34 @@ Jobs separados e inicialmente somente `report` para:
 - posts sem imagem suficiente;
 - midia orfa.
 
-## Pontos a integrar na proxima iteracao
+## Estado das capacidades
 
-1. Adaptador do plugin SEO em uso (Yoast, Rank Math etc.) para gravar title/description/keyword nos metas corretos.
-2. Adaptador de pesquisa de imagens com fontes permitidas.
-3. Insercao automatica de imagens conforme `media_plan`.
-4. Registro e validação da licença/crédito de cada mídia, sem declarar que “Google Images” garante direitos.
-5. Marcadores de processamento (`_ai_editor_*`) registrados/expostos na REST API do WordPress.
+| Capacidade | Onde vive | Estado |
+|---|---|---|
+| **Rank Math** (title/description/focus keyword nos metas do plugin) | `seo/rank_math.py` | ✅ |
+| **Descoberta de imagens** (Bing/Yandex/Google agregados, com circuit breaker e backoff) | `media/search.py` | ✅ |
+| **Validação de origem** (a imagem consta na página? bytes conferem?) | `media/source_verify.py` | ✅ |
+| **Resolver de origem** para candidatos sem página (Yandex) | `media/source_resolver.py` | ✅ |
+| **Registry de fontes oficiais** (entidade → publishers) | `media/official_sources.py` | ✅ |
+| **Subject por item/H2** + score determinístico de evidência (gates A/B/C) | `media/evidence.py` | ✅ |
+| **Dedupe visual** (pHash antes da seleção/upload) | `media/visual_hash.py` | ✅ |
+| **Índice de mídia** (fingerprint + proveniência; reuso antes de custo novo) | `media/library_index.py` | ✅ |
+| **Conversão WebP + upload** com crédito/licença | `media/converter.py`, `media/wordpress_media.py` | ✅ |
+| **Vision gate** (só em caso ambíguo, depois da origem validada) | `media/vision_gate.py` | ✅ |
+| **Trailer auditável** (evidência determinística) | `media/` | ✅ |
+| **Estados persistentes** (`_hermes_*`) + `AWAITING_HUMAN` no WordPress | `state.py`, `workflow.py` | ✅ |
+| **Reconciliação de estado** (`unicornio-editor reconcile`, somente leitura) | `reconcile.py` | ✅ |
+| **Links internos idempotentes** (1 URL por artigo, canônica) | `internal_links.py` | ✅ |
+
+### Decisões de política (fonte da verdade)
+
+- **Publicação**: as janelas publicam **todos os posts READY** disponíveis — não há
+  cota por janela. `PUBLISH_LIMIT=0` significa **sem teto**; um valor positivo é
+  tratado como **lote** (processar em blocos), nunca como limite diário. A tabela
+  antiga (00h=5/08h=7/12h=8/18h=10/21h=10 ≈ 40/dia) está revogada: o gargalo real
+  é o pipeline editorial, não a janela de publicação.
+- **Mídia**: nenhuma imagem entra porque o agente disse que está correta. A cadeia
+  verificável é `query → página de origem → URL → bytes → subject → seção → hash`,
+  com proveniência como **hard gate** (sem origem não existe ACCEPT) e visão/LLM
+  restrita a casos ambíguos **com origem validada**.
+

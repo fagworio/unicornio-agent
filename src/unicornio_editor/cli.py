@@ -303,6 +303,17 @@ def build_parser() -> argparse.ArgumentParser:
     discard_parser.add_argument("--root", type=Path, default=Path("."))
     discard_parser.add_argument("--reason", type=str, default="")
 
+    migrate_parser = subparsers.add_parser(
+        "migrate-state",
+        help="migration explicita dos posts legados (sem _hermes_state): grave o "
+        "estado que falta para o publish-ready exigir SOMENTE ready (dry-run por "
+        "padrao)",
+    )
+    migrate_parser.add_argument("--root", type=Path, default=Path("."))
+    migrate_parser.add_argument("--apply", action="store_true",
+                                help="sem esta flag o comando apenas relata o que faria")
+    migrate_parser.add_argument("--limit", type=int, default=0)
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -747,6 +758,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .observability import read_telemetry_summary
 
             result = read_telemetry_summary(args.root)
+        elif args.command == "migrate-state":
+            from .workflow import migrate_legacy_state
+
+            result = migrate_legacy_state(
+                client, config, args.root,
+                apply=bool(getattr(args, "apply", False)),
+                limit=int(getattr(args, "limit", 0) or 0),
+            )
         elif args.command == "reconcile":
             from .reconcile import reconcile_state
 

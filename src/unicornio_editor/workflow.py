@@ -2023,6 +2023,18 @@ def publish_ready_posts(
         state_info = read_state(candidate)
         if state_info["state"] not in (None, STATE_READY):
             continue  # fora da fila de publicacao — sem chamadas caras
+        if state_info["state"] is None:
+            # P3.7: o modo legado (post sem `_hermes_state`) continua elegivel
+            # por seguranca operacional, mas nunca em silencio — cada uso fica
+            # registrado para que a migracao explicita seja concluida e o gate
+            # passe a exigir SOMENTE STATE_READY.
+            try:
+                append_telemetry(
+                    root, "legacy_state_used",
+                    post_id=candidate.get("id"), bucket="publish_ready",
+                )
+            except Exception:  # noqa: BLE001 - telemetria nunca bloqueia
+                pass
         if state_info["state"] is None and (
             root / "backups" / str(candidate_id) / "editorial.blocked.json"
         ).is_file():
@@ -2149,6 +2161,60 @@ def _post_title(post: dict[str, Any]) -> str | None:
         return sanitize_title(title) or None
     return None
 
+
+
+def migrate_legacy_state(
+    client: Any,
+    config: Any,
+    root: Path,
+    *,
+    apply: bool = False,
+    limit: int = 0,
+) -> dict[str, Any]:
+    """Migration EXPLÍCITA dos posts legados (P3.7).
+
+    O ``publish-ready`` aceitava ``state is None`` para não travar a fila antiga.
+    Com a máquina de estados madura, o modo legado sai do caminho: esta função
+    percorre os posts do WordPress e grava o ``_hermes_state`` que falta —
+    ``PUBLISHED`` para quem já está publicado, ``NEW`` para quem está pendente —
+    deixando o ``publish-ready`` apto a exigir SOMENTE ``STATE_READY``.
+
+    Só roda com ``apply=True`` (dry-run por padrão) e nunca sobrescreve um estado
+    existente.
+    """
+    vistos = 0
+    migrados: list[dict[str, Any]] = []
+    for status_wp in ("publish", "pending", "draft", "awaiting_human"):
+        try:
+            posts = client.list_pending(status=status_wp, per_page=100) or []
+        except Exception:  # noqa: BLE001
+            continue
+        for post in posts:
+            if limit and vistos >= limit:
+                break
+            post_id = post.get("id")
+            if not isinstance(post_id, int):
+                continue
+            vistos += 1
+            info = read_state(post)
+            if info.get("state") is not None:
+                continue  # já tem estado: nunca sobrescreve
+            destino = STATE_PUBLISHED if status_wp == "publish" else STATE_NEW
+            registro = {"post_id": post_id, "wp_status": status_wp, "state": destino}
+            migrados.append(registro)
+            if apply:
+                _write_state_markers(
+                    client, config, post_id, destino, root=root,
+                    attempts=int(info.get("attempts") or 0),
+                )
+        if limit and vistos >= limit:
+            break
+    return {
+        "scanned": vistos,
+        "legacy_found": len(migrados),
+        "applied": bool(apply),
+        "items": migrados[:50],
+    }
 
 def build_queue_report(
     client: WordPressClient,

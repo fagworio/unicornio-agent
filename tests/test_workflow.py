@@ -1886,5 +1886,47 @@ class WorkflowTests(unittest.TestCase):
             )
 
 
+    def test_migrate_legacy_state_dry_run_nao_escreve(self):
+        """P3.7: a migração é explícita — sem --apply não grava nada."""
+        from unicornio_editor.workflow import migrate_legacy_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            legado = self.post()
+            legado["status"] = "publish"
+            legado.pop("meta", None)
+            client = FakeClient(legado)
+            client.list_pending = lambda **kw: [legado] if kw.get("status") == "publish" else []
+            report = migrate_legacy_state(client, self.config(False), Path(directory))
+            self.assertFalse(report["applied"])
+            self.assertEqual(report["legacy_found"], 1)
+            self.assertEqual(report["items"][0]["state"], "published")
+            # dry-run: nada foi escrito no WordPress
+            self.assertTrue(all("_hermes_state" not in (p or {}) for _pid, p in client.updated))
+
+    def test_migrate_legacy_state_apply_grava_so_quem_nao_tem_estado(self):
+        from unicornio_editor.workflow import migrate_legacy_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            legado = self.post()
+            legado["status"] = "publish"
+            legado.pop("meta", None)
+            com_estado = self.post()
+            com_estado["id"] = 43
+            com_estado["status"] = "publish"
+            com_estado["meta"] = {"_hermes_state": "published"}
+            client = FakeClient(legado)
+            client.list_pending = lambda **kw: (
+                [legado, com_estado] if kw.get("status") == "publish" else []
+            )
+            report = migrate_legacy_state(client, self.config(False), Path(directory), apply=True)
+            self.assertTrue(report["applied"])
+            self.assertEqual(report["legacy_found"], 1)  # o que já tinha estado ficou fora
+            gravados = [
+                pid for pid, payload in client.updated
+                if "_hermes_state" in ((payload or {}).get("meta") or {})
+            ]
+            self.assertEqual(gravados, [42])
+
+
 if __name__ == "__main__":
     unittest.main()
