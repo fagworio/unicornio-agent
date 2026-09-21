@@ -162,6 +162,11 @@ def _bing_result_objects(html: str) -> list[dict[str, Any]]:
        tinha purl).
     """
     objects: list[dict[str, Any]] = []
+    # O HTML do Bing chega com as aspas do JSON escapadas como &quot;. Decodifica
+    # aqui dentro (o chamador pode passar o html cru) — sem isso o atributo
+    # `m="{...}"` fica invisivel e o parser cai no fallback (que nao tem a
+    # pagina de origem de cada resultado).
+    html = html.replace("&quot;", '"')
     for raw in _BING_M_ATTR_RE.findall(html):
         try:
             data = json.loads(raw)
