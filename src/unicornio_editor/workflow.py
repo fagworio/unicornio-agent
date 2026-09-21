@@ -1310,6 +1310,19 @@ def get_cleaned_content(
     post = client.get_post(post_id)
     _require_pending(post)
     raw = _raw_content(post)
+    # P0 (auditoria): se o conteúdo JÁ é um envelope operacional (o acidente do
+    # post 114180 publicou o JSON do comando), desembrulha o HTML real antes de
+    # limpar — e registra, porque significa que algo gravou saída de CLI no corpo.
+    from .content_quality import looks_like_operational_envelope, unwrap_operational_envelope
+
+    if looks_like_operational_envelope(raw):
+        try:
+            from .observability import append_telemetry as _telemetria
+
+            _telemetria(root, "content_envelope_unwrapped", post_id=post_id)
+        except Exception:  # noqa: BLE001
+            pass
+        raw = unwrap_operational_envelope(raw)
     cleaned = clean_html(_repair_orphan_media(raw))
     return {
         "post_id": post_id,
@@ -1975,6 +1988,39 @@ def _publish_post_unlocked(
             "reason": f"estado {state} (fora da fila de publicacao; rework/agente)",
             "state": state,
         }
+    # P0 (auditoria): invariância no NÍVEL MAIS BAIXO — nenhum caminho de
+    # publicação aceita envelope operacional. O sanity existia só no loop do
+    # cron (publish_ready_posts); o fast-path `publish POST_ID` chama esta
+    # função e ia direto ao manifest_match — era por ali que o 114180 passava.
+    # E não basta pular: o post vira BLOCKED com motivo visível, senão o READY
+    # volta a cada janela e é bloqueado em silêncio para sempre.
+    from .content_quality import looks_like_operational_envelope
+
+    if looks_like_operational_envelope(str(_raw_content(post) or "")):
+        aviso = (
+            "corpo é saída de comando do CLI (envelope JSON operacional) — "
+            "o post precisa de conteúdo editorial real antes de publicar"
+        )
+        try:
+            _write_state_markers(
+                client, config, post_id, STATE_BLOCKED, root=root,
+                last_error="operational_envelope_in_content",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .observability import append_telemetry as _telemetria
+
+            _telemetria(root, "publish_blocked_operational_envelope", post_id=post_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "blocked",
+            "reason": aviso,
+            "state": STATE_BLOCKED,
+        }
     if state == STATE_READY:
         raw_meta = post.get("meta")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
@@ -2150,21 +2196,13 @@ def publish_ready_posts(
         # publica sem revalidar" confiava no manifesto; se o corpo gravado for
         # um envelope operacional (o acidente do post 114180), o manifesto não
         # percebe. Aqui é barato: uma leitura do conteúdo já carregado.
-        from .content_quality import looks_like_operational_envelope
-
-        if looks_like_operational_envelope(str(_raw_content(candidate) or "")):
-            try:
-                # import local com ALIAS: `append_telemetry` é importado mais
-                # adiante nesta função, e usar o mesmo nome aqui o tornaria
-                # local em todo o escopo (UnboundLocalError).
-                from .observability import append_telemetry as _telemetria
-
-                _telemetria(root, "publish_blocked_operational_envelope",
-                            post_id=candidate.get("id"))
-            except Exception:  # noqa: BLE001
-                pass
-            continue
-
+        # P0 (auditoria): o sanity do envelope mora no NÍVEL MAIS BAIXO
+        # (_publish_post_unlocked), que é chamado pelo publish_post logo abaixo
+        # E pelo fast-path `publish POST_ID`. Antes havia um `continue` aqui:
+        # não publicava, mas também não marcava BLOCKED, não gerava outcome e
+        # não deixava motivo na resposta — o READY voltava a cada janela e era
+        # bloqueado em silêncio para sempre. Agora o próprio publish_post
+        # devolve status=blocked, grava o estado e registra a telemetria.
         published = sum(1 for outcome in outcomes if outcome.get("wordpress_changed"))
         if limit and published >= limit:
             break

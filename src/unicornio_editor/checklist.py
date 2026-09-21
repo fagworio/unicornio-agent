@@ -122,19 +122,24 @@ def run_pre_publish_checklist(
     check("conteudo_nao_vazio", content_ok, "cleaned_html preenchido" if content_ok else "cleaned_html vazio")
     # P0 (auditoria): o corpo não pode ser a saída de um comando do CLI. O
     # acidente do post 114180 publicou {"post_id":..., "cleaned_html":...} na
-    # cara do leitor — este item fecha a última porta (o publish revalida pelo
-    # checklist quando o hash está STALE).
+    # cara do leitor. Verifica o editorial E o conteúdo REAL do WordPress: o
+    # checklist protege o que será publicado, e pode divergir do editorial
+    # (ex.: cleaned_html correto no latest.json, content contaminado no WP).
     from .content_quality import looks_like_operational_envelope
 
-    envelope_operacional = looks_like_operational_envelope(
+    envelope_editorial = looks_like_operational_envelope(
         str(editorial.get("cleaned_html") or "")
     )
+    envelope_wordpress = looks_like_operational_envelope(str(content or ""))
     check(
         "conteudo_sem_metadados_operacionais",
-        not envelope_operacional,
+        not envelope_editorial and not envelope_wordpress,
         "corpo é texto editorial"
-        if not envelope_operacional
-        else "corpo parece saída de comando do CLI (JSON operacional: post_id/cleaned_html)",
+        if not envelope_editorial and not envelope_wordpress
+        else (
+            "corpo parece saída de comando do CLI (JSON operacional: post_id/cleaned_html)"
+            + (" [wordpress]" if envelope_wordpress else " [editorial]")
+        ),
     )
 
     # 5. Source block: original_link exists -> canonical Fonte must be present.
