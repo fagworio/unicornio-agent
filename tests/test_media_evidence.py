@@ -6,6 +6,7 @@ from unittest import mock
 from unicornio_editor.media import visual_hash
 from unicornio_editor.media.evidence import (
     LIMIAR_LOCAL,
+    source_context,
     LIMIAR_MATCH,
     dedupe_by_phash,
     LIMIAR_AMBIGUO,
@@ -255,6 +256,54 @@ class EvidenciaLocalTests(unittest.TestCase):
         )
         self.assertGreaterEqual(out["local_score"], LIMIAR_LOCAL)
         self.assertEqual(out["verdict"], "deterministic_match")
+
+
+class ContextoImageLocalTests(unittest.TestCase):
+    """P1 da auditoria: figcaption/heading precisam ser DA REGIÃO da imagem.
+
+    Antes `source_context` pegava o primeiro <figcaption> e o primeiro <h1-4> da
+    página inteira: numa matéria com uma key art em <figure> e um avatar do autor
+    solto depois, o avatar herdava legenda E heading da key art (local_score 6
+    sem nada local), furando o requisito local_score >= 4.
+    """
+
+    HTML = (
+        "<html><head><title>Metroid Prime 4</title></head><body>"
+        "<h1>Metroid Prime 4</h1>"
+        '<figure><img src="https://cdn.x/metroid-keyart.jpg" alt="Metroid Prime 4 key art">'
+        "<figcaption>Metroid Prime 4</figcaption></figure>"
+        "<p>Texto da materia.</p>"
+        '<img src="https://cdn.x/author-avatar.jpg">'
+        "</body></html>"
+    )
+
+    def test_avatar_nao_herda_contexto_da_key_art(self):
+        ctx = source_context(self.HTML, "https://cdn.x/author-avatar.jpg")
+        self.assertNotIn("figcaption", ctx)
+        self.assertNotIn("heading", ctx)
+        self.assertEqual(ctx.get("filename"), "author-avatar.jpg")
+
+    def test_key_art_recebe_o_proprio_contexto(self):
+        ctx = source_context(self.HTML, "https://cdn.x/metroid-keyart.jpg")
+        self.assertEqual(ctx.get("figcaption"), "Metroid Prime 4")
+        self.assertEqual(ctx.get("heading"), "Metroid Prime 4")
+        self.assertEqual(ctx.get("alt_original"), "Metroid Prime 4 key art")
+
+    def test_avatar_nao_vira_deterministic_match(self):
+        ctx = source_context(self.HTML, "https://cdn.x/author-avatar.jpg")
+        out = evidence_score(
+            "metroid prime 4",
+            filename=ctx.get("filename", ""),
+            page_title=ctx.get("page_title", ""),
+            og_title=ctx.get("og_title", ""),
+            alt_original=ctx.get("alt_original", ""),
+            figcaption=ctx.get("figcaption", ""),
+            heading=ctx.get("heading", ""),
+            page_url="https://www.nintendo.com/metroid-prime-4/",
+            query="metroid prime 4",
+        )
+        self.assertEqual(out["local_score"], 0)
+        self.assertEqual(out["verdict"], "ambiguous")
 
 
 if __name__ == "__main__":

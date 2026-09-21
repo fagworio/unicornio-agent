@@ -276,5 +276,40 @@ class CapacidadePorAceitosTests(unittest.TestCase):
             self.assertTrue(any("google" in c["direct_image_url"] for c in com))
 
 
+class ListicleAcceptTests(unittest.TestCase):
+    """P1 da auditoria: o batch do listicle também encerra por ACEITOS.
+
+    Antes o `search_web_images_batch` chamava o orquestrador sem `accept` e o
+    item caía no critério antigo: uma engine com candidatos "usable" ruins
+    encerrava a pesquisa daquele item e as outras nunca eram consultadas.
+    """
+
+    def test_batch_repassa_accept_e_nao_para_no_primeiro_engine(self):
+        from unicornio_editor.media import search
+
+        queries_vistas: list[str] = []
+
+        def bing(q, **kw):
+            return [{"direct_image_url": f"https://cdn.bing/{q}.jpg",
+                     "source_page_url": f"https://p.bing/{q}", "usable": True}]
+
+        def yandex(q, **kw):
+            return [{"direct_image_url": f"https://cdn.ya/{q}.jpg",
+                     "source_page_url": f"https://p.ya/{q}", "usable": True}]
+
+        def accept(novos, query):
+            queries_vistas.append(query)
+            return 0  # nada aceito: a busca do item deve continuar
+
+        with mock.patch.object(search, "search_bing_images", bing), \
+             mock.patch.object(search, "search_yandex_images", yandex), \
+             mock.patch.object(search, "search_google_images", lambda q, **kw: []):
+            rows = search.search_web_images_batch(["pluto anime"], limit=2, accept=accept)
+
+        self.assertTrue(queries_vistas, "o accept precisa ser chamado pelo batch")
+        engines = {c.get("engine") for c in rows[0]["candidates"]}
+        self.assertIn("yandex", engines, "a busca do item não pode parar na 1ª engine")
+
+
 if __name__ == "__main__":
     unittest.main()

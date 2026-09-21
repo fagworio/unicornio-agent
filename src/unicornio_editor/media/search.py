@@ -604,6 +604,7 @@ def search_web_images_batch(
     limit: int = 3,
     timeout: float = 30.0,
     engine: str = "auto",
+    accept: Any = None,
 ) -> list[dict[str, Any]]:
     """Discover candidates for several distinct works concurrently.
 
@@ -627,8 +628,16 @@ def search_web_images_batch(
         return []
 
     def _search(query: str) -> list[dict[str, Any]]:
+        # O callback do batch recebe TAMBÉM a query: cada item do listicle tem o
+        # seu próprio subject e o aceite precisa ser medido por item (antes o
+        # batch caía no critério antigo "usable" e encerrava a busca do item).
+        def _accept_do_item(novos: list[dict[str, Any]]) -> int:
+            return int(accept(novos, query) or 0) if accept is not None else 0
+
         return search_web_images(
-            query, size=size, ratio=ratio, limit=limit, timeout=timeout, engine=engine
+            query, size=size, ratio=ratio, limit=limit, timeout=timeout,
+            engine=engine,
+            accept=_accept_do_item if accept is not None else None,
         )
 
     found: dict[str, list[dict[str, Any]]] = {}

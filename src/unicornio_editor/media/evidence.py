@@ -186,6 +186,54 @@ def item_query(subject: str, article_title: str = "", *, extra: str = "") -> str
     return f"{base} {contexto}"
 
 
+
+def _image_local_context(html: str, image_url: str) -> dict[str, str]:
+    """figcaption/heading da REGIÃO da imagem (não os primeiros da página)."""
+    alvo = normalize(unquote(str(image_url or "").split("?")[0].rsplit("/", 1)[-1]))
+    if not alvo:
+        return {}
+    pos = -1
+    for achado in _IMG_TAG_RE.finditer(html):
+        attrs = dict(_ATTR_RE.findall(achado.group(0)))
+        fonte = attrs.get("src") or attrs.get("data-src") or ""
+        if normalize(unquote(fonte.split("?")[0].split("/")[-1])) == alvo:
+            pos = achado.start()
+            break
+    if pos < 0:
+        return {}
+
+    out: dict[str, str] = {}
+    # A imagem só herda legenda se estiver DENTRO de um <figure> (contagem de
+    # abertura/fechamento antes dela) — o avatar solto na página não tem figura.
+    dentro_de_figure = html.count("<figure", 0, pos) - html.count("</figure>", 0, pos) > 0
+    if dentro_de_figure:
+        inicio = html.rfind("<figure", 0, pos)
+        fim = html.find("</figure>", pos)
+        bloco = html[inicio : fim if fim > pos else pos + 2000]
+        legenda = _FIGCAPTION_RE.search(bloco)
+        if legenda:
+            out["figcaption"] = _TAG_RE.sub(" ", legenda.group(1)).strip()
+
+    # Heading só conta se for IMEDIATAMENTE anterior (contexto próximo), nunca o
+    # h1 do topo da página.
+    anterior = html[:pos]
+    cabecalhos = list(
+        re.finditer(r"<h[1-4]\b[^>]*>(.*?)</h[1-4]>", anterior, re.IGNORECASE | re.DOTALL)
+    )
+    if cabecalhos:
+        ultimo = cabecalhos[-1]
+        # Mesmo container: nada de fechar figure/section/div/article entre o
+        # heading e a imagem. Sem isso o <h1> do topo "vaza" para uma imagem
+        # que está depois de uma figura fechada (o avatar do autor).
+        entre = anterior[ultimo.end():]
+        mesmo_container = not re.search(
+            r"</(?:figure|section|div|article|aside)>", entre, re.IGNORECASE
+        )
+        if mesmo_container and pos - ultimo.end() <= 600:
+            out["heading"] = _TAG_RE.sub(" ", ultimo.group(1)).strip()
+    return out
+
+
 def source_context(
     html: str,
     image_url: str,
@@ -223,13 +271,12 @@ def source_context(
             contexto["alt_original"] = alt
         break
 
-    legenda = _FIGCAPTION_RE.search(html)
-    if legenda:
-        contexto["figcaption"] = _TAG_RE.sub(" ", legenda.group(1)).strip()
-
-    cabecalhos = re.findall(r"<h[1-4]\b[^>]*>(.*?)</h[1-4]>", html, re.IGNORECASE | re.DOTALL)
-    if cabecalhos:
-        contexto["heading"] = _TAG_RE.sub(" ", cabecalhos[0]).strip()
+    # P1 (auditoria): figcaption e heading têm de vir da REGIÃO da imagem alvo.
+    # Antes pegava-se o PRIMEIRO <figcaption> e o PRIMEIRO <h1-4> da página: numa
+    # matéria "Metroid Prime 4 ... <figure>key art</figure> <img avatar-do-autor>"
+    # o avatar do autor herdava a legenda E o heading da key art — local_score 6
+    # sem nada local de verdade, furando o requisito local_score >= 4.
+    contexto.update(_image_local_context(html, image_url))
 
     if base_url:
         contexto["page_url"] = base_url
@@ -370,6 +417,14 @@ def dedupe_by_phash(
 
     urls = [str(c.get("direct_image_url") or "") for c in aprovados]
     hashes = image_hashes([u for u in urls if u])
+    # O fingerprint é anexado SEMPRE (mesmo quando não há duplicata): a contagem
+    # de capacidade usa pHash global entre engines, e antes o early-return
+    # deixava o candidato único sem hash — a parada caía para URL e duas
+    # engines com o MESMO frame (URLs diferentes) atingiam o alvo cedo.
+    for cand in aprovados:
+        url = str(cand.get("direct_image_url") or "")
+        if hashes.get(url):
+            cand["phash"] = str(hashes[url])
     if len(hashes) < 2:
         return aprovados, rejeitados
     kwargs = {} if threshold is None else {"threshold": threshold}
@@ -379,9 +434,6 @@ def dedupe_by_phash(
     mantidos: list[dict[str, Any]] = []
     for cand in aprovados:
         url = str(cand.get("direct_image_url") or "")
-        # fingerprint fica no candidato: o upload o persiste no índice local.
-        if hashes.get(url):
-            cand["phash"] = str(hashes[url])
         if url in duplicados:
             cand["evidence"] = {
                 **(cand.get("evidence") or {}),
