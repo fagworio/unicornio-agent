@@ -5,6 +5,8 @@ from unittest import mock
 
 from unicornio_editor.media import visual_hash
 from unicornio_editor.media.evidence import (
+    LIMIAR_LOCAL,
+    LIMIAR_MATCH,
     dedupe_by_phash,
     LIMIAR_AMBIGUO,
     LIMIAR_MATCH,
@@ -211,6 +213,48 @@ class DedupePhashTests(unittest.TestCase):
             mantidos, _ = dedupe_by_phash([self._cand("https://x/a.jpg")], [])
         m.assert_not_called()
         self.assertEqual(len(mantidos), 1)
+
+
+class EvidenciaLocalTests(unittest.TestCase):
+    """Acceptance 2: página certa NÃO aprova imagem errada (avatar do autor)."""
+
+    def test_avatar_do_autor_nao_vira_match_so_com_sinais_de_pagina(self):
+        out = evidence_score(
+            "metroid prime 4",
+            filename="author-avatar.jpg",
+            page_title="Nintendo apresenta Metroid Prime 4",
+            og_title="Metroid Prime 4",
+            page_url="https://www.nintendo.com/metroid-prime-4/",
+            query="metroid prime 4",
+        )
+        # página diz tudo sobre Metroid (score alto), imagem não diz nada
+        self.assertGreaterEqual(out["score"], LIMIAR_MATCH)
+        self.assertEqual(out["local_score"], 0)
+        self.assertEqual(out["verdict"], "ambiguous")
+
+    def test_key_art_com_alt_original_e_match(self):
+        out = evidence_score(
+            "metroid prime 4",
+            filename="metroid-prime-4-keyart.jpg",
+            og_title="Metroid Prime 4",
+            page_title="Metroid Prime 4: Beyond",
+            alt_original="Metroid Prime 4 key art",
+            page_url="https://www.nintendo.com/metroid-prime-4/",
+            query="metroid prime 4",
+        )
+        self.assertGreaterEqual(out["local_score"], LIMIAR_LOCAL)
+        self.assertEqual(out["verdict"], "deterministic_match")
+
+    def test_filename_sozinho_ja_e_sinal_local(self):
+        out = evidence_score(
+            "pluto anime",
+            filename="pluto-anime-keyart.jpg",
+            page_title="Pluto",
+            page_url="https://unicorniohater.com.br/pluto-anime/",
+            query="pluto anime",
+        )
+        self.assertGreaterEqual(out["local_score"], LIMIAR_LOCAL)
+        self.assertEqual(out["verdict"], "deterministic_match")
 
 
 if __name__ == "__main__":

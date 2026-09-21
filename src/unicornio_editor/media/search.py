@@ -502,6 +502,7 @@ def search_web_images(
     limit: int = 10,
     timeout: float = 30.0,
     engine: str = "auto",
+    accept: Any = None,
 ) -> list[dict[str, Any]]:
     """Busca AGREGADA entre as engines (Fase 3), com parada por capacidade.
 
@@ -554,6 +555,7 @@ def search_web_images(
                     pass
             continue
         engine_ok(name)
+        novos: list[dict[str, Any]] = []
         for cand in lote or []:
             url = str(cand.get("direct_image_url") or "")
             if not url or url in vistos:
@@ -561,7 +563,20 @@ def search_web_images(
             vistos.add(url)
             cand.setdefault("engine", name)
             acumulado.append(cand)
-        if sum(1 for c in acumulado if c.get("usable")) >= alvo:
+            novos.append(cand)
+        # Capacidade que encerra a busca: se o chamador fornece `accept`, o
+        # critério é o número de candidatos ACEITOS (origem verificada +
+        # subject + frame distinto) — nunca "usable" estrutural. Sem isso o
+        # Bing podia devolver 6 resultados com source_page e todos serem lixo
+        # de outra query: `usable=6` encerrava a busca e Google/Yandex, que
+        # poderiam ter imagens boas, nunca eram consultados.
+        if accept is not None:
+            try:
+                if int(accept(novos) or 0) >= alvo:
+                    break
+            except Exception:  # noqa: BLE001 - aceite é do chamador
+                pass
+        elif sum(1 for c in acumulado if c.get("usable")) >= alvo:
             break
     return acumulado
 

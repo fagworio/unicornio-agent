@@ -57,6 +57,13 @@ PENALIDADES: dict[str, int] = {
 }
 LIMIAR_MATCH = 7
 LIMIAR_AMBIGUO = 4
+# Sinais que falam da IMAGEM (filename, alt original, figcaption, heading
+# próximo) versus os que falam da PÁGINA (page_title, og:title, url, query).
+# `deterministic_match` exige pelo menos um sinal local forte: sem isso uma
+# página sobre Metroid aprovaria o avatar do autor (page_title 4 + url 2 +
+# query 1 = 7) mesmo sem nenhuma evidência sobre a imagem.
+SINAIS_LOCAIS: tuple[str, ...] = ("filename", "alt_original", "figcaption", "heading")
+LIMIAR_LOCAL = 4
 
 
 def post_subjects(
@@ -316,15 +323,20 @@ def evidence_score(
                 "reason": "mesmo frame visual de outra imagem do artigo (pHash)"}
 
     # GATE B — RELEVÂNCIA (só depois da proveniência válida).
-    if score >= LIMIAR_MATCH:
+    local_score = sum(PESOS[campo] for campo in SINAIS_LOCAIS if campo in evidencias)
+    if score >= LIMIAR_MATCH and local_score >= LIMIAR_LOCAL:
         veredito = "deterministic_match"
     elif score >= LIMIAR_AMBIGUO:
+        # Ambíguo por dois motivos possíveis: score total baixo OU página forte
+        # sem NADA sobre a imagem (o avatar do autor). Os dois pedem visão — e
+        # nunca ACCEPT automático.
         veredito = "ambiguous"
     else:
         veredito = "reject"
     return {
         **base,
         "score": score,
+        "local_score": local_score,
         "gate": "relevance",
         "verdict": veredito,
         "penalties": [],
@@ -405,6 +417,8 @@ def subject_for_image(image_url: str, subjects: list[dict[str, Any]]) -> str:
 
 __all__ = [
     "PESOS",
+    "SINAIS_LOCAIS",
+    "LIMIAR_LOCAL",
     "dedupe_by_phash",
     "item_query",
     "tipo_de_conteudo",

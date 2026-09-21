@@ -853,12 +853,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .media.search import search_web_images
             from .observability import append_telemetry
 
+            # P0/P1 (auditoria): o subject é resolvido ANTES da busca e é ele
+            # que alimenta o critério de capacidade — a pesquisa só encerra
+            # quando há candidatos ACEITOS (origem verificada + subject + frame
+            # distinto), não quando há N candidatos apenas "usable" (o Bing
+            # degradado devolvia 6 com source e todos eram lixo de outra query).
+            subject_alvo = args.termo
+            post_id_ref = int(getattr(args, "post_id", 0) or 0)
+            if post_id_ref:
+                try:
+                    from .media.evidence import post_subjects
+
+                    post_ref = client.get_post(post_id_ref)
+                    titulo_ref = post_ref.get("title")
+                    conteudo_ref = post_ref.get("content") or {}
+                    subs = post_subjects(
+                        title=(titulo_ref or {}).get("raw", "") if isinstance(titulo_ref, dict) else str(titulo_ref or ""),
+                        content_html=(conteudo_ref.get("raw") or "") if isinstance(conteudo_ref, dict) else "",
+                    )
+                    if subs:
+                        subject_alvo = str(subs[0]["subject"])
+                except Exception:  # noqa: BLE001 - sem post, segue com o termo
+                    pass
+
+            _frames_aceitos: set[str] = set()
+
+            def _avaliar_capacidade(novos: list[dict]) -> int:
+                """Conta frames ACEITOS no lote novo (o que encerra a busca)."""
+                try:
+                    aprovados_lote, _rej = _enriquecer_candidatos(
+                        novos,
+                        subject=subject_alvo,
+                        termo=args.termo,
+                        verify=bool(getattr(args, "verify", True)),
+                    )
+                except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
+                    return len(_frames_aceitos)
+                for aprovado in aprovados_lote:
+                    _frames_aceitos.add(
+                        str(aprovado.get("phash") or aprovado.get("direct_image_url") or "")
+                    )
+                return len(_frames_aceitos)
+
             candidates = search_web_images(
                 args.termo,
                 size=args.size,
                 ratio=args.ratio,
                 limit=args.limit,
                 engine=getattr(args, "engine", "auto"),
+                accept=_avaliar_capacidade,
             )
             if not candidates:
                 # Possivel bloqueio/rate-limit do Google em producao: registrar
@@ -880,25 +923,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         engine=str(candidate.get("engine") or "unknown"),
                     )
             rejeitados: list[dict] = []
-            subject_alvo = args.termo
-            post_id_ref = int(getattr(args, "post_id", 0) or 0)
-            # P0: o subject vem do POST (entidade principal do título / H2), não
-            # do termo digitado.
-            if post_id_ref:
-                try:
-                    from .media.evidence import post_subjects
-
-                    post_ref = client.get_post(post_id_ref)
-                    titulo_ref = post_ref.get("title")
-                    conteudo_ref = post_ref.get("content") or {}
-                    subs = post_subjects(
-                        title=(titulo_ref or {}).get("raw", "") if isinstance(titulo_ref, dict) else str(titulo_ref or ""),
-                        content_html=(conteudo_ref.get("raw") or "") if isinstance(conteudo_ref, dict) else "",
-                    )
-                    if subs:
-                        subject_alvo = str(subs[0]["subject"])
-                except Exception:  # noqa: BLE001 - sem post, segue com o termo
-                    pass
             candidates, novos_rejeitados = _enriquecer_candidatos(
                 candidates,
                 subject=subject_alvo,

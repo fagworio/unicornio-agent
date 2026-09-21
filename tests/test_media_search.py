@@ -243,5 +243,38 @@ class SearchQueryEvidenceTests(unittest.TestCase):
             self.assertEqual(results[0]["engine"], "yandex")
 
 
+class CapacidadePorAceitosTests(unittest.TestCase):
+    """Acceptance 4: engine com candidatos "usable" mas ruins NÃO encerra a busca."""
+
+    def test_busca_continua_quando_a_engine_nao_entrega_aceitos(self):
+        from unicornio_editor.media import search
+
+        def bing(q, **kw):
+            # 6 candidatos estruturalmente "usable" (tem origem), todos ruins
+            return [{"direct_image_url": f"https://cdn.bing/{i}.jpg",
+                     "source_page_url": f"https://page.bing/{i}", "usable": True}
+                    for i in range(6)]
+
+        def google(q, **kw):
+            return [{"direct_image_url": "https://cdn.google/boa.jpg",
+                     "source_page_url": "https://page.google/boa", "usable": True}]
+
+        with mock.patch.object(search, "search_bing_images", bing), \
+             mock.patch.object(search, "search_google_images", google), \
+             mock.patch.object(search, "search_yandex_images", lambda q, **kw: []):
+            # sem accept: comportamento antigo (encerra no "usable" do 1o engine)
+            sem = search.search_web_images("x", limit=6, engine="bing")
+            self.assertEqual(len(sem), 6)
+            self.assertFalse(any("google" in c["direct_image_url"] for c in sem))
+            # com accept: como NENHUM candidato e aceito, a busca segue para o
+            # Google e traz o candidato bom
+            def accept(novos):
+                return sum(1 for c in novos if "google" in c["direct_image_url"])
+
+            # engine="auto" para o orquestrador poder consultar as demais
+            com = search.search_web_images("x", limit=6, engine="auto", accept=accept)
+            self.assertTrue(any("google" in c["direct_image_url"] for c in com))
+
+
 if __name__ == "__main__":
     unittest.main()
