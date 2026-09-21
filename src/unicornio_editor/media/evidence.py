@@ -359,6 +359,9 @@ def dedupe_by_phash(
     mantidos: list[dict[str, Any]] = []
     for cand in aprovados:
         url = str(cand.get("direct_image_url") or "")
+        # fingerprint fica no candidato: o upload o persiste no índice local.
+        if hashes.get(url):
+            cand["phash"] = str(hashes[url])
         if url in duplicados:
             cand["evidence"] = {
                 **(cand.get("evidence") or {}),

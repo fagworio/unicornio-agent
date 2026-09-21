@@ -635,10 +635,32 @@ def _enriquecer_candidatos(
             str(cand.get("direct_image_url") or ""), subject
         )
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
-    # Oficiais primeiro; depois o score de evidência (o melhor de cada frame
-    # visual é quem sobrevive ao dedupe por pHash logo abaixo).
+    # Fase 13 / ordem da busca: o que JÁ está na biblioteca vem antes de custo
+    # novo (imagem validada e hospedada não precisa ser baixada nem enviada de
+    # novo). Depois domínio oficial, depois score de evidência.
+    if root is not None:
+        try:
+            from .media.library_index import find_by_source_url, find_similar
+
+            for cand in aprovados:
+                url_cand = str(cand.get("direct_image_url") or "")
+                ja = find_by_source_url(root, url_cand) or (
+                    find_similar(root, str(cand.get("phash") or ""))
+                    if cand.get("phash")
+                    else None
+                )
+                cand["already_in_library"] = bool(ja)
+                if ja and ja.get("media_id"):
+                    cand["library_media_id"] = ja.get("media_id")
+        except Exception:  # noqa: BLE001 - índice é otimização
+            pass
+
     aprovados.sort(
-        key=lambda c: (bool(c.get("official_source")), c["evidence_score"]),
+        key=lambda c: (
+            bool(c.get("already_in_library")),
+            bool(c.get("official_source")),
+            c["evidence_score"],
+        ),
         reverse=True,
     )
 

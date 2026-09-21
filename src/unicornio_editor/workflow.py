@@ -1434,6 +1434,23 @@ def _execute_media_plan(
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
                     raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                # Fase 13: persiste o fingerprint/proveniencia da midia. Assim a
+                # proxima busca do mesmo subject (ou do mesmo frame recomprimido)
+                # reusa a imagem em vez de baixar e subir de novo.
+                try:
+                    from .media.library_index import register as _registrar_midia
+
+                    _registrar_midia(
+                        root,
+                        phash=str(item.get("phash") or ""),
+                        source_url=str(item.get("direct_image_url") or ""),
+                        source_page=str(item.get("source_page_url") or ""),
+                        subject=str(item.get("subject") or ""),
+                        media_id=int(media_id),
+                        article_id=int(post_id),
+                    )
+                except Exception:  # noqa: BLE001 - indice e otimizacao, nunca gate
+                    pass
                 # A visão cara já ocorreu no media-validate. Transfere a
                 # aprovação para a URL hospedada no WordPress; o checklist
                 # final continua fail-closed, mas consome o cache em vez de
