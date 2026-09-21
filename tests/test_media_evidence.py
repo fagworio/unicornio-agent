@@ -1,8 +1,11 @@
 """Fases 7-11 — subject, contexto de origem e score determinístico."""
 
 import unittest
+from unittest import mock
 
+from unicornio_editor.media import visual_hash
 from unicornio_editor.media.evidence import (
+    dedupe_by_phash,
     LIMIAR_AMBIGUO,
     LIMIAR_MATCH,
     evidence_score,
@@ -172,6 +175,42 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(assertivo["verdict"], "deterministic_match")
         self.assertFalse(assertivo["needs_vision"])
+
+
+class DedupePhashTests(unittest.TestCase):
+    """Fase 12: o mesmo frame em URLs diferentes é resolvido ANTES do upload."""
+
+    def _cand(self, url, score=10):
+        return {"direct_image_url": url, "evidence_score": score,
+                "evidence": {"score": score, "verdict": "deterministic_match"}}
+
+    def test_mesmo_frame_mantem_apenas_o_melhor(self):
+        a, b, c = (self._cand("https://x/a.jpg", 21),
+                   self._cand("https://x/b.jpg", 14),
+                   self._cand("https://x/c.jpg", 9))
+        with mock.patch.object(
+            visual_hash, "image_hashes",
+            return_value={"https://x/a.jpg": 100, "https://x/b.jpg": 102, "https://x/c.jpg": 90},
+        ):
+            mantidos, rejeitados = dedupe_by_phash([a, b, c], [])
+        self.assertEqual([m["direct_image_url"] for m in mantidos],
+                         ["https://x/a.jpg", "https://x/c.jpg"])
+        self.assertEqual(len(rejeitados), 1)
+        self.assertEqual(rejeitados[0]["evidence"]["verdict"], "duplicate_frame")
+        self.assertEqual(rejeitados[0]["evidence"]["gate"], "diversity")
+
+    def test_sem_hashes_suficientes_nao_descarta_nada(self):
+        a, b = self._cand("https://x/a.jpg"), self._cand("https://x/b.jpg")
+        with mock.patch.object(visual_hash, "image_hashes", return_value={}):
+            mantidos, rejeitados = dedupe_by_phash([a, b], [])
+        self.assertEqual(len(mantidos), 2)
+        self.assertEqual(rejeitados, [])
+
+    def test_um_unico_candidato_nao_chama_phash(self):
+        with mock.patch.object(visual_hash, "image_hashes") as m:
+            mantidos, _ = dedupe_by_phash([self._cand("https://x/a.jpg")], [])
+        m.assert_not_called()
+        self.assertEqual(len(mantidos), 1)
 
 
 if __name__ == "__main__":

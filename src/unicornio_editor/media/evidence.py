@@ -326,6 +326,55 @@ def evidence_score(
     }
 
 
+
+def dedupe_by_phash(
+    aprovados: list[dict[str, Any]],
+    rejeitados: list[dict[str, Any]],
+    *,
+    threshold: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """GATE C antecipado: pHash ANTES da seleção/upload (Fase 12).
+
+    O mesmo frame servido por URLs diferentes entrava várias vezes no plano e só
+    era detectado no checklist — depois do download e do upload, com a Media
+    Library já suja e o post indo para rework. Aqui os aprovados são agrupados
+    por similaridade visual e só o MELHOR de cada grupo sobrevive (a lista chega
+    ordenada: origem oficial primeiro, depois score de evidência).
+
+    Fail-soft: se não houver hashes suficientes (imagem inacessível), nada é
+    descartado — a política cheia continua valendo no checklist.
+    """
+    if len(aprovados) < 2:
+        return aprovados, rejeitados
+    from .visual_hash import image_hashes, similar_image_pairs
+
+    urls = [str(c.get("direct_image_url") or "") for c in aprovados]
+    hashes = image_hashes([u for u in urls if u])
+    if len(hashes) < 2:
+        return aprovados, rejeitados
+    kwargs = {} if threshold is None else {"threshold": threshold}
+    duplicados = {u2 for _u1, u2, _d in similar_image_pairs(urls, hashes=hashes, **kwargs)}
+    if not duplicados:
+        return aprovados, rejeitados
+    mantidos: list[dict[str, Any]] = []
+    for cand in aprovados:
+        url = str(cand.get("direct_image_url") or "")
+        if url in duplicados:
+            cand["evidence"] = {
+                **(cand.get("evidence") or {}),
+                "score": 0,
+                "verdict": "duplicate_frame",
+                "gate": "diversity",
+                "needs_vision": False,
+                "reason": "mesmo frame visual (pHash) de outro candidato melhor colocado",
+            }
+            cand["needs_vision"] = False
+            rejeitados.append(cand)
+        else:
+            mantidos.append(cand)
+    return mantidos, rejeitados
+
+
 def subject_for_image(image_url: str, subjects: list[dict[str, Any]]) -> str:
     """Qual subject a imagem deve representar (Fase 9).
 
@@ -345,6 +394,7 @@ def subject_for_image(image_url: str, subjects: list[dict[str, Any]]) -> str:
 
 __all__ = [
     "PESOS",
+    "dedupe_by_phash",
     "item_query",
     "tipo_de_conteudo",
     "PENALIDADES",

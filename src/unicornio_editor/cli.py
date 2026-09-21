@@ -635,11 +635,18 @@ def _enriquecer_candidatos(
             str(cand.get("direct_image_url") or ""), subject
         )
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
-    # Oficiais primeiro; depois o score de evidência.
+    # Oficiais primeiro; depois o score de evidência (o melhor de cada frame
+    # visual é quem sobrevive ao dedupe por pHash logo abaixo).
     aprovados.sort(
         key=lambda c: (bool(c.get("official_source")), c["evidence_score"]),
         reverse=True,
     )
+
+    # Fase 12: pHash ANTES da seleção/upload.
+    if len(aprovados) >= 2:
+        from .media.evidence import dedupe_by_phash
+
+        aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados)
 
     # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
     # é "quantas imagens o Bing devolveu", e sim quantas atravessaram
