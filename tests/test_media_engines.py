@@ -7,6 +7,7 @@ import unittest
 
 from unicornio_editor.media import search
 from unicornio_editor.media.evidence import item_query, tipo_de_conteudo
+from unicornio_editor.media.official_sources import dominios_oficiais, official_source
 
 
 class DesambiguacaoTests(unittest.TestCase):
@@ -73,6 +74,22 @@ class CircuitBreakerTests(unittest.TestCase):
         search.engine_falhou("bing")
         self.assertFalse(search.engine_disponivel("bing"))
         self.assertTrue(search.engine_disponivel("yandex"))
+
+
+class OfficialSourcesTests(unittest.TestCase):
+    def test_entidade_conhecida_mapeia_o_publisher(self):
+        self.assertIn("nintendo.com", dominios_oficiais("metroid prime 4"))
+        self.assertIn("shueisha.co.jp", dominios_oficiais("bleach"))
+        self.assertIn("crunchyroll.com", dominios_oficiais("anime de temporada"))
+
+    def test_host_oficial_e_reconhecido_com_subdominio(self):
+        self.assertTrue(official_source("https://assets.nintendo.com/x.jpg", "metroid prime 4"))
+        self.assertTrue(official_source("https://cdn.playstation.com/x.jpg", "god of war"))
+        self.assertFalse(official_source("https://cdn.shopify.com/x.jpg", "metroid prime 4"))
+        self.assertFalse(official_source("", "metroid prime 4"))
+
+    def test_entidade_desconhecida_nao_inventa_dominio(self):
+        self.assertEqual(dominios_oficiais("jogo indie aleatorio"), [])
 
 
 if __name__ == "__main__":

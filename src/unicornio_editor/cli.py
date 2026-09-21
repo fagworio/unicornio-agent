@@ -576,6 +576,7 @@ def _enriquecer_candidatos(
     from urllib.parse import unquote
 
     from .media.evidence import evidence_score, source_context
+    from .media.official_sources import official_source
     from .media.source_verify import validate_discovered_candidate
 
     aprovados: list[dict] = []
@@ -627,8 +628,18 @@ def _enriquecer_candidatos(
         cand["evidence_score"] = pontos["score"]
         cand["needs_vision"] = bool(pontos["needs_vision"])
         cand["source_context_used"] = bool(ctx)
+        # Estratégia C (registry oficial): imagem servida por domínio do próprio
+        # publisher/estúdio é proveniência mais forte — vira desempate na
+        # ordenação e evidência auditável no JSON.
+        cand["official_source"] = official_source(
+            str(cand.get("direct_image_url") or ""), subject
+        )
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
-    aprovados.sort(key=lambda c: c["evidence_score"], reverse=True)
+    # Oficiais primeiro; depois o score de evidência.
+    aprovados.sort(
+        key=lambda c: (bool(c.get("official_source")), c["evidence_score"]),
+        reverse=True,
+    )
 
     # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
     # é "quantas imagens o Bing devolveu", e sim quantas atravessaram

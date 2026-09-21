@@ -403,9 +403,13 @@ def _primary_engine(query: str) -> str:
 # de resultados e cooldown da engine — o pipeline simplesmente usa as outras
 # fontes enquanto uma está bloqueada. Estado em arquivo para sobreviver entre
 # execuções do CLI (cada comando é um processo novo).
-_ENGINE_STATE_PATH = Path(
-    os.environ.get("UNICORNIO_ENGINE_STATE") or "/tmp/unicornio_media_engines.json"
-)
+def _engine_state_path() -> Path:
+    """Caminho do estado do breaker (lido a cada uso, não no import).
+
+    Constante avaliada no import ignoraria ``UNICORNIO_ENGINE_STATE`` definido
+    depois — o que fazia os testes compartilharem o arquivo real.
+    """
+    return Path(os.environ.get("UNICORNIO_ENGINE_STATE") or "/tmp/unicornio_media_engines.json")
 _COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
 _BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
 
@@ -425,7 +429,7 @@ def _breaker_ativo() -> bool:
 
 def _ler_estado_engines() -> dict[str, dict[str, Any]]:
     try:
-        dados = json.loads(_ENGINE_STATE_PATH.read_text(encoding="utf-8"))
+        dados = json.loads(_engine_state_path().read_text(encoding="utf-8"))
         return dados if isinstance(dados, dict) else {}
     except Exception:  # noqa: BLE001 - estado ausente/corrompido não bloqueia
         return {}
@@ -433,8 +437,9 @@ def _ler_estado_engines() -> dict[str, dict[str, Any]]:
 
 def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
     try:
-        _ENGINE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _ENGINE_STATE_PATH.write_text(json.dumps(dados), encoding="utf-8")
+        caminho = _engine_state_path()
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        caminho.write_text(json.dumps(dados), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
