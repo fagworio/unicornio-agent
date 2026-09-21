@@ -537,6 +537,84 @@ def _monitor_line(report: dict) -> str:
     return " ".join(parts) or "0"
 
 
+
+def _enriquecer_candidatos(
+    candidates: list[dict],
+    *,
+    subject: str,
+    termo: str,
+    verify: bool = True,
+) -> tuple[list[dict], list[dict]]:
+    """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
+
+    Usado pelo ``media-search-web`` (artigo: subject = entidade principal do
+    post) e pelo ``media-search-listicle`` (um subject por item/H2). Cada
+    candidato é validado contra a SUA página de origem e pontuado contra o SEU
+    subject — nenhum herda evidência global do artigo.
+
+    Só ``deterministic_match`` e ``ambiguous`` são aprovados; qualquer veredito
+    de gate (``unresolved_source``/``source_mismatch``/``duplicate_frame``) ou
+    relevância < 4 vai para rejeitados com o motivo.
+    """
+    from urllib.parse import unquote
+
+    from .media.evidence import evidence_score, source_context
+    from .media.source_verify import validate_discovered_candidate
+
+    aprovados: list[dict] = []
+    rejeitados: list[dict] = []
+    cache_paginas: dict = {}
+    cache_html: dict = {}
+    for cand in candidates:
+        cand["subject"] = subject
+        if not cand.get("usable"):
+            # Gate A: sem origem nao existe ACCEPT possivel.
+            cand["evidence"] = {
+                "subject": subject, "score": 0, "verdict": "unresolved_source",
+                "gate": "provenance", "matched": [], "needs_vision": False,
+                "reason": cand.get("rejected_reason") or "candidato sem origem",
+            }
+            cand["evidence_score"] = 0
+            cand["needs_vision"] = False
+            rejeitados.append(cand)
+            continue
+        if verify:
+            veredito = validate_discovered_candidate(
+                cand, cache=cache_paginas, cache_html=cache_html
+            )
+            cand["valid"] = bool(veredito["valid"])
+            cand["valid_reason"] = str(veredito.get("reason") or "")
+            cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
+        pagina = str(cand.get("source_page_url") or "")
+        nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
+        ctx = (
+            source_context(cache_html.get(pagina, ""), str(cand.get("direct_image_url") or ""),
+                           base_url=pagina)
+            if pagina
+            else {}
+        )
+        pontos = evidence_score(
+            subject,
+            filename=nome,
+            og_title=ctx.get("og_title", ""),
+            page_title=ctx.get("page_title", ""),
+            alt_original=ctx.get("alt_original", ""),
+            figcaption=ctx.get("figcaption", ""),
+            heading=ctx.get("heading", ""),
+            page_url=pagina,
+            query=termo,
+            source_page_present=bool(pagina),
+            image_in_source=bool(cand.get("valid")),
+        )
+        cand["evidence"] = pontos
+        cand["evidence_score"] = pontos["score"]
+        cand["needs_vision"] = bool(pontos["needs_vision"])
+        cand["source_context_used"] = bool(ctx)
+        (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
+    aprovados.sort(key=lambda c: c["evidence_score"], reverse=True)
+    return aprovados, rejeitados
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
@@ -679,116 +757,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                         engine=str(candidate.get("engine") or "unknown"),
                     )
             rejeitados: list[dict] = []
-            # Fase 5: validacao de ORIGEM antes de o candidato entrar no
-            # media_plan. Antes um `source_page_url` invalida (ou uma imagem que
-            # nao consta na pagina) so aparecia no apply — depois de baixar e
-            # subir a imagem, enchendo a Media Library e gerando rework.
-            if getattr(args, "verify", True) and candidates:
-                from .media.source_verify import validate_discovered_candidate
+            subject_alvo = args.termo
+            post_id_ref = int(getattr(args, "post_id", 0) or 0)
+            # P0: o subject vem do POST (entidade principal do título / H2), não
+            # do termo digitado.
+            if post_id_ref:
+                try:
+                    from .media.evidence import post_subjects
 
-                cache_paginas: dict = {}
-                cache_html: dict = {}
-                aprovados: list[dict] = []
-                for cand in candidates:
-                    if not cand.get("usable"):
-                        cand["valid"] = False
-                        cand["valid_reason"] = (
-                            cand.get("rejected_reason") or "candidato sem origem"
-                        )
-                        rejeitados.append(cand)
-                        continue
-                    veredito = validate_discovered_candidate(
-                        cand, cache=cache_paginas, cache_html=cache_html
+                    post_ref = client.get_post(post_id_ref)
+                    titulo_ref = post_ref.get("title")
+                    conteudo_ref = post_ref.get("content") or {}
+                    subs = post_subjects(
+                        title=(titulo_ref or {}).get("raw", "") if isinstance(titulo_ref, dict) else str(titulo_ref or ""),
+                        content_html=(conteudo_ref.get("raw") or "") if isinstance(conteudo_ref, dict) else "",
                     )
-                    cand["valid"] = bool(veredito["valid"])
-                    cand["valid_reason"] = str(veredito.get("reason") or "")
-                    cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
-                    (aprovados if cand["valid"] else rejeitados).append(cand)
-                candidates = aprovados
-                if rejeitados:
-                    append_telemetry(
-                        args.root, "media_source_rejections",
-                        query=args.termo, rejected=len(rejeitados),
-                        approved=len(aprovados),
-                    )
-            # Fase 11: score determinístico de evidência por candidato. O
-            # filename e a URL da página de origem são evidência de ORIGEM; o
-            # termo buscado entra como sinal fraco (+1). Sem isso, um candidato
-            # com origem confirmada mas conteúdo irrelevante (o "pinguim" para
-            # Metroid) seguiria para o media_plan só porque os bytes conferem.
-            if candidates:
-                from urllib.parse import unquote
-
-                from .media.evidence import evidence_score, post_subjects, source_context
-
-                # P0: o subject tem de vir do POST (entidade principal / H2), nao
-                # do termo digitado. Com o termo como subject o teto real do
-                # score era filename+url+query = 8; a mesma key art que pontua 21
-                # nos testes mal passava no fluxo real.
-                subject_alvo = args.termo
-                post_id_ref = int(getattr(args, "post_id", 0) or 0)
-                if post_id_ref:
-                    try:
-                        post_ref = client.get_post(post_id_ref)
-                        titulo_ref = post_ref.get("title")
-                        conteudo_ref = post_ref.get("content") or {}
-                        subs = post_subjects(
-                            title=(titulo_ref or {}).get("raw", "") if isinstance(titulo_ref, dict) else str(titulo_ref or ""),
-                            content_html=(conteudo_ref.get("raw") or "") if isinstance(conteudo_ref, dict) else "",
-                        )
-                        if subs:
-                            subject_alvo = str(subs[0]["subject"])
-                    except Exception:  # noqa: BLE001 - sem post, segue com o termo
-                        pass
-                for cand in candidates:
-                    pagina = str(cand.get("source_page_url") or "")
-                    nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
-                    # Contexto REAL da pagina de origem (o HTML ja foi baixado na
-                    # validacao): og:title, page title, alt original, figcaption,
-                    # heading. Sem isso o gate de relevancia perde os sinais
-                    # fortes e so sobram filename/url/query.
-                    ctx = (
-                        source_context(
-                            cache_html.get(pagina, ""),
-                            str(cand.get("direct_image_url") or ""),
-                            base_url=pagina,
-                        )
-                        if pagina
-                        else {}
-                    )
-                    pontos = evidence_score(
-                        subject_alvo,
-                        filename=nome,
-                        og_title=ctx.get("og_title", ""),
-                        page_title=ctx.get("page_title", ""),
-                        alt_original=ctx.get("alt_original", ""),
-                        figcaption=ctx.get("figcaption", ""),
-                        heading=ctx.get("heading", ""),
-                        page_url=pagina,
-                        query=args.termo,
-                        source_page_present=bool(pagina),
-                        image_in_source=bool(cand.get("valid")),
-                    )
-                    cand["evidence"] = pontos
-                    cand["evidence_score"] = pontos["score"]
-                    cand["needs_vision"] = pontos["needs_vision"]
-                    cand["subject"] = subject_alvo
-                    cand["source_context_used"] = bool(ctx)
-                # melhor evidência primeiro; empate mantém a ordem da busca
-                # Só deterministic_match e ambiguous seguem; qualquer veredito
-                # de gate (unresolved_source, source_mismatch, duplicate_frame)
-                # ou de relevância baixa (reject) vai para rejeitados.
-                aceitos = {"deterministic_match", "ambiguous"}
-                candidatos_relevantes = [c for c in candidates if c["evidence"]["verdict"] in aceitos]
-                descartados = [c for c in candidates if c["evidence"]["verdict"] not in aceitos]
-                candidatos_relevantes.sort(key=lambda c: c["evidence_score"], reverse=True)
-                rejeitados.extend(descartados)
-                candidates = candidatos_relevantes
-                if descartados:
-                    append_telemetry(
-                        args.root, "media_evidence_rejections",
-                        query=args.termo, rejected=len(descartados),
-                    )
+                    if subs:
+                        subject_alvo = str(subs[0]["subject"])
+                except Exception:  # noqa: BLE001 - sem post, segue com o termo
+                    pass
+            candidates, novos_rejeitados = _enriquecer_candidatos(
+                candidates,
+                subject=subject_alvo,
+                termo=args.termo,
+                verify=bool(getattr(args, "verify", True)),
+            )
+            rejeitados.extend(novos_rejeitados)
+            if novos_rejeitados:
+                append_telemetry(
+                    args.root, "media_source_rejections",
+                    query=args.termo, rejected=len(novos_rejeitados),
+                    approved=len(candidates),
+                )
             result = {
                 "query": args.termo,
                 "size_filter": f"{args.size}|{args.ratio}",
@@ -820,6 +820,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         query=query, size_filter=f"{args.size}|{args.ratio}", batch=True,
                     )
                 else:
+                    # Listicle: cada item/H2 roda o MESMO pipeline do artigo —
+                    # origem verificada + contexto da página + score DELE.
+                    # Uma imagem do item "Pluto" nunca é aceita por evidência do
+                    # item "Cyberpunk".
+                    candidates, rejeitados_item = _enriquecer_candidatos(
+                        candidates, subject=query, termo=query
+                    )
                     for candidate in candidates:
                         direct_url = str(candidate.get("direct_image_url") or "")
                         append_telemetry(
@@ -827,13 +834,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                             source_domain=(urlparse(direct_url).hostname or "").lower(),
                             engine=str(candidate.get("engine") or "unknown"), batch=True,
                         )
-                # Thumbnail and repeated size metadata are useful to a visual
-                # browser, but not to the editorial JSON. Omit them here to
-                # keep the single batch response small enough for a 10-item list.
+                    if not candidates:
+                        missing.append(query)
+                # O browser visual não precisa de thumbnail/size; o JSON
+                # editorial agora leva o veredito de evidência (subject, score,
+                # verdict) para o agente escolher sem "adivinhar" relevância.
                 compact = [
                     {
-                        key: candidate.get(key, "")
-                        for key in ("query", "engine", "title", "direct_image_url", "source_page_url")
+                        "query": candidate.get("query", ""),
+                        "engine": candidate.get("engine", ""),
+                        "title": candidate.get("title", ""),
+                        "direct_image_url": candidate.get("direct_image_url", ""),
+                        "source_page_url": candidate.get("source_page_url", ""),
+                        "subject": candidate.get("subject", ""),
+                        "evidence_score": candidate.get("evidence_score", 0),
+                        "verdict": (candidate.get("evidence") or {}).get("verdict", ""),
+                        "needs_vision": candidate.get("needs_vision", False),
                     }
                     for candidate in candidates
                 ]
