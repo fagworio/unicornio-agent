@@ -2184,10 +2184,14 @@ def migrate_legacy_state(
     """
     vistos = 0
     migrados: list[dict[str, Any]] = []
+    erros: list[str] = []
     for status_wp in ("publish", "pending", "draft", "awaiting_human"):
         try:
             posts = client.list_pending(status=status_wp, per_page=100) or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Não engolir: "0 legados" por falha de conexão seria lido como
+            # "nada a migrar" e a migração seria dada por concluída.
+            erros.append(f"{status_wp}: {type(exc).__name__}: {exc}")
             continue
         for post in posts:
             if limit and vistos >= limit:
@@ -2214,6 +2218,7 @@ def migrate_legacy_state(
         "legacy_found": len(migrados),
         "applied": bool(apply),
         "items": migrados[:50],
+        "errors": erros,
     }
 
 def build_queue_report(

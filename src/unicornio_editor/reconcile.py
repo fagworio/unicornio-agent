@@ -122,16 +122,19 @@ def reconcile_state(
     Somente leitura. `scanned` conta posts distintos analisados.
     """
     posts: list[dict[str, Any]] = []
+    erros: list[str] = []
     for status in statuses:
         try:
             posts.extend(client.list_pending(status=status, per_page=100) or [])
         except TypeError:  # cliente antigo sem o parâmetro status
             try:
                 posts.extend(client.list_pending() or [])
-            except Exception:  # noqa: BLE001 - reconciliação nunca derruba o run
-                pass
-        except Exception:  # noqa: BLE001
-            continue
+            except Exception as exc:  # noqa: BLE001
+                erros.append(f"{status}: {type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            # "0 divergências" por falha de conexão seria lido como "está tudo
+            # certo": o operador precisa saber que NADA foi lido (WAF/timeout).
+            erros.append(f"{status}: {type(exc).__name__}: {exc}")
 
     vistos: set[int] = set()
     itens: list[dict[str, Any]] = []
@@ -151,4 +154,5 @@ def reconcile_state(
         "by_code": dict(por_codigo),
         "items": itens,
         "read_only": True,
+        "errors": erros,
     }
