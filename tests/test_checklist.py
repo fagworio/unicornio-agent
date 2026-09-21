@@ -531,5 +531,50 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
 
 
+    # ---- Fase 1: o pHash NUNCA reduz o minimo 2/4/6 ----
+
+    def _texto_1200(self):
+        return "<p>" + ("palavra videogame jogo noticia lancamento " * 250) + "</p>"
+
+    def test_minimo_nao_e_reduzido_por_frames_distintos(self):
+        """1200 palavras (minimo 6) com 2 imagens distintas -> FAIL.
+
+        Antes `required_effective = distinct_frames` virava 2 e o post passava
+        alegando que so existiam duas imagens disponiveis — o pHash apenas
+        provou que as 2 URLs sao frames diferentes, nunca que a busca esgotou.
+        """
+        content = (
+            '<figure><img src="https://media.example/a.webp" alt="Notícia sobre videogame" /></figure>'
+            '<figure><img src="https://media.example/b.webp" alt="Notícia sobre videogame" /></figure>'
+            + self._texto_1200()
+        )
+        hashes = {"https://media.example/a.webp": 1, "https://media.example/b.webp": 2}
+        with mock.patch(
+            "unicornio_editor.media.visual_hash.distinct_image_count", return_value=2
+        ), mock.patch(
+            "unicornio_editor.media.visual_hash.image_hashes", return_value=hashes
+        ):
+            result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertIn("6", str(item.get("detail") or ""))
+
+    def test_seis_imagens_distintas_passam(self):
+        """1200 palavras + 6 imagens distintas -> PASS (minimo honrado)."""
+        imgs = "".join(
+            f'<figure><img src="https://media.example/{i}.webp" alt="Notícia sobre videogame" /></figure>'
+            for i in range(6)
+        )
+        content = imgs + self._texto_1200()
+        hashes = {f"https://media.example/{i}.webp": 10 + i for i in range(6)}
+        with mock.patch(
+            "unicornio_editor.media.visual_hash.distinct_image_count", return_value=6
+        ), mock.patch(
+            "unicornio_editor.media.visual_hash.image_hashes", return_value=hashes
+        ):
+            result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "pass")
+
+
 if __name__ == "__main__":
     unittest.main()

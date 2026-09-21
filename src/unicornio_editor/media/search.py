@@ -103,20 +103,90 @@ def _unescape(value: str) -> str:
     return value
 
 
-def _candidate(query, size_filter, direct, page, title, thumb):
+def _valid_http(url: str) -> bool:
+    """URL http(s) absoluta com host (Fase 4)."""
+    try:
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
+def _candidate(query, size_filter, direct, page, title, thumb, *, engine=""):
+    """Candidato normalizado — com `usable` explicito (Fase 4).
+
+    A cadeia verificavel e query -> pagina de origem -> URL da imagem -> bytes.
+    Sem `source_page_url` nao existe cadeia: o candidato do Yandex (que entrega
+    a imagem sem a pagina) fica `usable=False` + `discovery_only`, e nunca deve
+    entrar no media_plan. Antes ele entrava com source vazio e so era
+    descoberto no apply (depois de baixar e gastar upload).
+    """
+    page_clean = _clean_page_url(page)
+    usable = _valid_http(direct) and _valid_http(page_clean)
+    motivo = ""
+    if not usable:
+        if not _valid_http(page_clean):
+            motivo = "missing_source_page"
+        else:
+            motivo = "invalid_direct_image_url"
     return {
         "query": query,
         "size_filter": size_filter,
         "title": (title or "")[:200],
         "direct_image_url": direct,
-        "source_page_url": _clean_page_url(page),
+        "source_page_url": page_clean,
         "thumbnail_url": thumb,
+        "engine": engine,
+        "usable": usable,
+        "discovery_only": not usable,
+        "rejected_reason": motivo,
     }
 
 
 # ---------------------------------------------------------------------------
 # Bing Images
 # ---------------------------------------------------------------------------
+
+_BING_M_ATTR_RE = re.compile(r'\bm="(\{.*?\})"', re.DOTALL)
+
+
+def _bing_result_objects(html: str) -> list[dict[str, Any]]:
+    """Objetos de resultado do Bing (Fase 14: um candidato por objeto).
+
+    1. Formato principal: o JSON no atributo ``m`` de cada resultado — as
+       chaves purl/murl/turl/t vivem JUNTAS no mesmo objeto.
+    2. Fallback (páginas que só trazem as chaves soltas): agrupa por
+       PROXIMIDADE — cada bloco começa em um ``murl`` e lê as chaves daquele
+       trecho. Nunca associa por índice entre listas separadas (era assim que a
+       imagem acabava ligada à página de OUTRO resultado quando um deles não
+       tinha purl).
+    """
+    objects: list[dict[str, Any]] = []
+    for raw in _BING_M_ATTR_RE.findall(html):
+        try:
+            data = json.loads(raw)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("murl"):
+            objects.append(data)
+    if objects:
+        return objects
+    for bloco in re.split(r'(?="murl"\s*:)', html)[1:]:
+        janela = bloco[:1200]
+        murl = re.search(r'"murl"\s*:\s*"([^"]+)"', janela)
+        if not murl:
+            continue
+        purl = re.search(r'"purl"\s*:\s*"([^"]+)"', janela)
+        titulo = re.search(r'"t"\s*:\s*"([^"]+)"', janela)
+        turl = re.search(r'"turl"\s*:\s*"([^"]+)"', janela)
+        objects.append({
+            "murl": _unescape(murl.group(1)),
+            "purl": _unescape(purl.group(1)) if purl else "",
+            "t": _unescape(titulo.group(1)) if titulo else "",
+            "turl": _unescape(turl.group(1)) if turl else "",
+        })
+    return objects
+
 
 def build_bing_url(query: str, *, size: str = "xga") -> str:
     qft = ""
@@ -144,20 +214,27 @@ def search_bing_images(
     except (HTTPError, URLError, OSError, ValueError):
         return []
     html = page.replace("&quot;", '"')
-    purls = [m.group(1) for m in _BING_PURL_RE.finditer(html)]
-    murls = [m.group(1) for m in _BING_MURL_RE.finditer(html)]
-    turls = [m.group(1) for m in _BING_TURL_RE.finditer(html)]
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for i, direct in enumerate(murls):
-        if not direct or not _real_image_url(direct):
-            continue
-        if direct in seen:
+    # Fase 14: cada resultado do Bing carrega o proprio JSON no atributo `m`
+    # (murl+purl+turl do MESMO resultado). O parser antigo coletava as tres
+    # listas separadamente e associava por INDICE: quando um resultado nao
+    # tinha purl (ou a ordem divergia), a imagem era ligada a pagina de OUTRO
+    # resultado — origem errada, verificacao de origem inutil.
+    for obj in _bing_result_objects(html):
+        direct = str(obj.get("murl") or "")
+        if not direct or not _real_image_url(direct) or direct in seen:
             continue
         seen.add(direct)
-        page_url = purls[i] if i < len(purls) else ""
-        thumb = turls[i] if i < len(turls) else ""
-        results.append(_candidate(query, "1024x768|w", direct, page_url, "", thumb))
+        results.append(
+            _candidate(
+                query, "1024x768|w", direct,
+                str(obj.get("purl") or ""),
+                str(obj.get("t") or ""),
+                str(obj.get("turl") or ""),
+                engine="bing",
+            )
+        )
         if len(results) >= limit:
             break
     return results
@@ -166,6 +243,31 @@ def search_bing_images(
 # ---------------------------------------------------------------------------
 # Google Images
 # ---------------------------------------------------------------------------
+
+def _google_result_objects(html: str) -> list[dict[str, Any]]:
+    """Resultados do Google (Fase 14): um objeto por segmento de resultado.
+
+    O HTML do Google embute as chaves ``tu``/``ou``/``ru``/``pt`` dentro do
+    mesmo trecho de cada resultado. Dividimos pelo marcador ``"ou"`` (a imagem
+    real) e lemos as chaves DENTRO da janela daquele resultado.
+    """
+    objects: list[dict[str, Any]] = []
+    for parte in re.split(r'(?="ou"\s*:)', html)[1:]:
+        janela = parte[:4000]
+        ou = _SRC_KEY_RE.search(janela)
+        if not ou:
+            continue
+        ru = _PAGE_KEY_RE.search(janela)
+        pt = _TITLE_KEY_RE.search(janela)
+        tu = _THUMB_KEY_RE.search(janela)
+        objects.append({
+            "murl": _unescape(ou.group(1)),
+            "purl": _unescape(ru.group(1)) if ru else "",
+            "t": _unescape(pt.group(1)) if pt else "",
+            "turl": _unescape(tu.group(1)) if tu else "",
+        })
+    return objects
+
 
 def build_search_url(query: str, *, size: str = "xga", ratio: str = "w") -> str:
     size = (size or "xga").strip()
@@ -200,20 +302,23 @@ def search_google_images(
         page = _fetch(url, timeout)
     except (HTTPError, URLError, OSError, ValueError):
         return []
-    thumbs = _THUMB_KEY_RE.findall(page)
-    sources = _SRC_KEY_RE.findall(page)
-    pages = _PAGE_KEY_RE.findall(page)
-    titles = _TITLE_KEY_RE.findall(page)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for i, thumb in enumerate(thumbs):
-        direct = sources[i] if i < len(sources) else ""
-        source_page = pages[i] if i < len(pages) else ""
-        title = titles[i] if i < len(titles) else ""
+    # Fase 14: as chaves tu/ou/ru/pt pertencem ao MESMO resultado. O parser
+    # antigo montava quatro listas paralelas e associava por indice — qualquer
+    # resultado sem uma das chaves deslocava todas as associacoes seguintes.
+    for obj in _google_result_objects(page):
+        direct = str(obj.get("murl") or "")
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
         seen.add(direct)
-        results.append(_candidate(query, f"{_SIZE_LABEL.get(size, size)}|{ratio}", direct, source_page, title, _unescape(thumb)))
+        results.append(
+            _candidate(
+                query, f"{_SIZE_LABEL.get(size, size)}|{ratio}", direct,
+                str(obj.get("purl") or ""), str(obj.get("t") or ""),
+                str(obj.get("turl") or ""), engine="google",
+            )
+        )
         if len(results) >= limit:
             break
     return results
@@ -260,7 +365,10 @@ def search_yandex_images(
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
         seen.add(direct)
-        results.append(_candidate(query, "1024x768|w", direct, "", "", ""))
+        # Fase 4: o Yandex entrega a imagem SEM a pagina de origem. O
+        # candidato nasce `discovery_only` (usable=False) — serve de pista,
+        # nunca entra no media_plan.
+        results.append(_candidate(query, "1024x768|w", direct, "", "", "", engine="yandex"))
         if len(results) >= limit:
             break
     return results
@@ -289,13 +397,19 @@ def search_web_images(
     timeout: float = 30.0,
     engine: str = "auto",
 ) -> list[dict[str, Any]]:
-    """Busca com rotacao REAL entre Bing e Yandex (Google como fallback).
+    """Busca AGREGADA entre as engines (Fase 3), com parada por capacidade.
 
-    No modo ``auto`` a engine primaria alterna por query (hash CRC32 estavel:
-    ~50% Bing, ~50% Yandex) e, se a primaria nao retornar candidatos, tenta a
-    outra e por fim Google. Engine concreta (``bing``/``yandex``/``google``)
-    usa apenas aquela. Fail-closed: sempre retorna lista (possivelmente
-    vazia), nunca levanta.
+    Antes a primeira engine que retornasse QUALQUER coisa encerrava a busca
+    ("first engine wins"). Se ela devolvesse 3 candidatos sem pagina de origem,
+    a busca parava ali e o pipeline seguia com menos material do que a web
+    oferecia — sem saber.
+
+    Agora consulta as engines em ordem (a primaria alterna por hash estavel da
+    query: ~50/50 Bing/Yandex; Google e fallback), acumula candidatos com
+    dedupe por URL e PARA quando ja existem ``limit`` candidatos UTILIZAVEIS
+    (com pagina de origem). Engine concreta usa apenas aquela.
+
+    Fail-closed: sempre retorna lista (possivelmente vazia), nunca levanta.
     """
     query = (query or "").strip()
     if not query:
@@ -311,16 +425,24 @@ def search_web_images(
         "yandex": search_yandex_images,
         "google": search_google_images,
     }
+    alvo = max(1, int(limit or 1))
+    acumulado: list[dict[str, Any]] = []
+    vistos: set[str] = set()
     for name in order:
         try:
-            last = _fns[name](query, size=size, ratio=ratio, limit=limit, timeout=timeout)
+            lote = _fns[name](query, size=size, ratio=ratio, limit=alvo, timeout=timeout)
         except Exception:  # noqa: BLE001 - rotate on any failure
-            last = []
-        if last:
-            for c in last:
-                c["engine"] = name
-            return last
-    return []
+            lote = []
+        for cand in lote or []:
+            url = str(cand.get("direct_image_url") or "")
+            if not url or url in vistos:
+                continue
+            vistos.add(url)
+            cand.setdefault("engine", name)
+            acumulado.append(cand)
+        if sum(1 for c in acumulado if c.get("usable")) >= alvo:
+            break
+    return acumulado
 
 
 def search_web_images_batch(

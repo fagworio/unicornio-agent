@@ -162,8 +162,14 @@ def run_pre_publish_checklist(
         except Exception:  # noqa: BLE001 - deps/rede: mantem a politica cheia
             img_hashes = None
             distinct_frames = None
-    if distinct_frames is not None and distinct_frames < required_effective:
-        required_effective = distinct_frames
+    # Fase 1: o pHash NUNCA reduz o mínimo exigido (2/4/6 por palavras).
+    # Antes `required_effective = distinct_frames` transformava "6 URLs com 3
+    # frames reais" em "mínimo 3" — o post passava alegando que só existiam 3
+    # imagens disponíveis, quando o pHash só provou que 3 daquelas 6 URLs são o
+    # mesmo frame. O pHash responde OUTRA pergunta, no gate `imagens_similares`:
+    # "as N URLs do corpo representam N imagens distintas?". O único caminho
+    # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
+    required_effective = required
 
     # Waiver "media_exhausted": quando a busca de imagens foi honestamente
     # esgotada (media-search-web devolveu count=0) E existe featured E NAO e
