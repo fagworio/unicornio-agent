@@ -153,7 +153,9 @@ def _apply_editorial_unlocked(
         # NOT final — record it as uncertain so the post stays pending (out of
         # the processing queue, visible for review) instead of being dropped
         # forever via editorial.latest.json.
-        baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
+        # UNCERTAIN tambem nao altera conteudo: a duvida e sobre pertencer ou
+        # nao ao portal, entao mexer no WordPress seria prematuro.
+        baseline_changed = False
         _save_uncertain(root, post_id, editorial)
         _backoff_u = rework_backoff(
             read_state(post)["attempts"] + 1,
@@ -165,6 +167,7 @@ def _apply_editorial_unlocked(
             config,
             post_id,
             STATE_UNCERTAIN,
+            root=root,
             attempts=_backoff_u["attempts"],
             next_retry_at=_backoff_u["next_retry_at"],
             last_error=editorial["site_relevance"]["reason"],
@@ -188,12 +191,16 @@ def _apply_editorial_unlocked(
         editorial = resolve_editorial_defaults(editorial, post)
     _save_editorial_latest(root, post_id, editorial)
     if decision == "skip":
-        baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
+        # SKIPPED = zero alteracao de conteudo no WordPress (o motivo do skip
+        # pode ser justamente o conteudo nao pertencer ao portal). Persistir
+        # CTA/fonte/links aqui contradizia o contrato de seguranca do README.
+        baseline_changed = False
         _write_state_markers(
             client,
             config,
             post_id,
             STATE_SKIPPED,
+            root=root,
             last_error=editorial["site_relevance"]["reason"],
         )
         append_telemetry(
@@ -337,6 +344,7 @@ def _apply_editorial_unlocked(
                 config,
                 post_id,
                 backoff["state"],
+                root=root,
                 attempts=backoff["attempts"],
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
@@ -368,8 +376,26 @@ def _apply_editorial_unlocked(
                         pass
                 try:
                     client.move_to_status(post_id, "awaiting_human")
-                except Exception:  # noqa: BLE001 - best-effort
-                    pass
+                    # Verificacao POS-ESCRITA: o operador precisa achar o post no
+                    # filtro "Awaiting Human" do WP. Se o status nao mudou, a
+                    # meta diz awaiting_human e o WP continua pending — o humano
+                    # abre a fila e o post nao esta la (divergencia silenciosa).
+                    _conf = client.get_post(post_id)
+                    _st_wp = str(_conf.get("status") or "")
+                    if _st_wp != "awaiting_human":
+                        append_telemetry(
+                            root, "awaiting_human_status_mismatch",
+                            post_id=post_id, status_wp=_st_wp,
+                            state_meta=str((_conf.get("meta") or {}).get("_hermes_state") or ""),
+                        )
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    try:
+                        append_telemetry(
+                            root, "awaiting_human_move_failed",
+                            post_id=post_id, error=str(exc)[:200],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             images_summary = _images_summary(
                 content, _post_title(post) or editorial["seo"]["title"], image_entities
             )
@@ -545,25 +571,38 @@ def _persist_baseline_enrichment(
         return False
 
 
+# Estados em que perder a persistência é operacionalmente crítico: o post fica
+# fora de sincronia com a fila (reaparece, gera retry e custo de LLM de novo).
+_STATE_MARKER_CRITICAL = frozenset({
+    STATE_READY, STATE_SKIPPED, STATE_UNCERTAIN, STATE_BLOCKED, STATE_AWAITING_HUMAN,
+})
+
+
 def _write_state_markers(
     client: WordPressClient,
     config: Config,
     post_id: int,
     state: str,
     *,
+    root: Path | None = None,
     attempts: int = 0,
     next_retry_at: str = "",
     last_error: str = "",
     ready_hash: str = "",
-) -> None:
+) -> bool:
     """Persiste o estado operacional ``_hermes_*`` no WordPress (write mode).
 
-    Telemetria de estado: falha aqui não derruba o fluxo — o pior caso é o
-    post ficar sem estado e o publish-ready revalidar pelo checklist (mais
-    caro, nunca inseguro).
+    Falha aqui NÃO derruba o fluxo — o pior caso é o post ficar sem estado e o
+    publish-ready revalidar pelo checklist (mais caro, nunca inseguro).
+
+    Mas também não é mais silenciosa: uma falha de escrita deixa o estado
+    DISTRIBUÍDO inconsistente (filesystem/draft avança, WordPress não), o que
+    faz o post reaparecer na fila, gerar retry desnecessário (custo de LLM de
+    novo) e divergir dos relatórios. Retorna True quando confirmado e registra
+    telemetria ``state_persist_failed`` (crítica nos estados terminais).
     """
     if config.dry_run:
-        return
+        return True
     try:
         client.update_post(
             post_id,
@@ -578,8 +617,19 @@ def _write_state_markers(
                 )
             },
         )
-    except Exception:  # noqa: BLE001 - telemetria nunca bloqueia o fluxo
-        pass
+    except Exception as exc:  # noqa: BLE001 - telemetria nunca bloqueia o fluxo
+        critical = state in _STATE_MARKER_CRITICAL
+        if root is not None:
+            try:
+                append_telemetry(
+                    root, "state_persist_failed",
+                    post_id=post_id, state=state,
+                    error=str(exc)[:200], critical=critical,
+                )
+            except Exception:  # noqa: BLE001 - telemetria jamais derruba o fluxo
+                pass
+        return False
+    return True
 
 
 def _save_draft(root: Path, post_id: int, editorial: dict[str, Any]) -> None:
@@ -1839,6 +1889,7 @@ def _publish_post_unlocked(
             config,
             post_id,
             STATE_BLOCKED,
+            root=root,
             last_error="checklist pre-publicacao com falhas",
         )
         return {
@@ -2630,6 +2681,7 @@ def retry_post(
         config,
         post_id,
         STATE_BLOCKED,
+        root=root,
         attempts=0,
         last_error="reaberto por revisao humana (retry)",
     )
@@ -2655,11 +2707,21 @@ def discard_post(
     UNCERTAIN — o post sai da agenda do monitor e nunca publica.
     """
     post = client.get_post(post_id)
-    if post.get("status") != "pending":
-        raise WorkflowError(f"post {post_id} nao esta pending ({post.get('status')})")
+    # O discard humano precisa funcionar exatamente onde o pipeline PARA:
+    # `pending` (fila) e `awaiting_human` (3a falha / midia esgotada). Antes so
+    # `pending` era aceito, entao o operador tinha de fazer retry->pending->
+    # discard para conseguir descartar justamente o post que pediu intervencao.
+    if post.get("status") not in ("pending", "awaiting_human"):
+        raise WorkflowError(
+            f"post {post_id} nao esta pending nem awaiting_human ({post.get('status')})"
+        )
     if config.dry_run:
         raise WorkflowError("discard e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
-    baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
+    # Discard NAO altera conteudo: a decisao humana pode ser exatamente "este
+    # conteudo nao pertence ao portal". O baseline enrichment (CTA/fonte/links)
+    # ficou restrito ao caminho BLOCKED, onde o post ja foi considerado
+    # relevante pelo pipeline.
+    baseline_changed = False
     # Preserva o motivo ANTERIOR: o discard nao pode apagar o historico do
     # bloqueio. Um rotulo generico ("off-topic") sobrescrevia o motivo real
     # (imagens_no_corpo/estrutura_lista/trailer) na meta do WP — depois disso o
@@ -2676,6 +2738,7 @@ def discard_post(
         config,
         post_id,
         STATE_UNCERTAIN,
+        root=root,
         last_error=motivo,
     )
     return {

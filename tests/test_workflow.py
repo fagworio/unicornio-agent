@@ -7,6 +7,7 @@ from unittest import mock
 
 from unicornio_editor.config import Config
 from unicornio_editor.workflow import (
+    WorkflowError,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -357,12 +358,14 @@ class WorkflowTests(unittest.TestCase):
             payload = editorial_payload("skip")
             payload["site_relevance"]["confidence"] = 0.70
             client = FakeClient(self.post())
+            conteudo_antes = client.post["content"]["raw"]
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
             self.assertEqual(report["status"], "uncertain")
-            self.assertTrue(report["wordpress_changed"])
-            self.assertTrue(report["baseline_enriched"])
-            self.assertIn("Confira mais novidades", client.post["content"]["raw"])
-            self.assertIn("Fonte:", client.post["content"]["raw"])
+            # UNCERTAIN nao altera conteudo: a duvida e sobre pertencer ao portal.
+            self.assertFalse(report["wordpress_changed"])
+            self.assertFalse(report["baseline_enriched"])
+            self.assertEqual(client.post["content"]["raw"], conteudo_antes)
+            self.assertNotIn("Confira mais novidades", client.post["content"]["raw"])
             self.assertTrue(Path(directory, "backups/42/uncertain.json").is_file())
             self.assertFalse(Path(directory, "backups/42/editorial.latest.json").exists())
 
@@ -371,9 +374,13 @@ class WorkflowTests(unittest.TestCase):
             payload = editorial_payload("skip")
             payload["site_relevance"]["confidence"] = 0.99
             client = FakeClient(self.post())
+            conteudo_antes = client.post["content"]["raw"]
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
-            self.assertTrue(report["wordpress_changed"])
-            self.assertTrue(report["baseline_enriched"])
+            # SKIPPED = zero alteracao de conteudo no WordPress (contrato do
+            # README: post fora da pauta e ignorado sem alterar o site).
+            self.assertFalse(report["wordpress_changed"])
+            self.assertFalse(report["baseline_enriched"])
+            self.assertEqual(client.post["content"]["raw"], conteudo_antes)
             self.assertIn("skip_reason", report)
             self.assertFalse(Path(directory, "backups/42/uncertain.json").exists())
             self.assertTrue(Path(directory, "backups/42/editorial.latest.json").is_file())
@@ -680,22 +687,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["featured_vision"][0]["existing_featured_id"], 7)
         self.assertEqual(result["featured_vision"][0]["status"], "passed")
 
-    def test_apply_skip_persists_safe_baseline_but_not_editorial_draft(self):
+    def test_apply_skip_nao_altera_conteudo_no_wordpress(self):
+        """SKIPPED = zero alteracao de conteudo (antes persistia CTA/Fonte).
+
+        O commit b0d35d8 fazia skip/uncertain/discard persistirem melhorias
+        mecanicas (CTA, Fonte, links) no conteudo do WordPress. Isso contradizia
+        o contrato de seguranca do README: o motivo do skip pode ser justamente
+        o conteudo nao pertencer ao portal. Agora o skip grava APENAS a meta de
+        estado (para o post sair da fila), nunca o conteudo.
+        """
         with tempfile.TemporaryDirectory() as directory:
             post = self.post()
-            post["content"] = {"raw": "<h1>Titulo duplicado</h1><p>Notícia sobre Xbox.</p>"}
+            original = "<h1>Titulo duplicado</h1><p>Notícia sobre Xbox.</p>"
+            post["content"] = {"raw": original}
             client = FakeClient(post)
             report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload("skip"))
-            self.assertTrue(report["wordpress_changed"])
+            self.assertFalse(report["wordpress_changed"])
             self.assertEqual(report["status"], "skipped")
-            self.assertEqual(len(client.updated), 2)
-            content = client.updated[0][1]["content"]["raw"]
-            self.assertNotIn("<h1>", content)
-            self.assertIn("Confira mais novidades", content)
-            self.assertIn("Fonte:", content)
-            self.assertIn('href="https://www.unicorniohater.com.br/games/x-box/"', content)
-            self.assertNotIn("Texto revisado", content)
-            self.assertEqual(client.updated[1][1]["meta"]["_hermes_state"], "skipped")
+            # exatamente UMA escrita: a meta _hermes_state (nunca o conteudo)
+            self.assertEqual(len(client.updated), 1)
+            self.assertIn("meta", client.updated[0][1])
+            self.assertNotIn("content", client.updated[0][1])
+            self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "skipped")
+            self.assertEqual(client.post["content"]["raw"], original)
 
     def test_apply_processes_pending_without_sending_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -984,6 +998,12 @@ class WorkflowTests(unittest.TestCase):
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         self.assertEqual(report["state"], "awaiting_human")
         self.assertEqual(report["status"], "needs_rework")
+        # P2.4: o post e movido para o status WP que o humano filtra (e o
+        # resultado do move e verificado depois da escrita - se o WP nao
+        # confirmar, vira telemetria em vez de silencio).
+        self.assertTrue(
+            any(payload.get("status") == "awaiting_human" for _pid, payload in client.updated)
+        )
 
     def test_awaiting_human_normalizes_existing_featured_before_human_review(self):
         post = self.post()
@@ -1796,6 +1816,55 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(summary["by_event"].get("apply_blocked"), 1)
             reasons = summary["by_reason"]["apply_blocked"]
             self.assertTrue(any("imagens" in r for r in reasons))
+
+
+    def test_discard_aceita_awaiting_human(self):
+        """P1.1: o discard humano funciona exatamente onde o pipeline para.
+
+        Antes so `pending` era aceito, entao o operador precisava fazer
+        retry->pending->discard justamente no post que pediu intervencao.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["status"] = "awaiting_human"
+            client = FakeClient(post)
+            report = discard_post(
+                client, self.config(False), Path(directory), 42, reason="fora da pauta"
+            )
+            self.assertEqual(report["status"], "discarded")
+            self.assertEqual(report["state"], "uncertain")
+            # P1.2: discard NAO altera conteudo — so a meta de estado e gravada
+            self.assertFalse(report["baseline_enriched"])
+            self.assertTrue(all("content" not in payload for _pid, payload in client.updated))
+
+    def test_discard_rejeita_status_invalido(self):
+        """Status que nao pede intervencao humana continua recusado."""
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["status"] = "publish"
+            client = FakeClient(post)
+            with self.assertRaises(WorkflowError):
+                discard_post(client, self.config(False), Path(directory), 42)
+
+    def test_write_state_markers_reporta_falha(self):
+        """P1.3: falha ao persistir _hermes_state deixa de ser silenciosa.
+
+        Sem telemetria, o post ficava sem estado no WP (reaparecia na fila,
+        gerava retry e custo de LLM de novo) sem nenhum sinal operacional.
+        """
+        from unicornio_editor.workflow import _write_state_markers
+        from unicornio_editor.observability import read_telemetry_summary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            with mock.patch.object(client, "update_post", side_effect=RuntimeError("HTTP 500")):
+                ok = _write_state_markers(
+                    client, self.config(False), 42, "ready", root=root, ready_hash="abc"
+                )
+            self.assertFalse(ok)
+            summary = read_telemetry_summary(root)
+            self.assertEqual(summary["by_event"].get("state_persist_failed"), 1)
 
 
 if __name__ == "__main__":
