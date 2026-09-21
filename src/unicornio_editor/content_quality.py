@@ -107,3 +107,58 @@ def validate_centered_images(html: str) -> None:
     for image in images:
         if not re.search(r"aligncenter|text-align\s*:\s*center", image, re.IGNORECASE):
             raise ContentQualityError("every content image must be centered")
+
+
+# ---------------------------------------------------------------------------
+# P0 (auditoria): envelope operacional publicado como conteúdo.
+#
+# O acidente do post 114180 publicou literalmente
+# ``{"post_id": ..., "status": ..., "cleaned_html": "...", ...}``: o agente
+# tratou a SAÍDA do comando `content` como se fosse o texto do post. O caso é
+# detectável de forma determinística e é bloqueado em quatro camadas: leitura
+# (get_cleaned_content), validação (validate_editorial), checklist e publish.
+# ---------------------------------------------------------------------------
+
+_CHAVES_ENVELOPE = frozenset({
+    "post_id", "cleaned_html", "original_link", "word_count",
+    "editorial", "media_plan", "seo", "status",
+})
+
+
+def looks_like_operational_envelope(texto: str) -> bool:
+    """O texto é um envelope operacional do CLI (JSON), não conteúdo editorial?"""
+    amostra = (texto or "").strip()
+    if not amostra.startswith("{"):
+        return False
+    if len(amostra) > 200_000:  # grande demais para ser envelope de comando
+        return False
+    import json as _json
+
+    try:
+        dados = _json.loads(amostra)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(dados, dict):
+        return False
+    return len(_CHAVES_ENVELOPE & set(dados.keys())) >= 2
+
+
+def unwrap_operational_envelope(texto: str) -> str:
+    """Devolve o HTML real quando o texto é um envelope conhecido.
+
+    Sem envelope devolve o texto como veio. Envelope sem campo de conteúdo
+    aproveitável devolve string vazia (melhor vazio do que publicar JSON).
+    """
+    if not looks_like_operational_envelope(texto):
+        return texto
+    import json as _json
+
+    try:
+        dados = _json.loads((texto or "").strip())
+    except (ValueError, TypeError):
+        return ""
+    for chave in ("cleaned_html", "html", "content", "conteudo", "raw"):
+        valor = dados.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            return valor
+    return ""

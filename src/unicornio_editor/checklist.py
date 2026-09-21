@@ -120,6 +120,22 @@ def run_pre_publish_checklist(
     cleaned = editorial.get("cleaned_html")
     content_ok = isinstance(cleaned, str) and bool(cleaned.strip())
     check("conteudo_nao_vazio", content_ok, "cleaned_html preenchido" if content_ok else "cleaned_html vazio")
+    # P0 (auditoria): o corpo não pode ser a saída de um comando do CLI. O
+    # acidente do post 114180 publicou {"post_id":..., "cleaned_html":...} na
+    # cara do leitor — este item fecha a última porta (o publish revalida pelo
+    # checklist quando o hash está STALE).
+    from .content_quality import looks_like_operational_envelope
+
+    envelope_operacional = looks_like_operational_envelope(
+        str(editorial.get("cleaned_html") or "")
+    )
+    check(
+        "conteudo_sem_metadados_operacionais",
+        not envelope_operacional,
+        "corpo é texto editorial"
+        if not envelope_operacional
+        else "corpo parece saída de comando do CLI (JSON operacional: post_id/cleaned_html)",
+    )
 
     # 5. Source block: original_link exists -> canonical Fonte must be present.
     meta = post.get("meta") if isinstance(post.get("meta"), Mapping) else {}

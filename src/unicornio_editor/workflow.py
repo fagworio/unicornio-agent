@@ -2088,6 +2088,25 @@ def publish_ready_posts(
             # Legado ja sinalizado como rework: nao revalida a cada janela —
             # o agente corrige (re-apply) e o estado vira READY.
             continue
+        # P0 (auditoria): sanity ANTES do fast-path. O caminho "hash intacto ->
+        # publica sem revalidar" confiava no manifesto; se o corpo gravado for
+        # um envelope operacional (o acidente do post 114180), o manifesto não
+        # percebe. Aqui é barato: uma leitura do conteúdo já carregado.
+        from .content_quality import looks_like_operational_envelope
+
+        if looks_like_operational_envelope(str(_raw_content(candidate) or "")):
+            try:
+                # import local com ALIAS: `append_telemetry` é importado mais
+                # adiante nesta função, e usar o mesmo nome aqui o tornaria
+                # local em todo o escopo (UnboundLocalError).
+                from .observability import append_telemetry as _telemetria
+
+                _telemetria(root, "publish_blocked_operational_envelope",
+                            post_id=candidate.get("id"))
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+
         published = sum(1 for outcome in outcomes if outcome.get("wordpress_changed"))
         if limit and published >= limit:
             break

@@ -94,6 +94,18 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     # This is the token-economy default: the model must not re-emit text it
     # did not change. CTA/Fonte/rodape are always code-inserted (builder).
     cleaned_html = payload.get("cleaned_html")
+    if cleaned_html is not None and isinstance(cleaned_html, str) and cleaned_html.strip():
+        # P0 (auditoria): o corpo do post não pode ser a SAÍDA de um comando do
+        # CLI. O acidente do post 114180 publicou o envelope
+        # {"post_id":..., "cleaned_html":...} como se fosse texto editorial.
+        from .content_quality import looks_like_operational_envelope
+
+        if looks_like_operational_envelope(cleaned_html):
+            raise EditorialValidationError(
+                "cleaned_html parece a saida de um comando do CLI (envelope JSON "
+                "com post_id/cleaned_html) — envie o HTML editorial, nao o "
+                "resultado de `content`/`queue`"
+            )
     if cleaned_html is not None and not isinstance(cleaned_html, str):
         raise EditorialValidationError("cleaned_html must be a string or null")
     if decision == "process" and isinstance(cleaned_html, str) and not cleaned_html.strip():
