@@ -210,9 +210,12 @@ def evidence_score(
 ) -> dict[str, Any]:
     """Score determinístico de evidência (Fase 11).
 
-    Soma os pesos das evidências de ORIGEM que citam o subject e aplica as
-    penalidades objetivas. Veredito: ``>=7`` deterministic_match, ``4-6``
-    ambiguous (único lugar onde visão/LLM pode entrar), ``<4`` reject.
+    Ordem dos gates (o score NUNCA substitui proveniência):
+      A. proveniência (hard): sem `source_page_url` -> ``unresolved_source``;
+         imagem não listada na página -> ``source_mismatch``;
+      C. diversidade: pHash duplicado -> ``duplicate_frame``;
+      B. relevância (só então): ``>=7`` deterministic_match, ``4-6``
+         ambiguous (único lugar para visão), ``<4`` reject.
     """
     campos = {
         "filename": filename,
@@ -231,17 +234,35 @@ def evidence_score(
             score += PESOS[chave]
             evidencias.append(chave)
 
-    penalidades: list[str] = []
-    if not source_page_present:
-        score += PENALIDADES["missing_source"]
-        penalidades.append("missing_source")
-    if source_page_present and not image_in_source:
-        score += PENALIDADES["not_in_source"]
-        penalidades.append("not_in_source")
-    if duplicate_frame:
-        score += PENALIDADES["duplicate_frame"]
-        penalidades.append("duplicate_frame")
+    base = {
+        "subject": subject,
+        "matched": evidencias,
+        "evidence": {chave: valor for chave, valor in campos.items() if valor},
+    }
 
+    # GATE A — PROVENIÊNCIA (hard gate, não penalidade). Sem origem não existe
+    # ACCEPT possível: nenhuma soma de sinais de relevância compensa ausência de
+    # proveniência. Era -10 e podia ser "vencido" por muitos +5/+4 — o que
+    # permitiria publicar uma imagem bonita de origem desconhecida.
+    if not source_page_present:
+        return {**base, "score": 0, "gate": "provenance",
+                "verdict": "unresolved_source", "penalties": ["missing_source"],
+                "needs_vision": False,
+                "reason": "sem página de origem: proveniência não resolvida"}
+    if not image_in_source:
+        return {**base, "score": 0, "gate": "provenance",
+                "verdict": "source_mismatch", "penalties": ["not_in_source"],
+                "needs_vision": False,
+                "reason": "imagem não consta na página de origem (bytes/link divergem)"}
+
+    # GATE C — DIVERSIDADE: frame repetido nunca entra, mesmo com score alto.
+    if duplicate_frame:
+        return {**base, "score": score + PENALIDADES["duplicate_frame"],
+                "gate": "diversity", "verdict": "duplicate_frame",
+                "penalties": ["duplicate_frame"], "needs_vision": False,
+                "reason": "mesmo frame visual de outra imagem do artigo (pHash)"}
+
+    # GATE B — RELEVÂNCIA (só depois da proveniência válida).
     if score >= LIMIAR_MATCH:
         veredito = "deterministic_match"
     elif score >= LIMIAR_AMBIGUO:
@@ -249,13 +270,14 @@ def evidence_score(
     else:
         veredito = "reject"
     return {
-        "subject": subject,
+        **base,
         "score": score,
+        "gate": "relevance",
         "verdict": veredito,
-        "matched": evidencias,
-        "penalties": penalidades,
+        "penalties": [],
+        # A visão só entra em ambíguo E com proveniência já válida: uma IA
+        # dizendo "parece Metroid" não resolve origem/licenciamento.
         "needs_vision": veredito == "ambiguous",
-        "evidence": {chave: valor for chave, valor in campos.items() if valor},
     }
 
 

@@ -184,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
     media_search_web_parser.add_argument(
+        "--post-id",
+        dest="post_id",
+        type=int,
+        default=0,
+        help="post de referencia: o subject da busca vem de post_subjects() "
+        "(entidade principal do titulo / H2), nao do termo digitado",
+    )
+    media_search_web_parser.add_argument(
         "--verify",
         dest="verify",
         action="store_true",
@@ -679,6 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .media.source_verify import validate_discovered_candidate
 
                 cache_paginas: dict = {}
+                cache_html: dict = {}
                 aprovados: list[dict] = []
                 for cand in candidates:
                     if not cand.get("usable"):
@@ -688,7 +697,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                         rejeitados.append(cand)
                         continue
-                    veredito = validate_discovered_candidate(cand, cache=cache_paginas)
+                    veredito = validate_discovered_candidate(
+                        cand, cache=cache_paginas, cache_html=cache_html
+                    )
                     cand["valid"] = bool(veredito["valid"])
                     cand["valid_reason"] = str(veredito.get("reason") or "")
                     cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
@@ -708,24 +719,68 @@ def main(argv: Sequence[str] | None = None) -> int:
             if candidates:
                 from urllib.parse import unquote
 
-                from .media.evidence import evidence_score
+                from .media.evidence import evidence_score, post_subjects, source_context
 
+                # P0: o subject tem de vir do POST (entidade principal / H2), nao
+                # do termo digitado. Com o termo como subject o teto real do
+                # score era filename+url+query = 8; a mesma key art que pontua 21
+                # nos testes mal passava no fluxo real.
+                subject_alvo = args.termo
+                post_id_ref = int(getattr(args, "post_id", 0) or 0)
+                if post_id_ref:
+                    try:
+                        post_ref = client.get_post(post_id_ref)
+                        titulo_ref = post_ref.get("title")
+                        conteudo_ref = post_ref.get("content") or {}
+                        subs = post_subjects(
+                            title=(titulo_ref or {}).get("raw", "") if isinstance(titulo_ref, dict) else str(titulo_ref or ""),
+                            content_html=(conteudo_ref.get("raw") or "") if isinstance(conteudo_ref, dict) else "",
+                        )
+                        if subs:
+                            subject_alvo = str(subs[0]["subject"])
+                    except Exception:  # noqa: BLE001 - sem post, segue com o termo
+                        pass
                 for cand in candidates:
+                    pagina = str(cand.get("source_page_url") or "")
                     nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
+                    # Contexto REAL da pagina de origem (o HTML ja foi baixado na
+                    # validacao): og:title, page title, alt original, figcaption,
+                    # heading. Sem isso o gate de relevancia perde os sinais
+                    # fortes e so sobram filename/url/query.
+                    ctx = (
+                        source_context(
+                            cache_html.get(pagina, ""),
+                            str(cand.get("direct_image_url") or ""),
+                            base_url=pagina,
+                        )
+                        if pagina
+                        else {}
+                    )
                     pontos = evidence_score(
-                        args.termo,
+                        subject_alvo,
                         filename=nome,
-                        page_url=str(cand.get("source_page_url") or ""),
+                        og_title=ctx.get("og_title", ""),
+                        page_title=ctx.get("page_title", ""),
+                        alt_original=ctx.get("alt_original", ""),
+                        figcaption=ctx.get("figcaption", ""),
+                        heading=ctx.get("heading", ""),
+                        page_url=pagina,
                         query=args.termo,
-                        source_page_present=bool(cand.get("source_page_url")),
+                        source_page_present=bool(pagina),
                         image_in_source=bool(cand.get("valid")),
                     )
                     cand["evidence"] = pontos
                     cand["evidence_score"] = pontos["score"]
                     cand["needs_vision"] = pontos["needs_vision"]
+                    cand["subject"] = subject_alvo
+                    cand["source_context_used"] = bool(ctx)
                 # melhor evidência primeiro; empate mantém a ordem da busca
-                candidatos_relevantes = [c for c in candidates if c["evidence"]["verdict"] != "reject"]
-                descartados = [c for c in candidates if c["evidence"]["verdict"] == "reject"]
+                # Só deterministic_match e ambiguous seguem; qualquer veredito
+                # de gate (unresolved_source, source_mismatch, duplicate_frame)
+                # ou de relevância baixa (reject) vai para rejeitados.
+                aceitos = {"deterministic_match", "ambiguous"}
+                candidatos_relevantes = [c for c in candidates if c["evidence"]["verdict"] in aceitos]
+                descartados = [c for c in candidates if c["evidence"]["verdict"] not in aceitos]
                 candidatos_relevantes.sort(key=lambda c: c["evidence_score"], reverse=True)
                 rejeitados.extend(descartados)
                 candidates = candidatos_relevantes

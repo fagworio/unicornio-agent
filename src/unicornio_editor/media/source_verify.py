@@ -125,6 +125,7 @@ def validate_discovered_candidate(
     candidate: dict[str, Any],
     *,
     cache: dict[str, list[str] | None] | None = None,
+    cache_html: dict[str, str] | None = None,
     audit=None,
 ) -> dict[str, Any]:
     """Valida um candidato ANTES do media_plan (Fase 5).
@@ -160,11 +161,13 @@ def validate_discovered_candidate(
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     if page_url not in cache:
         pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
-        cache[page_url] = (
-            _image_urls_in_page(pagina.decode("utf-8", "ignore"), page_url)
-            if pagina is not None
-            else None
-        )
+        texto = pagina.decode("utf-8", "ignore") if pagina is not None else ""
+        cache[page_url] = _image_urls_in_page(texto, page_url) if pagina is not None else None
+        # Guarda o HTML da origem: o chamador extrai o contexto (og:title,
+        # page title, alt original, figcaption) e alimenta o score de
+        # relevância sem baixar a página uma segunda vez.
+        if cache_html is not None and texto:
+            cache_html[page_url] = texto
     listadas = cache[page_url]
     if not listadas:
         resultado["reason"] = "pagina de origem inacessivel ou sem imagens listadas"

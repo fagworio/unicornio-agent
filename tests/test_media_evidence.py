@@ -126,5 +126,53 @@ class SourceContextTests(unittest.TestCase):
         self.assertEqual(source_context("", "https://x/a.jpg"), {})
 
 
+class GateTests(unittest.TestCase):
+    """Proveniência é GATE (hard), não penalidade: nenhuma soma de relevância
+    pode compensar ausência de origem."""
+
+    def test_sem_origem_e_unresolved_source_mesmo_com_score_maximo(self):
+        out = evidence_score(
+            "metroid prime 4",
+            filename="metroid-prime-4-keyart.jpg",
+            og_title="Metroid Prime 4",
+            page_title="Metroid Prime 4",
+            alt_original="Metroid Prime 4 key art",
+            figcaption="Metroid Prime 4",
+            heading="Metroid Prime 4",
+            page_url="https://x/metroid-prime-4/",
+            query="Metroid Prime 4",
+            source_page_present=False,
+        )
+        self.assertEqual(out["verdict"], "unresolved_source")
+        self.assertEqual(out["gate"], "provenance")
+        self.assertEqual(out["score"], 0)
+        self.assertFalse(out["needs_vision"])
+
+    def test_imagem_ausente_da_pagina_e_source_mismatch(self):
+        out = evidence_score("metroid", filename="metroid.jpg", image_in_source=False)
+        self.assertEqual(out["verdict"], "source_mismatch")
+        self.assertEqual(out["gate"], "provenance")
+
+    def test_frame_duplicado_e_gate_de_diversidade(self):
+        out = evidence_score(
+            "metroid", filename="metroid.jpg", og_title="Metroid", duplicate_frame=True
+        )
+        self.assertEqual(out["verdict"], "duplicate_frame")
+        self.assertEqual(out["gate"], "diversity")
+
+    def test_visao_so_em_ambiguo_com_origem_valida(self):
+        ambiguo = evidence_score("metroid prime 4", filename="metroid-prime-4.jpg")
+        self.assertEqual(ambiguo["verdict"], "ambiguous")
+        self.assertTrue(ambiguo["needs_vision"])
+        assertivo = evidence_score(
+            "metroid prime 4",
+            filename="metroid-prime-4.jpg",
+            og_title="Metroid Prime 4: Beyond",
+            page_title="Metroid Prime 4 review",
+        )
+        self.assertEqual(assertivo["verdict"], "deterministic_match")
+        self.assertFalse(assertivo["needs_vision"])
+
+
 if __name__ == "__main__":
     unittest.main()
