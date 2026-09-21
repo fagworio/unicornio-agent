@@ -190,16 +190,31 @@ def item_query(subject: str, article_title: str = "", *, extra: str = "") -> str
 def _image_local_context(html: str, image_url: str) -> dict[str, str]:
     """figcaption/heading da REGIÃO da imagem (não os primeiros da página)."""
     alvo = normalize(unquote(str(image_url or "").split("?")[0].rsplit("/", 1)[-1]))
+    alvo_path = normalize(unquote(str(image_url or "").split("?")[0]))
     if not alvo:
         return {}
-    pos = -1
+    # Match em TRÊS níveis (P2 da auditoria): caminho normalizado primeiro,
+    # basename só quando for ÚNICO. Antes comparava apenas o basename: numa
+    # página com /authors/avatar.jpg e /games/avatar.jpg (e nenhum dos dois com
+    # o caminho do alvo) o código podia escolher a imagem errada.
+    exatos: list[int] = []
+    por_basename: list[int] = []
     for achado in _IMG_TAG_RE.finditer(html):
         attrs = dict(_ATTR_RE.findall(achado.group(0)))
         fonte = attrs.get("src") or attrs.get("data-src") or ""
-        if normalize(unquote(fonte.split("?")[0].split("/")[-1])) == alvo:
-            pos = achado.start()
-            break
-    if pos < 0:
+        if not fonte:
+            continue
+        caminho = normalize(unquote(str(fonte).split("?")[0]))
+        if alvo_path.endswith(caminho) or caminho.endswith(alvo_path):
+            exatos.append(achado.start())
+            continue
+        if normalize(unquote(str(fonte).split("?")[0].split("/")[-1])) == alvo:
+            por_basename.append(achado.start())
+    if exatos:
+        pos = exatos[0]
+    elif len(por_basename) == 1:
+        pos = por_basename[0]  # basename único: seguro
+    else:
         return {}
 
     out: dict[str, str] = {}

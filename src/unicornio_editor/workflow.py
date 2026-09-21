@@ -870,11 +870,12 @@ def _item_entities(
 ) -> set[str]:
     """Entidades que valem para ESTE item (P1 da auditoria).
 
-    O subject esperado vem da SEÇÃO (H2 do item). Se o media_plan declara um
-    subject, ele é confrontado com o esperado — divergência é inconsistência do
-    plano e não pode ser usada como evidência (section = Bleach, subject =
-    Naruto, imagem = Naruto: rejeitado). Sem seção determinável, cai no subject
-    declarado e, sem ele, nas entidades do artigo.
+    ATENÇÃO — estado ATUAL: usa o `subject` DECLARADO no media_plan (dado do
+    agente) e, sem ele, as entidades do artigo. O subject derivado da SEÇÃO
+    (`_expected_subject`) ainda NÃO substitui o declarado: o mapeamento
+    H2<->paragraph_index precisa de mais cuidado (ativar antes disso rejeitou
+    itens legítimos de listicle nos testes). Ou seja, a proteção contra um plano
+    inconsistente (seção = Bleach, subject = Naruto) ainda NÃO existe.
     """
     declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
     # O subject esperado da SEÇÃO fica disponível (auditoria/futuro), mas ainda
