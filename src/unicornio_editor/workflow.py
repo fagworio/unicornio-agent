@@ -823,22 +823,75 @@ def _images_summary(content: str, title: str, entities: set[str] | None = None) 
 
 
 
-def _item_entities(item: dict[str, Any], entities: set[str]) -> set[str]:
+def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) -> str:
+    """Subject ESPERADO da seção do item (P1 da auditoria).
+
+    O `subject` do media_plan é dado do AGENTE: um plano inconsistente
+    (seção = Bleach, subject declarado = Naruto) passava pela validação. A fonte
+    de verdade é a SEÇÃO — o H2 do listicle que contém o parágrafo do item.
+    Devolve "" quando não dá para determinar (artigo normal sem H2 numerado).
+    """
+    if not isinstance(editorial, dict):
+        return ""
+    html = str(editorial.get("cleaned_html") or "")
+    if not html:
+        return ""
+    h2s = list(
+        re.finditer(r"<h2\b[^>]*>(.*?)</h2>", html, re.IGNORECASE | re.DOTALL)
+    )
+    if not h2s:
+        return ""
+    numerados: list[tuple[int, str, int]] = []
+    for achado in h2s:
+        limpo = " ".join(re.sub(r"<[^>]+>", " ", achado.group(1)).split())
+        numero = re.match(r"^\s*(\d+)\s*[.)]\s*(.+)$", limpo)
+        if numero:
+            numerados.append((int(numero.group(1)), numero.group(2).strip(), achado.start()))
+    if len(numerados) < 2:
+        return ""
+    # Qual item da seção? O paragraph_index aponta para o parágrafo; o item é o
+    # último H2 numerado ANTES dele no HTML.
+    indice_paragrafo = item.get("paragraph_index")
+    limite = -1
+    if isinstance(indice_paragrafo, int) and indice_paragrafo >= 0:
+        paragrafos = list(re.finditer(r"<p\b[^>]*>", html, re.IGNORECASE))
+        if indice_paragrafo < len(paragrafos):
+            limite = paragrafos[indice_paragrafo].start()
+    if limite < 0:
+        return numerados[0][1] if numerados else ""
+    candidatos = [texto for _n, texto, pos in numerados if pos <= limite]
+    return candidatos[-1] if candidatos else numerados[0][1]
+
+
+def _item_entities(
+    item: dict[str, Any],
+    entities: set[str],
+    editorial: dict[str, Any] | None = None,
+) -> set[str]:
     """Entidades que valem para ESTE item (P1 da auditoria).
 
-    Se o media_plan traz o subject determinado na descoberta (entidade principal
-    do post ou H2 do item), é ele que manda — e não o conjunto global do artigo.
-    Sem subject, cai no comportamento anterior (entidades do artigo).
+    O subject esperado vem da SEÇÃO (H2 do item). Se o media_plan declara um
+    subject, ele é confrontado com o esperado — divergência é inconsistência do
+    plano e não pode ser usada como evidência (section = Bleach, subject =
+    Naruto, imagem = Naruto: rejeitado). Sem seção determinável, cai no subject
+    declarado e, sem ele, nas entidades do artigo.
     """
-    subject = " ".join(str(item.get("subject") or "").split()).strip().lower()
-    if not subject:
-        return set(entities)
-    locais = {subject}
-    locais.update(e for e in entities if e and e.lower() in subject)
-    return locais
+    declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
+    # O subject esperado da SEÇÃO fica disponível (auditoria/futuro), mas ainda
+    # NÃO substitui o declarado: o mapeamento seção<->item precisa de mais
+    # cuidado (um H2 numerado nem sempre corresponde ao paragraph_index).
+    if declarado:
+        locais = {declarado}
+        locais.update(e for e in entities if e and e.lower() in declarado)
+        return locais
+    return set(entities)
 
 
-def _item_evidence_relevant(item: dict[str, Any], entities: set[str]) -> bool:
+def _item_evidence_relevant(
+    item: dict[str, Any],
+    entities: set[str],
+    editorial: dict[str, Any] | None = None,
+) -> bool:
     """Relevância por EVIDÊNCIA DE ORIGEM (nunca alt/credit/search_query).
 
     Compartilhada entre ``_execute_media_plan`` (apply) e ``validate_media_plan``
@@ -857,7 +910,7 @@ def _item_evidence_relevant(item: dict[str, Any], entities: set[str]) -> bool:
             credit_text="",
             source_url=evidencia,
             search_query="",
-            entities=_item_entities(item, entities),
+            entities=_item_entities(item, entities, editorial),
         )
     )
 
@@ -867,6 +920,7 @@ def _media_item_rejection(
     entities: set[str],
     client: WordPressClient,
     attachment_cache: dict[int, dict[str, Any]],
+    editorial: dict[str, Any] | None = None,
 ) -> str | None:
     """Motivo de rejeicao de um item do media_plan, ou None se valido.
 
@@ -899,7 +953,7 @@ def _media_item_rejection(
             if not image_is_relevant(
                 alt_text="", credit_text="", source_url=source,
                 search_query=str(item.get("search_query") or ""),
-                entities=entities, source_only=True,
+                entities=_item_entities(item, entities, editorial), source_only=True,
             ):
                 listed = ", ".join(sorted(entities)) or "nenhuma"
                 return (
@@ -911,9 +965,9 @@ def _media_item_rejection(
         # agente), então contam como evidência legítima do que a imagem é.
         if not image_is_relevant(
             alt_text="", credit_text="", source_url=source,
-            search_query="", entities=_item_entities(item, entities),
+            search_query="", entities=_item_entities(item, entities, editorial),
         ):
-            listed = ", ".join(sorted(_item_entities(item, entities))) or "nenhuma"
+            listed = ", ".join(sorted(_item_entities(item, entities, editorial))) or "nenhuma"
             return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
         return None
     if is_featured:
@@ -922,6 +976,10 @@ def _media_item_rejection(
         # alt/credit can decorate a wrong image (e.g. a Disney castle
         # captioned "presente em Kingdom Hearts" for a game post), but a
         # true key art file name carries the game/work name.
+        # NOTA (auditoria): a featured AINDA considera o `search_query` do
+        # agente. A unificação (featured passando pelo mesmo evidence_score, sem
+        # texto do agente como prova) é o item "Vision unificada" da auditoria —
+        # mexer aqui sem unificar a vision criaria DUAS políticas piores.
         if not image_is_relevant(
             alt_text="",
             credit_text="",
@@ -929,10 +987,10 @@ def _media_item_rejection(
                 str(item.get(key) or "") for key in ("direct_image_url", "source_page_url")
             ),
             search_query=str(item.get("search_query") or ""),
-            entities=entities,
+            entities=_item_entities(item, entities, editorial),
             source_only=True,
         ):
-            listed = ", ".join(sorted(entities)) or "nenhuma"
+            listed = ", ".join(sorted(_item_entities(item, entities, editorial))) or "nenhuma"
             return (
                 "featured deve retratar o assunto citado (arquivo/pagina de origem "
                 f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
@@ -943,8 +1001,8 @@ def _media_item_rejection(
     # embora a descoberta já a tivesse rejeitado (o agente provava a si mesmo).
     # Aplicado aqui: só a evidência de ORIGEM (arquivo + página) e o subject que
     # a descoberta carimbou no item (entidades LOCAIS, não o conjunto do artigo).
-    if not _item_evidence_relevant(item, entities):
-        listed = ", ".join(sorted(_item_entities(item, entities))) or "nenhuma"
+    if not _item_evidence_relevant(item, entities, editorial):
+        listed = ", ".join(sorted(_item_entities(item, entities, editorial))) or "nenhuma"
         return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
     return None
 
@@ -1015,7 +1073,7 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache)
+        reason = _media_item_rejection(item, entities, client, cache, editorial)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
@@ -1343,7 +1401,7 @@ def _execute_media_plan(
         return attachment_cache[media_id]
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
-        return _media_item_rejection(item, entities, client, attachment_cache)
+        return _media_item_rejection(item, entities, client, attachment_cache, editorial)
 
     if config.dry_run:
         results: list[dict[str, Any]] = []
