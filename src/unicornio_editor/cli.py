@@ -184,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
     media_search_web_parser.add_argument(
+        "--article-title",
+        dest="article_title",
+        type=str,
+        default="",
+        help="titulo do artigo: acrescenta o tipo de conteudo a busca (ex: "
+        "'Pluto' num artigo de animes vira 'Pluto anime')",
+    )
+    media_search_web_parser.add_argument(
         "--post-id",
         dest="post_id",
         type=int,
@@ -215,6 +223,14 @@ def build_parser() -> argparse.ArgumentParser:
         "media-search-listicle",
         help="busca em lote candidatos para obras de uma lista; cada titulo recebe uma busca "
         "independente em paralelo (uma chamada compacta, somente leitura)",
+    )
+    media_search_listicle_parser.add_argument(
+        "--article-title",
+        dest="article_title",
+        type=str,
+        default="",
+        help="titulo do artigo: acrescenta o tipo de conteudo a cada item "
+        "(ex: item 'Pluto' num artigo de animes vira 'Pluto anime')",
     )
     media_search_listicle_parser.add_argument(
         "titulos", nargs="+", type=str,
@@ -544,6 +560,7 @@ def _enriquecer_candidatos(
     subject: str,
     termo: str,
     verify: bool = True,
+    root=None,
 ) -> tuple[list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -612,6 +629,32 @@ def _enriquecer_candidatos(
         cand["source_context_used"] = bool(ctx)
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
     aprovados.sort(key=lambda c: c["evidence_score"], reverse=True)
+
+    # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
+    # é "quantas imagens o Bing devolveu", e sim quantas atravessaram
+    # descoberta -> origem verificada -> relevância. Com isso o agente passa a
+    # escolher provider por yield medido, não por preferência fixa.
+    if root is not None:
+        try:
+            from .observability import append_telemetry
+
+            funil: dict[str, dict[str, int]] = {}
+            for cand in aprovados + rejeitados:
+                eng = str(cand.get("engine") or "unknown")
+                linha = funil.setdefault(
+                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0}
+                )
+                linha["discovered"] += 1
+                if cand.get("valid"):
+                    linha["verified"] += 1
+                if (cand.get("evidence") or {}).get("verdict") == "deterministic_match":
+                    linha["subject_match"] += 1
+            for cand in aprovados:
+                funil[str(cand.get("engine") or "unknown")]["selected"] += 1
+            for eng, linha in funil.items():
+                append_telemetry(root, "media_engine_yield", engine=eng, **linha)
+        except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
+            pass
     return aprovados, rejeitados
 
 
@@ -781,6 +824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 subject=subject_alvo,
                 termo=args.termo,
                 verify=bool(getattr(args, "verify", True)),
+                root=args.root,
             )
             rejeitados.extend(novos_rejeitados)
             if novos_rejeitados:
@@ -801,8 +845,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .media.search import search_web_images_batch
             from .observability import append_telemetry
 
+            # Fase 8: a QUERY de cada item ganha o tipo de conteudo do artigo
+            # ("Pluto" -> "Pluto anime"), enquanto o SUBJECT continua sendo o
+            # item original — a busca fica no dominio certo e o score mede a
+            # evidencia contra o que o item realmente nomeia.
+            from .media.evidence import item_query
+
+            artigo_titulo = str(getattr(args, "article_title", "") or "")
+            queries_listicle = [item_query(t, artigo_titulo) or t for t in args.titulos]
+            subject_por_query = {q: t for q, t in zip(queries_listicle, args.titulos)}
             rows = search_web_images_batch(
-                args.titulos,
+                queries_listicle,
                 size=args.size,
                 ratio=args.ratio,
                 limit=args.limit,
@@ -824,8 +877,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # origem verificada + contexto da página + score DELE.
                     # Uma imagem do item "Pluto" nunca é aceita por evidência do
                     # item "Cyberpunk".
+                    subject_item = str(subject_por_query.get(query) or query)
                     candidates, rejeitados_item = _enriquecer_candidatos(
-                        candidates, subject=query, termo=query
+                        candidates, subject=subject_item, termo=query, root=args.root
                     )
                     for candidate in candidates:
                         direct_url = str(candidate.get("direct_image_url") or "")

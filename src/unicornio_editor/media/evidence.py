@@ -126,6 +126,51 @@ def _entidade_principal(title: str) -> str:
     return normalize(max(grupos, key=len))
 
 
+
+# Tipo de conteúdo do artigo -> termo de contexto que desambigua o item.
+# Um H2 isolado ("Pluto") traz o planeta do National Geographic; com o tipo do
+# artigo a busca fica no domínio certo ("Pluto anime") sem custo nenhum.
+_CONTEXTO_POR_TIPO: tuple[tuple[str, str], ...] = (
+    ("anime", ("anime", "animes")),
+    ("manga", ("manga", "mangas")),
+    ("game", ("jogo", "jogos", "game", "games", "videogame", "videogames")),
+    ("filme", ("filme", "filmes")),
+    ("serie", ("serie", "series")),
+    ("quadrinho", ("quadrinho", "quadrinhos", "hq", "hqs", "comic", "comics")),
+    ("personagem", ("personagem", "personagens")),
+    ("temporada", ("temporada", "temporadas")),
+)
+
+
+def tipo_de_conteudo(article_title: str) -> str:
+    """Termo de contexto do artigo (o "Pluto anime" vem daqui)."""
+    alvo = normalize(article_title or "")
+    if not alvo:
+        return ""
+    for termo, variantes in _CONTEXTO_POR_TIPO:
+        if any(re.search(rf"\b{re.escape(v)}", alvo) for v in variantes):
+            return termo
+    return ""
+
+
+def item_query(subject: str, article_title: str = "", *, extra: str = "") -> str:
+    """Query ESPECÍFICA para o subject de um item (Fase 8).
+
+    ``item_query("Pluto", "10 melhores animes")`` -> ``"Pluto anime"``.
+    Sem o contexto do artigo, ``Pluto`` devolve o planeta; com ele, o recall
+    fica no domínio editorial do post. Nunca duplica o termo já presente.
+    """
+    base = " ".join(str(subject or "").split()).strip()
+    if not base:
+        return ""
+    contexto = tipo_de_conteudo(article_title) or tipo_de_conteudo(extra)
+    if not contexto:
+        return base
+    if re.search(rf"\b{re.escape(contexto)}\b", normalize(base)):
+        return base
+    return f"{base} {contexto}"
+
+
 def source_context(
     html: str,
     image_url: str,
@@ -300,6 +345,8 @@ def subject_for_image(image_url: str, subjects: list[dict[str, Any]]) -> str:
 
 __all__ = [
     "PESOS",
+    "item_query",
+    "tipo_de_conteudo",
     "PENALIDADES",
     "LIMIAR_MATCH",
     "LIMIAR_AMBIGUO",

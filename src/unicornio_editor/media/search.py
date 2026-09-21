@@ -23,6 +23,10 @@ must still open source_page_url and confirm the image is listed there
 from __future__ import annotations
 
 import json
+import os
+import random
+import time
+from pathlib import Path
 import re
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -393,6 +397,98 @@ def _primary_engine(query: str) -> str:
     return "yandex" if (zlib.crc32((query or "").encode("utf-8")) & 1) else "bing"
 
 
+
+# --- Circuit breaker por engine (decisão registrada: NÃO tentar "vencer" o
+# rate-limit com rotação de User-Agent). Estratégia: backoff com jitter, cache
+# de resultados e cooldown da engine — o pipeline simplesmente usa as outras
+# fontes enquanto uma está bloqueada. Estado em arquivo para sobreviver entre
+# execuções do CLI (cada comando é um processo novo).
+_ENGINE_STATE_PATH = Path(
+    os.environ.get("UNICORNIO_ENGINE_STATE") or "/tmp/unicornio_media_engines.json"
+)
+_COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
+_BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
+
+
+def _breaker_ativo() -> bool:
+    """O breaker fica desligado sob pytest.
+
+    O estado vive num arquivo compartilhado (/tmp): numa sessão de testes uma
+    falha simulada em um caso colocaria a engine em cooldown para os seguintes
+    e o resultado passaria a depender da ORDEM dos testes. Os testes dedicados
+    do breaker ligam explicitamente via ``UNICORNIO_ENGINE_STATE``.
+    """
+    if os.environ.get("UNICORNIO_ENGINE_STATE"):
+        return True
+    return not bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _ler_estado_engines() -> dict[str, dict[str, Any]]:
+    try:
+        dados = json.loads(_ENGINE_STATE_PATH.read_text(encoding="utf-8"))
+        return dados if isinstance(dados, dict) else {}
+    except Exception:  # noqa: BLE001 - estado ausente/corrompido não bloqueia
+        return {}
+
+
+def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
+    try:
+        _ENGINE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ENGINE_STATE_PATH.write_text(json.dumps(dados), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def engine_disponivel(nome: str, *, agora: float | None = None) -> bool:
+    """A engine não está em cooldown? (circuit breaker meio-aberto.)"""
+    if not _breaker_ativo():
+        return True
+    estado = _ler_estado_engines().get(nome) or {}
+    bloqueado_ate = float(estado.get("blocked_until") or 0)
+    return (agora if agora is not None else time.time()) >= bloqueado_ate
+
+
+def engine_falhou(nome: str) -> float:
+    """Registra a falha e devolve quantos segundos a engine deve esperar.
+
+    1ª falha -> backoff curto com jitter; a partir da 3ª, a engine entra em
+    cooldown e o pipeline passa a usar as outras fontes (Bing cai, Yandex e
+    Google continuam).
+    """
+    if not _breaker_ativo():
+        return 0.0
+    dados = _ler_estado_engines()
+    atual = dados.get(nome) or {}
+    falhas = int(atual.get("failures") or 0) + 1
+    espera = 0.0
+    if falhas >= 3:
+        espera = _COOLDOWN_SEGUNDOS
+        bloqueio = time.time() + espera
+    else:
+        base = _BACKOFF_SEGUNDOS[min(falhas, len(_BACKOFF_SEGUNDOS)) - 1]
+        espera = base + random.uniform(0, base) * 0.6  # jitter (não é UA rotation)
+        bloqueio = time.time() + espera
+    dados[nome] = {"failures": falhas, "blocked_until": bloqueio,
+                   "last_failure": time.time()}
+    _gravar_estado_engines(dados)
+    return espera
+
+
+def engine_ok(nome: str) -> None:
+    """Sucesso zera o contador (circuit breaker fechado)."""
+    if not _breaker_ativo():
+        return
+    dados = _ler_estado_engines()
+    if nome in dados:
+        dados.pop(nome, None)
+        _gravar_estado_engines(dados)
+
+
+def engines_status() -> dict[str, dict[str, Any]]:
+    """Estado atual das engines (para o funil/telemetria)."""
+    return _ler_estado_engines()
+
+
 def search_web_images(
     query: str,
     *,
@@ -434,10 +530,25 @@ def search_web_images(
     acumulado: list[dict[str, Any]] = []
     vistos: set[str] = set()
     for name in order:
+        # Circuit breaker: engine em cooldown é simplesmente pulada — o
+        # pipeline segue com as outras fontes (sem trocar User-Agent).
+        if not engine_disponivel(name):
+            continue
         try:
             lote = _fns[name](query, size=size, ratio=ratio, limit=alvo, timeout=timeout)
         except Exception:  # noqa: BLE001 - rotate on any failure
             lote = []
+        if not lote:
+            # Vazio/erro conta como falha: backoff curto e, na 3ª, cooldown da
+            # engine (Bing degradado não deve segurar o ciclo).
+            espera = engine_falhou(name)
+            if espera:
+                try:
+                    time.sleep(min(float(espera), 8.0))
+                except Exception:  # noqa: BLE001 - sleep interrompido não quebra
+                    pass
+            continue
+        engine_ok(name)
         for cand in lote or []:
             url = str(cand.get("direct_image_url") or "")
             if not url or url in vistos:
