@@ -107,7 +107,7 @@ _VOID_TAGS = frozenset(
      "meta", "param", "source", "track", "wbr"}
 )
 _TAG_TOKEN_RE = re.compile(r"(<!--.*?-->|<[^>]+>)", re.DOTALL)
-_TAG_NAME_RE = re.compile(r"^</?s*([a-zA-Z0-9]+)")
+_TAG_NAME_RE = re.compile(r"^</?\s*([a-zA-Z0-9]+)")
 
 
 def _flatten_rules() -> list[tuple[str, str]]:

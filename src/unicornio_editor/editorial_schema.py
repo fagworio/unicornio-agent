@@ -45,6 +45,13 @@ _MEDIA = {
     # from this attachment and re-uploaded as a NEW attachment (the original
     # title/alt/caption are never overwritten).
     "media_library_id",
+    # Evidência determinística da descoberta (o apply RECALCULA e não confia
+    # nestes campos — eles existem para auditoria e para o índice local).
+    "subject",
+    "phash",
+    "evidence_score",
+    "evidence_verdict",
+    "candidate_id",
     # Query de descoberta que retornou esta imagem (ex.: "redfall xbox
     # series"). Evidencia de relevancia (fluxo manual do editor): se a busca
     # filtrada retornou a imagem, ela e o que se procura. O agente DEVE
@@ -116,7 +123,13 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
         media = _object(item, f"media_plan[{index}]")
         _keys(
             media, _MEDIA, f"media_plan[{index}]",
-            optional={"media_library_id", "search_query"},
+            # Campos de evidência são OPCIONAIS: o apply recalcula o score e não
+            # confia no JSON (um media_plan manual/adulterado não pode passar
+            # apenas por preencher evidence_score).
+            optional={
+                "media_library_id", "search_query", "subject", "phash",
+                "evidence_score", "evidence_verdict", "candidate_id",
+            },
         )
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:

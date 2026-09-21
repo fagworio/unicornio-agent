@@ -490,9 +490,14 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "skip")
         verify.assert_not_called()
 
-    def test_media_exhausted_waives_inline_for_article(self):
-        # Artigo (nao listicle) com busca de imagens esgotada + featured:
-        # o minimo de imagens inline e dispensado (waived).
+    def test_media_exhausted_do_editorial_nao_concede_waiver(self):
+        """Acceptance 13: `media_exhausted` vindo do JSON do LLM NAO vale.
+
+        A exaustão da busca só pode ser declarada pelo CÓDIGO, com evidência
+        (queries executadas, candidatos verificados, frames distintos). Antes
+        bastava o editorial declarar o flag para dispensar o mínimo 2/4/6 de um
+        artigo normal — e `attempts` de apply era lido como "busca esgotada".
+        """
         editorial = editorial_payload(media_exhausted=True)
         content = (
             "<p>Texto sobre o jogo videogame e seu lançamento.</p>"
@@ -506,8 +511,8 @@ class ChecklistTests(unittest.TestCase):
             content=content,
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
-        self.assertEqual(item["status"], "pass")
-        self.assertIn("waived", item["detail"])
+        self.assertEqual(item["status"], "fail")
+        self.assertNotIn("waived", item.get("detail") or "")
 
     def test_media_exhausted_does_not_waive_listicle(self):
         # Listicle (Top N) NAO dispensa o minimo: continua exigindo imagem por

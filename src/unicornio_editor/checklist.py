@@ -179,11 +179,17 @@ def run_pre_publish_checklist(
     # e pela visao.
     from .list_quality import detect_list_format
 
-    media_exhausted = bool(editorial.get("media_exhausted"))
+    # P1 (auditoria): o editorial/LLM NUNCA declara exaustao da busca — só o
+    # código pode, contando buscas completas de verdade. Aceitar o flag do JSON
+    # dispensaria o mínimo 2/4/6 sem nenhuma evidência de busca esgotada.
+    media_exhausted = False
     # Deterministico: apos N applies falhando em imagens (cada apply = 1 busca
     # completa), decide SEM depender do campo do LLM. O media_exhausted do
     # modelo vira apenas uma dica que adianta a decisao (economiza 1 ciclo).
-    deterministic_exhausted = (attempts + 1) >= config.max_media_search_attempts
+    # P1 (auditoria): `attempts` conta APPLYs (SEO falhou, trailer
+    # falhou...), não buscas de imagem esgotadas — usá-lo como exaustão
+    # declarava "busca esgotada" sem nenhuma busca ter sido feita.
+    deterministic_exhausted = False
     exhausted = media_exhausted or deterministic_exhausted
     featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
     is_list = detect_list_format(title_str, content) is not None

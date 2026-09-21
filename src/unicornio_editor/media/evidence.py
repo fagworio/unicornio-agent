@@ -75,18 +75,26 @@ def post_subjects(
     Cada subject é a chave de validação da SUA imagem: a imagem do item 1 não
     pode ser aceita por evidência do item 3 (Fase 9).
     """
-    itens: list[dict[str, Any]] = []
-    for indice, h2 in enumerate(_H2_RE.findall(content_html or ""), start=1):
+    # Lista = H2 REALMENTE numerados ("1. Bleach"). Um artigo comum também tem
+    # H2 ("O que sabemos até agora") e antes cada um virava item — o subject
+    # saía do H2 em vez da entidade do título ("O que sabemos até agora" no
+    # lugar de "metroid prime 4"), destruindo o score em notícias normais.
+    numerados: list[tuple[int, str]] = []
+    for h2 in _H2_RE.findall(content_html or ""):
         limpo = re.sub(r"\s+", " ", _TAG_RE.sub(" ", h2)).strip()
-        numero = _ITEM_RE.match(limpo)
-        item = int(numero.group(1)) if numero else indice
+        achado = _ITEM_RE.match(limpo)
+        if not achado:
+            continue
         # O H2 inteiro (menos o numero) e o subject: "Cyberpunk: Edgerunners"
         # nomeia a obra em si — cortar no ":" perderia metade do nome.
-        subject = _ITEM_RE.sub("", limpo).strip()
-        if subject:
-            itens.append({"item": item, "heading": subject, "subject": subject})
-    if itens:
-        return itens
+        texto_item = _ITEM_RE.sub("", limpo).strip()
+        if texto_item:
+            numerados.append((int(achado.group(1)), texto_item))
+    if len(numerados) >= 2:
+        return [
+            {"item": numero, "heading": texto, "subject": texto}
+            for numero, texto in numerados
+        ]
 
     principal = _entidade_principal(title)
     if not principal:

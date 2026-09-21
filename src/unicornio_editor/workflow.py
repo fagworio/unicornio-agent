@@ -1233,6 +1233,7 @@ def _execute_media_plan(
     root: Path,
     *,
     preflight: dict[str, Any] | None = None,
+    post_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -1437,9 +1438,13 @@ def _execute_media_plan(
                 # Fase 13: persiste o fingerprint/proveniencia da midia. Assim a
                 # proxima busca do mesmo subject (ou do mesmo frame recomprimido)
                 # reusa a imagem em vez de baixar e subir de novo.
-                try:
-                    from .media.library_index import register as _registrar_midia
+                from .media.library_index import register as _registrar_midia
 
+                # Erro de PROGRAMAÇÃO aqui tem de estourar (o swallow total
+                # escondia um NameError e o índice simplesmente nunca era
+                # gravado); só falha de I/O é tolerada, e mesmo assim fica
+                # registrada.
+                try:
                     _registrar_midia(
                         root,
                         phash=str(item.get("phash") or ""),
@@ -1447,10 +1452,16 @@ def _execute_media_plan(
                         source_page=str(item.get("source_page_url") or ""),
                         subject=str(item.get("subject") or ""),
                         media_id=int(media_id),
-                        article_id=int(post_id),
+                        article_id=int(post_id) if post_id else None,
                     )
-                except Exception:  # noqa: BLE001 - indice e otimizacao, nunca gate
-                    pass
+                except (OSError, ValueError) as exc:
+                    try:
+                        from .observability import append_telemetry
+
+                        append_telemetry(root, "media_index_write_failed",
+                                         post_id=post_id, error=str(exc)[:200])
+                    except Exception:  # noqa: BLE001
+                        pass
                 # A visão cara já ocorreu no media-validate. Transfere a
                 # aprovação para a URL hospedada no WordPress; o checklist
                 # final continua fail-closed, mas consome o cache em vez de

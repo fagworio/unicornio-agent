@@ -1044,9 +1044,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.post["featured_media"], 88)
         self.assertTrue(report["featured_normalized"])
 
-    def test_article_deterministic_waiver_on_second_apply(self):
-        # SEM media_exhausted do LLM: um ARTIGO falhando em imagens + featured
-        # waiva DETERMINISTICAMENTE no 2o apply (teto max_media_search_attempts=2).
+    def test_article_sem_waiver_por_contagem_de_apply(self):
+        """Acceptance 13: `attempts` de APPLY não é evidência de busca esgotada.
+
+        Antes o 2º apply de um artigo sem imagens virava `ready` só porque o
+        contador chegou ao teto — sem nenhuma busca de imagem ter sido esgotada
+        (o apply pode ter falhado em SEO, trailer, etc.). Agora o waiver só
+        existe com evidência do CÓDIGO; sem ela o post segue bloqueado até o
+        teto de tentativas mandá-lo para decisão humana (não trava em loop).
+        """
         payload = editorial_payload()
         payload["cleaned_html"] = "<p>Texto revisado sobre videogame.</p>"  # 0 imagens
         payload["media_plan"] = []
@@ -1055,9 +1061,11 @@ class WorkflowTests(unittest.TestCase):
             client = FakeClient(self.post())
             first = apply_editorial(client, self.config(False), root, 42, payload)
             second = apply_editorial(client, self.config(False), root, 42, payload)
+            third = apply_editorial(client, self.config(False), root, 42, payload)
         self.assertEqual(first["state"], "blocked")
         self.assertEqual(first["attempts"], 1)
-        self.assertEqual(second["state"], "ready")
+        self.assertEqual(second["state"], "blocked")  # antes: ready (waiver)
+        self.assertEqual(third["state"], "awaiting_human")  # teto -> humano
 
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
