@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from html import escape
+from urllib.parse import urlparse
 
 # --- Internal link map (category URL -> unambiguous terms) -------------------
 # Terms are listed MOST SPECIFIC first within each category (multi-word before
@@ -158,16 +159,90 @@ def _is_closing(token: str) -> bool:
     return bool(re.match(r"^</", token))
 
 
-def add_internal_links(html: str, *, max_per_url: int = 1) -> str:
-    """Insert internal category links into `html` deterministically.
+_A_HREF_RE = re.compile(
+    r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
+)
 
-    Only text outside protected tags (existing <a>, headings, script, style) is
-    processed, at unicode word boundaries, first occurrence per URL, most
-    specific term wins. Pure insertion — never alters surrounding text/HTML.
+# Hosts do próprio portal (host vazio = URL relativa "/categoria/").
+_INTERNAL_HOSTS = frozenset({"unicorniohater.com.br", ""})
+
+
+def _canonical_url(url: str) -> str:
+    """Forma canônica de URL interna (Fase 15).
+
+    ``/series``, ``/series/``, http/https e www/non-www apontam para a MESMA
+    página: sem canonicalizar, "uma URL interna no máximo uma vez" não vale
+    (o contador trataria a mesma categoria como duas).
+    """
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if not path.endswith("/"):
+        path += "/"
+    # URL relativa ("/series/") e URL absoluta do próprio site apontam para a
+    # MESMA página: o que identifica a categoria interna é o PATH. Sem isso o
+    # link relativo não era reconhecido e o contador deixava passar um segundo
+    # link para a mesma categoria.
+    if host in _INTERNAL_HOSTS:
+        return path.lower()
+    return f"{host}{path}".lower()
+
+
+# Conjunto canônico das URLs internas administradas pelo mapa.
+_INTERNAL_CANON: frozenset[str] = frozenset(
+    _canonical_url(url) for url, _terms in _INTERNAL_LINK_MAP
+)
+
+
+def add_internal_links(html: str, *, max_per_url: int = 1, repair_duplicates: bool = True) -> str:
+    """Insert internal category links into `html` — deterministic and IDEMPOTENT.
+
+    Fase 15 do documento de correções:
+
+    * **uma URL interna no máximo uma vez por artigo** — contando também os
+      links que JÁ existem no HTML. Antes o contador era local à chamada, então
+      um segundo parágrafo podia ganhar outro link para a MESMA categoria;
+    * **reparo de conteúdo antigo**: quando a mesma URL aparece duas vezes,
+      preserva o PRIMEIRO link e devolve os demais ao texto (sem âncora);
+    * **idempotência**: ``f(f(html)) == f(html)``.
+
+    Só texto fora de tags protegidas (``<a>``, headings, script, style) é
+    processado, em limites de palavra, primeira ocorrência por URL, termo mais
+    específico primeiro. Inserção pura — nunca altera o texto ao redor.
     """
     if not isinstance(html, str) or not html.strip():
         return html
+
     used_urls: dict[str, int] = {}
+
+    # 1) Conta (e canonicaliza) os links internos JÁ presentes no documento.
+    def _contar(match: re.Match[str]) -> str:
+        canon = _canonical_url(match.group(1))
+        if canon in _INTERNAL_CANON:
+            used_urls[canon] = used_urls.get(canon, 0) + 1
+        return match.group(0)
+
+    html = _A_HREF_RE.sub(_contar, html)
+
+    # 2) Reparo: a partir da segunda ocorrência da mesma URL, devolve o texto.
+    if repair_duplicates:
+        vistos: set[str] = set()
+
+        def _reparar(match: re.Match[str]) -> str:
+            canon = _canonical_url(match.group(1))
+            if canon not in _INTERNAL_CANON:
+                return match.group(0)
+            if canon in vistos:
+                return match.group(2)  # mantém o texto, remove a âncora repetida
+            vistos.add(canon)
+            return match.group(0)
+
+        html = _A_HREF_RE.sub(_reparar, html)
 
     def _linkify(text: str) -> str:
         if not text:
@@ -178,9 +253,10 @@ def add_internal_links(html: str, *, max_per_url: int = 1) -> str:
             url = _TERM_TO_URL.get(term.casefold())
             if url is None:
                 return term
-            if used_urls.get(url, 0) >= max_per_url:
-                return term  # keep text; URL already used this article
-            used_urls[url] = used_urls.get(url, 0) + 1
+            canon = _canonical_url(url)
+            if used_urls.get(canon, 0) >= max_per_url:
+                return term  # keep text; URL already used in this article
+            used_urls[canon] = used_urls.get(canon, 0) + 1
             return _link_anchor(term, url)
 
         return _TERM_ALTERNATION.sub(_repl, text)
