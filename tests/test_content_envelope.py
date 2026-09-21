@@ -7,6 +7,7 @@ testes cobrem as quatro camadas que agora bloqueiam o caso.
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,6 +65,83 @@ class ValidacaoTests(unittest.TestCase):
 
     def test_validate_editorial_aceita_html_normal(self):
         validate_editorial(self._payload("<p>Conteudo editorial normal.</p>"))
+
+
+class CamadasReaisTests(unittest.TestCase):
+    """P0: as camadas no CAMINHO REAL (não só nos helpers).
+
+    A auditoria apontou que os 6 testes anteriores cobriam apenas
+    `looks_like_operational_envelope`, `unwrap_operational_envelope` e
+    `validate_editorial` — e foi por isso que o CI ficou verde com o
+    `get_cleaned_content()` sem usar o unwrap.
+    """
+
+    def _post_com(self, conteudo):
+        return {
+            "id": 114180,
+            "status": "pending",
+            "title": {"raw": "Carrie Fisher"},
+            "content": {"raw": conteudo},
+            "meta": {},
+        }
+
+    def test_get_cleaned_content_desembrulha_o_envelope(self):
+        from unicornio_editor.workflow import get_cleaned_content
+
+        class FakeClient:
+            def __init__(self, post):
+                self.post = post
+
+            def get_post(self, post_id):
+                return self.post
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self._post_com(ENVELOPE))
+            dados = get_cleaned_content(client, Path(directory), 114180)
+        # o HTML real volta, não o JSON do comando
+        self.assertIn("Carrie Fisher e a saga", dados["cleaned_html"])
+        self.assertNotIn("post_id", dados["cleaned_html"])
+
+    def test_publish_de_envelope_vira_blocked(self):
+        """O fast-path `publish POST_ID` também bloqueia (invariância no nível
+        mais baixo: antes só o loop do cron tinha o sanity)."""
+        from unicornio_editor.config import load_config
+        from unicornio_editor.workflow import publish_post
+
+        class FakeClient:
+            def __init__(self, post):
+                self.post = post
+                self.updated = []
+
+            def get_post(self, post_id):
+                return self.post
+
+            def update_post(self, post_id, payload):
+                self.updated.append((post_id, payload))
+                return self.post
+
+            def move_to_status(self, post_id, status):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            cliente = FakeClient(self._post_com(ENVELOPE))
+            resultado = publish_post(cliente, load_config(), Path(directory), 114180)
+        self.assertEqual(resultado["status"], "blocked")
+        self.assertFalse(resultado["wordpress_changed"])
+        self.assertIn("envelope", str(resultado.get("reason") or "").lower())
+        # o estado foi gravado (não é skip silencioso)
+        self.assertEqual(resultado.get("state"), "blocked")
+
+    def test_hamming_conta_bits_nao_digitos_hex(self):
+        """P1 da auditoria: o pHash é hexadecimal — '0' vs 'f' são 4 bits."""
+        from unicornio_editor.media.library_index import hamming
+
+        self.assertEqual(hamming("0", "f"), 4)
+        self.assertEqual(hamming("00", "0f"), 4)
+        self.assertEqual(hamming("abcd", "abcd"), 0)
+        self.assertEqual(hamming("00000000", "00000001"), 1)
+        self.assertEqual(hamming("", "ab"), 999)
+        self.assertEqual(hamming("zz", "ab"), 999)
 
 
 if __name__ == "__main__":

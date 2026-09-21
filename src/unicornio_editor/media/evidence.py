@@ -411,7 +411,7 @@ def dedupe_by_phash(
     Fail-soft: se não houver hashes suficientes (imagem inacessível), nada é
     descartado — a política cheia continua valendo no checklist.
     """
-    if len(aprovados) < 2:
+    if not aprovados:
         return aprovados, rejeitados
     from .visual_hash import image_hashes, similar_image_pairs
 

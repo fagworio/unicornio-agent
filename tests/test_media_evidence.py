@@ -209,11 +209,52 @@ class DedupePhashTests(unittest.TestCase):
         self.assertEqual(len(mantidos), 2)
         self.assertEqual(rejeitados, [])
 
-    def test_um_unico_candidato_nao_chama_phash(self):
-        with mock.patch.object(visual_hash, "image_hashes") as m:
+    def test_um_unico_candidato_TAMBEM_recebe_phash(self):
+        """P1 da auditoria: o singleton precisa do pHash.
+
+        A contagem de capacidade usa pHash global ENTRE engines; sem hash ela
+        cai para URL, e o MESMO frame servido por duas engines (URLs diferentes)
+        contava como 2 frames distintos — a busca encerrava cedo e o dedupe
+        final encontrava menos frames do que o alvo.
+        """
+        with mock.patch.object(
+            visual_hash, "image_hashes", return_value={"https://x/a.jpg": "3f2a"}
+        ) as m:
             mantidos, _ = dedupe_by_phash([self._cand("https://x/a.jpg")], [])
-        m.assert_not_called()
-        self.assertEqual(len(mantidos), 1)
+        m.assert_called_once()
+        self.assertEqual(mantidos[0]["phash"], "3f2a")
+
+    def test_cross_engine_mesmo_frame_conta_um(self):
+        """Acceptance cross-engine: 2 engines, mesmo frame, URLs diferentes."""
+        from unicornio_editor.media.search import search_web_images
+
+        def bing(q, **kw):
+            return [{"direct_image_url": "https://cdn.bing/a.jpg",
+                     "source_page_url": "https://p.bing/a", "usable": True}]
+
+        def yandex(q, **kw):
+            return [{"direct_image_url": "https://cdn.ya/a.jpg",
+                     "source_page_url": "https://p.ya/a", "usable": True}]
+
+        def google(q, **kw):
+            return []
+
+        # as duas URLs servem o MESMO frame visual (hash idêntico)
+        with mock.patch.object(
+            visual_hash, "image_hashes",
+            return_value={"https://cdn.bing/a.jpg": "3f2a", "https://cdn.ya/a.jpg": "3f2a"},
+        ), mock.patch("unicornio_editor.media.search.search_bing_images", bing), \
+           mock.patch("unicornio_editor.media.search.search_yandex_images", yandex), \
+           mock.patch("unicornio_editor.media.search.search_google_images", google):
+
+            def accept(novos):
+                aprovados, _ = dedupe_by_phash(list(novos), [])
+                return len({c.get("phash") or c.get("direct_image_url") for c in aprovados})
+
+            # limit=2: se a URL fosse a chave, as 2 engines fechariam o alvo com
+            # 1 frame real; com pHash a busca segue (0 aceitos distintos).
+            out = search_web_images("x", limit=2, engine="auto", accept=accept)
+        self.assertGreaterEqual(len(out), 2)  # consultou as duas engines
 
 
 class EvidenciaLocalTests(unittest.TestCase):

@@ -56,10 +56,19 @@ def _salvar(root: Path | str, dados: dict[str, Any]) -> None:
 
 
 def hamming(a: str, b: str) -> int:
-    """Distância de Hamming entre dois pHashes em texto binário."""
+    """Distância de Hamming entre dois pHashes — em BITS, não em dígitos.
+
+    O pHash é persistido em hexadecimal (``str(imagehash)``). Comparar
+    caractere a caractere conta diferenças de DÍGITO: "0" vs "f" contava 1
+    quando são 4 bits diferentes — o `find_similar` passava a tratar frames bem
+    distintos como duplicados (afetando reuso da Media Library e dedupe).
+    """
     if not a or not b:
         return 999
-    return sum(1 for x, y in zip(a, b) if x != y)
+    try:
+        return (int(str(a), 16) ^ int(str(b), 16)).bit_count()
+    except (TypeError, ValueError):
+        return 999
 
 
 def register(

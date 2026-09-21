@@ -706,11 +706,13 @@ def _enriquecer_candidatos(
         reverse=True,
     )
 
-    # Fase 12: pHash ANTES da seleção/upload.
-    if len(aprovados) >= 2:
-        from .media.evidence import dedupe_by_phash
+    # Fase 12: pHash ANTES da seleção/upload. Chamado SEMPRE (inclusive com um
+    # único aprovado): a contagem de capacidade usa pHash global entre engines e
+    # sem hash ela cai para URL — o mesmo frame servido por 2 engines (URLs
+    # diferentes) contaria como 2 frames distintos.
+    from .media.evidence import dedupe_by_phash
 
-        aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados)
+    aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados)
 
     # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
     # é "quantas imagens o Bing devolveu", e sim quantas atravessaram
@@ -968,12 +970,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             artigo_titulo = str(getattr(args, "article_title", "") or "")
             queries_listicle = [item_query(t, artigo_titulo) or t for t in args.titulos]
             subject_por_query = {q: t for q, t in zip(queries_listicle, args.titulos)}
+            # P1 (auditoria): o listicle TAMBÉM encerra a busca por ACEITOS. Sem o
+            # callback o item caía no critério antigo ("usable") e uma engine com
+            # candidatos estruturalmente válidos mas ruins encerrava a pesquisa
+            # daquele item — Google/Yandex nunca eram consultados.
+            _frames_por_item: dict[str, set[str]] = {}
+
+            def _aceitar_item(novos: list[dict], query: str = "") -> int:
+                item = str(query or "")
+                try:
+                    aprovados_lote, _rej = _enriquecer_candidatos(
+                        novos,
+                        subject=str(subject_por_query.get(item) or item),
+                        termo=item,
+                        root=args.root,
+                    )
+                except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
+                    return 0
+                conjunto = _frames_por_item.setdefault(item, set())
+                for aprovado in aprovados_lote:
+                    conjunto.add(
+                        str(aprovado.get("phash") or aprovado.get("direct_image_url") or "")
+                    )
+                return len(conjunto)
+
             rows = search_web_images_batch(
                 queries_listicle,
                 size=args.size,
                 ratio=args.ratio,
                 limit=args.limit,
                 engine=args.engine,
+                accept=_aceitar_item,
             )
             items = []
             missing: list[str] = []
