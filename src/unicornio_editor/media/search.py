@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 import re
@@ -414,17 +415,31 @@ _COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
 _BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
 
 
-def _breaker_ativo() -> bool:
-    """O breaker fica desligado sob pytest.
+def _em_teste() -> bool:
+    """Estamos num runner de testes (pytest OU unittest discover)?
 
-    O estado vive num arquivo compartilhado (/tmp): numa sessão de testes uma
-    falha simulada em um caso colocaria a engine em cooldown para os seguintes
-    e o resultado passaria a depender da ORDEM dos testes. Os testes dedicados
-    do breaker ligam explicitamente via ``UNICORNIO_ENGINE_STATE``.
+    O CI oficial roda ``python -m unittest discover``, onde ``PYTEST_CURRENT_TEST``
+    NÃO existe. Detectar só o pytest deixava o breaker ATIVO no CI: o estado em
+    /tmp era compartilhado entre os casos, uma engine entrava em cooldown numa
+    falha simulada e os testes seguintes dependiam da ORDEM — verde no pytest
+    (com sleeps de backoff), vermelho no GitHub Actions.
+    """
+    if os.environ.get("UNICORNIO_TESTING"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "unittest" in " ".join(sys.argv).lower()
+
+
+def _breaker_ativo() -> bool:
+    """O breaker fica desligado em runners de teste.
+
+    Os testes dedicados do breaker/estado ligam explicitamente via
+    ``UNICORNIO_ENGINE_STATE``.
     """
     if os.environ.get("UNICORNIO_ENGINE_STATE"):
         return True
-    return not bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    return not _em_teste()
 
 
 def _ler_estado_engines() -> dict[str, dict[str, Any]]:
