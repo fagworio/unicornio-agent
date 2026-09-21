@@ -184,6 +184,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=10, help="maximo de candidatos (default: 10)"
     )
     media_search_web_parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=True,
+        help="valida a origem de cada candidato antes de devolver (default: ligado)",
+    )
+    media_search_web_parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="devolve os candidatos brutos, sem validar a pagina de origem",
+    )
+    media_search_web_parser.add_argument(
         "--engine", default="auto",
         help="buscador: auto (rotaciona Bing->Google->Yandex), bing, google, yandex "
         "(default: auto)",
@@ -657,11 +670,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                         source_domain=(urlparse(direct_url).hostname or "").lower(),
                         engine=str(candidate.get("engine") or "unknown"),
                     )
+            rejeitados: list[dict] = []
+            # Fase 5: validacao de ORIGEM antes de o candidato entrar no
+            # media_plan. Antes um `source_page_url` invalida (ou uma imagem que
+            # nao consta na pagina) so aparecia no apply — depois de baixar e
+            # subir a imagem, enchendo a Media Library e gerando rework.
+            if getattr(args, "verify", True) and candidates:
+                from .media.source_verify import validate_discovered_candidate
+
+                cache_paginas: dict = {}
+                aprovados: list[dict] = []
+                for cand in candidates:
+                    if not cand.get("usable"):
+                        cand["valid"] = False
+                        cand["valid_reason"] = (
+                            cand.get("rejected_reason") or "candidato sem origem"
+                        )
+                        rejeitados.append(cand)
+                        continue
+                    veredito = validate_discovered_candidate(cand, cache=cache_paginas)
+                    cand["valid"] = bool(veredito["valid"])
+                    cand["valid_reason"] = str(veredito.get("reason") or "")
+                    cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
+                    (aprovados if cand["valid"] else rejeitados).append(cand)
+                candidates = aprovados
+                if rejeitados:
+                    append_telemetry(
+                        args.root, "media_source_rejections",
+                        query=args.termo, rejected=len(rejeitados),
+                        approved=len(aprovados),
+                    )
             result = {
                 "query": args.termo,
                 "size_filter": f"{args.size}|{args.ratio}",
                 "count": len(candidates),
                 "candidates": candidates,
+                "rejected": rejeitados,
+                "rejected_count": len(rejeitados),
             }
         elif args.command == "media-search-listicle":
             from .media.search import search_web_images_batch

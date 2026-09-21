@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
@@ -109,6 +110,81 @@ def _normalized_url(url: str) -> str:
 def _md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
+
+
+def _valid_http(url: str) -> bool:
+    """URL http(s) absoluta com host (Fase 5)."""
+    try:
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
+def validate_discovered_candidate(
+    candidate: dict[str, Any],
+    *,
+    cache: dict[str, list[str] | None] | None = None,
+    audit=None,
+) -> dict[str, Any]:
+    """Valida um candidato ANTES do media_plan (Fase 5).
+
+    Checagem LEVE e determinística — sem baixar bytes: a ``direct_image_url``
+    aparece mesmo na ``source_page_url``? Antes isso só era descoberto no
+    apply, DEPOIS do download e do upload: a Media Library enchia de imagens
+    que nunca passariam e o post entrava em rework.
+
+    Retorna ``{"valid", "source_verified", "image_url", "source_page_url",
+    "reason", "images_in_page"}``. Só ``valid=True`` deve seguir para o plano.
+    O confronto byte-a-byte continua no apply
+    (``verify_downloaded_against_source``), que é a prova final.
+    """
+    image_url = str(candidate.get("direct_image_url") or "").strip()
+    page_url = str(candidate.get("source_page_url") or "").strip()
+    resultado: dict[str, Any] = {
+        "valid": False,
+        "source_verified": False,
+        "image_url": image_url,
+        "source_page_url": page_url,
+        "reason": "",
+        "images_in_page": 0,
+    }
+    if not _valid_http(page_url):
+        resultado["reason"] = "source_page_url ausente ou invalida"
+        return resultado
+    if not _valid_http(image_url):
+        resultado["reason"] = "direct_image_url ausente ou invalida"
+        return resultado
+
+    cache = cache if cache is not None else {}
+    budget = [_VERIFY_TOTAL_MAX_BYTES]
+    if page_url not in cache:
+        pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+        cache[page_url] = (
+            _image_urls_in_page(pagina.decode("utf-8", "ignore"), page_url)
+            if pagina is not None
+            else None
+        )
+    listadas = cache[page_url]
+    if not listadas:
+        resultado["reason"] = "pagina de origem inacessivel ou sem imagens listadas"
+        return resultado
+    resultado["images_in_page"] = len(listadas)
+
+    alvo = _normalized_url(image_url)
+    if any(_normalized_url(url) == alvo for url in listadas):
+        resultado["valid"] = True
+        resultado["source_verified"] = True
+        resultado["reason"] = "URL exata encontrada no HTML da pagina de origem"
+        return resultado
+    slug = _slug(image_url)
+    if slug and any(_slug(url) == slug for url in listadas):
+        resultado["valid"] = True
+        resultado["source_verified"] = True
+        resultado["reason"] = "mesma imagem (slug) listada na pagina de origem"
+        return resultado
+    resultado["reason"] = "imagem nao listada na pagina de origem"
+    return resultado
 
 def verify_downloaded_against_source(
     *,
