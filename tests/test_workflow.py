@@ -2032,5 +2032,28 @@ class WorkflowTests(unittest.TestCase):
         baixar.assert_called()
 
 
+    def test_migrate_percorre_mais_de_uma_pagina(self):
+        """Acceptance 10: 250 legados não podem parar em 100."""
+        from unicornio_editor.workflow import migrate_legacy_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            paginas = {1: [], 2: [], 3: []}
+            for i in range(1, 251):
+                pagina = (i - 1) // 100 + 1
+                legado = self.post()
+                legado["id"] = 1000 + i
+                legado["status"] = "publish"
+                legado.pop("meta", None)
+                paginas[pagina].append(legado)
+
+            client = FakeClient(self.post())
+            client.list_pending = lambda **kw: (
+                paginas.get(int(kw.get("page", 1)), []) if kw.get("status") == "publish" else []
+            )
+            report = migrate_legacy_state(client, self.config(False), Path(directory))
+            self.assertEqual(report["legacy_found"], 250)
+            self.assertEqual(report["scanned"], 250)
+
+
 if __name__ == "__main__":
     unittest.main()

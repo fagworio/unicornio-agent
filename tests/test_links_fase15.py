@@ -58,5 +58,32 @@ class CanonicalUrlTests(unittest.TestCase):
         )
 
 
+class ScriptStyleProtegidosTests(unittest.TestCase):
+    """Acceptance 9: <script>/<style> ficam INTOCADOS (bug do regex `s*`).
+
+    O regex de nome de tag era `^</?s*([a-zA-Z0-9]+)` — sem a barra antes do
+    `s`, `<script>` era lido como tag "cript" e `<style>` como "tyle". Nenhuma
+    das duas entrava no conjunto de tags protegidas, então um texto como
+    "série" dentro de JavaScript podia receber um <a> no meio do código.
+    """
+
+    def test_nao_insere_link_dentro_de_script(self):
+        html = (
+            "<p>Confira nossa cobertura de séries e séries de TV.</p>"
+            '<script>const canal = "séries do portal";</script>'
+            '<style>.series { color: red; }</style>'
+        )
+        out = add_internal_links(html)
+        # o conteúdo dentro das duas tags não muda
+        inicio_script = out.index("<script>")
+        fim_script = out.index("</script>")
+        self.assertNotIn("<a ", out[inicio_script:fim_script])
+        inicio_style = out.index("<style>")
+        fim_style = out.index("</style>")
+        self.assertNotIn("<a ", out[inicio_style:fim_style])
+        # e continua idempotente
+        self.assertEqual(add_internal_links(out), out)
+
+
 if __name__ == "__main__":
     unittest.main()
