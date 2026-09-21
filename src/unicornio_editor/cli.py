@@ -700,6 +700,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                         query=args.termo, rejected=len(rejeitados),
                         approved=len(aprovados),
                     )
+            # Fase 11: score determinístico de evidência por candidato. O
+            # filename e a URL da página de origem são evidência de ORIGEM; o
+            # termo buscado entra como sinal fraco (+1). Sem isso, um candidato
+            # com origem confirmada mas conteúdo irrelevante (o "pinguim" para
+            # Metroid) seguiria para o media_plan só porque os bytes conferem.
+            if candidates:
+                from urllib.parse import unquote
+
+                from .media.evidence import evidence_score
+
+                for cand in candidates:
+                    nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
+                    pontos = evidence_score(
+                        args.termo,
+                        filename=nome,
+                        page_url=str(cand.get("source_page_url") or ""),
+                        query=args.termo,
+                        source_page_present=bool(cand.get("source_page_url")),
+                        image_in_source=bool(cand.get("valid")),
+                    )
+                    cand["evidence"] = pontos
+                    cand["evidence_score"] = pontos["score"]
+                    cand["needs_vision"] = pontos["needs_vision"]
+                # melhor evidência primeiro; empate mantém a ordem da busca
+                candidatos_relevantes = [c for c in candidates if c["evidence"]["verdict"] != "reject"]
+                descartados = [c for c in candidates if c["evidence"]["verdict"] == "reject"]
+                candidatos_relevantes.sort(key=lambda c: c["evidence_score"], reverse=True)
+                rejeitados.extend(descartados)
+                candidates = candidatos_relevantes
+                if descartados:
+                    append_telemetry(
+                        args.root, "media_evidence_rejections",
+                        query=args.termo, rejected=len(descartados),
+                    )
             result = {
                 "query": args.termo,
                 "size_filter": f"{args.size}|{args.ratio}",
