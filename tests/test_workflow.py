@@ -1866,6 +1866,25 @@ class WorkflowTests(unittest.TestCase):
             summary = read_telemetry_summary(root)
             self.assertEqual(summary["by_event"].get("state_persist_failed"), 1)
 
+    def test_discard_de_awaiting_human_volta_status_para_pending(self):
+        """Fase 16: o post descartado sai da fila HUMANA.
+
+        Sem devolver o status para pending, um post descartado continuaria
+        aparecendo no filtro "Awaiting Human" como se ainda esperasse decisao.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["status"] = "awaiting_human"
+            client = FakeClient(post)
+            report = discard_post(
+                client, self.config(False), Path(directory), 42, reason="fora da pauta"
+            )
+            self.assertEqual(report["status"], "discarded")
+            self.assertTrue(
+                any(payload.get("status") == "pending" for _pid, payload in client.updated),
+                "o status WP deveria voltar para pending",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

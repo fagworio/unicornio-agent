@@ -162,7 +162,10 @@ def _apply_editorial_unlocked(
             cooldown_minutes=config.rework_cooldown_minutes,
             max_attempts=config.max_rework_attempts,
         )
-        _write_state_markers(
+        # Fase 17 (fail-closed): UNCERTAIN e estado terminal para a automacao.
+        # Sem persistir, o post volta a ser trilhado na proxima janela e o
+        # trabalho editorial e refeito (custo de LLM) sem ninguem saber.
+        if not _write_state_markers(
             client,
             config,
             post_id,
@@ -171,7 +174,11 @@ def _apply_editorial_unlocked(
             attempts=_backoff_u["attempts"],
             next_retry_at=_backoff_u["next_retry_at"],
             last_error=editorial["site_relevance"]["reason"],
-        )
+        ):
+            raise WorkflowError(
+                f"estado UNCERTAIN nao persistiu no WordPress (post {post_id}); "
+                "sem estado o post reaparece na fila — verifique a conexao e reaplique"
+            )
         append_telemetry(
             root, "apply_uncertain",
             post_id=post_id, reason=editorial["site_relevance"]["reason"],
@@ -195,14 +202,20 @@ def _apply_editorial_unlocked(
         # pode ser justamente o conteudo nao pertencer ao portal). Persistir
         # CTA/fonte/links aqui contradizia o contrato de seguranca do README.
         baseline_changed = False
-        _write_state_markers(
+        # Fase 17 (fail-closed): um SKIPPED nao persistido volta a ser
+        # processado na proxima janela (o editorial.latest.json ja foi gravado).
+        if not _write_state_markers(
             client,
             config,
             post_id,
             STATE_SKIPPED,
             root=root,
             last_error=editorial["site_relevance"]["reason"],
-        )
+        ):
+            raise WorkflowError(
+                f"estado SKIPPED nao persistiu no WordPress (post {post_id}); "
+                "o post voltaria a fila como se nunca tivesse sido avaliado"
+            )
         append_telemetry(
             root, "apply_skipped",
             post_id=post_id, reason=editorial["site_relevance"]["reason"],
@@ -339,7 +352,10 @@ def _apply_editorial_unlocked(
                 for item in failed_items[:5]
             )
             _save_blocked(root, post_id, editorial, checklist)
-            _write_state_markers(
+            # Fase 17 (fail-closed) nos estados terminais do rework; BLOCKED
+            # tolera falha de escrita (o post continua na fila de qualquer
+            # forma), mas devolve `state_persisted` no relatorio.
+            _state_ok = _write_state_markers(
                 client,
                 config,
                 post_id,
@@ -349,6 +365,12 @@ def _apply_editorial_unlocked(
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
             )
+            if not _state_ok and backoff["state"] in (STATE_AWAITING_HUMAN, STATE_UNCERTAIN):
+                raise WorkflowError(
+                    f"estado {backoff['state']} nao persistiu no WordPress "
+                    f"(post {post_id}); sem estado o post nao entra na fila humana "
+                    "de forma confiavel — verifique a conexao e reaplique"
+                )
             featured_normalized = False
             # AWAITING_HUMAN sai da fila de trilhagem: move o status WP para o
             # filtro "Awaiting Human" (visivel para decisao humana). Falha de
@@ -2741,6 +2763,26 @@ def discard_post(
         root=root,
         last_error=motivo,
     )
+    # Fase 16: o post descartado precisa SAIR da fila humana. Com o status WP em
+    # `awaiting_human` ele continuaria aparecendo no filtro "Awaiting Human" como
+    # se ainda esperasse decisao — quem o retira da automacao e o estado
+    # UNCERTAIN; o status volta para pending e a confirmacao e verificada.
+    if str(post.get("status") or "") == "awaiting_human":
+        try:
+            client.move_to_status(post_id, "pending")
+            _confirmado = client.get_post(post_id)
+            if str(_confirmado.get("status") or "") != "pending":
+                append_telemetry(
+                    root, "discard_status_mismatch",
+                    post_id=post_id,
+                    status_wp=str(_confirmado.get("status") or ""),
+                )
+        except Exception as exc:  # noqa: BLE001 - best-effort com telemetria
+            try:
+                append_telemetry(root, "discard_status_move_failed",
+                                 post_id=post_id, error=str(exc)[:200])
+            except Exception:  # noqa: BLE001
+                pass
     return {
         "post_id": post_id,
         "status": "discarded",

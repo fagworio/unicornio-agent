@@ -67,7 +67,8 @@ def reconcile_post(post: dict[str, Any], root: Path) -> list[dict[str, Any]]:
     if state is None and wp_status in ("pending", "awaiting_human"):
         add("missing_state_marker",
             "post sem _hermes_state (formato legado) ainda na fila",
-            "processar (prepare/apply) para gravar o estado ou migrar via reconcile --migrate")
+            "processar (prepare/apply) para gravar o estado; o reparo em massa "
+            "exige uma operação explícita (o reconcile é somente leitura)")
 
     # 2) A experiência humana: o filtro do WP precisa refletir o estado.
     if state == STATE_AWAITING_HUMAN and wp_status != "awaiting_human":
