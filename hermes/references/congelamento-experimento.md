@@ -45,7 +45,7 @@ auditoria, não hard gate**: nenhum destes hashes bloqueia execução ou publica
 | `~/.hermes/skills/unicorniohater-editor/references/economia-contexto.md` | `5b655c34b6e14fdf27eb6b806c56856bb878388972ea7443b1f301dd83117891` | 16430 | 2026-09-22T16:01:52Z | `hermes/references/economia-contexto.md` | `5b655c34b6e14fdf27eb6b806c56856bb878388972ea7443b1f301dd83117891` | idêntico byte a byte |
 | `~/.hermes/skills/unicorniohater-editor/references/hash-imagens-analise.md` | `236c724e9c92861cc9e7b0f1cbbfe61482cf81897a018cc1403e9656dc4d3976` | 5523 | 2026-09-22T16:01:52Z | `hermes/references/hash-imagens-analise.md` | `236c724e9c92861cc9e7b0f1cbbfe61482cf81897a018cc1403e9656dc4d3976` | idêntico byte a byte |
 | `~/.hermes/skills/unicorniohater-editor/references/editorial-texto.md` | `15a03059c5098e4de52c45d4b0db08ec9d4dd1d9474aa5a57739e29038939f53` | 2826 | 2026-09-22T16:01:52Z | `hermes/references/editorial-texto.md` | `15a03059c5098e4de52c45d4b0db08ec9d4dd1d9474aa5a57739e29038939f53` | idêntico byte a byte |
-| `~/.hermes/skills/unicorniohater-editor/references/congelamento-experimento.md` | `88eff3b82cacc862006f3a7694ff9230a18d0f07afdf003b96b926ccc9d3b531` | 4944 | 2026-09-22T16:01:52Z | `hermes/references/congelamento-experimento.md` | `88eff3b82cacc862006f3a7694ff9230a18d0f07afdf003b96b926ccc9d3b531` | idêntico no t0 (fonte em `56aef0c`; o arquivo nasceu em `dffe3ee`, não existe em `cfa8375`). Passa a divergir quando este registro for estendido — ver nota abaixo |
+| `~/.hermes/skills/unicorniohater-editor/references/congelamento-experimento.md` | `a79f5d84712643b244695eb68169f799c67c97b5d524c4d46e71b8c2be308f23` | 16792 | 2026-09-22T17:27:39Z | `hermes/references/congelamento-experimento.md` | `a79f5d84712643b244695eb68169f799c67c97b5d524c4d46e71b8c2be308f23` | hoje idêntico à fonte em `main` no commit `a0b3fd2` (o que foi deployado); no t0 era `88eff3b8…` (4944 B). **Re-sincronizado por decisão do operador** em 2026-09-22T17:27:39Z — ver "Registros durante a coleta" |
 | `~/.hermes/skills/unicorniohater-editor/scripts/commons_search.py` | `1b21922360b08e2e99ea0d4f3c6036390d35265da47b0f3096e24af6f453da96` | 3259 | 2026-09-17T08:00:15Z | (sem fonte versionada) | - | sem origem no Git; candidato divergente em `work/commons_search.py` (`work/` é git-ignored) |
 | `~/.hermes/skills/unicorniohater-editor/scripts/precheck_media.py` | `e276a9eacc419c7a0c1c05536b1dc53386fa379f2ae5ff35d5aa81e665408fe4` | 2766 | 2026-09-16T07:29:57Z | (sem fonte versionada) | - | sem origem no Git; mesmo sha256 de `/tmp/precheck_media.py` (arquivo transiente) |
 | `~/.hermes/scripts/unicornio-editor-monitor.sh` | `8b8d72a78066d5f8ea9c5f0389bbaacbda84c84b9a2dec5f7f97d21563b382d3` | 3780 | 2026-09-22T16:01:52Z | `hermes/monitor.sh` | `6d7c09107b504cfc3d12dd7c9e998ac907a83263bf44715611f160a69c771aaf` | **derivado**: `sed 's\|@PROJECT_ROOT@\|/www/wwwroot/hermes/unicornio-agent\|g'`; sha256 do resultado == sha256 implantado (CONFERE) |
@@ -79,14 +79,14 @@ alteração de runtime durante a coleta e deve ser REGISTRADA, não corrigida.
 (`/www/wwwroot/hermes/unicornio-agent/scripts/diagnostico.sh`) e não contra a pasta
 `scripts/` da skill — os dois `.py` acima não são o que o SKILL referencia.
 - Mtime não é conteúdo: os arquivos de `~/.hermes` foram regravados em
-2026-09-22T16:01:52Z (re-execução do install logo após o push), **depois** do
-congelamento. O conteúdo, porém, é byte a byte o do t0 (hash conferido contra a revisão
-no Git) — foi redeploy sem mudança, não alteração. É exatamente por isso que este
+2026-09-22T16:01:52Z e de novo em 2026-09-22T17:27:39Z (execuções do `cron-install.sh`),
+**depois** do congelamento. O conteúdo, porém, é byte a byte o do t0 (hash conferido contra
+a revisão no Git) — foi redeploy sem mudança, não alteração. É exatamente por isso que este
 snapshot existe.
-- Este registro (docs-only) é o único artefato que PODE mudar durante a coleta: a cópia
-implantada em `~/.hermes/.../references/congelamento-experimento.md` fica congelada em
-`88eff3b8…` (4944 bytes) e **não** é re-sincronizada até o experimento encerrar. A
-divergência é esperada e está declarada aqui.
+- Este registro (docs-only) é re-sincronizado no runtime **apenas por decisão explícita do
+operador**, e cada re-sincronização entra em "Registros durante a coleta" com data + hash.
+Última: 2026-09-22T17:27:39Z, `88eff3b8…` → `a79f5d84…`. Nunca em silêncio: enquanto a
+cópia implantada estiver atrasada em relação a `main`, isso está escrito aqui.
 
 ## Critério de sessão cron VÁLIDA (início efetivo da amostra)
 
@@ -116,9 +116,10 @@ freeze_at 15:54:51Z ── ARMADO
                  ACTIVE (active_since = início dessa sessão)
 ```
 
-Estado em 2026-09-22T16:44:56Z: `ARMED_WAITING_FOR_WORK` — assinatura do monitor `0`.
+Estado em 2026-09-22T17:27:39Z: `ARMED_WAITING_FOR_WORK` — assinatura do monitor `0`.
 Última sessão do job: `cron_9e39343dc6f5_20260922_090524` (12:05:24Z, 3h49 antes do
-congelamento); próximo tick 18:01:52Z.
+congelamento); próximo tick **19:27:39Z** (o `cron edit` de 2026-09-22T17:27:39Z rebaseou o
+intervalo a partir da edição — antes era 18:01:52Z; ver "Registros durante a coleta").
 
 ## Como contar a amostra (denominadores)
 
@@ -207,8 +208,58 @@ como referência histórica, porque misturam execuções manuais e não têm atr
    durante a coleta — a correção vira uma rodada posterior, com o experimento
    encerrado e o marco reaberto.
 4. Este documento é o registro do experimento: pode ser ESTENDIDO durante a coleta
-   (docs-only, evidência). A cópia implantada em `~/.hermes/.../references/` **não** é
-   re-sincronizada durante a coleta (ver "Snapshot do runtime implantado").
+   (docs-only, evidência) e re-sincronizado para `~/.hermes/.../references/` **somente por
+   decisão explícita do operador**, com data + hash em "Registros durante a coleta".
+   Código, parâmetro e SKILL seguem intocados.
+5. `hermes/cron-install.sh` só pode ser executado do checkout de PRODUÇÃO — nunca de um
+   worktree/branch (ver o pitfall registrado em "Registros durante a coleta").
+
+## Registros durante a coleta (docs-only, com data e evidência)
+
+Registrar não é corrigir: nada aqui invalida o congelamento de `cfa8375`, porque nenhum
+item é código, parâmetro de pipeline ou SKILL. O que muda (quando muda) é o estado de
+runtime, e isso fica escrito.
+
+### 2026-09-22T17:27:39Z — `cron-install.sh` executado do checkout de produção (decisão do operador)
+
+Comando: `cd /www/wwwroot/hermes/unicornio-agent && ./hermes/cron-install.sh`
+(saída: `Updated job: 9e39343dc6f5`, workdir `/www/wwwroot/hermes/unicornio-agent`).
+
+Efeitos medidos (snapshot antes/depois por sha256):
+
+| arquivo | antes | depois | veredito |
+|---|---|---|---|
+| `~/.hermes/scripts/unicornio-editor-monitor.sh` | `8b8d72a7…` | `8b8d72a7…` | conteúdo idêntico (só mtime) |
+| `~/.hermes/skills/.../SKILL.md` | `3ad86dce…` | `3ad86dce…` | conteúdo idêntico (só mtime) |
+| `references/` (5 arquivos) | inalterados | inalterados | conteúdo idêntico (só mtime) |
+| `references/congelamento-experimento.md` | `88eff3b8…` (4944 B) | `a79f5d84…` (16792 B) | **única mudança de conteúdo** — este registro, por decisão explícita |
+| `.env` | `6f9a454d…` | `6f9a454d…` | conteúdo idêntico (o job id regravado com o mesmo valor) |
+| job `9e39343dc6f5` | schedule/prompt/skill/workdir/monitor iguais | iguais | `prompt f1a88502…`, `workdir /www/wwwroot/hermes/unicornio-agent`, `monitor unicornio-editor-monitor.sh` |
+| `next_run_at` do job | `2026-09-22T18:01:52Z` | `2026-09-22T19:27:39Z` | **rebased pelo `cron edit`** (intervalo de 120 min recalculado a partir da edição) — o tick das 18:01Z foi absorvido |
+
+Veredito: o experimento continua válido (código, parâmetros e SKILL intocados; o monitor
+segue `8b8d72a7…` e responde `0`), mas o próximo tick atrasou ~1h26. Registrado aqui para
+que a leitura de "quando a amostra começou" não dependa de memória.
+
+### Pitfall descoberto no mesmo dia — `cron-install.sh` de dentro de um worktree
+
+`cron-install.sh` deriva `ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"` e passa
+`--workdir "$ROOT"` para o `hermes cron edit`. Rodá-lo de
+`/www/wwwroot/hermes/unicornio-agent-next` **reapontaria o job de produção para a branch
+dev** — ou seja, o cron "congelado" passaria a executar código da branch sem nenhum merge.
+
+Evidência do efeito colateral (teste com o monitor apontado para o worktree, que não tem
+`.env` porque é git-ignored):
+
+```text
+$ sed 's|@PROJECT_ROOT@|/www/wwwroot/hermes/unicornio-agent-next|g' hermes/monitor.sh > /tmp/monitor_next_test.sh
+$ bash /tmp/monitor_next_test.sh
+/tmp/monitor_next_test.sh: line 29: ./.env: No such file or directory
+exit=1
+```
+
+Ou seja: além de contaminar a coleta, o editorial pararia (monitor sem assinatura estável e
+sessão sem credenciais/config). Por isso a regra 5 acima.
 
 ## Isolamento da próxima fase (branch + worktree)
 
