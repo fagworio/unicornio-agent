@@ -55,9 +55,33 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertTrue((ROOT / "hermes" / "references" / "politica-imagens.md").is_file())
         self.assertTrue((ROOT / "hermes" / "references" / "editorial-texto.md").is_file())
         self.assertTrue((ROOT / "hermes" / "references" / "operacao.md").is_file())
+        # Contrato dos comandos de economia de contexto (orcamento de sessao,
+        # media-search-web compacto, draft --for-fix, telemetry --sessions).
+        self.assertTrue((ROOT / "hermes" / "references" / "economia-contexto.md").is_file())
+        self.assertIn("references/economia-contexto.md", skill)
         # O diagnostico referenciado pelo skill existe em scripts/.
         self.assertTrue((ROOT / "scripts" / "diagnostico.sh").is_file())
         self.assertIn("scripts/diagnostico.sh", skill)
+
+    def test_skill_keeps_the_session_budget_rules(self):
+        # O SKILL precisa lembrar o agente de que o TETO de posts tocados existe
+        # (parar e parte do trabalho) e de que o checklist nunca e simplificado
+        # para caber no orcamento.
+        content = (ROOT / "hermes" / "SKILL.md").read_text()
+        self.assertIn("EDITOR_MAX_POSTS_TOUCHED_PER_RUN", content)
+        self.assertIn("session_budget_exhausted", content)
+        self.assertIn("NUNCA simplifique o checklist", content)
+        self.assertIn("telemetry --sessions", content)
+
+    def test_cost_guard_also_guards_context_volume(self):
+        # Dolar nao percebe regressao de contexto: o guard tambem mede requests,
+        # input_tokens e os bytes devolvidos ao modelo.
+        content = (ROOT / "hermes" / "cost_guard.py").read_text()
+        self.assertIn("--limit-requests", content)
+        self.assertIn("--limit-input-tokens", content)
+        self.assertIn("--limit-context-bytes", content)
+        monitor = (ROOT / "hermes" / "monitor.sh").read_text()
+        self.assertIn("HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT", monitor)
 
     def test_monitor_template_is_valid_shell(self):
         script = ROOT / "hermes" / "monitor.sh"

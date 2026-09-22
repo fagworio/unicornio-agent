@@ -46,6 +46,16 @@ def _project_root(backup_path: str | Path | None) -> Path:
     return Path(".")
 
 
+def required_image_count(words: int, *, title: str = "", content: str = "") -> int:
+    """Política 2/4/6 pública (mesma fonte do gate ``imagens_no_corpo``).
+
+    O ``media-validate`` precisa calcular a capacidade (required/valid/missing)
+    exatamente como o checklist faz — duas implementações divergiriam e o agente
+    corrigiria o plano para um número que o apply recusa.
+    """
+    return _required_image_count(words, title=title, content=content)
+
+
 def _required_image_count(words: int, *, title: str, content: str) -> int:
     """Minimum body images for the post.
 

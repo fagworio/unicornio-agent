@@ -22,15 +22,25 @@ set -a
 source ./.env
 set +a
 
-# Freio de custo opcional, com atribuição EXATA por ID de job. Sem limite ou
-# quando a versão do Hermes não expõe a coluna de job, o guard permite seguir;
-# nunca pausamos a operação por uma medição ambígua.
-if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ]; then
+# Freios do cron editorial (opcionais). A atribuição por ID de job exato é
+# obrigatória no banco moderno; quando não há limite configurado ou a medição é
+# ambígua, o guard permite seguir — nunca pausamos a operação por uma medição
+# dupla. Além do custo em USD, o guard vigia VOLUME (requests, input_tokens e os
+# bytes de contexto devolvidos ao modelo): com deepseek-flash o dólar não
+# percebe uma regressão de contexto.
+if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
+  || [ "${HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT:-0}" != "0" ] \
+  || [ "${HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT:-0}" != "0" ] \
+  || [ "${HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT:-0}" != "0" ]; then
   guard_out="$("$ROOT/.venv/bin/python" "$ROOT/hermes/cost_guard.py" \
     --state-db "${HERMES_STATE_DB:-$HOME/.hermes/state.db}" \
     --job-id "${HERMES_EDITORIAL_CRON_JOB_ID:-}" \
     --project-root "$ROOT" \
-    --limit "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD}" 2>/dev/null)" || guard_status=$?
+    --limit "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" \
+    --limit-requests "${HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT:-0}" \
+    --limit-input-tokens "${HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT:-0}" \
+    --limit-context-bytes "${HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT:-0}" \
+    --telemetry "$ROOT/work/telemetry.jsonl" 2>/dev/null)" || guard_status=$?
   if [ "${guard_status:-0}" -eq 10 ]; then
     printf '%s\n' "BUDGET_EXHAUSTED ${guard_out}"
     exit 0

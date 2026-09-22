@@ -155,6 +155,23 @@ def find_by_subject(root: Path | str, subject: str) -> list[dict[str, Any]]:
     ]
 
 
+def find_by_media_id(root: Path | str, media_id: int) -> dict[str, Any] | None:
+    """Proveniência da imagem a partir do attachment do WordPress.
+
+    Entradas antigas do índice podem ter ficado SEM subject (o media_plan não
+    trazia o campo), mas com a URL original e a página de origem registradas. A
+    busca na Media Library (title/alt/caption) acha a imagem; o índice dá a
+    proveniência que o apply exige — sem isso o reuso por subject nunca acharia
+    nada do acervo já existente.
+    """
+    if not media_id:
+        return None
+    for entrada in load_index(root)["entries"]:
+        if entrada.get("media_id") == media_id:
+            return entrada
+    return None
+
+
 def count(root: Path | str) -> int:
     return len(load_index(root)["entries"])
 
@@ -165,6 +182,7 @@ __all__ = [
     "find_by_source_url",
     "find_similar",
     "find_by_subject",
+    "find_by_media_id",
     "hamming",
     "count",
 ]

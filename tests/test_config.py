@@ -18,6 +18,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
 
+    def test_session_budget_defaults_separate_goal_from_touched_cap(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
+            config = load_config()
+        # A meta de producao (READY) e o teto de posts TOCADOS sao coisas
+        # diferentes: sem o segundo, a sessao tocava 8-15 posts perseguindo 5.
+        self.assertEqual(config.target_ready_per_run, 5)
+        self.assertEqual(config.max_posts_touched_per_run, 2)
+        # A janela PRECISA ser menor que o intervalo do cron (2h).
+        self.assertEqual(config.session_window_minutes, 90)
+        self.assertEqual(config.session_context_bytes_budget, 600_000)
+
+    def test_session_budget_parses_env_and_allows_disabling(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_TARGET_READY_PER_RUN": "3",
+                "EDITOR_MAX_POSTS_TOUCHED_PER_RUN": "0",
+                "EDITOR_SESSION_WINDOW_MINUTES": "60",
+                "EDITOR_SESSION_CONTEXT_BYTES_BUDGET": "0",
+            },
+            clear=True,
+        ):
+            config = load_config()
+        self.assertEqual(config.target_ready_per_run, 3)
+        self.assertEqual(config.max_posts_touched_per_run, 0)
+        self.assertEqual(config.session_window_minutes, 60)
+        self.assertEqual(config.session_context_bytes_budget, 0)
+
     def test_site_topics_and_skip_confidence_parse_env(self):
         with patch.dict(
             os.environ,

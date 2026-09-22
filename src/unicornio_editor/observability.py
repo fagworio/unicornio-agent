@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -67,12 +67,30 @@ def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
     )
 
 
-def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
-    """Resumo agregado do telemetry.jsonl (contadores por evento e motivo)."""
+def read_telemetry_summary(
+    root: str | Path, *, hours: int | None = None
+) -> dict[str, Any]:
+    """Resumo agregado do telemetry.jsonl (contadores por evento e motivo).
+
+    Inclui o contexto POR POST e POR COMANDO (P0 da auditoria de contexto): sem
+    isso o operador via "75 milhoes de tokens" sem conseguir apontar quantos
+    bytes cada etapa colocou na conversa de cada post.
+
+    ``hours`` limita a janela (mesma janela do gasto que vem do state.db): sem
+    ela um total historico seria dividido pelos READY de 24h — numero bonito e
+    errado. Registros sem timestamp entram (nao descartamos evidencia por falta
+    de campo).
+    """
+    limite = None
+    if hours and int(hours) > 0:
+        limite = datetime.now(timezone.utc) - timedelta(hours=int(hours))
     path = telemetry_path(root)
     counts: dict[str, int] = {}
     reasons: dict[str, dict[str, int]] = {}
     cmd_bytes: dict[str, int] = {}
+    cmd_bytes_kind: dict[str, int] = {}
+    post_cmd_bytes: dict[str, dict[str, int]] = {}
+    post_totals: dict[str, int] = {}
     total_cmd_bytes = 0
     last_ts: str | None = None
     started_posts: set[int] = set()
@@ -93,6 +111,10 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
             event = record.get("event")
             if not isinstance(event, str):
                 continue
+            if limite is not None:
+                quando = _timestamp(record.get("ts"))
+                if quando is not None and quando < limite:
+                    continue
             counts[event] = counts.get(event, 0) + 1
             reason = record.get("reason")
             if isinstance(reason, str) and reason.strip():
@@ -104,6 +126,14 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
                 if isinstance(command, str) and isinstance(size, int):
                     cmd_bytes[command] = cmd_bytes.get(command, 0) + size
                     total_cmd_bytes += size
+                    kind = record.get("kind")
+                    chave_kind = kind if isinstance(kind, str) and kind else "read"
+                    cmd_bytes_kind[chave_kind] = cmd_bytes_kind.get(chave_kind, 0) + size
+                    cmd_post = record.get("post_id")
+                    if isinstance(cmd_post, int):
+                        detalhe = post_cmd_bytes.setdefault(str(cmd_post), {})
+                        detalhe[command] = detalhe.get(command, 0) + size
+                        post_totals[str(cmd_post)] = post_totals.get(str(cmd_post), 0) + size
             post_id = record.get("post_id")
             if isinstance(post_id, int):
                 if event == "apply_started":
@@ -143,11 +173,18 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
         "by_event": counts,
         "by_reason": reasons,
         "context_bytes_by_command": cmd_bytes,
+        "context_bytes_by_kind": cmd_bytes_kind,
+        "context_bytes_by_post": post_totals,
+        "post_context_detail": post_cmd_bytes,
         "context_bytes_total": total_cmd_bytes,
+        "context_bytes_per_ready": (
+            round(total_cmd_bytes / len(ready_posts)) if ready_posts else None
+        ),
         "production": {
             "unique_started_posts": len(started_posts),
             "unique_blocked_posts": len(blocked_posts),
             "unique_ready_posts": len(ready_posts),
+            "unique_touched_posts": len(started_posts | blocked_posts | ready_posts),
             "first_pass_ready": first_pass_ready,
             "first_pass_ready_rate": (
                 round(first_pass_ready / ready_with_first_pass, 4)
@@ -166,6 +203,19 @@ def read_telemetry_summary(root: str | Path) -> dict[str, Any]:
         "media_by_domain": media_by_domain,
         "last_event_at": last_ts,
     }
+
+
+def _timestamp(valor: Any) -> datetime | None:
+    """ISO-8601 do telemetry.jsonl -> datetime (None quando ausente/invalido)."""
+    if not isinstance(valor, str) or not valor:
+        return None
+    try:
+        quando = datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+    if quando.tzinfo is None:
+        quando = quando.replace(tzinfo=timezone.utc)
+    return quando
 
 
 def _is_sensitive(key: str) -> bool:

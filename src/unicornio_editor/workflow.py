@@ -1377,6 +1377,24 @@ def _execute_media_plan(
         focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
         game_name=editorial.get("game_name"),
     )
+    # P1 (auditoria de contexto): o reuso da Media Library e casado por SUBJECT.
+    # Quando o media_plan nao declara `subject`, usa o MESMO subject que o
+    # `media-search-web` deriva do post (entidade principal do titulo) — antes a
+    # entrada ia para o indice com subject vazio e o reuso nunca achava nada.
+    subject_idx = ""
+    try:
+        from .media.evidence import post_subjects
+
+        _subs = post_subjects(
+            title=str((editorial.get("seo") or {}).get("title") or ""),
+            content_html=str(editorial.get("cleaned_html") or ""),
+            focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
+            game_name=editorial.get("game_name"),
+        )
+        if _subs:
+            subject_idx = str(_subs[0].get("subject") or "")
+    except Exception:  # noqa: BLE001 - registro do indice e otimizacao
+        subject_idx = ""
 
     attachment_cache: dict[int, dict[str, Any]] = {}
 
@@ -1558,7 +1576,7 @@ def _execute_media_plan(
                         phash=str(item.get("phash") or ""),
                         source_url=str(item.get("direct_image_url") or ""),
                         source_page=str(item.get("source_page_url") or ""),
-                        subject=str(item.get("subject") or ""),
+                        subject=str(item.get("subject") or "") or subject_idx,
                         media_id=int(media_id),
                         article_id=int(post_id) if post_id else None,
                     )
@@ -2749,6 +2767,11 @@ def build_cards(
                 "blocked": blocked,
                 "blocked_reason": _blocked_reason(backups_dir) if blocked else None,
                 "fix": fix,
+                # P2 da auditoria de contexto: o card ja diz se o rework precisa
+                # do artigo inteiro. Post NOVO fica `false` (o texto existente
+                # normalmente basta; reescrever e uma decisao do agente, e para
+                # isso existe `content POST_ID`).
+                "requires_content": bool(fix.get("requires_content")) if fix else False,
                 "draft": (
                     str(backups_dir / "editorial.draft.json")
                     if (backups_dir / "editorial.draft.json").is_file()
@@ -2861,6 +2884,7 @@ def _fix_plan(
         pass
     # find_inline_images = o delta real (missing) — vale para blocked legado
     # (sem blocked_checklist) e para qualquer gate que deixe imagens faltando.
+    rewrite_text = "qualidade_texto" in names or "estrutura_lista" in names
     return {
         "find_inline_images": images["missing"],
         "normalize_featured": featured.get("action") == "normalize",
@@ -2873,6 +2897,10 @@ def _fix_plan(
         "provide_trailer": "trailer_youtube" in names,
         "fix_dimensions": "dimensoes_imagens" in names,
         "remove_duplicate_images": "imagens_duplicadas" in names,
+        # P2 da auditoria de contexto: o agente SO pede `content POST_ID` quando
+        # o rework realmente reescreve o texto. Um rework de midia/SEO/trailer
+        # nunca precisa do artigo inteiro na conversa.
+        "requires_content": bool(rewrite_text),
     }
 
 

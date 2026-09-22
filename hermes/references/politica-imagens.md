@@ -89,6 +89,31 @@ attachment, a imagem NÃO pode ser reutilizada** (falta evidência de licença).
 O reuso nunca edita o attachment original — baixa e re-envia como NOVO
 attachment.
 
+`media-search-web` já consulta o índice local/Media Library ANTES da web e
+devolve o bloco `reuse` (URL original + página de origem + pHash + media_id):
+use esses itens primeiro e só busque na web o déficit restante
+(`capacity.missing`).
+
+**`media_library_id` NÃO substitui a URL original.** No `media_plan` ponha
+sempre `direct_image_url` = URL ORIGINAL listada na página de origem (o apply
+rebaixa e confere byte a byte; a URL S3 do nosso upload não consta na página e é
+rejeitada com "imagem baixada nao consta na pagina de origem").
+
+## Posição no texto (`paragraph_index`)
+
+- Imagens entram **APÓS** o parágrafo alvo; entre duas imagens exigem **>= 3
+  parágrafos** de distância; índice máximo = `len(</p> do conteúdo) - 2`
+  (senão: `media must be inserted between paragraphs`).
+- Contagem de blocos: `content POST_ID` (só quando a reescrita for necessária) ou
+  o `word_count` do card.
+- A **featured não entra no insert** (vai como `featured_media`), então não ocupa
+  vaga de spacing — mas o índice dela conta na validação do plano.
+- Teto estrutural de imagens inline: `floor((blocos-1)/3)+1`. Post com 14 blocos
+  aceita 5 imagens mesmo exigindo 6: **corrija o TEXTO** (divida 3 parágrafos
+  longos em dois, mesmo texto) — jamais encurte o artigo para cair de faixa.
+- **Listicle**: a imagem entra LOGO após o H2 numerado; a regra de 3 parágrafos
+  não vale (`paragraph_index` = 1º parágrafo após cada H2 `N. Título: descrição`).
+
 ## Fallbacks
 
 - Se após busca honesta não houver imagem real relevante, use

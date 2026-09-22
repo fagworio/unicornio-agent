@@ -191,7 +191,7 @@ class CompactOutputTests(unittest.TestCase):
         )
 
 
-    def test_record_cmd_output_only_for_context_commands(self):
+    def test_record_cmd_output_covers_read_and_write_commands(self):
         import tempfile
         from pathlib import Path
         from unittest import mock
@@ -205,15 +205,30 @@ class CompactOutputTests(unittest.TestCase):
             args.root = root
             args.command = "cards"
             _record_cmd_output(args, {"count": 1, "cards": []})
-            # Comando de escrita nao gera cmd_output.
+            # P0 da auditoria de contexto: o apply TAMBEM coloca contexto (a
+            # decisao do proximo passo sai do resultado dele) e agora e medido,
+            # com kind=write, post_id e o tamanho do cleaned_html.
             args.command = "apply"
-            _record_cmd_output(args, {"status": "ready"})
+            args.post_id = 77
+            _record_cmd_output(
+                args,
+                {"status": "ready", "cleaned_html": "<p>" + "x" * 100 + "</p>"},
+            )
+            # media-validate (leitura pesada) entrou na medicao.
+            args.command = "media-validate"
+            args.post_id = 88
+            _record_cmd_output(args, {"valid": 1, "rejected": [], "listicle": {}})
             from unicornio_editor.observability import read_telemetry_summary
 
             summary = read_telemetry_summary(root)
-            self.assertEqual(summary["by_event"].get("cmd_output"), 1)
+            self.assertEqual(summary["by_event"].get("cmd_output"), 3)
             self.assertGreater(summary["context_bytes_total"], 0)
             self.assertIn("cards", summary["context_bytes_by_command"])
+            self.assertIn("apply", summary["context_bytes_by_command"])
+            self.assertIn("media-validate", summary["context_bytes_by_command"])
+            self.assertIn("write", summary["context_bytes_by_kind"])
+            self.assertEqual(summary["context_bytes_by_post"]["77"],
+                             summary["context_bytes_by_command"]["apply"])
 
 
     def test_retry_all_parser_defaults_states(self):

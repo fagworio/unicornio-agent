@@ -36,6 +36,25 @@ class Config:
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
     max_posts_per_run: int = 5  # cards por lote / posts processados por run
+    # P0 (auditoria de contexto): a META de producao (READY por run) e o TETO
+    # de posts TOCADOS por sessao sao coisas diferentes. Antes so existia a
+    # meta: skipped/uncertain/blocked nao consumiam a cota e a sessao podia
+    # tocar 8, 10, 15 posts tentando chegar a 5 READY — contexto acumulando o
+    # tempo todo. O teto de tocados e um HARD CAP: nao reduz nenhuma qualidade
+    # (nenhum gate muda), apenas encerra a sessao e deixa o proximo post para a
+    # proxima. 0 desliga o teto (papel do antigo comportamento).
+    target_ready_per_run: int = 5  # EDITOR_TARGET_READY_PER_RUN
+    max_posts_touched_per_run: int = 2  # EDITOR_MAX_POSTS_TOUCHED_PER_RUN
+    # Janela de sessao (minutos de inatividade que separam duas sessoes/duas
+    # execucoes do cron). O ledger de sessao (work/session_state.json) expira
+    # sozinho: sem isso um teto de tocados bloquearia o cron seguinte. PRECISA
+    # ser MENOR que o intervalo do cron editorial (default 90 min < 2h): se
+    # fosse maior, a execucao seguinte herdaria o teto esgotado da anterior.
+    session_window_minutes: int = 90  # EDITOR_SESSION_WINDOW_MINUTES
+    # Budget de CONTEXTO da sessao (bytes de stdout consumidos pelo LLM).
+    # Dolar nao basta: deepseek-flash entrega 75M tokens por ~US$ 1. O budget
+    # encerra a sessao limpa (nunca simplifica checklist/gate). 0 desliga.
+    session_context_bytes_budget: int = 600_000  # EDITOR_SESSION_CONTEXT_BYTES_BUDGET
     max_source_retries: int = 2  # tentativas de download por fonte (alem da 1a)
     remote_url_policy: str = "audit"  # off | audit | enforce
     internal_links_enabled: bool = True  # enriquece o conteudo com links internos determinísticos
@@ -165,6 +184,12 @@ def load_config() -> Config:
         vision_mode=_choice("EDITOR_VISION_MODE", "ambiguous", {"always", "ambiguous"}),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 5, 1, 10),
+        target_ready_per_run=_int("EDITOR_TARGET_READY_PER_RUN", 5, 1, 10),
+        max_posts_touched_per_run=_int("EDITOR_MAX_POSTS_TOUCHED_PER_RUN", 2, 0, 20),
+        session_window_minutes=_int("EDITOR_SESSION_WINDOW_MINUTES", 90, 5, 1440),
+        session_context_bytes_budget=_int(
+            "EDITOR_SESSION_CONTEXT_BYTES_BUDGET", 600_000, 0, 100_000_000
+        ),
         max_source_retries=_int("EDITOR_MAX_SOURCE_RETRIES", 2, 0, 5),
         remote_url_policy=_choice("EDITOR_REMOTE_URL_POLICY", "audit", {"off", "audit", "enforce"}),
         internal_links_enabled=_bool("EDITOR_INTERNAL_LINKS_ENABLED", True),
