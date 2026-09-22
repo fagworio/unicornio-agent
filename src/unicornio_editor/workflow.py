@@ -425,7 +425,9 @@ def _apply_editorial_unlocked(
                 root, "apply_blocked",
                 post_id=post_id,
                 attempts=backoff["attempts"],
-                **_decision_fields(root, post_id),
+                # O plano manda na atribuição: cada imagem carrega o
+                # decision_id que a escolheu (item 3 auto != item 4 choose).
+                **_decision_fields(root, post_id, payload.get("media_plan")),
                 reason=", ".join(item["name"] for item in failed_items),
                 missing_images=images_summary.get("missing", 0),
                 valid_images=images_summary.get("valid", 0),
@@ -517,7 +519,7 @@ def _apply_editorial_unlocked(
         "apply_ready",
         post_id=post_id,
         attempts=attempts_before + 1,
-        **_decision_fields(root, post_id),
+        **_decision_fields(root, post_id, payload.get("media_plan")),
         first_pass=attempts_before == 0,
         duration_ms=round((time.monotonic() - started_at) * 1000),
     )
@@ -2969,26 +2971,50 @@ def _original_link(post: dict[str, Any]) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _decision_fields(root: Path, post_id: int | None) -> dict[str, Any]:
+def _decision_fields(
+    root: Path, post_id: int | None, plan: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Decisão de mídia do post para os eventos de resultado (auto/choose/reuse).
 
     É o que permite CRUZAR economia com qualidade: `apply_ready`/`apply_blocked`
     carregam a decisão que escolheu as imagens, então a telemetria mostra se os
     casos `auto` (sem julgamento do agente) bloqueiam mais ou menos que `choose`.
+
+    ``plan`` (o `media_plan`) manda quando traz `decision_id`: o resultado passa a
+    ser atribuído à decisão de CADA imagem (`decision_ids`) em vez da última
+    decisão do post. Se o plano misturar decisões diferentes, o rótulo único
+    `decision` é OMITIDO — atribuir o bloqueio do post a uma delas seria chute.
     """
     if not post_id:
         return {}
+    campos: dict[str, Any] = {}
+    ids: list[str] = []
+    decisoes_plano: list[str] = []
+    for item in plan or []:
+        if not isinstance(item, dict):
+            continue
+        identificador = str(item.get("decision_id") or "")
+        if identificador:
+            ids.append(identificador)
+            if str(item.get("decision") or ""):
+                decisoes_plano.append(str(item["decision"]))
+    if ids:
+        campos["decision_ids"] = sorted(set(ids))
+        distintas = {d for d in decisoes_plano if d}
+        if len(distintas) == 1:
+            campos["decision"] = next(iter(distintas))
     try:
         from .observability import read_media_decision
 
         decisao = read_media_decision(root, post_id)
     except Exception:  # noqa: BLE001 - telemetria nunca quebra o apply
-        return {}
-    campos: dict[str, Any] = {}
-    if decisao.get("decision"):
+        return campos
+    if "decision" not in campos and not ids and decisao.get("decision"):
         campos["decision"] = str(decisao["decision"])
     if decisao.get("score_gap") is not None:
         campos["score_gap"] = decisao["score_gap"]
+    if decisao.get("decision_id") and "decision_ids" not in campos:
+        campos["decision_id"] = str(decisao["decision_id"])
     return campos
 
 

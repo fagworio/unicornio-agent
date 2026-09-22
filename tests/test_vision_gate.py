@@ -131,20 +131,27 @@ class VisionGateTests(unittest.TestCase):
         self.assertIn("high:", reason)
 
     def test_ambiguo_no_low_mas_confirmado_no_high_e_aceito(self):
-        VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.55, "visual_type": "other"}'
-
-        def resposta_por_chamada():
-            # 1ª chamada (low): inconclusivo; 2ª (high): confirmado.
-            if len(VisionHandler.calls) >= 1:
-                VisionHandler.answer = '{"status": "MATCH", "confidence": 0.95, "visual_type": "key_art"}'
-
+        """A resposta do `high` decide: inconclusivo no low pode virar MATCH."""
         original = VisionHandler.do_POST
 
-        def do_POST_com_escalada(self):  # noqa: N802
-            original(self)
-            resposta_por_chamada()
+        def do_POST_por_detalhe(self):  # noqa: N802
+            # Determinístico (sem corrida): a resposta depende do `detail` pedido.
+            tamanho = int(self.headers.get("Content-Length", "0"))
+            corpo = json.loads(self.rfile.read(tamanho) or b"{}")
+            detalhe = corpo["messages"][1]["content"][1]["image_url"].get("detail")
+            if detalhe == "high":
+                resposta = '{"status": "MATCH", "confidence": 0.95, "visual_type": "key_art"}'
+            else:
+                resposta = '{"status": "AMBIGUOUS", "confidence": 0.55, "visual_type": "other"}'
+            VisionHandler.calls.append(corpo)
+            dados = json.dumps({"choices": [{"message": {"content": resposta}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(dados)))
+            self.end_headers()
+            self.wfile.write(dados)
 
-        VisionHandler.do_POST = do_POST_com_escalada
+        VisionHandler.do_POST = do_POST_por_detalhe
         try:
             ok, reason = self._verify(detail="low", allow_high=True)
         finally:

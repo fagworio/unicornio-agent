@@ -52,6 +52,13 @@ _MEDIA = {
     "evidence_score",
     "evidence_verdict",
     "candidate_id",
+    # Rastreabilidade da DECISÃO de mídia que escolheu esta imagem: o
+    # `decision_id` vem do ledger append-only (work/media_decisions.jsonl) que o
+    # `media-search-web`/`-listicle` devolve no stdout. Sem ele, o media-validate
+    # e o apply só conseguiam atribuir o resultado à ÚLTIMA decisão do post —
+    # num item de lista (auto/choose/auto) isso culpava a decisão errada.
+    "decision_id",
+    "decision",
     # Query de descoberta que retornou esta imagem (ex.: "redfall xbox
     # series"). Evidencia de relevancia (fluxo manual do editor): se a busca
     # filtrada retornou a imagem, ela e o que se procura. O agente DEVE
@@ -141,6 +148,9 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
             optional={
                 "media_library_id", "search_query", "subject", "phash",
                 "evidence_score", "evidence_verdict", "candidate_id",
+                # Rastreabilidade opcional (vem do ledger de decisões); o apply
+                # NUNCA confia nela para decidir, só para medir qualidade.
+                "decision_id", "decision",
             },
         )
         paragraph_index = media["paragraph_index"]

@@ -68,6 +68,10 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
    bloco `reuse`
    (Media Library/índice local) vem ANTES da web: use-o primeiro. Google Images é
    só índice; a página original é a fonte. Não faça pré-verificação manual.
+   **Copie `decision_id` (e `decision`) de cada busca/item para o item
+   correspondente do `media_plan`** — é o que liga causalmente a decisão à
+   imagem e permite medir a qualidade por decisão (sem isso, o resultado cai na
+   última decisão do post).
 7. Mídia nova → `media-validate editorial.json --post-id POST_ID` (1 chamada;
    `{valid, rejected, capacity{required,valid,missing}, featured{status,reason}}`).
 8. `apply POST_ID editorial.json --compact` = preflight COMPLETO (editorial →

@@ -131,19 +131,25 @@ def usage_measurement_in_last_24h(
         ).fetchone()
         # Uso AUXILIAR do Hermes (vision/compressao/titulo/aprovacao): gravado em
         # session_model_usage com task != '' e FORA dos contadores de `sessions`.
-        # O teto em USD precisa somar os dois, senao o dashboard do provedor
-        # sempre aparece mais caro que a medicao interna.
+        # O filtro por task é OBRIGATÓRIO: o main-loop TAMBÉM aparece em
+        # session_model_usage com task='' (agregado espelhado em `sessions`), e
+        # somá-lo aqui contava o custo do main-loop DUAS vezes.
         custo_aux = 0.0
+        tokens_aux = 0
         try:
             aux_row = db.execute(
-                "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM session_model_usage "
-                "WHERE session_id IN (SELECT id FROM sessions WHERE source='cron' "
+                "SELECT COALESCE(SUM(estimated_cost_usd),0), "
+                "COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens),0) "
+                "FROM session_model_usage "
+                "WHERE COALESCE(task,'') != '' AND session_id IN ("
+                "SELECT id FROM sessions WHERE source='cron' "
                 f"AND started_at > strftime('%s','now') - ? AND {predicate})",
                 (int(hours) * 3600, *params),
             ).fetchone()
             custo_aux = float((aux_row or [0])[0] or 0)
+            tokens_aux = int((aux_row or [0, 0])[1] or 0)
         except sqlite3.Error:
-            custo_aux = 0.0
+            custo_aux, tokens_aux = 0.0, 0
         db.close()
     except sqlite3.Error:
         return None
@@ -151,6 +157,7 @@ def usage_measurement_in_last_24h(
     cache_read = int(row[5] or 0)
     cache_write = int(row[6] or 0)
     custo_main = float(row[0] or 0)
+    prompt_main = entrada + cache_read + cache_write
     return {
         "cost_usd": round(custo_main + custo_aux, 6),
         "cost_main_usd": round(custo_main, 6),
@@ -161,7 +168,12 @@ def usage_measurement_in_last_24h(
         "output_tokens": int(row[4] or 0),
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
-        "prompt_tokens": entrada + cache_read + cache_write,
+        # Três níveis explícitos: main-loop, auxiliar e o GRAND TOTAL. O teto de
+        # prompt tokens usa o grand total (o auxiliar também consome contexto).
+        "main_prompt_tokens": prompt_main,
+        "aux_prompt_tokens": tokens_aux,
+        "grand_total_prompt_tokens": prompt_main + tokens_aux,
+        "prompt_tokens": prompt_main + tokens_aux,
         "scope": scope,
     }
 

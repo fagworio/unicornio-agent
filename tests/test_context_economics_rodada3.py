@@ -506,11 +506,43 @@ class DecisionQualityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            record_media_decision(root, 7, decision="reuse", score_gap=None)
+            decision_id = record_media_decision(root, 7, decision="reuse", score_gap=None)
             campos = _decision_fields(root, 7)
-            self.assertEqual(campos, {"decision": "reuse"})
+            self.assertEqual(campos["decision"], "reuse")
+            self.assertEqual(campos["decision_id"], decision_id)
             self.assertEqual(_decision_fields(root, 8), {})
             self.assertEqual(_decision_fields(root, None), {})
+
+    def test_plano_com_decision_id_por_item_manda_na_atribuicao(self):
+        """O resultado do apply é atribuído à decisão de CADA imagem."""
+        from unicornio_editor.workflow import _decision_fields
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Ledger tem a ÚLTIMA decisão como "auto"; o plano diz que a imagem do
+            # item 1 veio de "choose" — o plano vence.
+            record_media_decision(root, 7, decision="auto", score_gap=4)
+            campos = _decision_fields(
+                root, 7,
+                [
+                    {"decision_id": "aaa", "decision": "choose"},
+                    {"decision_id": "bbb", "decision": "auto"},
+                ],
+            )
+            self.assertEqual(campos["decision_ids"], ["aaa", "bbb"])
+            # Plano MISTO: sem rótulo único (atribuir a um deles seria chute).
+            self.assertNotIn("decision", campos)
+
+    def test_plano_com_decisao_unica_rotula_o_evento(self):
+        from unicornio_editor.workflow import _decision_fields
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campos = _decision_fields(
+                root, 7, [{"decision_id": "aaa", "decision": "choose"}]
+            )
+            self.assertEqual(campos["decision"], "choose")
+            self.assertEqual(campos["decision_ids"], ["aaa"])
 
 
 class AutoMarginCalibrationTests(unittest.TestCase):

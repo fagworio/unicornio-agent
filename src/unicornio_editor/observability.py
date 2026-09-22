@@ -208,16 +208,22 @@ def _ler_decisoes(root: str | Path) -> list[dict[str, Any]]:
                 decisoes.append(registro)
     legado = Path(root) / "work" / _LEGACY_DECISIONS_FILENAME
     if legado.is_file():
-        # Compatibilidade com o arquivo antigo (mapa). Entra DEPOIS do log para
-        # não perder o histórico novo.
+        # Compatibilidade com o arquivo antigo (mapa post -> última decisão).
+        # Ele é carregado PRIMEIRO e as entradas de um post que JÁ tem registro
+        # no JSONL são descartadas: o log novo é autoritativo e, entrando depois,
+        # o legado não pode virar a "última decisão" de um post recente.
         try:
             dados = json.loads(legado.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             dados = {}
         if isinstance(dados, dict):
-            for post_id, valor in dados.items():
-                if isinstance(valor, dict):
-                    decisoes.append({**valor, "post_id": post_id, "legacy": True})
+            com_jsonl = {str(d.get("post_id")) for d in decisoes}
+            antigas = [
+                {**valor, "post_id": post_id, "legacy": True}
+                for post_id, valor in dados.items()
+                if isinstance(valor, dict) and str(post_id) not in com_jsonl
+            ]
+            decisoes = antigas + decisoes
     return decisoes
 
 

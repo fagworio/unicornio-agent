@@ -169,13 +169,22 @@ stdout pequeno orientado à próxima ação:
   nos contadores de `sessions`); `grand_total_*` soma tudo, no custo também.
 - **Qualidade por decisão** (`decision_quality`): a decisão de mídia fica no
   ledger append-only `work/media_decisions.jsonl` — uma entrada por busca/ITEM,
-  com `decision_id` (o mesmo id vai no `media_plan`, no `media_search_result` e no
-  `media_validate_result`) — e os gates seguintes carregam essa decisão nos
+  com `decision_id` (o mesmo id vai no `media_plan[]`, no `media_search_result` e
+  no `media_validate_result`) — e os gates seguintes carregam essa decisão nos
   eventos. Assim dá para comparar `auto` x `choose` x `reuse` em
   `validate_rejected_items_per_event`, `validate_posts_with_rejection_rate`,
   `media_block_rate`, `ready_first_pass_share` (dos READY, quantos foram de
   primeira) e `first_pass_success_rate` (das PRIMEIRAS tentativas, quantas deram
   READY: 1 READY + 10 bloqueados = 9,1%, não 100%).
+- **Ligação causal por ITEM**: o `media-validate` emite um evento por item do
+  `media_plan` que traz `decision_id` (valid/rejected DAQUELE item); o agregado do
+  post sai sem rótulo de decisão para não duplicar. No apply, o `media_plan`
+  manda: `decision_ids` lista os ids das imagens do post e `decision` só aparece
+  com UM valor único — plano misto (auto + choose) não é atribuído a uma decisão
+  só. Sem o `decision_id` no plano, a atribuição volta a ser a última decisão do
+  post (e aí `decision_quality` não serve para calibrar margem).
+- O arquivo legado `work/media_decisions.json` (mapa post → última decisão) só é
+  usado para posts SEM registro no JSONL — o log novo é autoritativo.
 - `EDITOR_AUTO_SCORE_MARGIN` (default 2) é a margem de `evidence_score` para o
   `auto`: **hipótese de calibração**, não fato. Se os casos `auto` passarem a ser
   rejeitados depois, suba a margem (ou exija `len(fortes) == 1`).

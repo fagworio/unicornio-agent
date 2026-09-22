@@ -870,6 +870,7 @@ def _enriquecer_candidatos(
             resolver = None
 
     for cand in pendentes:
+        chave_original: str | None = None
         sem_origem = not str(cand.get("source_page_url") or "").strip()
         if sem_origem and resolver is not None:
             if teto_resolver and _fortes_distintos() >= teto_resolver:
@@ -905,6 +906,14 @@ def _enriquecer_candidatos(
             # próximo enriquecimento do MESMO candidato vai usar.
             _guardar_memo(cand, chave_original)
         _classificar(cand)
+        if chave_original:
+            # ALIAS da chave original, agora com o resultado COMPLETO
+            # (evidence/evidence_score/phash): a gravação acima acontecia ANTES da
+            # classificação e guardava uma entrada sem `evidence.verdict` — se o
+            # mesmo candidato bruto reaparecesse sem origem, o memo incompleto
+            # fazia o pipeline pular o processamento e o candidato terminava
+            # rejeitado por "não verificado".
+            _guardar_memo(cand, chave_original)
 
     # Candidatos que vieram do memo (não reprocessados) entram no resultado pela
     # MESMA decisão registrada — o memo é o resultado, não um atalho.
@@ -1450,6 +1459,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for row in rows:
                 query = str(row["query"])
                 candidates = list(row.get("candidates") or [])
+                decisao_item: dict = {}
+                decision_id_item = ""
                 if not candidates:
                     missing.append(query)
                     append_telemetry(
@@ -1556,7 +1567,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     }
                     for candidate in candidates
                 ]
-                items.append({"query": query, "count": len(compact), "candidates": compact})
+                items.append({
+                    "query": query,
+                    "count": len(compact),
+                    # Rastreabilidade POR ITEM: o agente copia `decision_id` para
+                    # cada entrada do media_plan, então o media-validate/apply
+                    # atribuem o resultado à decisão DAQUELE item (antes tudo caía
+                    # na "última decisão do post").
+                    "decision_id": decision_id_item,
+                    "decision": str(decisao_item.get("decision") or ""),
+                    "coverage": str(decisao_item.get("coverage") or ""),
+                    "select": decisao_item.get("select"),
+                    "options": decisao_item.get("options") or [],
+                    "candidates": compact,
+                })
             audit = _write_audit(
                 args.root / "work" / "search" / f"listicle-{_audit_key('-'.join(queries_listicle))}.json",
                 {
@@ -1645,12 +1669,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 / f"{args.post_id or _audit_key(args.editorial_file.name)}.json",
                 result,
             )
-            # Evento de QUALIDADE (com a decisão que escolheu a mídia): é o que
-            # permite comparar rejeição do preflight entre auto/choose/reuse.
+            # Evento de QUALIDADE. Quando o `media_plan` traz `decision_id` por
+            # item, o resultado sai POR ITEM (é o que liga causalmente a decisão
+            # à imagem: num plano com auto/choose/auto, o agregado do post
+            # culpava a última decisão). O agregado continua sendo emitido para os
+            # contadores do post, mas SEM rótulo de decisão — do contrário a mesma
+            # rejeição entraria duas vezes em `decision_quality`.
             try:
                 from .observability import append_telemetry, read_media_decision
 
-                decisao_midia = read_media_decision(args.root, args.post_id or 0)
+                plano = payload.get("media_plan") or []
+                rejeitados_idx = {
+                    int(row.get("index"))
+                    for row in (result.get("rejected") or [])
+                    if isinstance(row.get("index"), int)
+                }
+                ultima = read_media_decision(args.root, args.post_id or 0)
+                com_id = [
+                    item for item in plano
+                    if isinstance(item, dict) and str(item.get("decision_id") or "")
+                ]
+                for indice, item in enumerate(plano):
+                    if not isinstance(item, dict) or not str(item.get("decision_id") or ""):
+                        continue
+                    append_telemetry(
+                        args.root, "media_validate_result",
+                        post_id=args.post_id or 0,
+                        item_index=indice,
+                        valid=indice not in rejeitados_idx,
+                        rejected_items=1 if indice in rejeitados_idx else 0,
+                        decision=str(item.get("decision") or ultima.get("decision") or ""),
+                        decision_id=str(item.get("decision_id") or ""),
+                        score_gap=ultima.get("score_gap"),
+                    )
                 append_telemetry(
                     args.root, "media_validate_result",
                     post_id=args.post_id or 0,
@@ -1659,9 +1710,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     featured_status=str(
                         ((result.get("featured_vision") or [{}])[0] or {}).get("status") or ""
                     ),
-                    decision=str(decisao_midia.get("decision") or ""),
-                    score_gap=decisao_midia.get("score_gap"),
-                    decision_id=str(decisao_midia.get("decision_id") or ""),
+                    decision="" if com_id else str(ultima.get("decision") or ""),
+                    score_gap=None if com_id else ultima.get("score_gap"),
+                    decision_id="" if com_id else str(ultima.get("decision_id") or ""),
                 )
             except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
                 pass
