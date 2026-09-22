@@ -93,10 +93,15 @@ def usage_measurement_in_last_24h(
     *,
     hours: int = 24,
 ) -> dict | None:
-    """Custo E volume de contexto das sessoes da janela (fail-soft).
+    """Custo E volume de CONTEXTO das sessoes da janela (fail-soft).
 
-    ``requests``/``input_tokens``/``cache_read_tokens`` respondem a pergunta que
-    o dolar esconde: a sessao esta relendo um contexto gigante?
+    ``prompt_tokens`` e a medida honesta do contexto: o Hermes cobra/relê
+    ``input_tokens + cache_read_tokens + cache_write_tokens`` a cada request, e o
+    que domina o gasto e justamente o cache-read (a conversa inteira relida).
+    Um limite que olhasse so ``input_tokens`` ficaria cego para a situacao
+    "pouco input novo + dezenas de milhoes relidos do cache" — exatamente o
+    problema que este guard existe para pegar. Os buckets seguem expostos
+    separadamente para diagnostico.
     """
     if not state_db.is_file():
         return None
@@ -118,7 +123,8 @@ def usage_measurement_in_last_24h(
         row = db.execute(
             "SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*), "
             f"{_soma('api_call_count')}, {_soma('input_tokens')}, "
-            f"{_soma('output_tokens')}, {_soma('cache_read_tokens')} "
+            f"{_soma('output_tokens')}, {_soma('cache_read_tokens')}, "
+            f"{_soma('cache_write_tokens')} "
             "FROM sessions WHERE source='cron' "
             f"AND started_at > strftime('%s','now') - ? AND {predicate}",
             (int(hours) * 3600, *params),
@@ -126,13 +132,18 @@ def usage_measurement_in_last_24h(
         db.close()
     except sqlite3.Error:
         return None
+    entrada = int(row[3] or 0)
+    cache_read = int(row[5] or 0)
+    cache_write = int(row[6] or 0)
     return {
         "cost_usd": float(row[0] or 0),
         "runs": int(row[1] or 0),
         "requests": int(row[2] or 0),
-        "input_tokens": int(row[3] or 0),
+        "input_tokens": entrada,
         "output_tokens": int(row[4] or 0),
-        "cache_read_tokens": int(row[5] or 0),
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "prompt_tokens": entrada + cache_read + cache_write,
         "scope": scope,
     }
 
@@ -202,8 +213,12 @@ def main() -> int:
     parser.add_argument("--limit", type=float, default=0.0, help="limite de custo em USD")
     parser.add_argument("--limit-requests", type=float, default=0.0,
                         help="limite de requests (api_call_count) na janela")
+    parser.add_argument("--limit-prompt-tokens", type=float, default=0.0,
+                        help="limite de PROMPT tokens (input + cache_read + cache_write): "
+                        "e a medida real do contexto relido a cada request")
     parser.add_argument("--limit-input-tokens", type=float, default=0.0,
-                        help="limite de tokens de entrada na janela")
+                        help="DEPRECATED/alias: hoje conta prompt tokens (input+cache), "
+                        "nao apenas input novo")
     parser.add_argument("--limit-context-bytes", type=float, default=0.0,
                         help="limite dos bytes de contexto devolvidos ao LLM")
     parser.add_argument("--telemetry", type=Path, default=None,
@@ -214,7 +229,9 @@ def main() -> int:
     limites = {
         "cost_usd": args.limit,
         "requests": args.limit_requests,
-        "input_tokens": args.limit_input_tokens,
+        # O limite de tokens e de PROMPT (input + cache): olhar so `input_tokens`
+        # deixava o guard cego para "pouco input novo + milhoes relidos do cache".
+        "prompt_tokens": args.limit_prompt_tokens or args.limit_input_tokens,
         "context_bytes": args.limit_context_bytes,
     }
     if not any(valor and valor > 0 for valor in limites.values()):
@@ -229,7 +246,7 @@ def main() -> int:
     medidos = {
         "cost_usd": usage["cost_usd"],
         "requests": usage["requests"],
-        "input_tokens": usage["input_tokens"],
+        "prompt_tokens": usage["prompt_tokens"],
     }
     escopo = usage["scope"]
     if args.limit_context_bytes > 0:
@@ -251,6 +268,15 @@ def main() -> int:
                 "scope": escopo,
                 "runs": usage["runs"],
                 "measured": {chave: round(valor, 4) for chave, valor in medidos.items()},
+                # Buckets separados: o total de prompt tokens e a soma, mas o
+                # diagnostico precisa saber DE ONDE ele veio (input novo x cache).
+                "tokens": {
+                    "input": usage["input_tokens"],
+                    "cache_read": usage["cache_read_tokens"],
+                    "cache_write": usage["cache_write_tokens"],
+                    "prompt": usage["prompt_tokens"],
+                    "output": usage["output_tokens"],
+                },
                 "limits": {chave: valor for chave, valor in limites.items() if valor},
             },
             ensure_ascii=False,

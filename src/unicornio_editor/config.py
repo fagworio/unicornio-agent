@@ -51,6 +51,14 @@ class Config:
     # ser MENOR que o intervalo do cron editorial (default 90 min < 2h): se
     # fosse maior, a execucao seguinte herdaria o teto esgotado da anterior.
     session_window_minutes: int = 90  # EDITOR_SESSION_WINDOW_MINUTES
+    # Margem de score para o `auto` do media-search-web: com UM candidato forte
+    # inequívoco o julgamento do agente é dispensado (o codigo ja ranqueou).
+    # `2` e HIPOTESE DE CALIBRACAO, nao fato: a telemetria grava score_gap +
+    # decision + resultado dos gates por decisao (media_economy/decision_quality)
+    # para provar se a economia de julgamento preservou a qualidade. Ajuste para
+    # um valor maior (ou comporte-se de forma mais conservadora) se aparecer
+    # rejeicao posterior nos casos `auto`.
+    auto_score_margin: int = 2  # EDITOR_AUTO_SCORE_MARGIN
     # Budget de CONTEXTO da sessao (bytes de stdout consumidos pelo LLM).
     # Dolar nao basta: deepseek-flash entrega 75M tokens por ~US$ 1. O budget
     # encerra a sessao limpa (nunca simplifica checklist/gate). 0 desliga.
@@ -187,6 +195,7 @@ def load_config() -> Config:
         target_ready_per_run=_int("EDITOR_TARGET_READY_PER_RUN", 5, 1, 10),
         max_posts_touched_per_run=_int("EDITOR_MAX_POSTS_TOUCHED_PER_RUN", 2, 0, 20),
         session_window_minutes=_int("EDITOR_SESSION_WINDOW_MINUTES", 90, 5, 1440),
+        auto_score_margin=_int("EDITOR_AUTO_SCORE_MARGIN", 2, 0, 20),
         session_context_bytes_budget=_int(
             "EDITOR_SESSION_CONTEXT_BYTES_BUDGET", 600_000, 0, 100_000_000
         ),

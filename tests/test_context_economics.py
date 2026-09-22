@@ -8,6 +8,7 @@ compactos, telemetria por post/sessão e orçamento de contexto.
 
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -19,6 +20,19 @@ from unicornio_editor import session_budget
 from unicornio_editor.config import Config
 from unicornio_editor.observability import append_telemetry, read_telemetry_summary
 from unicornio_editor.session_metrics import session_metrics
+
+# A fatia OFICIAL das métricas é o cron: os testes marcam a origem para não
+# depender do ambiente onde a suíte roda (o HERMES_SESSION_ID do agente
+# classificaria tudo como "manual" e o KPI ficaria vazio).
+CRON_ENV = {"UNICORNIO_RUN_SOURCE": "cron",
+            "HERMES_SESSION_ID": "cron_editorial_20260922_090923"}
+
+
+class OrigemCronMixin:
+    def setUp(self):
+        self._origem = mock.patch.dict(os.environ, CRON_ENV, clear=False)
+        self._origem.start()
+        self.addCleanup(self._origem.stop)
 
 
 def _config(**overrides):
@@ -597,7 +611,7 @@ class MediaValidateCompactTests(unittest.TestCase):
         self.assertEqual(resultado["featured"]["status"], "absent")
 
 
-class TelemetryTests(unittest.TestCase):
+class TelemetryTests(OrigemCronMixin, unittest.TestCase):
     """P0/P1: telemetria por comando, por post e por sessão."""
 
     def test_summary_breaks_context_down_by_post_and_kind(self):
@@ -645,10 +659,17 @@ class TelemetryTests(unittest.TestCase):
             )
         self.assertEqual(metricas["telemetry"]["ready"], 2)
         self.assertEqual(metricas["hermes_sessions"]["requests"], 40)
-        self.assertEqual(metricas["derived"]["tokens_per_ready"], 5000.0)
+        # prompt_tokens = input + cache_read + cache_write (1000 + 9000 + 0);
+        # o nome diz o que a metrica mede (contexto lido), nao "todos os tokens".
+        self.assertEqual(metricas["hermes_sessions"]["prompt_tokens"], 10000)
+        self.assertEqual(metricas["derived"]["prompt_tokens_per_ready"], 5000.0)
+        self.assertEqual(metricas["derived"]["output_tokens_per_ready"], 100.0)
+        self.assertEqual(metricas["derived"]["total_model_tokens_per_ready"], 5100.0)
+        self.assertNotIn("tokens_per_ready", metricas["derived"])
         self.assertEqual(metricas["derived"]["requests_per_ready"], 20.0)
         self.assertEqual(metricas["derived"]["tool_context_bytes_per_ready"], 2000.0)
         self.assertEqual(metricas["derived"]["cost_per_ready_usd"], 0.25)
+        self.assertEqual(metricas["official_slice"]["run_source"], "cron")
 
     def test_session_metrics_without_attribution_does_not_invent_zeros(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -666,11 +687,11 @@ class TelemetryTests(unittest.TestCase):
                 root, state_db=banco, job_id="", project_root=str(root), hours=24
             )
         self.assertIsNone(metricas["hermes_sessions"])
-        self.assertIsNone(metricas["derived"]["tokens_per_ready"])
+        self.assertIsNone(metricas["derived"]["prompt_tokens_per_ready"])
         self.assertEqual(metricas["telemetry"]["ready"], 1)
 
 
-class AttributionTests(unittest.TestCase):
+class AttributionTests(OrigemCronMixin, unittest.TestCase):
     """A medição precisa achar a sessão do cron no schema REAL do Hermes.
 
     No schema atual não existe coluna de job e as sessões de cron gravam ``cwd``

@@ -780,7 +780,19 @@ def _enriquecer_candidatos(
                     resolvido.pop("rejected_reason", None)
                     cand.clear()
                     cand.update(resolvido)
-                    if cand.get("valid"):
+                    # CONTRATO REAL do resolver: quando ele encontra e VERIFICA
+                    # uma pagina, o sucesso aparece em
+                    # ``source_resolution == "verified_page"`` — ele NAO devolve
+                    # ``valid=True`` (o veredito do verifier fica registrado na
+                    # resolucao). Contar apenas ``valid`` deixava ``validos`` em 0
+                    # no caminho real e o teto de capacidade NUNCA disparava: o
+                    # resolver seguia investigando candidato que ja nao era
+                    # necessario. ``valid`` continua contando quando um verifier
+                    # externo o define (contrato antigo/testes).
+                    if (
+                        cand.get("valid")
+                        or cand.get("source_resolution") == "verified_page"
+                    ):
                         validos += 1
                     # O memo fica sob a chave ORIGINAL (sem origem): é a chave
                     # que o próximo enriquecimento do MESMO candidato vai usar.
@@ -1019,27 +1031,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "cards":
             from . import session_budget
 
-            # HARD CAP de posts TOCADOS por sessao (P0 da auditoria de
-            # contexto): a meta de producao e 5 READY, mas nenhuma sessao pode
-            # tocar mais posts do que o teto. O lote e cortado ao que ainda cabe
-            # (o ``apply`` re-checa — aqui o agente nem enxerga o que nao pode
-            # tocar, o que tambem economiza contexto).
+            # HARD STOP de sessao: orcamento de CONTEXTO estourado (ou teto de
+            # posts tocados esgotado) encerra a sessao ANTES de montar qualquer
+            # card — a sessao nao pode "gastar so mais um pouquinho". Sem isso era
+            # possivel o estado remaining_posts=1 + context_budget_exceeded=true
+            # ainda devolver outro card, contrariando a propria documentacao.
             orcamento = session_budget.status(args.root, config)
+            motivo = session_budget.stop_reason(args.root, config)
             per_page = config.max_posts_per_run if args.limit is None else int(args.limit)
             if orcamento["remaining_posts"] is not None:
                 per_page = min(per_page, int(orcamento["remaining_posts"]))
-            result = (
-                build_cards(client, config, args.root, per_page=per_page)
-                if per_page > 0
-                else {"count": 0, "cards": []}
-            )
-            if args.compact:
-                # Auditoria completa em arquivo; terminal so com a acao por post.
-                _write_audit(args.root / "work" / "cards.latest.json", result)
-                result = _compact_cards(result)
+            if motivo:
+                result = {"count": 0, "cards": [], "stop": motivo}
+                if args.compact:
+                    _write_audit(args.root / "work" / "cards.latest.json", result)
+            else:
+                result = (
+                    build_cards(client, config, args.root, per_page=per_page)
+                    if per_page > 0
+                    else {"count": 0, "cards": []}
+                )
+                if args.compact:
+                    # Auditoria completa em arquivo; terminal so com a acao por post.
+                    _write_audit(args.root / "work" / "cards.latest.json", result)
+                    result = _compact_cards(result)
             result["session"] = session_budget.status(args.root, config)
-            if per_page <= 0:
-                result["stop"] = session_budget.stop_reason(args.root, config)
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
             if args.compact:
@@ -1227,7 +1243,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     query=args.termo, rejected=len(rejeitados),
                     approved=len(aprovados),
                 )
-            decisao_auditoria = _media_decision(aprovados)
+            decisao_auditoria = _final_decision(
+                aprovados, reuso, needed, margin=int(config.auto_score_margin)
+            )
+            if post_id_ref:
+                # Ledger da decisão: os gates seguintes (media-validate, apply,
+                # first-pass) carregam esta decisão nos eventos, o que permite
+                # medir se `auto`/`reuse` pioraram a qualidade das imagens.
+                try:
+                    from .observability import record_media_decision
+
+                    record_media_decision(
+                        args.root, post_id_ref,
+                        decision=str(decisao_auditoria["decision"]),
+                        score_gap=decisao_auditoria.get("score_gap"),
+                        query=args.termo,
+                    )
+                except Exception:  # noqa: BLE001 - ledger é instrumentação
+                    pass
             # Economia de mídia medível (P0/P1): quanto veio do acervo local,
             # quantas buscas web de fato aconteceram, quantos candidatos foram
             # examinados e quantos foram apenas DISPENSADOS por capacidade
@@ -1291,6 +1324,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     audit=audit,
                     ambiguous=len(_frames_ambiguos),
                     deferred=len(deferidos),
+                    margin=int(config.auto_score_margin),
                 )
             else:
                 result = {
@@ -1535,6 +1569,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 / f"{args.post_id or _audit_key(args.editorial_file.name)}.json",
                 result,
             )
+            # Evento de QUALIDADE (com a decisão que escolheu a mídia): é o que
+            # permite comparar rejeição do preflight entre auto/choose/reuse.
+            try:
+                from .observability import append_telemetry, read_media_decision
+
+                decisao_midia = read_media_decision(args.root, args.post_id or 0)
+                append_telemetry(
+                    args.root, "media_validate_result",
+                    post_id=args.post_id or 0,
+                    valid=result.get("valid"),
+                    rejected_items=len(result.get("rejected") or []),
+                    featured_status=str(
+                        ((result.get("featured_vision") or [{}])[0] or {}).get("status") or ""
+                    ),
+                    decision=str(decisao_midia.get("decision") or ""),
+                    score_gap=decisao_midia.get("score_gap"),
+                )
+            except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
+                pass
             if getattr(args, "compact", True):
                 result = _compact_media_validate(
                     payload, result, audit=audit, post_title=post_title
@@ -1731,7 +1784,7 @@ def _rejected_summary(rejeitados: list[dict]) -> dict[str, int]:
     return resumo
 
 
-def _media_decision(aprovados: list[dict], *, options: int = 3) -> dict:
+def _media_decision(aprovados: list[dict], *, options: int = 3, margin: int = 2) -> dict:
     """Selecao DETERMINISTICA: o modelo so decide quando ha ambiguidade real.
 
     O codigo ja ordenou por ``already_in_library`` -> ``official_source`` ->
@@ -1740,18 +1793,21 @@ def _media_decision(aprovados: list[dict], *, options: int = 3) -> dict:
     para o ``media-validate``. Em caso de empate/ambiguidade, vao 2-3 opcoes
     para julgamento (a visao continua reservada a esses casos).
 
-    A decisao carrega a RAZAO (scores/empate) porque ela e auditavel: e assim
-    que se verifica depois se a economia de julgamento/visao reduziu a qualidade
-    das imagens escolhidas.
+    ``margin`` e a margem minima de ``evidence_score`` para considerar o topo
+    ISOLADO (``EDITOR_AUTO_SCORE_MARGIN``, default 2). E HIPOTESE DE CALIBRACAO,
+    nao fato: a decisao carrega ``score_gap`` e a RAZAO, e a telemetria cruza
+    decisao x resultado dos gates (media_validate/apply/first_pass) — se os
+    casos ``auto`` comecarem a ser rejeitados depois, o parametro sobe.
     """
     fortes = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"]
     fracos = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") != "deterministic_match"]
     if fortes:
         nota_topo = int(fortes[0].get("evidence_score") or 0)
         nota_segundo = int(fortes[1].get("evidence_score") or 0) if len(fortes) > 1 else None
-        unico = len(fortes) == 1 or (nota_topo - (nota_segundo or 0)) >= 2
+        gap = None if nota_segundo is None else nota_topo - nota_segundo
+        unico = len(fortes) == 1 or (gap or 0) >= int(margin)
     else:
-        nota_topo = nota_segundo = None
+        nota_topo = nota_segundo = gap = None
         unico = False
     if unico:
         escolhido = _media_candidate(fortes[0])
@@ -1759,22 +1815,29 @@ def _media_decision(aprovados: list[dict], *, options: int = 3) -> dict:
             razao = f"unico candidato forte (score {nota_topo}); hard gates passaram"
         else:
             razao = (
-                f"melhor candidato forte isolado (score {nota_topo} vs {nota_segundo}); "
-                "margem >= 2"
+                f"melhor candidato forte isolado (score {nota_topo} vs {nota_segundo}; "
+                f"gap {gap} >= margem {margin})"
             )
-        return {"decision": "auto", "reason": razao, "select": escolhido, "options": [escolhido]}
+        return {
+            "decision": "auto",
+            "reason": razao,
+            "score_gap": gap,
+            "select": escolhido,
+            "options": [escolhido],
+        }
     ordenados = (fortes + fracos)[: max(1, options)]
     if not ordenados:
         return {
             "decision": "none",
             "reason": "nenhum candidato aprovado (todos reprovaram em gate de origem/relevancia)",
+            "score_gap": None,
             "select": None,
             "options": [],
         }
     if fortes:
         razao = (
-            f"empate de candidatos fortes (scores {nota_topo} vs {nota_segundo}): "
-            f"{len(ordenados)} opcoes para julgamento"
+            f"empate de candidatos fortes (scores {nota_topo} vs {nota_segundo}; "
+            f"gap {gap} < margem {margin}): {len(ordenados)} opcoes para julgamento"
         )
     else:
         razao = (
@@ -1784,9 +1847,40 @@ def _media_decision(aprovados: list[dict], *, options: int = 3) -> dict:
     return {
         "decision": "choose",
         "reason": razao,
+        "score_gap": gap,
         "select": None,
         "options": [_media_candidate(c) for c in ordenados],
     }
+
+
+def _final_decision(
+    aprovados: list[dict], reuso: list[dict], needed: int, *, margin: int = 2
+) -> dict:
+    """Decisão FINAL de mídia (auto/choose/reuse/none) para este post.
+
+    Única fonte da verdade: usada pelo stdout/artefato E pelo ledger
+    (``work/media_decisions.json``) que os gates seguintes consultam para cruzar
+    economia com qualidade. Se o acervo local já cobre o déficit, `reuse` vence:
+    reusar é mais barato e a imagem já passou pelos controles (a proveniência
+    registrada continua valendo no apply).
+    """
+    fortes = sum(
+        1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+    )
+    faltam = max(0, int(needed) - len(reuso) - fortes)
+    decisao = _media_decision(aprovados, margin=int(margin))
+    if reuso and faltam == 0:
+        decisao = {
+            "decision": "reuse",
+            "reason": (
+                f"acervo local cobre o deficit ({len(reuso)} reuso(s) para "
+                f"{len(reuso)} de {int(needed)} necessarias); nenhuma busca web necessaria"
+            ),
+            "score_gap": None,
+            "select": None,
+            "options": decisao.get("options") or [],
+        }
+    return decisao
 
 
 def _compact_media_search(
@@ -1801,6 +1895,7 @@ def _compact_media_search(
     audit: str,
     ambiguous: int = 0,
     deferred: int = 0,
+    margin: int = 2,
 ) -> dict:
     """Contrato compacto do ``media-search-web`` (o que o agente pode USAR).
 
@@ -1814,21 +1909,8 @@ def _compact_media_search(
     fortes = sum(
         1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
     )
-    decisao = _media_decision(aprovados)
+    decisao = _final_decision(aprovados, reuso, needed, margin=int(margin))
     faltam = max(0, int(needed) - len(reuso) - fortes)
-    if reuso and faltam == 0:
-        # O acervo local JA cobre o deficit: reusar e mais barato e a imagem ja
-        # passou pelos controles (a proveniencia registrada e o gate continuam
-        # valendo no apply). As opcoes da web ficam como alternativa.
-        decisao = {
-            "decision": "reuse",
-            "reason": (
-                f"acervo local cobre o deficit ({len(reuso)} reuso(s) para "
-                f"{len(reuso)} de {int(needed)} necessarias); nenhuma busca web necessaria"
-            ),
-            "select": None,
-            "options": decisao.get("options") or [],
-        }
     resultado = {
         "query": query,
         "subject": subject,
@@ -1845,6 +1927,7 @@ def _compact_media_search(
         "engines_queried": engines,
         "audit": audit,
         "decision_reason": decisao.get("reason"),
+        "decision_score_gap": decisao.get("score_gap"),
     }
     if reuso:
         resultado["reuse"] = reuso

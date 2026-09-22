@@ -6,13 +6,21 @@ importa: **quantos tokens custou cada READY**. Para isso e preciso cruzar:
 
 * o que o pipeline produziu (``apply_ready``, ``apply_blocked``, bytes de
   contexto por comando e por post) — o ledger do proprio repo; e
-* o que a SESSAO do Hermes gastou (requests, tokens de entrada/saida, custo) —
-  ``state.db``, lido em modo somente-leitura.
+* o que a SESSAO do Hermes gastou (requests, tokens, custo) — ``state.db``, lido
+  em modo somente-leitura.
 
-O resultado sao as metricas centrais de economia, comparaveis entre mudancas de
-configuracao: ``tokens_per_ready``, ``tokens_per_post_touched``,
-``requests_per_ready`` e ``tool_context_bytes_per_ready``. Sem elas, "75
-milhoes de tokens" nao aponta o culpado.
+Nomes precisos importam aqui. O Hermes cobra/relê, a cada request,
+``input + cache_read + cache_write`` (tudo isso e contexto de PROMPT). Chamar
+isso de "tokens" esconderia que o volume e de contexto relido, nao de tokens
+novos; e omitir ``cache_write`` subestimaria o total. Por isso o KPI sai como:
+
+* ``prompt_tokens_per_ready`` — input + cache_read + cache_write (contexto lido);
+* ``output_tokens_per_ready`` — tokens gerados;
+* ``total_model_tokens_per_ready`` — prompt + output + reasoning.
+
+E o KPI oficial usa APENAS a fatia do cron editorial (``run_source=cron`` +
+id do job): execucao manual/verificacao entra no balanco por origem, separada,
+para nao contaminar o before/after.
 """
 
 from __future__ import annotations
@@ -36,9 +44,10 @@ def _hermes_totals(
 ) -> dict[str, Any] | None:
     """Soma de requests/tokens/custo das sessoes da janela (fail-soft).
 
-    Atribuicao EXATA por id de job quando o banco expoe a coluna; senao, por
-    diretorio do projeto. Sem atribuicao segura devolve ``None`` — reportar
-    ``$0.000``/``0 requests`` de uma medicao ambigua seria pior que nao medir.
+    Atribuicao EXATA por id de job quando o banco expoe a coluna; senao, pelo
+    prefixo do id da sessao (``cron_<job_id>_...``); senao, por diretorio do
+    projeto. Sem atribuicao segura devolve ``None`` — reportar ``$0.000``/
+    ``0 requests`` de uma medicao ambigua seria pior que nao medir.
     """
     if not state_db.is_file():
         return None
@@ -80,6 +89,8 @@ def _hermes_totals(
             f"{_soma('input_tokens')}, "
             f"{_soma('output_tokens')}, "
             f"{_soma('cache_read_tokens')}, "
+            f"{_soma('cache_write_tokens')}, "
+            f"{_soma('reasoning_tokens')}, "
             f"{_soma('estimated_cost_usd')}, "
             f"{_soma('tool_call_count')} "
             "FROM sessions WHERE " + " AND ".join(where),
@@ -88,14 +99,23 @@ def _hermes_totals(
         db.close()
     except sqlite3.Error:
         return None
+    entrada = int(row[2] or 0)
+    cache_read = int(row[4] or 0)
+    cache_write = int(row[5] or 0)
+    saida = int(row[3] or 0)
+    reasoning = int(row[6] or 0)
     return {
         "sessions": int(row[0] or 0),
         "requests": int(row[1] or 0),
-        "input_tokens": int(row[2] or 0),
-        "output_tokens": int(row[3] or 0),
-        "cache_read_tokens": int(row[4] or 0),
-        "cost_usd": round(float(row[5] or 0), 6),
-        "tool_calls": int(row[6] or 0),
+        "input_tokens": entrada,
+        "output_tokens": saida,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "reasoning_tokens": reasoning,
+        "prompt_tokens": entrada + cache_read + cache_write,
+        "total_model_tokens": entrada + cache_read + cache_write + saida + reasoning,
+        "cost_usd": round(float(row[7] or 0), 6),
+        "tool_calls": int(row[8] or 0),
         "scope": scope,
     }
 
@@ -111,6 +131,43 @@ def _ratio(numerador: float | None, denominador: int | None) -> float | None:
     return round(float(numerador) / denominador, 2)
 
 
+def _per_ready(
+    hermes: dict[str, Any] | None, *,
+    ready: int,
+    tocados: int,
+    bytes_contexto: int,
+    media_economy: dict[str, Any],
+) -> dict[str, Any]:
+    """KPIs na unidade POR READY (o volume/tipo de posts da janela varia)."""
+    prompt = hermes["prompt_tokens"] if hermes else None
+    saida = hermes["output_tokens"] if hermes else None
+    total = hermes["total_model_tokens"] if hermes else None
+    requests = hermes["requests"] if hermes else None
+    gasto = hermes["cost_usd"] if hermes else None
+    return {
+        # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: mede o
+        # que o pipeline DEVOLVEU ao modelo (nao o tamanho dos arquivos de
+        # auditoria, que ficam em disco).
+        "tool_context_bytes_per_ready": _ratio(bytes_contexto, ready),
+        "tool_context_bytes_per_post_touched": _ratio(bytes_contexto, tocados),
+        "prompt_tokens_per_ready": _ratio(prompt, ready),
+        "prompt_tokens_per_post_touched": _ratio(prompt, tocados),
+        "output_tokens_per_ready": _ratio(saida, ready),
+        "total_model_tokens_per_ready": _ratio(total, ready),
+        "requests_per_ready": _ratio(requests, ready),
+        "requests_per_post_touched": _ratio(requests, tocados),
+        "cost_per_ready_usd": (
+            round(gasto / ready, 6) if gasto is not None and ready else None
+        ),
+        # Midia, mesma unidade: quantas buscas web, chamadas reais de visao e
+        # candidatos examinados cada post pronto custou; e quanto veio do acervo.
+        "local_reuse_rate": media_economy.get("local_reuse_rate"),
+        "web_searches_per_ready": _ratio(media_economy.get("searches_with_web"), ready),
+        "vision_calls_per_ready": _ratio(media_economy.get("vision_calls"), ready),
+        "candidates_examined_per_ready": _ratio(media_economy.get("examined_total"), ready),
+    }
+
+
 def session_metrics(
     root: str | Path,
     *,
@@ -119,30 +176,46 @@ def session_metrics(
     project_root: str = "",
     hours: int = 24,
 ) -> dict[str, Any]:
-    """Metricas centrais de custo por post/por sessao."""
-    resumo = read_telemetry_summary(root, hours=int(hours))
+    """Metricas centrais de custo por post/por sessao (fatia oficial = cron)."""
+    # KPI oficial: SOMENTE a fatia do cron editorial. A fatia manual/teste fica
+    # no balanco por origem — sem essa separacao, o trabalho de quem investiga o
+    # problema entrava no baseline e o before/after ficava invalido.
+    resumo = read_telemetry_summary(
+        root, hours=int(hours), run_source="cron",
+        cron_job_id=job_id if job_id else None,
+    )
+    completo = read_telemetry_summary(root, hours=int(hours))
     producao = resumo.get("production") or {}
     ready = int(producao.get("unique_ready_posts") or 0)
     tocados = int(producao.get("unique_touched_posts") or 0)
     bytes_contexto = int(resumo.get("context_bytes_total") or 0)
-    banco = Path(
-        state_db
-        or Path.home() / ".hermes" / "state.db"
-    )
+    banco = Path(state_db or Path.home() / ".hermes" / "state.db")
     hermes = _hermes_totals(
         banco, hours=max(1, int(hours)), job_id=job_id, project_root=project_root
     )
-    entradas: float | None = None
-    gasto: float | None = None
-    requests: int | None = None
-    if hermes:
-        # O custo de contexto esta no que o modelo RELÊ a cada request: entrada
-        # nova + cache leitura. Somar os dois e a medida honesta do volume.
-        entradas = int(hermes["input_tokens"]) + int(hermes["cache_read_tokens"])
-        gasto = float(hermes["cost_usd"])
-        requests = int(hermes["requests"])
+    media_economy = resumo.get("media_economy") or {}
+    origens = completo.get("run_sources") or {}
+    nota = (
+        "KPI oficial: somente eventos do cron editorial. Execucao manual/"
+        "verificacao aparece em run_sources, fora do baseline."
+    )
+    if not sum((resumo.get("counts") or {}).values()) and origens.get("unknown"):
+        # Eventos gravados ANTES da instrumentacao de origem não podem ser
+        # atribuídos: em vez de mostrar zero (que parece "custo zero"), diga o
+        # que aconteceu e quando a fatia oficial passa a encher.
+        nota += (
+            " ATENCAO: a fatia oficial esta vazia porque os eventos da janela sao"
+            " anteriores a instrumentacao de origem (run_sources.unknown); ela"
+            " passa a medir a partir da proxima execucao do cron."
+        )
     return {
         "window_hours": int(hours),
+        "official_slice": {
+            "run_source": "cron",
+            "cron_job_id": job_id or "",
+            "telemetry_events": int(sum((resumo.get("counts") or {}).values())),
+            "note": nota,
+        },
         "telemetry": {
             "ready": ready,
             "posts_touched": tocados,
@@ -150,35 +223,24 @@ def session_metrics(
             "context_bytes_by_command": resumo.get("context_bytes_by_command") or {},
             "context_bytes_by_post": resumo.get("context_bytes_by_post") or {},
             "post_context_detail": resumo.get("post_context_detail") or {},
-            "media_economy": resumo.get("media_economy") or {},
+            "media_economy": media_economy,
+            "decision_quality": resumo.get("decision_quality") or {},
+        },
+        # Todas as origens (cron + manual + teste): mostra a contaminacao em vez
+        # de esconde-la.
+        "run_sources": completo.get("run_sources") or {},
+        "all_sources": {
+            "context_bytes_total": int(completo.get("context_bytes_total") or 0),
+            "ready": int((completo.get("production") or {}).get("unique_ready_posts") or 0),
         },
         "hermes_sessions": hermes,
-        "derived": {
-            # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: ela
-            # mede o que o pipeline DEVOLVEU ao modelo (nao o tamanho dos
-            # arquivos de auditoria, que ficam em disco).
-            "tokens_per_ready": _ratio(entradas, ready),
-            "tokens_per_post_touched": _ratio(entradas, tocados),
-            "requests_per_ready": _ratio(requests, ready),
-            "requests_per_post_touched": _ratio(requests, tocados),
-            "tool_context_bytes_per_ready": _ratio(bytes_contexto, ready),
-            "tool_context_bytes_per_post_touched": _ratio(bytes_contexto, tocados),
-            "cost_per_ready_usd": (
-                round(gasto / ready, 6) if gasto is not None and ready else None
-            ),
-            # Midia (unidade por READY) — compara antes/depois sem depender do
-            # volume/tipo de posts da janela.
-            "local_reuse_rate": (resumo.get("media_economy") or {}).get("local_reuse_rate"),
-            "web_searches_per_ready": _ratio(
-                (resumo.get("media_economy") or {}).get("searches_with_web"), ready
-            ),
-            "vision_calls_per_ready": _ratio(
-                (resumo.get("media_economy") or {}).get("vision_calls"), ready
-            ),
-            "candidates_examined_per_ready": _ratio(
-                (resumo.get("media_economy") or {}).get("examined_total"), ready
-            ),
-        },
+        "derived": _per_ready(
+            hermes,
+            ready=ready,
+            tocados=tocados,
+            bytes_contexto=bytes_contexto,
+            media_economy=media_economy,
+        ),
     }
 
 

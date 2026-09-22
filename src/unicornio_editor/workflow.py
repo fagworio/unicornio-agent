@@ -425,6 +425,7 @@ def _apply_editorial_unlocked(
                 root, "apply_blocked",
                 post_id=post_id,
                 attempts=backoff["attempts"],
+                **_decision_fields(root, post_id),
                 reason=", ".join(item["name"] for item in failed_items),
                 missing_images=images_summary.get("missing", 0),
                 valid_images=images_summary.get("valid", 0),
@@ -516,6 +517,7 @@ def _apply_editorial_unlocked(
         "apply_ready",
         post_id=post_id,
         attempts=attempts_before + 1,
+        **_decision_fields(root, post_id),
         first_pass=attempts_before == 0,
         duration_ms=round((time.monotonic() - started_at) * 1000),
     )
@@ -2988,6 +2990,29 @@ def _original_link(post: dict[str, Any]) -> str | None:
         return None
     value = meta.get("original_link")
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _decision_fields(root: Path, post_id: int | None) -> dict[str, Any]:
+    """Decisão de mídia do post para os eventos de resultado (auto/choose/reuse).
+
+    É o que permite CRUZAR economia com qualidade: `apply_ready`/`apply_blocked`
+    carregam a decisão que escolheu as imagens, então a telemetria mostra se os
+    casos `auto` (sem julgamento do agente) bloqueiam mais ou menos que `choose`.
+    """
+    if not post_id:
+        return {}
+    try:
+        from .observability import read_media_decision
+
+        decisao = read_media_decision(root, post_id)
+    except Exception:  # noqa: BLE001 - telemetria nunca quebra o apply
+        return {}
+    campos: dict[str, Any] = {}
+    if decisao.get("decision"):
+        campos["decision"] = str(decisao["decision"])
+    if decisao.get("score_gap") is not None:
+        campos["score_gap"] = decisao["score_gap"]
+    return campos
 
 
 def load_draft(root: Path, post_id: int) -> dict[str, Any]:

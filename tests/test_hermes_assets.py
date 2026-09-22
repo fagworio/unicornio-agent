@@ -72,16 +72,35 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("session_budget_exhausted", content)
         self.assertIn("NUNCA simplifique o checklist", content)
         self.assertIn("telemetry --sessions", content)
+        self.assertIn("content_not_required", content)
 
     def test_cost_guard_also_guards_context_volume(self):
         # Dolar nao percebe regressao de contexto: o guard tambem mede requests,
-        # input_tokens e os bytes devolvidos ao modelo.
+        # PROMPT tokens (input + cache_read + cache_write) e os bytes devolvidos
+        # ao modelo.
         content = (ROOT / "hermes" / "cost_guard.py").read_text()
         self.assertIn("--limit-requests", content)
-        self.assertIn("--limit-input-tokens", content)
+        self.assertIn("--limit-prompt-tokens", content)
+        self.assertIn("--limit-input-tokens", content)  # alias deprecated
         self.assertIn("--limit-context-bytes", content)
+        self.assertIn("prompt_tokens", content)
         monitor = (ROOT / "hermes" / "monitor.sh").read_text()
         self.assertIn("HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT", monitor)
+        self.assertIn("HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT", monitor)
+
+    def test_monitor_freezes_the_signature_when_the_budget_blocks(self):
+        # O Hermes hasheia a saida: imprimir "BUDGET_EXHAUSTED {json}" no bloqueio
+        # seria uma MUDANCA de hash e acordaria o LLM justamente no freio.
+        content = (ROOT / "hermes" / "monitor.sh").read_text()
+        self.assertIn("monitor_effective_output", content)
+        self.assertIn("emitir_assinatura_congelada", content)
+        self.assertIn("monitor-budget.log", content)
+        self.assertNotIn("BUDGET_EXHAUSTED ", content)
+
+    def test_env_example_documents_the_new_windows(self):
+        content = (ROOT / ".env.example").read_text()
+        self.assertIn("HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT", content)
+        self.assertIn("EDITOR_AUTO_SCORE_MARGIN", content)
 
     def test_monitor_template_is_valid_shell(self):
         script = ROOT / "hermes" / "monitor.sh"

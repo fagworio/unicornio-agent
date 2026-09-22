@@ -24,13 +24,19 @@ cron, senão a execução seguinte herda o teto esgotado),
   Expira sozinho por inatividade — a execução seguinte do cron começa limpa.
   Só comandos do agente editorial alimentam o ledger: `publish`/`publish-ready`
   rodam em outro cron no mesmo diretório e não podem estender esta janela.
+  O arquivo é protegido por `flock` (leitura → incremento → escrita atômicos) e
+  a vaga é reservada com `claim_touch` — concorrência não estoura o teto.
 - `cards --compact` traz `session{target_ready, ready, max_posts_touched,
   remaining_posts, context_bytes_used, context_bytes_budget}` e corta o lote ao
-  que ainda cabe. Com `remaining_posts: 0` (ou `stop` preenchido) a sessão acabou.
+  que ainda cabe. **HARD STOP**: com o orçamento de contexto estourado (ou o teto
+  esgotado) o comando devolve `count: 0`, `cards: []` e `stop` ANTES de montar
+  qualquer card — a sessão não "gasta só mais um pouquinho".
 - `apply` de um post NOVO acima do teto devolve
   `status: session_budget_exhausted`, `wordpress_changed: false` e NÃO escreve
   nada (nenhum estado/attempt é consumido; o post fica para a próxima janela).
-- Reaplicar um post JÁ tocado é sempre permitido (é o mesmo post).
+- Política explícita do orçamento estourado: **nenhum post novo**; o `apply`
+  final de um post JÁ iniciado ainda é permitido (para não jogar fora o trabalho
+  feito) e, depois dele, o `cards` seguinte já devolve o `stop`.
 - O checklist NUNCA é simplificado para caber no orçamento: encerre a sessão.
 
 ## 2. `media-search-web` (compacto por padrão) e busca ADAPTATIVA
@@ -119,22 +125,32 @@ stdout pequeno orientado à próxima ação:
 - `unicornio-editor telemetry` → `context_bytes_by_command`, `by_post`,
   `post_context_detail`, `context_bytes_per_ready`, produção (READY, tocados).
 - `unicornio-editor telemetry --sessions` cruza o ledger com o `state.db` do
-  Hermes e devolve `tokens_per_ready`, `tokens_per_post_touched`,
-  `requests_per_ready`, `tool_context_bytes_per_ready` e `cost_per_ready_usd`.
-  É a medida para comparar antes/depois de cada mudança — a unidade é POR READY
+  Hermes. Nomes precisos (o Hermes relê `input + cache_read + cache_write` a cada
+  request): `prompt_tokens_per_ready`, `output_tokens_per_ready`,
+  `total_model_tokens_per_ready`, `requests_per_ready`,
+  `tool_context_bytes_per_ready` e `cost_per_ready_usd`. A unidade é POR READY
   (o volume/tipo de posts da janela varia, o custo por post pronto não).
+- **O KPI oficial usa SOMENTE a fatia do cron** (`official_slice`:
+  `run_source=cron` + id do job). Cada evento carrega `run_source`/`session_id`/
+  `cron_job_id` (derivados do `HERMES_SESSION_ID`: `cron_<job>_...` = cron);
+  execução manual/verificação aparece em `run_sources`, fora do baseline — antes
+  ela contaminava o before/after.
 - **`tool_context_bytes_per_ready` é a métrica PRINCIPAL de contexto**: ela mede
   o que o pipeline DEVOLVEU ao modelo, não o tamanho dos arquivos de auditoria
   (que ficam em disco e não entram na conversa).
 - Mídia (mesma janela, mesma unidade): `local_reuse_rate` (reuso/necessidade),
   `web_searches_per_ready`, `vision_calls_per_ready`,
   `candidates_examined_per_ready`. `vision_calls` conta CHAMADAS REAIS de visão
-  (cache e bypass determinístico não contam) — é assim que se verifica se a
-  economia de julgamento não virou custo escondido.
-- `media_economy` no resumo separa `deferred_total` de `rejected_total`:
-  candidato dispensado porque a capacidade já estava atendida NÃO é rejeição
-  (nada foi verificado contra ele). Somar os dois faria a busca parecer pior
-  justamente quando ficou mais eficiente.
+  (cache e bypass determinístico não contam).
+- **Qualidade por decisão** (`decision_quality`): a decisão de mídia fica no
+  ledger `work/media_decisions.json` e os gates seguintes carregam essa decisão
+  nos eventos, então dá para comparar `auto` x `choose` x `reuse` em
+  `validate_rejected_items_per_event`, `validate_posts_with_rejection_rate`,
+  `media_block_rate` e `first_pass_ready_rate`. É a prova de que a economia de
+  julgamento não piorou a imagem escolhida.
+- `EDITOR_AUTO_SCORE_MARGIN` (default 2) é a margem de `evidence_score` para o
+  `auto`: **hipótese de calibração**, não fato. Se os casos `auto` passarem a ser
+  rejeitados depois, suba a margem (ou exija `len(fortes) == 1`).
 - Cada busca grava `media_search_result` (needed, reuse, strong, ambiguous,
   accepted, rejected, deferred, examined, engines_queried, decision,
   decision_reason) e o artefato `work/search/*.json` guarda a decisão com RAZÃO

@@ -17,6 +17,7 @@ Cobrem exatamente os cenários pedidos na revisão:
 import argparse
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -29,6 +30,16 @@ from unicornio_editor import session_budget
 from unicornio_editor.config import Config
 from unicornio_editor.observability import append_telemetry, read_telemetry_summary
 from unicornio_editor.session_metrics import session_metrics
+
+CRON_ENV = {"UNICORNIO_RUN_SOURCE": "cron",
+            "HERMES_SESSION_ID": "cron_editorial_20260922_090923"}
+
+
+class OrigemCronMixin:
+    def setUp(self):
+        self._origem = mock.patch.dict(os.environ, CRON_ENV, clear=False)
+        self._origem.start()
+        self.addCleanup(self._origem.stop)
 
 
 def _config(**overrides):
@@ -136,7 +147,7 @@ class SessionCapConcurrencyTests(unittest.TestCase):
             self.assertEqual(sorted(tocados), [400, 401, 402, 403, 404, 405])
 
 
-class MediaFlowRegressionTests(unittest.TestCase):
+class MediaFlowRegressionTests(OrigemCronMixin, unittest.TestCase):
     """reuse/auto/choose e a separação entre deferido e rejeitado."""
 
     @staticmethod
@@ -338,7 +349,7 @@ class ContentGuardTests(unittest.TestCase):
         self.assertTrue(conteudo.called)
 
 
-class ReadyMetricsWindowTests(unittest.TestCase):
+class ReadyMetricsWindowTests(OrigemCronMixin, unittest.TestCase):
     """A janela do telemetry precisa bater com a janela do gasto (state.db)."""
 
     def test_media_metrics_use_the_same_window_as_production(self):
