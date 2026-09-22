@@ -13,9 +13,27 @@ GOOD = """
 
 
 class ListQualityTests(unittest.TestCase):
-    def test_detects_promised_count(self):
-        self.assertEqual(detect_list_format("10 animes para assistir se você ama Frieren"), 10)
-        self.assertIsNone(detect_list_format("Bailarina ganha novo trailer"))
+    def test_numero_no_titulo_e_promessa_e_nao_prova(self):
+        """Bug do "N itens": o numero no titulo, sozinho, NAO faz listicle.
+
+        Sem H2 realmente numerados o post segue a politica 2/4/6 — antes o
+        titulo decidia sozinho e "40 jogos retrô e música" exigia 40 imagens
+        (post travado para sempre, mesmo sendo um evento).
+        """
+        self.assertIsNone(
+            detect_list_format("10 animes para assistir se você ama Frieren", "<p>texto</p>")
+        )
+        self.assertIsNone(
+            detect_list_format(
+                "Nostalgia Sem Wifi Festival no Parque das Árvores: 40 jogos retrô e música",
+                "<p>evento</p>",
+            )
+        )
+        self.assertIsNone(detect_list_format("Bailarina ganha novo trailer", ""))
+        # Com a estrutura presente, a contagem prometida continua valendo.
+        com_h2 = "<h2>1. Bleach: a saga</h2><h2>2. Pluto: o robô</h2>"
+        self.assertEqual(detect_list_format("10 animes para assistir", com_h2), 10)
+        self.assertEqual(detect_list_format("Os melhores jogos", com_h2), 2)
 
     def test_accepts_consistent_descending_list(self):
         report = validate_list_content("2 animes para assistir se você ama Frieren", GOOD)
@@ -46,14 +64,20 @@ class ListQualityTests(unittest.TestCase):
         report = validate_list_content("2 animes para assistir se você ama Frieren", html)
         self.assertTrue(report["passed"])
 
-    def test_rejects_unnumbered_h2_even_without_images(self):
+    def test_h2_sem_numeracao_nao_e_listicle(self):
+        """H2 sem numeração = artigo normal: não há contrato de lista a violar.
+
+        Antes o título ("2 animes") bastava para declarar lista e este HTML era
+        rejeitado; agora a ausência de H2 numerados o devolve à política 2/4/6.
+        """
         html = (
             "<p>Intro.</p>"
             "<h2>Tokyo Ghoul</h2>"
             "<p>Descrição do item.</p>"
         )
-        with self.assertRaises(ListContentError):
-            validate_list_content("2 animes para assistir se você ama Frieren", html)
+        report = validate_list_content("2 animes para assistir se você ama Frieren", html)
+        self.assertFalse(report["is_list"])
+        self.assertTrue(report["passed"])
 
 
 if __name__ == "__main__":

@@ -64,21 +64,29 @@ class _BlockParser(HTMLParser):
 
 
 def detect_list_format(title: str, html: str = "") -> int | None:
-    """Return the promised item count, or None when the article is not a list."""
-    # Numero + termo de lista juntos no titulo (ex.: "10 animes").
+    """Return the promised item count, or None when the article is not a list.
+
+    O numero no titulo e uma PROMESSA, nunca a prova. "Nostalgia Sem Wifi
+    Festival: 40 jogos retrô e música" e um EVENTO que oferece 40 jogos, nao um
+    listicle de 40 itens e descricoes — e a regra antiga (numero do titulo
+    decide sozinho) exigia 40 IMAGENS para um artigo normal, travando o post
+    para sempre. "10 animes para ficar de olho" tinha o mesmo destino.
+
+    A prova estrutural e a mesma adotada no post_subjects(): H2 REALMENTE
+    numerados (2+). Sem essa estrutura o post segue a politica 2/4/6.
+    """
+    numerados = re.findall(r"<h2[^>]*>\s*(\d{1,3})\s*[.)-]", html or "", re.IGNORECASE)
+    if len(numerados) < 2:
+        return None  # sem estrutura de lista: o titulo nao decide
+    # Com a estrutura presente, a contagem vem do TITULO quando ele promete —
+    # a conferencia prometido x realizado continua no validate_list_content.
     match = _COUNT_WITH_TERM.search(title or "")
     if match:
         return int(match.group(1))
-    # "Top N" (Top 10, Top 27...).
     top_match = re.search(r"\btop\s+(\d{1,3})\b", title or "", re.IGNORECASE)
     if top_match:
         return int(top_match.group(1))
-    # H2 numerados no HTML indicam lista.
-    if re.search(r"<h2[^>]*>\s*\d+\s*[.)-]", html or "", re.I):
-        any_num = re.search(r"\b(\d{1,3})\b", title or "")
-        if any_num:
-            return int(any_num.group(1))
-    return None
+    return max(int(n) for n in numerados)
 
 
 def validate_list_content(title: str, html: str) -> dict[str, int | bool]:
