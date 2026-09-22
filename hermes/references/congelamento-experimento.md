@@ -10,7 +10,7 @@ experimento que acabou de ser instrumentado.
 | Campo | Valor |
 |---|---|
 | SHA do CÓDIGO congelado | `cfa83758015a42c3b84ba79497f63ee9a5b4c1df` |
-| Commit do registro (docs-only) | `dffe3eecdf963eebb504401cc03a581d53c8762a` (só acrescenta este documento; o tree de código é o de cfa8375) |
+| Commit do registro (docs-only) | começa em `dffe3eecdf963eebb504401cc03a581d53c8762a`; commits posteriores só editam este documento — o tree de CÓDIGO congelado continua sendo o de `cfa8375` |
 | Início da coleta (UTC) | 2026-09-22T15:54:51Z |
 | Job do cron | `9e39343dc6f5` (job "UnicornioHater editorial pending", intervalo 120 min) |
 | Primeira sessão cron válida | **pendente** — será a primeira sessão `cron_9e39343dc6f5_*` posterior a este marco que gere eventos com `run_source=cron`. Preencher aqui quando existir. |
