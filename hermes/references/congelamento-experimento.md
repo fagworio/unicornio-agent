@@ -9,12 +9,24 @@ experimento que acabou de ser instrumentado.
 
 | Campo | Valor |
 |---|---|
-| SHA congelado (`main`) | `cfa83758015a42c3b84ba79497f63ee9a5b4c1df` |
+| SHA do CÓDIGO congelado | `cfa83758015a42c3b84ba79497f63ee9a5b4c1df` |
+| Commit do registro (docs-only) | `dffe3eecdf963eebb504401cc03a581d53c8762a` (só acrescenta este documento; o tree de código é o de cfa8375) |
 | Início da coleta (UTC) | 2026-09-22T15:54:51Z |
 | Job do cron | `9e39343dc6f5` (job "UnicornioHater editorial pending", intervalo 120 min) |
 | Primeira sessão cron válida | **pendente** — será a primeira sessão `cron_9e39343dc6f5_*` posterior a este marco que gere eventos com `run_source=cron`. Preencher aqui quando existir. |
 | Atribuição esperada do KPI | `join_sessions` (exige correspondência COMPLETA das sessões; parcial cai em `window_job`, marcado) |
 | Estado da fatia oficial no marco | 0 eventos atribuíveis (os anteriores não têm `run_source` e são contados como `unknown`) |
+| CI verde do código congelado | run `35750568269` (dffe3ee) — 590 testes, compileall, SECRET_SCAN_PASSED, whitespace |
+
+Nota de CI (para não gerar falso alarme): o run do próprio `cfa8375`
+(`35750503497`) aparece FALHO no step "Check whitespace", mas por artefato de
+publicação, não por conteúdo — aquele commit foi publicado com `--force-with-lease`
+(amend de mensagem) e o step roda `git diff --check "$BEFORE_SHA...$HEAD_SHA"`,
+onde o before-SHA deixa de existir no clone. O range equivalente
+(`git diff --check 1da93c3...cfa8375`) passa limpo, e o run do commit seguinte com
+o MESMO código passou em todos os steps. PITFALL do repo: não usar force-push/amend
+em `main`; se usar, revalidar com `git diff --check <base>...HEAD` e considerar o
+run do commit seguinte como o válido.
 
 ## Parâmetros em vigor no marco
 
