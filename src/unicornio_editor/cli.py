@@ -19,6 +19,7 @@ from .config import ConfigError, load_config
 from .editorial_schema import validate_editorial
 from .maintenance import generate_report
 from .workflow import (
+    WorkflowError,
     apply_editorial,
     attach_trailer_audit,
     build_cards,
@@ -304,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     content_parser.add_argument("post_id", type=int)
     content_parser.add_argument("--root", type=Path, default=Path("."))
+    content_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="le o corpo mesmo quando o fix do card nao pede reescrita (use SO "
+        "quando voce DECIDIR reescrever o texto)",
+    )
 
     media_validate_parser = subparsers.add_parser(
         "media-validate",
@@ -655,7 +662,7 @@ def _enriquecer_candidatos(
     root=None,
     capacity: int | None = None,
     enriched_cache: dict | None = None,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
     Usado pelo ``media-search-web`` (artigo: subject = entidade principal do
@@ -666,6 +673,12 @@ def _enriquecer_candidatos(
     Só ``deterministic_match`` e ``ambiguous`` são aprovados; qualquer veredito
     de gate (``unresolved_source``/``source_mismatch``/``duplicate_frame``) ou
     relevância < 4 vai para rejeitados com o motivo.
+
+    Devolve ``(aprovados, rejeitados, deferidos)``. ``deferidos`` são os
+    candidatos que a capacidade já atendida dispensou de investigar: NÃO são
+    rejeições (nada foi verificado contra eles) e por isso têm contagem própria —
+    misturá-los com os rejeitados faria a busca parecer pior justamente quando
+    ficou mais eficiente.
 
     Dois parâmetros de ECONOMIA (P1 da auditoria de contexto), ambos sem
     afrouxar nenhum gate:
@@ -690,6 +703,7 @@ def _enriquecer_candidatos(
     cache_memo = enriched_cache if enriched_cache is not None else {}
     aprovados: list[dict] = []
     rejeitados: list[dict] = []
+    deferidos: list[dict] = []
     cache_paginas: dict = {}
     cache_html: dict = {}
 
@@ -777,6 +791,10 @@ def _enriquecer_candidatos(
     for cand in pendentes:
         cand["subject"] = subject
         if cand.get("capacity_deferred"):
+            # NÃO é rejeição: nada foi verificado contra este candidato, ele
+            # apenas deixou de ser necessário. Contagem própria (deferidos) para
+            # a telemetria distinguir "já tínhamos material suficiente" de
+            # "investigado e rejeitado".
             cand["evidence"] = {
                 "subject": subject, "score": 0, "verdict": "capacity_met",
                 "gate": "capacity", "matched": [], "needs_vision": False,
@@ -784,7 +802,7 @@ def _enriquecer_candidatos(
             }
             cand["evidence_score"] = 0
             cand["needs_vision"] = False
-            rejeitados.append(cand)
+            deferidos.append(cand)
             _guardar_memo(cand)
             continue
         if not cand.get("usable"):
@@ -847,7 +865,7 @@ def _enriquecer_candidatos(
             continue
         verdict = str((cand.get("evidence") or {}).get("verdict") or "")
         if cand.get("capacity_deferred"):
-            rejeitados.append(cand)
+            deferidos.append(cand)
         elif verdict in ("deterministic_match", "ambiguous"):
             aprovados.append(cand)
         else:
@@ -901,20 +919,28 @@ def _enriquecer_candidatos(
             for cand in aprovados + rejeitados:
                 eng = str(cand.get("engine") or "unknown")
                 linha = funil.setdefault(
-                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0}
+                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0,
+                          "deferred": 0},
                 )
                 linha["discovered"] += 1
                 if cand.get("valid"):
                     linha["verified"] += 1
                 if (cand.get("evidence") or {}).get("verdict") == "deterministic_match":
                     linha["subject_match"] += 1
+            for cand in deferidos:
+                # Não investigado != reprovado: o funil conta em campo próprio.
+                eng = str(cand.get("engine") or "unknown")
+                funil.setdefault(
+                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0,
+                          "deferred": 0},
+                )["deferred"] += 1
             for cand in aprovados:
                 funil[str(cand.get("engine") or "unknown")]["selected"] += 1
             for eng, linha in funil.items():
                 append_telemetry(root, "media_engine_yield", engine=eng, **linha)
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
             pass
-    return aprovados, rejeitados
+    return aprovados, rejeitados, deferidos
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1126,7 +1152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 custo às custas do gate).
                 """
                 try:
-                    aprovados_lote, _rej = _enriquecer_candidatos(
+                    aprovados_lote, _rej, _def = _enriquecer_candidatos(
                         novos,
                         subject=subject_alvo,
                         termo=args.termo,
@@ -1182,10 +1208,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             aprovados: list[dict] = []
             rejeitados: list[dict] = []
+            deferidos: list[dict] = []
             if candidates:
                 # MESMO enriquecimento do callback, agora reaproveitado pelo memo
                 # (P1): sem ele cada candidato era resolvido/pontuado/hasheado 2x.
-                aprovados, rejeitados = _enriquecer_candidatos(
+                aprovados, rejeitados, deferidos = _enriquecer_candidatos(
                     candidates,
                     subject=subject_alvo,
                     termo=args.termo,
@@ -1200,6 +1227,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                     query=args.termo, rejected=len(rejeitados),
                     approved=len(aprovados),
                 )
+            decisao_auditoria = _media_decision(aprovados)
+            # Economia de mídia medível (P0/P1): quanto veio do acervo local,
+            # quantas buscas web de fato aconteceram, quantos candidatos foram
+            # examinados e quantos foram apenas DISPENSADOS por capacidade
+            # (deferidos != rejeitados).
+            append_telemetry(
+                args.root, "media_search_result",
+                query=args.termo,
+                post_id=post_id_ref or 0,
+                needed=needed,
+                needed_web=needed_web,
+                reuse=len(reuso),
+                strong=sum(
+                    1 for c in aprovados
+                    if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+                ),
+                ambiguous=len(_frames_ambiguos),
+                accepted=len(aprovados),
+                rejected=len(rejeitados),
+                deferred=len(deferidos),
+                examined=len(candidates),
+                engines_queried=len(engines_queried),
+                decision=decisao_auditoria["decision"],
+                decision_reason=str(decisao_auditoria.get("reason") or "")[:200],
+            )
             audit = _write_audit(
                 args.root / "work" / "search" / f"{_audit_key(args.termo, post_id_ref)}.json",
                 {
@@ -1214,6 +1266,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "candidates": aprovados,
                     "rejected": rejeitados,
                     "rejected_count": len(rejeitados),
+                    "deferred": deferidos,
+                    "deferred_count": len(deferidos),
+                    # Decisão + RAZÃO + scores no artefato: é assim que se
+                    # verifica depois se a economia de visão/julgamento reduziu
+                    # a qualidade das imagens escolhidas.
+                    "decision": {
+                        "kind": decisao_auditoria["decision"],
+                        "reason": decisao_auditoria.get("reason"),
+                        "selected": decisao_auditoria.get("select"),
+                        "options": decisao_auditoria.get("options") or [],
+                    },
                 },
             )
             if getattr(args, "compact", True):
@@ -1226,10 +1289,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rejeitados=rejeitados,
                     engines=engines_queried,
                     audit=audit,
-                    # Quantos candidatos ambíguos ficaram disponíveis: é o que
-                    # o `media-validate` vai julgar por visão (o agente não
-                    # precisa estimar isso na mão).
                     ambiguous=len(_frames_ambiguos),
+                    deferred=len(deferidos),
                 )
             else:
                 result = {
@@ -1243,6 +1304,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "candidates": aprovados,
                     "rejected": rejeitados,
                     "rejected_count": len(rejeitados),
+                    "deferred": deferidos,
+                    "deferred_count": len(deferidos),
+                    "decision": {
+                        "kind": decisao_auditoria["decision"],
+                        "reason": decisao_auditoria.get("reason"),
+                        "selected": decisao_auditoria.get("select"),
+                        "options": decisao_auditoria.get("options") or [],
+                    },
                     "audit": audit,
                 }
         elif args.command == "media-search-listicle":
@@ -1271,7 +1340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             def _aceitar_item(novos: list[dict], query: str = "") -> int:
                 item = str(query or "")
                 try:
-                    aprovados_lote, _rej = _enriquecer_candidatos(
+                    aprovados_lote, _rej, _def = _enriquecer_candidatos(
                         novos,
                         subject=str(subject_por_query.get(item) or item),
                         termo=item,
@@ -1298,6 +1367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             items = []
             audit_items: list[dict] = []
             rejeitados_por_query: dict[str, list[dict]] = {}
+            deferidos_por_query: dict[str, list[dict]] = {}
             missing: list[str] = []
             for row in rows:
                 query = str(row["query"])
@@ -1314,11 +1384,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # Uma imagem do item "Pluto" nunca é aceita por evidência do
                     # item "Cyberpunk".
                     subject_item = str(subject_por_query.get(query) or query)
-                    candidates, rejeitados_item = _enriquecer_candidatos(
+                    candidates, rejeitados_item, deferidos_item = _enriquecer_candidatos(
                         candidates, subject=subject_item, termo=query, root=args.root,
                         enriched_cache=_memo_listicle,
                     )
                     rejeitados_por_query[query] = rejeitados_item
+                    deferidos_por_query[query] = deferidos_item
                     for candidate in candidates:
                         direct_url = str(candidate.get("direct_image_url") or "")
                         append_telemetry(
@@ -1326,6 +1397,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                             source_domain=(urlparse(direct_url).hostname or "").lower(),
                             engine=str(candidate.get("engine") or "unknown"), batch=True,
                         )
+                    # Economia de mídia por ITEM do listicle (mesma unidade do
+                    # artigo): examinados, fortes, ambíguos e DISPENSADOS por
+                    # capacidade (deferido != rejeitado). Em lote o número de
+                    # engines é um proxy (1 = o item teve candidato): a contagem
+                    # exata por item não existe no batch.
+                    append_telemetry(
+                        args.root, "media_search_result",
+                        query=query, post_id=0, batch=True,
+                        needed=1, needed_web=1, reuse=0,
+                        strong=sum(
+                            1 for c in candidates
+                            if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+                        ),
+                        ambiguous=sum(
+                            1 for c in candidates
+                            if (c.get("evidence") or {}).get("verdict") == "ambiguous"
+                        ),
+                        accepted=len(candidates),
+                        rejected=len(rejeitados_item),
+                        deferred=len(deferidos_item),
+                        examined=len(candidates),
+                        engines_queried=1 if candidates else 0,
+                        decision="",
+                        decision_reason="",
+                    )
                     if not candidates:
                         missing.append(query)
                 # O browser visual não precisa de thumbnail/size; o JSON
@@ -1333,7 +1429,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # verdict) para o agente escolher sem "adivinhar" relevância.
                 audit_items.append(
                     {"query": query, "candidates": candidates,
-                     "rejected": rejeitados_por_query.get(query, [])}
+                     "rejected": rejeitados_por_query.get(query, []),
+                     "deferred": deferidos_por_query.get(query, [])}
                 )
                 compact = [
                     {
@@ -1367,11 +1464,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for query, rejeitados in rejeitados_por_query.items()
                     if rejeitados
                 },
+                "deferred_summary": {
+                    query: len(deferidos)
+                    for query, deferidos in deferidos_por_query.items()
+                    if deferidos
+                },
                 "audit": audit,
                 "items": items,
             }
         elif args.command == "content":
-            result = get_cleaned_content(client, args.root, args.post_id)
+            # P2 da auditoria de contexto: `requires_content=false` precisa
+            # valer ate o FIM do fluxo, nao so como conselho no card. Se o gate
+            # que bloqueou o post nao pediu reescrita (midia/SEO/trailer), o
+            # corpo nao entra na conversa: o comando explica o que fazer em vez
+            # de despejar o artigo. `--force` existe para quando o agente DECIDE
+            # reescrever o texto; post novo (sem gate de rework) segue liberado.
+            componentes = []
+            if not getattr(args, "force", False):
+                componentes = _blocked_components(args.root, args.post_id)
+            if componentes and "text" not in componentes:
+                from .state import read_state
+
+                bloqueado = False
+                try:
+                    bloqueado = read_state(client.get_post(args.post_id))["state"] == STATE_BLOCKED
+                except Exception:  # noqa: BLE001 - sem estado confiavel, nao bloqueia
+                    bloqueado = False
+                if bloqueado:
+                    result = {
+                        "post_id": args.post_id,
+                        "status": "content_not_required",
+                        "component": componentes,
+                        "reason": (
+                            "o fix deste post e "
+                            + ", ".join(componentes)
+                            + ": o corpo do artigo nao e necessario"
+                        ),
+                        "action": (
+                            "use `draft POST_ID --for-fix` e corrija SO o componente "
+                            "(apply ... --merge-draft). Para reescrever o texto de "
+                            "verdade, repita com --force"
+                        ),
+                    }
+                else:
+                    result = get_cleaned_content(client, args.root, args.post_id)
+            else:
+                result = get_cleaned_content(client, args.root, args.post_id)
         elif args.command == "media-validate":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             post_title = ""
@@ -1492,13 +1630,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload, merged_note = _merge_patch_with_draft(
                     args.root, args.post_id, payload
                 )
-            orcamento = session_budget.status(args.root, config)
-            permitido, orcamento = session_budget.touch_allowed(
-                args.root, args.post_id, config
-            )
+            # Reserva ATOMICA da vaga: checar e registrar nao pode ter janela
+            # entre dois processos (cron + manual) — senao os dois passariam pelo
+            # teto. Em dry-run nada e reservado; com o budget de CONTEXTO
+            # estourado um post NOVO nem chega a reservar (a sessao acabou).
+            projecao_antes = session_budget.status(args.root, config)
+            ja_tocado = int(args.post_id) in projecao_antes["posts_touched"]
             motivo = session_budget.stop_reason(args.root, config)
-            novo_post = int(args.post_id) not in orcamento["posts_touched"]
-            if not getattr(args, "dry_run", False) and (not permitido or (motivo and novo_post)):
+            dry = bool(getattr(args, "dry_run", False))
+            if dry:
+                permitido, orcamento = session_budget.touch_allowed(
+                    args.root, args.post_id, config
+                )
+                sem_vaga = not permitido
+            elif motivo and not ja_tocado:
+                permitido, orcamento, sem_vaga = False, projecao_antes, True
+            else:
+                permitido, orcamento = session_budget.claim_touch(
+                    args.root, args.post_id, config
+                )
+                sem_vaga = not permitido
+            if not dry and sem_vaga:
                 # Encerra a sessao ANTES de escrever: o post fica intacto para a
                 # proxima janela (nenhum estado/attempt e consumido, nenhum gate
                 # e afrouxado — o unico efeito e a sessao parar de crescer).
@@ -1518,11 +1670,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = apply_editorial(client, config, args.root, args.post_id, payload)
                 if merged_note:
                     result["merged_from_draft"] = merged_note
-                if not result.get("dry_run"):
-                    session_budget.record_touch(
-                        args.root, args.post_id, config,
-                        ready=result.get("status") == "ready",
-                    )
+                if not result.get("dry_run") and result.get("status") == "ready":
+                    session_budget.record_ready(args.root, config)
                 if args.compact:
                     # Auditoria completa em arquivo; terminal so com o resumo
                     # (success = minimo, failure = so o que corrigir).
@@ -1533,7 +1682,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (ConfigError, WordPressError, OSError, ValueError) as exc:
+    except (ConfigError, WordPressError, WorkflowError, OSError, ValueError) as exc:
+        # WorkflowError incluido de proposito: um traceback Python no contexto do
+        # agente e caro e inutil — o operador (e o LLM) precisam do motivo em
+        # JSON, nao da stack inteira.
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
 
@@ -1587,21 +1739,51 @@ def _media_decision(aprovados: list[dict], *, options: int = 3) -> dict:
     hard gates (``deterministic_match`` sem empate no topo), ele vai sozinho
     para o ``media-validate``. Em caso de empate/ambiguidade, vao 2-3 opcoes
     para julgamento (a visao continua reservada a esses casos).
+
+    A decisao carrega a RAZAO (scores/empate) porque ela e auditavel: e assim
+    que se verifica depois se a economia de julgamento/visao reduziu a qualidade
+    das imagens escolhidas.
     """
     fortes = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"]
     fracos = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") != "deterministic_match"]
-    unico = bool(fortes) and (
-        len(fortes) == 1
-        or int(fortes[0].get("evidence_score") or 0) - int(fortes[1].get("evidence_score") or 0) >= 2
-    )
+    if fortes:
+        nota_topo = int(fortes[0].get("evidence_score") or 0)
+        nota_segundo = int(fortes[1].get("evidence_score") or 0) if len(fortes) > 1 else None
+        unico = len(fortes) == 1 or (nota_topo - (nota_segundo or 0)) >= 2
+    else:
+        nota_topo = nota_segundo = None
+        unico = False
     if unico:
         escolhido = _media_candidate(fortes[0])
-        return {"decision": "auto", "select": escolhido, "options": [escolhido]}
+        if len(fortes) == 1:
+            razao = f"unico candidato forte (score {nota_topo}); hard gates passaram"
+        else:
+            razao = (
+                f"melhor candidato forte isolado (score {nota_topo} vs {nota_segundo}); "
+                "margem >= 2"
+            )
+        return {"decision": "auto", "reason": razao, "select": escolhido, "options": [escolhido]}
     ordenados = (fortes + fracos)[: max(1, options)]
     if not ordenados:
-        return {"decision": "none", "select": None, "options": []}
+        return {
+            "decision": "none",
+            "reason": "nenhum candidato aprovado (todos reprovaram em gate de origem/relevancia)",
+            "select": None,
+            "options": [],
+        }
+    if fortes:
+        razao = (
+            f"empate de candidatos fortes (scores {nota_topo} vs {nota_segundo}): "
+            f"{len(ordenados)} opcoes para julgamento"
+        )
+    else:
+        razao = (
+            f"sem candidato forte; {len(ordenados)} opcao(oes) ambigua(s) "
+            "(visao decide)"
+        )
     return {
         "decision": "choose",
+        "reason": razao,
         "select": None,
         "options": [_media_candidate(c) for c in ordenados],
     }
@@ -1618,12 +1800,16 @@ def _compact_media_search(
     engines: list[str],
     audit: str,
     ambiguous: int = 0,
+    deferred: int = 0,
 ) -> dict:
     """Contrato compacto do ``media-search-web`` (o que o agente pode USAR).
 
     Rejeitados nao vem inteiros: viram ``rejected_summary`` (contagem por
     motivo). O JSON completo (candidatos brutos, evidencia, pHash, flags,
     pagina de origem de cada rejeitado) fica em ``work/search/<chave>.json``.
+
+    ``deferred`` sai em campo PRÓPRIO: candidato que deixou de ser investigado
+    porque a capacidade já estava atendida não é rejeição.
     """
     fortes = sum(
         1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
@@ -1634,7 +1820,15 @@ def _compact_media_search(
         # O acervo local JA cobre o deficit: reusar e mais barato e a imagem ja
         # passou pelos controles (a proveniencia registrada e o gate continuam
         # valendo no apply). As opcoes da web ficam como alternativa.
-        decisao = {"decision": "reuse", "select": None, "options": decisao.get("options") or []}
+        decisao = {
+            "decision": "reuse",
+            "reason": (
+                f"acervo local cobre o deficit ({len(reuso)} reuso(s) para "
+                f"{len(reuso)} de {int(needed)} necessarias); nenhuma busca web necessaria"
+            ),
+            "select": None,
+            "options": decisao.get("options") or [],
+        }
     resultado = {
         "query": query,
         "subject": subject,
@@ -1645,10 +1839,12 @@ def _compact_media_search(
             "strong": fortes,
             "ambiguous": int(ambiguous),
             "accepted": len(aprovados),
+            "deferred": int(deferred),
             "missing": faltam,
         },
         "engines_queried": engines,
         "audit": audit,
+        "decision_reason": decisao.get("reason"),
     }
     if reuso:
         resultado["reuse"] = reuso

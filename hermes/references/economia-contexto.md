@@ -72,7 +72,13 @@ unicornio-editor apply POST_ID patch.json --merge-draft --compact
 - `draft --for-fix` (ou `--component media|seo|text|trailer`) devolve apenas o
   componente que o gate bloqueou (inferido do `editorial.blocked.json`), o
   subject, a featured do plano e o erro. O artigo inteiro fica no arquivo
-  (`full_draft`) — nenhum rework de imagem precisa reenviar texto/SEO.
+  (`full_draft` + `requires_content`) — nenhum rework de imagem precisa reenviar
+  texto/SEO.
+- `requires_content: false` é ENFORÇADO, não aconselhado: com o post BLOCKED num
+  gate de mídia/SEO/trailer, `content POST_ID` devolve
+  `status: content_not_required` (com o componente e o próximo passo) em vez de
+  despejar o corpo. Para reescrever o texto de verdade, repita com `--force`
+  (ou o gate do rework é de texto, ou o post já saiu do estado BLOCKED).
 - `apply --merge-draft` trata o arquivo como PATCH PARCIAL: mescla
   deterministicamente com `editorial.draft.json` (dicionários chave a chave;
   listas substituem). O merge é do CÓDIGO, não do modelo; o resultado auditável
@@ -115,7 +121,24 @@ stdout pequeno orientado à próxima ação:
 - `unicornio-editor telemetry --sessions` cruza o ledger com o `state.db` do
   Hermes e devolve `tokens_per_ready`, `tokens_per_post_touched`,
   `requests_per_ready`, `tool_context_bytes_per_ready` e `cost_per_ready_usd`.
-  É a medida para comparar antes/depois de cada mudança.
+  É a medida para comparar antes/depois de cada mudança — a unidade é POR READY
+  (o volume/tipo de posts da janela varia, o custo por post pronto não).
+- **`tool_context_bytes_per_ready` é a métrica PRINCIPAL de contexto**: ela mede
+  o que o pipeline DEVOLVEU ao modelo, não o tamanho dos arquivos de auditoria
+  (que ficam em disco e não entram na conversa).
+- Mídia (mesma janela, mesma unidade): `local_reuse_rate` (reuso/necessidade),
+  `web_searches_per_ready`, `vision_calls_per_ready`,
+  `candidates_examined_per_ready`. `vision_calls` conta CHAMADAS REAIS de visão
+  (cache e bypass determinístico não contam) — é assim que se verifica se a
+  economia de julgamento não virou custo escondido.
+- `media_economy` no resumo separa `deferred_total` de `rejected_total`:
+  candidato dispensado porque a capacidade já estava atendida NÃO é rejeição
+  (nada foi verificado contra ele). Somar os dois faria a busca parecer pior
+  justamente quando ficou mais eficiente.
+- Cada busca grava `media_search_result` (needed, reuse, strong, ambiguous,
+  accepted, rejected, deferred, examined, engines_queried, decision,
+  decision_reason) e o artefato `work/search/*.json` guarda a decisão com RAZÃO
+  e scores — é o que permite auditar a qualidade das imagens escolhidas.
 - Freios do monitor (`hermes/cost_guard.py`): além de USD, também
   `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,
   `HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT` e

@@ -150,9 +150,13 @@ def session_metrics(
             "context_bytes_by_command": resumo.get("context_bytes_by_command") or {},
             "context_bytes_by_post": resumo.get("context_bytes_by_post") or {},
             "post_context_detail": resumo.get("post_context_detail") or {},
+            "media_economy": resumo.get("media_economy") or {},
         },
         "hermes_sessions": hermes,
         "derived": {
+            # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: ela
+            # mede o que o pipeline DEVOLVEU ao modelo (nao o tamanho dos
+            # arquivos de auditoria, que ficam em disco).
             "tokens_per_ready": _ratio(entradas, ready),
             "tokens_per_post_touched": _ratio(entradas, tocados),
             "requests_per_ready": _ratio(requests, ready),
@@ -161,6 +165,18 @@ def session_metrics(
             "tool_context_bytes_per_post_touched": _ratio(bytes_contexto, tocados),
             "cost_per_ready_usd": (
                 round(gasto / ready, 6) if gasto is not None and ready else None
+            ),
+            # Midia (unidade por READY) — compara antes/depois sem depender do
+            # volume/tipo de posts da janela.
+            "local_reuse_rate": (resumo.get("media_economy") or {}).get("local_reuse_rate"),
+            "web_searches_per_ready": _ratio(
+                (resumo.get("media_economy") or {}).get("searches_with_web"), ready
+            ),
+            "vision_calls_per_ready": _ratio(
+                (resumo.get("media_economy") or {}).get("vision_calls"), ready
+            ),
+            "candidates_examined_per_ready": _ratio(
+                (resumo.get("media_economy") or {}).get("examined_total"), ready
             ),
         },
     }

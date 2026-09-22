@@ -402,7 +402,7 @@ class EnrichmentMemoTests(unittest.TestCase):
             side_effect=lambda aprovados, rejeitados: (aprovados, rejeitados),
         ):
             for _ in range(2):
-                aprovados, rejeitados = cli._enriquecer_candidatos(
+                aprovados, rejeitados, _deferidos = cli._enriquecer_candidatos(
                     [self._candidate("https://a/1.jpg")],
                     subject="Redfall",
                     termo="redfall",
@@ -444,12 +444,15 @@ class EnrichmentMemoTests(unittest.TestCase):
             "unicornio_editor.media.evidence.dedupe_by_phash",
             side_effect=lambda aprovados, rejeitados: (aprovados, rejeitados),
         ):
-            _aprovados, rejeitados = cli._enriquecer_candidatos(
+            _aprovados, rejeitados, deferidos = cli._enriquecer_candidatos(
                 candidatos, subject="Redfall", termo="redfall", capacity=1
             )
         self.assertEqual(resolvidos, ["https://a/1.jpg"])  # o 2º não foi investigado
-        deferidos = [c for c in rejeitados if c.get("capacity_deferred")]
         self.assertEqual(len(deferidos), 1)
+        # O dispensado por capacidade NÃO entra como rejeitado (nada foi
+        # verificado contra ele); o rejeitado que aparece ali é de relevância.
+        self.assertNotIn(deferidos[0], rejeitados)
+        self.assertTrue(all(not c.get("capacity_deferred") for c in rejeitados))
         self.assertEqual(deferidos[0]["evidence"]["verdict"], "capacity_met")
         self.assertFalse(deferidos[0]["evidence"]["needs_vision"])
 

@@ -26,20 +26,64 @@ devolve "sem teto" — isto e orcamento, nunca gate de qualidade.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .config import Config
 
 _ESTADO_RELATIVO = Path("work") / "session_state.json"
+_LOCK_RELATIVO = Path("work") / "session_state.lock"
 
 
 def _caminho(root: Path | str) -> Path:
     return Path(root) / _ESTADO_RELATIVO
+
+
+@contextlib.contextmanager
+def _ledger_lock(root: Path | str) -> Iterator[None]:
+    """Serializa leitura -> incremento -> escrita do ledger entre PROCESSOS.
+
+    O cron editorial, o publish-ready (outro cron) e uma execucao manual podem
+    tocar o mesmo diretorio: sem isto dois processos leem ``touched=1``, ambos
+    gravam ``2`` e um terceiro post entra mesmo com o teto esgotado — exatamente
+    o limite que o hard cap existe para impedir.
+
+    ``flock`` e do SO (nao deixa lock orfao: o kernel libera quando o processo
+    morre) e cobre tambem threads, porque cada ``open`` cria uma descricao de
+    arquivo propria. Em plataforma sem ``fcntl`` o codigo segue sem lock — perder
+    o lock e ruim, mas travar o pipeline por isso e pior (fail-soft).
+    """
+    caminho = Path(root) / _LOCK_RELATIVO
+    handle = None
+    try:
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(caminho, "a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:  # noqa: BLE001 - lock e protecao, nunca gate
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+        handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _agora(now: float | None = None) -> float:
@@ -161,28 +205,61 @@ def touch_allowed(
     return False, projecao
 
 
+def claim_touch(
+    root: Path | str, post_id: int, config: Config, *, now: float | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Reserva a vaga da sessao de forma ATOMICA (checa E registra).
+
+    ``touch_allowed`` seguido de ``record_touch`` tem uma janela entre a checagem
+    e a gravacao: dois processos poderiam passar pelo teto ao mesmo tempo. Como o
+    apply chama isto ANTES de escrever, a reserva e o proprio consumo da vaga —
+    "post tocado" e o trabalho gasto nele, tenha o resultado sido READY ou nao.
+    """
+    with _ledger_lock(root):
+        projecao = status(root, config, now=now)
+        ja_tocado = int(post_id) in projecao["posts_touched"]
+        if cap_ativo(config) and not ja_tocado and not projecao["remaining_posts"]:
+            return False, projecao
+        dados = load_session(root, config, now=now)
+        if not ja_tocado:
+            dados["posts_touched"].append(int(post_id))
+            _salvar(root, dados, now=now)
+        return True, status(root, config, now=now)
+
+
+def record_ready(root: Path | str, config: Config, *, now: float | None = None) -> dict[str, Any]:
+    """Conta um desfecho READY da sessao (progresso contra a meta)."""
+    with _ledger_lock(root):
+        dados = load_session(root, config, now=now)
+        dados["ready"] = int(dados["ready"]) + 1
+        _salvar(root, dados, now=now)
+    return status(root, config, now=now)
+
+
 def record_touch(
     root: Path | str, post_id: int, config: Config, *, ready: bool = False,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Registra que a sessao gastou trabalho real neste post."""
-    dados = load_session(root, config, now=now)
-    if int(post_id) not in dados["posts_touched"]:
-        dados["posts_touched"].append(int(post_id))
-    if ready:
-        dados["ready"] = int(dados["ready"]) + 1
-    _salvar(root, dados, now=now)
+    """Registra que a sessao gastou trabalho real neste post (com lock)."""
+    with _ledger_lock(root):
+        dados = load_session(root, config, now=now)
+        if int(post_id) not in dados["posts_touched"]:
+            dados["posts_touched"].append(int(post_id))
+        if ready:
+            dados["ready"] = int(dados["ready"]) + 1
+        _salvar(root, dados, now=now)
     return status(root, config, now=now)
 
 
 def record_context_bytes(
     root: Path | str, quantidade: int, config: Config, *, now: float | None = None
 ) -> dict[str, Any]:
-    """Soma os bytes de stdout que o LLM acabou de consumir."""
-    dados = load_session(root, config, now=now)
-    dados["context_bytes"] = int(dados["context_bytes"]) + max(0, int(quantidade))
-    dados["commands"] = int(dados["commands"]) + 1
-    _salvar(root, dados, now=now)
+    """Soma os bytes de stdout que o LLM acabou de consumir (com lock)."""
+    with _ledger_lock(root):
+        dados = load_session(root, config, now=now)
+        dados["context_bytes"] = int(dados["context_bytes"]) + max(0, int(quantidade))
+        dados["commands"] = int(dados["commands"]) + 1
+        _salvar(root, dados, now=now)
     return status(root, config, now=now)
 
 
@@ -210,8 +287,10 @@ def stop_reason(root: Path | str, config: Config, *, now: float | None = None) -
 
 __all__ = [
     "cap_ativo",
+    "claim_touch",
     "load_session",
     "record_context_bytes",
+    "record_ready",
     "record_touch",
     "status",
     "stop_reason",

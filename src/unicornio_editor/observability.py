@@ -102,6 +102,24 @@ def read_telemetry_summary(
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
     media_by_domain: dict[str, dict[str, int]] = {}
+    # Economia de midia (unidade: por BUSCA e por READY). `deferred` e contado
+    # SEPARADO de `rejected`: candidato dispensado por capacidade ja atendida
+    # nao foi investigado, entao nao e rejeicao — somar os dois faria a busca
+    # parecer pior justamente quando ficou mais eficiente.
+    midia = {
+        "searches": 0,
+        "searches_with_web": 0,
+        "engines_queried": 0,
+        "needed_total": 0,
+        "reuse_total": 0,
+        "strong_total": 0,
+        "ambiguous_total": 0,
+        "accepted_total": 0,
+        "rejected_total": 0,
+        "deferred_total": 0,
+        "examined_total": 0,
+        "vision_calls": 0,
+    }
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -153,6 +171,20 @@ def read_telemetry_summary(
                 duration = record.get("duration_ms")
                 if isinstance(duration, int):
                     ready_durations.append(duration)
+            if event == "media_search_result":
+                midia["searches"] += 1
+                for campo in ("needed", "reuse", "strong", "ambiguous", "accepted",
+                              "rejected", "deferred", "examined", "engines_queried"):
+                    valor = record.get(campo)
+                    if isinstance(valor, int):
+                        midia[f"{campo}_total" if campo in {"needed", "reuse", "strong",
+                                                            "ambiguous", "accepted",
+                                                            "rejected", "deferred",
+                                                            "examined"} else campo] += valor
+                if isinstance(record.get("engines_queried"), int) and record["engines_queried"] > 0:
+                    midia["searches_with_web"] += 1
+            if event == "vision_call":
+                midia["vision_calls"] += 1
             if event == "media_funnel":
                 stage = record.get("stage")
                 status = record.get("status")
@@ -201,6 +233,13 @@ def read_telemetry_summary(
         },
         "media_funnel": media_funnel,
         "media_by_domain": media_by_domain,
+        "media_economy": {
+            **midia,
+            "local_reuse_rate": (
+                round(midia["reuse_total"] / midia["needed_total"], 4)
+                if midia["needed_total"] else None
+            ),
+        },
         "last_event_at": last_ts,
     }
 

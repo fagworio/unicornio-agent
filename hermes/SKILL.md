@@ -51,6 +51,8 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 3. REWORK (`blocked:true`): `draft POST_ID --for-fix` devolve SÓ o componente do
    gate + o erro (o artigo fica no arquivo) → corrija → `apply POST_ID
    patch.json --merge-draft --compact` (patch parcial mesclado pelo código).
+   `requires_content: false` é enforçado: `content POST_ID` responde
+   `content_not_required` nesse caso (use `--force` só se for reescrever).
 4. Editorial: `site_relevance`, `seo`, `media_plan`, trailer. Jogo → `game_name`
    exato. `cleaned_html` OPCIONAL; `content POST_ID` SÓ quando
    `requires_content: true` ou reescrita real.
@@ -132,8 +134,10 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
   comando e por post (`context_bytes_by_command`, `by_post`,
   `context_bytes_per_ready`) distinguindo "não há imagem" de "busca falhou".
 - `unicornio-editor telemetry --sessions` cruza com o `state.db` do Hermes:
-  `tokens_per_ready`, `requests_per_ready`, `tool_context_bytes_per_ready`,
-  `cost_per_ready_usd` — a medida para comparar antes/depois de cada mudança.
+  `tokens_per_ready`, `requests_per_ready`, `tool_context_bytes_per_ready`
+  (métrica PRINCIPAL: o que voltou ao modelo), `cost_per_ready_usd` e, em mídia,
+  `local_reuse_rate`, `web_searches_per_ready`, `vision_calls_per_ready`,
+  `candidates_examined_per_ready` — a medida para comparar antes/depois.
 - Cron/roteiro completo: `hermes/cron-install.sh` (idempotente).
 
 ## Operational pitfalls (detalhes em references/operacao.md)

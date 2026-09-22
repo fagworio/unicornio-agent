@@ -574,6 +574,18 @@ def run_pre_publish_checklist(
                 vision_failures.append(f"{url[:60]}: limite de chamadas low atingido")
                 return
             calls_low += 1
+            # Contador determinístico de chamada REAL de visão (cache não
+            # conta): alimenta `vision_calls_per_ready` na telemetria.
+            try:
+                from .observability import append_telemetry
+
+                append_telemetry(
+                    vision_root, "vision_call",
+                    scope="featured_checklist" if is_featured else "inline_checklist",
+                    cached=False, detail=config.vision_detail,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 ok, reason = verify_image_subject(
                     image_url=url,
