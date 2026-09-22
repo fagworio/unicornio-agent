@@ -391,8 +391,10 @@ def read_telemetry_summary(
     ready_with_first_pass = 0
     first_pass_ready = 0
     first_pass_blocked = 0
-    # Cobertura da ATRIBUIÇÃO de decisão: resolved | missing | invalid | mixed.
-    atribuicao: dict[str, int] = {"resolved": 0, "missing": 0, "invalid": 0, "mixed": 0}
+    # Cobertura da ATRIBUIÇÃO de decisão: resolved | missing | invalid (por ITEM).
+    atribuicao: dict[str, int] = {"resolved": 0, "missing": 0, "invalid": 0}
+    # Planos com mais de uma decisão: característica do plano, não falha.
+    planos_mistos = 0
     ready_attempts = 0
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
@@ -419,6 +421,7 @@ def read_telemetry_summary(
         "vision_cached_tokens": 0,
         "vision_output_tokens": 0,
         "vision_errors": 0,
+        "vision_requests_without_usage": 0,
         "vision_low_requests": 0,
         "vision_high_requests": 0,
     }
@@ -527,6 +530,10 @@ def read_telemetry_summary(
                         midia[chave] += valor
                 if str(record.get("error") or "").strip():
                     midia["vision_errors"] += 1
+                if not isinstance(record.get("input_tokens"), int):
+                    # Sem `usage` (ex.: HTTP 500): a requisição conta, mas os
+                    # tokens ficam LOWER BOUND — o total passa a ser PARCIAL.
+                    midia["vision_requests_without_usage"] += 1
                 if str(record.get("detail") or "") == "high":
                     midia["vision_high_requests"] += 1
                 else:
@@ -535,13 +542,21 @@ def read_telemetry_summary(
                 # Formato anterior (sem usage): conta como chamada para não
                 # quebrar a série histórica, sem inflar os tokens.
                 midia["vision_calls"] += 1
-            # COBERTURA da atribuição: conta para TODO evento de media-validate,
-            # inclusive os SEM rótulo de decisão (é justamente aí que a atribuição
-            # falta — contar só dentro do bloco de decisão escondia o buraco).
-            if event == "media_validate_result":
+            # COBERTURA da atribuição: só eventos POR ITEM entram na taxa. O
+            # agregado do post NÃO é item — contá-lo fazia 100% dos itens
+            # atribuídos aparecer como 90,9% num listicle de 10 itens.
+            if event == "media_validate_result" and isinstance(
+                record.get("item_index"), int
+            ):
                 estado = str(record.get("attribution") or "")
-                if estado in atribuicao:
+                if estado in ("resolved", "missing", "invalid"):
                     atribuicao[estado] += 1
+            # `mixed` é CARACTERÍSTICA do plano (mais de uma decisão), não falha de
+            # atribuição: fica em outra dimensão.
+            if event == "media_validate_result" and str(
+                record.get("decision_scope") or ""
+            ) == "mixed":
+                planos_mistos += 1
             # QUALIDADE por decisão: cruza a decisão de busca (auto/choose/reuse)
             # com o que os gates fizeram depois. É a prova que falta de que a
             # economia de julgamento NÃO piorou a imagem escolhida.
@@ -663,16 +678,19 @@ def read_telemetry_summary(
         },
         "run_sources": por_origem,
         "root_sessions": sorted(sessoes_filtradas),
-        # COBERTURA da atribuição: quantos itens tiveram a decisão resolvida pelo
-        # ledger, quantos não trouxeram id, quantos trouxeram id inexistente e
-        # quantos planos são mistos (sem rótulo único). Sem isso, `auto` x `choose`
-        # podia ser lido com amostra enviesada por itens não atribuídos.
+        # COBERTURA da atribuição (POR ITEM): quantos itens tiveram a decisão
+        # resolvida pelo ledger, quantos não trouxeram id e quantos trouxeram id
+        # inexistente. `mixed_plan_count` é outra coisa: planos com mais de uma
+        # decisão (não rotuláveis como um todo). Sem essa separação a taxa caía
+        # artificialmente (10 itens atribuídos + 1 plano misto = 90,9%).
         "decision_attribution": {
             **atribuicao,
+            "itens": sum(atribuicao.values()),
             "decision_attribution_rate": (
                 round(atribuicao["resolved"] / sum(atribuicao.values()), 4)
                 if sum(atribuicao.values()) else None
             ),
+            "mixed_plan_count": planos_mistos,
         },
         "decision_quality": {
             decisao: {

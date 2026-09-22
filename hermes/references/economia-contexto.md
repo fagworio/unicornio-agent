@@ -191,12 +191,24 @@ stdout pequeno orientado à próxima ação:
   agente copiou para o `media_plan` é ignorado para métrica (erro de cópia não
   pode virar medição). Cada item do `media_plan` emite um evento de
   `media-validate` com o estado da atribuição:
-  `resolved` (id no ledger) | `missing` (item sem id) | `invalid` (id inexistente)
-  | `mixed` (plano com mais de uma decisão, sem rótulo único). O resumo publica
-  `decision_attribution` + `decision_attribution_rate` — sem isso a leitura de
-  `auto` x `choose` pode ficar enviesada por itens não atribuídos.
+  `resolved` (id no ledger) | `missing` (item sem id) | `invalid` (id inexistente).
+  A TAXA (`decision_attribution_rate`) conta **ITENS**: o evento agregado do post
+  não entra (senão 10 itens atribuídos + 1 plano misto davam 90,9%). Plano com
+  mais de uma decisão é outra dimensão: `mixed_plan_count` / `decision_scope`
+  (`uniform` | `mixed`) — mistura de decisões não é falha de atribuição.
+- **Rotulagem no apply (`_decision_fields`)**: só emite `decision` (auto/choose/
+  reuse) quando **todos** os itens do plano têm `decision_id`, **todos** resolvem
+  no ledger e a decisão é **única**. Plano parcialmente rastreado → `missing` sem
+  rótulo; id inexistente → `invalid` sem rótulo; tudo resolvido mas com decisões
+  diferentes → `resolved` + `decision_scope: mixed` sem rótulo. É o que impede um
+  `apply_ready`/`apply_blocked` mal rastreado de contaminar as estatísticas de
+  `auto`.
 - O arquivo legado `work/media_decisions.json` (mapa post → última decisão) só é
   usado para posts SEM registro no JSONL — o log novo é autoritativo.
+- Tokens de visão com **lower bound**: requisição sem `usage` (ex.: HTTP 500)
+  conta em `requests`/`errors` mas não tem consumo inventado; nesse caso
+  `direct_vision_tokens_partial` e `observed_grand_total.tokens_partial` ficam
+  `true` — o número continua servindo, desde que lido como piso.
 - `EDITOR_AUTO_SCORE_MARGIN` (default 2) é a margem de `evidence_score` para o
   `auto`: **hipótese de calibração**, não fato. Se os casos `auto` passarem a ser
   rejeitados depois, suba a margem (ou exija `len(fortes) == 1`).

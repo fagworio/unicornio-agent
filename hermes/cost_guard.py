@@ -104,7 +104,8 @@ def vision_direct_usage(
     """
     vazio: dict[str, int | bool] = {
         "requests": 0, "prompt_tokens": 0, "cached_tokens": 0,
-        "output_tokens": 0, "errors": 0, "measurable": False,
+        "output_tokens": 0, "errors": 0, "without_usage": 0,
+        "tokens_partial": False, "measurable": False,
     }
     if telemetry_path is None or not Path(telemetry_path).is_file():
         return vazio
@@ -142,8 +143,13 @@ def vision_direct_usage(
                     dados[chave] = int(dados[chave]) + valor
             if str(record.get("error") or "").strip():
                 dados["errors"] = int(dados["errors"]) + 1
+            if not isinstance(record.get("input_tokens"), int):
+                # Requisicao sem `usage` (ex.: HTTP 500): conta como request,
+                # mas os tokens ficam LOWER BOUND — nao se estima consumo.
+                dados["without_usage"] = int(dados["without_usage"]) + 1
     except OSError:
         return vazio
+    dados["tokens_partial"] = int(dados["without_usage"]) > 0
     return dados
 
 
@@ -255,6 +261,10 @@ def usage_measurement_in_last_24h(
         "direct_vision_cached_tokens": int(visao["cached_tokens"]),
         "direct_vision_output_tokens": int(visao["output_tokens"]),
         "direct_vision_errors": int(visao["errors"]),
+        "direct_vision_requests_without_usage": int(visao["without_usage"]),
+        # Ha requisicao sem `usage` => o total de tokens e LOWER BOUND.
+        "direct_vision_tokens_partial": bool(visao["tokens_partial"]),
+        "observed_grand_total_tokens_partial": bool(visao["tokens_partial"]),
         "direct_vision_measurable": bool(visao["measurable"]),
         "grand_total_prompt_tokens": prompt_main + tokens_aux + visao_prompt,
         "prompt_tokens": prompt_main + tokens_aux + visao_prompt,

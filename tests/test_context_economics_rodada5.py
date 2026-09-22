@@ -243,11 +243,14 @@ class MediaValidatePerItemTests(unittest.TestCase):
         self.assertEqual(por_item[0]["rejected_items"], 0)
         self.assertEqual(por_item[1]["valid"], False)
         self.assertEqual(por_item[1]["rejected_items"], 1)
-        # Agregado do post entra SEM rótulo; dois ids distintos = plano MISTO.
+        # Agregado do post: SEM rótulo de decisão; atribuição `resolved` (todos os
+        # itens resolveram) e `decision_scope: mixed` — plano com duas decisões é
+        # característica do plano, não falha de atribuição.
         agregados = [e for e in eventos if not e.get("decision_id")]
         self.assertEqual(len(agregados), 1)
         self.assertEqual(agregados[0]["decision"], "")
-        self.assertEqual(agregados[0]["attribution"], "mixed")
+        self.assertEqual(agregados[0]["attribution"], "resolved")
+        self.assertEqual(agregados[0]["decision_scope"], "mixed")
         self.assertEqual(agregados[0]["rejected_items"], 1)
         self.assertEqual(agregados[0]["featured_status"], "passed")
 
@@ -288,8 +291,11 @@ class MediaValidatePerItemTests(unittest.TestCase):
             resumo = read_telemetry_summary(root)
         por_item = [e for e in eventos if "item_index" in e]
         self.assertEqual([e["attribution"] for e in por_item], ["missing", "missing"])
-        self.assertEqual(resumo["decision_attribution"]["missing"], 3)  # 2 itens + agregado
-        self.assertEqual(resumo["decision_attribution"]["decision_attribution_rate"], 0.0)
+        # A taxa conta SÓ itens (o agregado do post não é item): 2 itens sem id.
+        atrib = resumo["decision_attribution"]
+        self.assertEqual(atrib["missing"], 2)
+        self.assertEqual(atrib["itens"], 2)
+        self.assertEqual(atrib["decision_attribution_rate"], 0.0)
 
 
 class ResolverMemoAliasTests(unittest.TestCase):

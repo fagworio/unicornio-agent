@@ -2988,13 +2988,20 @@ def _decision_fields(
     if not post_id:
         return {}
     campos: dict[str, Any] = {}
-    ids: list[str] = []
-    for item in plan or []:
-        if not isinstance(item, dict):
-            continue
-        identificador = str(item.get("decision_id") or "")
-        if identificador:
-            ids.append(identificador)
+    itens = [item for item in (plan or []) if isinstance(item, dict)]
+    itens_com_id = [item for item in itens if str(item.get("decision_id") or "")]
+    # REGRA RÍGIDA: só se TODOS os itens do plano têm `decision_id`, TODOS resolvem
+    # no ledger e TODAS as decisões resolvidas são IGUAIS é que o resultado pode
+    # ser rotulado (auto/choose/reuse). Antes, um plano com 1 imagem rastreada e
+    # outra SEM rastro saía como `resolved`/`auto` — e contaminava as estatísticas
+    # de `auto` no apply_ready/apply_blocked.
+    if itens and len(itens_com_id) != len(itens):
+        campos["decision_attribution"] = "missing"
+        campos["decision_ids"] = sorted(
+            {str(item["decision_id"]) for item in itens_com_id}
+        )
+        return campos
+    ids = [str(item.get("decision_id") or "") for item in itens_com_id]
     try:
         from .observability import read_media_decision, read_media_decision_by_id
     except Exception:  # noqa: BLE001 - telemetria nunca quebra o apply
@@ -3012,15 +3019,19 @@ def _decision_fields(
                 if str(registro.get("decision") or ""):
                     do_ledger.append(str(registro["decision"]))
         distintas = {d for d in do_ledger if d}
+        if resolvidos != len(ids):
+            # Algum id não existe no ledger: erro de cópia/invenção do agente —
+            # sem rótulo (não se atribui um plano mal rastreado a uma decisão).
+            campos["decision_attribution"] = "invalid"
+            return campos
+        campos["decision_attribution"] = "resolved"
         if len(distintas) == 1:
             campos["decision"] = next(iter(distintas))
-        if len(distintas) > 1:
-            campos["decision_attribution"] = "mixed"
-        elif resolvidos == len(ids):
-            campos["decision_attribution"] = "resolved"
-        else:
-            # Algum id não existe no ledger: erro de cópia/invenção do agente.
-            campos["decision_attribution"] = "invalid"
+            campos["decision_scope"] = "uniform"
+        elif len(distintas) > 1:
+            # Plano MISTO: atribuição resolvida, mas sem rótulo único — atribuir o
+            # bloqueio do post a uma das decisões seria chute.
+            campos["decision_scope"] = "mixed"
         return campos
     try:
         decisao = read_media_decision(root, post_id)

@@ -1686,11 +1686,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if isinstance(row.get("index"), int)
                 }
                 ids_plano: list[str] = []
+                estados: list[str] = []
                 for indice, item in enumerate(plano):
                     if not isinstance(item, dict):
                         continue
                     identificador = str(item.get("decision_id") or "")
                     estado = attribution_of(args.root, args.post_id or 0, identificador)
+                    estados.append(estado)
                     # `decision`/`score_gap` SÓ do ledger; o texto do plano é
                     # ignorado para medição (fica no JSON como documentação).
                     do_ledger = (
@@ -1710,9 +1712,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         decision_id=identificador,
                         score_gap=do_ledger.get("score_gap"),
                     )
-                agregado = "mixed" if len(set(ids_plano)) > 1 else attribution_of(
-                    args.root, args.post_id or 0, ids_plano[0] if ids_plano else ""
-                )
+                # Agregado do post: atribuição em PIOR CASO entre os itens
+                # (invalid > missing > resolved) e `decision_scope` dizendo se o
+                # plano é uniforme ou misto. `decision` fica SEMPRE vazio aqui —
+                # o rótulo pertence ao item, nunca ao post.
+                if not estados:
+                    agregado_estado = "missing"
+                elif "invalid" in estados:
+                    agregado_estado = "invalid"
+                elif "missing" in estados:
+                    agregado_estado = "missing"
+                else:
+                    agregado_estado = "resolved"
                 append_telemetry(
                     args.root, "media_validate_result",
                     post_id=args.post_id or 0,
@@ -1721,10 +1732,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     featured_status=str(
                         ((result.get("featured_vision") or [{}])[0] or {}).get("status") or ""
                     ),
-                    attribution=agregado,
-                    decision="" if ids_plano else "",
+                    attribution=agregado_estado,
+                    decision_scope="mixed" if len(set(ids_plano)) > 1 else "uniform",
+                    decision="",
                     score_gap=None,
-                    decision_id="" if len(set(ids_plano)) != 1 else ids_plano[0],
+                    decision_id="",
                 )
             except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
                 pass

@@ -227,6 +227,12 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
                     aux["reasoning_tokens"] += int(raciocinio or 0)
                     aux["cost_usd"] += float(custo or 0)
                     aux["tasks"][str(tarefa)] = int(chamadas or 0)
+                    # FALTava aqui: sem este incremento o caminho preferencial
+                    # (`join_sessions`, o que passa a valer com telemetria oficial)
+                    # zerava os requests auxiliares — o primeiro ciclo medido
+                    # pareceria artificialmente mais barato SÓ por trocar o método
+                    # de atribuição (ex.: 282 -> 247 de uma janela para a outra).
+                    aux["requests"] = int(aux["requests"]) + int(chamadas or 0)
             except sqlite3.Error:
                 # Banco legado sem a tabela de uso por modelo: o main-loop segue
                 # medido (nunca transformar ausência de aux em medição vazia).
@@ -250,7 +256,9 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
         "scope": f"mesmas sessoes da telemetria ({len(session_ids)} sessao(oes))",
         "session_ids": list(session_ids),
         "sessions": int(linha[0] or 0),
-        "requests": int(linha[1] or 0),
+        "requests": int(linha[1] or 0) + int(aux.get("requests") or 0),
+        # Mesmas chaves do caminho `window_job`: os dois métodos de atribuição não
+        # podem divergir (era aqui que o auxiliar sumia).
         "main_requests": int(linha[1] or 0),
         "aux_requests": int(aux.get("requests") or 0),
         "main": {
@@ -396,6 +404,12 @@ def session_metrics(
                 **hermes["main"],
                 "sessions": hermes["sessions"],
                 "requests": hermes["requests"],
+                # As chaves de camada precisam existir nos DOIS caminhos de
+                # atribuição (join e window_job): sem isso o join perdia os
+                # auxiliares e o primeiro ciclo medido parecia mais barato só por
+                # trocar o método.
+                "main_requests": hermes["main_requests"],
+                "aux_requests": hermes["aux_requests"],
                 "scope": hermes["scope"],
                 "session_ids": hermes["session_ids"],
                 "aux": hermes["aux"],
@@ -453,6 +467,13 @@ def session_metrics(
             "cached_tokens": int(media_economy.get("vision_cached_tokens") or 0),
             "output_tokens": int(media_economy.get("vision_output_tokens") or 0),
             "errors": int(media_economy.get("vision_errors") or 0),
+            "requests_without_usage": int(
+                media_economy.get("vision_requests_without_usage") or 0
+            ),
+            # Requisicao sem `usage` (ex.: HTTP 500) => tokens sao LOWER BOUND.
+            "tokens_partial": bool(
+                int(media_economy.get("vision_requests_without_usage") or 0)
+            ),
             "cost_usd": None,  # sem accounting de custo no state.db
         },
         "observed_grand_total": {
@@ -464,10 +485,14 @@ def session_metrics(
                 int((hermes or {}).get("grand_total", {}).get("requests") or 0)
                 + int(media_economy.get("vision_api_requests") or 0)
             ),
+            "tokens_partial": bool(
+                int(media_economy.get("vision_requests_without_usage") or 0)
+            ),
             "note": (
                 "Hermes main + auxiliar + visao DIRETA do pipeline. O custo em USD "
                 "cobre apenas as camadas do Hermes (a visao direta nao tem preco no "
-                "state.db)."
+                "state.db). tokens_partial=true quando houve requisicao de visao sem "
+                "`usage` (ex.: HTTP 500): nesse caso o total e LOWER BOUND."
             ),
         },
         # Todas as origens (cron + manual + teste): mostra a contaminacao em vez
