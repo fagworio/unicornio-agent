@@ -1,0 +1,45 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86073 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:54Z
+# bytes do payload: 1915 | sha256: 7a68ad9d760af405983ae916d19b84a5faf33b222e9aa6fb700018d64f827766
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: has_fonte = "Fonte:" in content and original_link in content
+# ---- payload a partir daqui ----
+has_fonte = "Fonte:" in content and original_link in content
+        check("fonte_original_link", has_fonte, f"original_link presente; bloco Fonte {'ok' if has_fonte else 'AUSENTE no conteudo'}")
+    else:
+        check("fonte_original_link", True, "sem original_link; bloco Fonte nao exigido", skipped=True)
+
+    # 6. Body images per content length (SEO rule: 2/4/6 minimum). The
+    #    minimum ALWAYS holds — an image-less post must not be published.
+    #    Listicles get their own floor (max(2, item count)) so the 2/4/6 rule
+    #    never conflicts with the one-image-per-item structural rule.
+    words = word_count(content)
+    title_str = str((post.get("title") or {}).get("raw") or "")
+    required = _required_image_count(words, title=title_str, content=content)
+    inline_images = _IMG_RE.findall(content)
+    image_count = len(inline_images)
+
+    # Opcao A: o minimo e dimensionado pela DISPONIBILIDADE REAL de frames
+    # visualmente distintos. O gate imagens_similares bloqueia as repetidas; o
+    # minimo efetivo cai para o que existe (obras com poucos frames reais nao
+    # devem repetir o mesmo frame so para atingir a cota).
+    from .media.relevance import iter_content_images
+
+    img_items = iter_content_images(content)
+    img_urls = [str(item.get("src") or "").strip() for item in img_items]
+    img_urls = [u for u in img_urls if u]
+    img_hashes = None
+    distinct_frames = None
+    required_effective = required
+    if len(img_urls) >= 2:
+        try:
+            from .media.visual_hash import distinct_image_count, image_hashes
+
+            img_hashes = image_hashes(img_urls)
+            distinct_frames = distinct_image_count(img_urls, hashes=img_hashes)
+        except Exception:  # noqa: BLE001 - deps/rede: mantem a politica cheia
+            img_hashes = None
+            distinct_frames = None
+    # Fase 1: o pHash NUNCA reduz o mínimo exigido (2/4/6 por palavras).

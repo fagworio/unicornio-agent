@@ -1,0 +1,77 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86192 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:55Z
+# bytes do payload: 3378 | sha256: a69d0b890f0a0369790d25f21b069c1089f8e0529f257c89532ee6f87ff11972
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/hermes/unicornio-agent"}
+# primeira linha: 236-    # 6b. Every inline image must be semantically related to the cited subject
+# ---- payload a partir daqui ----
+236-    # 6b. Every inline image must be semantically related to the cited subject
+237-    #     (deterministic entity-overlap gate; generic concept matches fail).
+238-    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+239-
+240-    content_images = iter_content_images(content)
+241-    image_entities = extract_entities(
+242-        title=str(editorial.get("seo", {}).get("title") or ""),
+243-        content_html=str(editorial.get("cleaned_html") or ""),
+244:        focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
+245-        game_name=editorial.get("game_name"),
+246-    )
+247-    irrelevant_images = [
+248-        item
+249-        for item in content_images
+250-        if not image_is_relevant(
+251-            alt_text=str(item.get("alt") or ""),
+252-            credit_text=str(item.get("caption") or ""),
+253-            source_url=str(item.get("src") or ""),
+254-            entities=image_entities,
+255-        )
+256-    ]
+257-    if content_images:
+258-        check(
+259-            "relevancia_imagens",
+260-            not irrelevant_images,
+261-            f"{len(content_images) - len(irrelevant_images)} relevante(s) de "
+262-            f"{len(content_images)} imagem(ns); irrelevantes: "
+263-            f"{', '.join(item.get('alt') or item.get('src') or '?' for item in irrelevant_images) or 'nenhuma'}",
+264-        )
+265-    else:
+266-        check("relevancia_imagens", True, "sem imagens para validar", skipped=True)
+267-
+268-    # 6c. No repeated image: each inline image must be distinct. Reusing the
+269-    #     same URL several times in a post is low-quality editorial (the exact
+--
+486-    # 10. Canonical CTA must be present.
+487-    check("cta_canonico", _CTA_MARKER in content, "CTA canonico presente" if _CTA_MARKER in content else "CTA AUSENTE")
+488-
+489-    # 11. Text quality gates (keyword, dashes, AI phrasing, subheadings).
+490-    try:
+491-        quality = validate_content_quality(
+492-            content,
+493-            title=str(editorial.get("seo", {}).get("title") or ""),
+494:            focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
+495-            matched_topics=relevance.get("matched_topics") or [],
+496-            allowed_topics=config.site_topics,
+497-        )
+498-        check("qualidade_texto", True, f"{quality['words']} palavras, qualidade ok")
+499-    except ContentQualityError as exc:
+500-        check("qualidade_texto", False, str(exc))
+501-
+502-    # 12. Numbered-list structural validation when applicable.
+503-    try:
+504-        validate_list_content(
+505-            str((post.get("title") or {}).get("raw") or editorial.get("seo", {}).get("title") or ""),
+506-            content,
+507-        )
+508-        check("estrutura_lista", True, "estrutura de lista validada (ou nao aplicavel)")
+509-    except ListContentError as exc:
+510-        check("estrutura_lista", False, str(exc))
+511-
+512-    # 13. Strict editorial schema validation.
+513-    try:
+514-        validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
+515-        check("schema_editorial", True, "JSON editorial valido no schema estrito")
+516-    except EditorialValidationError as exc:
+517-        check("schema_editorial", False, str(exc))
+518-
+519-    # 14. Vision gate (optional, fail-closed when enabled): a cheap vision

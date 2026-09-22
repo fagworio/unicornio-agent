@@ -1,0 +1,24 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86167 | papel: tool | tool: terminal | ts: 2026-09-22T09:55:25Z
+# bytes do payload: 1730 | sha256: 07cce5e851be7a58a8765f7dc0d61ab52488fca8a27bdc13a214bace0cb2338a
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ##### Studio Ghibli Donguri Kyowakoku memo pad collection
+# ---- payload a partir daqui ----
+##### Studio Ghibli Donguri Kyowakoku memo pad collection
+count 0 rej 20 size_filter xga|w
+  REJ bing 0 pagina de origem inacessivel ou sem imagens listadas https://i.pinimg.com/originals/c3/0b/e5/c30be59b754364909b87b17179b0bd
+  REJ bing 0 pagina de origem inacessivel ou sem imagens listadas https://studio-creations.co.uk/wp-content/uploads/2022/10/Platoon_Reco
+  REJ bing 0 pagina de origem inacessivel ou sem imagens listadas https://i.pinimg.com/originals/4c/d5/37/4cd53788fed76e8094b1246b6e3017
+  REJ bing 0 imagem nao listada na pagina de origem https://i.pinimg.com/originals/6e/b6/3b/6eb63b7460424641a6aa04a0d32f72
+  REJ bing 1 URL exata encontrada no HTML da pagina de origem https://media.makingmusic101.com/2023/12/Essential-Equipment-for-a-Rec
+  REJ bing 0 pagina de origem inacessivel ou sem imagens listadas https://i.pinimg.com/originals/4e/aa/4d/4eaa4dd8c4cfacbfa63269d36e2b3f
+##### The Batman Part II February 2028 delay
+count 0 rej 20 size_filter xga|w
+  REJ bing 1 mesma imagem (slug) listada na pagina de origem https://static1.srcdn.com/wordpress/wp-content/uploads/2024/04/batman-
+  REJ bing 0 imagem nao listada na pagina de origem https://images.hdqwalls.com/wallpapers/batman-concept-art-classic-suit
+  REJ bing 1 URL exata encontrada no HTML da pagina de origem https://static.dc.com/2023-04/press_040723_BM_Cv135_13511.jpg
+  REJ bing 0 imagem nao listada na pagina de origem https://static1.cbrimages.com/wordpress/wp-content/uploads/2024/10/bat
+  REJ bing 0 imagem nao listada na pagina de origem https://static1.srcdn.com/wordpress/wp-content/uploads/2025/02/batman-
+  REJ bing 1 URL exata encontrada no HTML da pagina de origem https://aiptcomics.com/wp-content/uploads/2023/04/BM_Cv135_JQ_var1_135

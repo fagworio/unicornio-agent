@@ -1,0 +1,69 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86070 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:50Z
+# bytes do payload: 3336 | sha256: 4c5745b0a13470f8e5ef4b33fc2292cb7dd789243215869082f700d976f193e4
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: distinct_frames = None
+# ---- payload a partir daqui ----
+distinct_frames = None
+    # Fase 1: o pHash NUNCA reduz o mínimo exigido (2/4/6 por palavras).
+    # Antes `required_effective = distinct_frames` transformava "6 URLs com 3
+    # frames reais" em "mínimo 3" — o post passava alegando que só existiam 3
+    # imagens disponíveis, quando o pHash só provou que 3 daquelas 6 URLs são o
+    # mesmo frame. O pHash responde OUTRA pergunta, no gate `imagens_similares`:
+    # "as N URLs do corpo representam N imagens distintas?". O único caminho
+    # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
+    required_effective = required
+
+    # Waiver "media_exhausted": quando a busca de imagens foi honestamente
+    # esgotada (media-search-web devolveu count=0) E existe featured E NAO e
+    # listicle, dispensa o minimo de imagens inline — artigo publica com
+    # featured + texto. Listicle NAO dispensa (vai para awaiting_human no
+    # apply, decisao manual). A featured segue validada pelos gates destaque_*
+    # e pela visao.
+    from .list_quality import detect_list_format
+
+    # P1 (auditoria): o editorial/LLM NUNCA declara exaustao da busca — só o
+    # código pode, contando buscas completas de verdade. Aceitar o flag do JSON
+    # dispensaria o mínimo 2/4/6 sem nenhuma evidência de busca esgotada.
+    media_exhausted = False
+    # Deterministico: apos N applies falhando em imagens (cada apply = 1 busca
+    # completa), decide SEM depender do campo do LLM. O media_exhausted do
+    # modelo vira apenas uma dica que adianta a decisao (economiza 1 ciclo).
+    # P1 (auditoria): `attempts` conta APPLYs (SEO falhou, trailer
+    # falhou...), não buscas de imagem esgotadas — usá-lo como exaustão
+    # declarava "busca esgotada" sem nenhuma busca ter sido feita.
+    deterministic_exhausted = False
+    exhausted = media_exhausted or deterministic_exhausted
+    featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
+    is_list = detect_list_format(title_str, content) is not None
+    waive_inline = exhausted and featured_exists and not is_list
+
+    if waive_inline:
+        check(
+            "imagens_no_corpo",
+            True,
+            f"waived: busca de imagens esgotada e featured presente "
+            f"({image_count} inline; minimo {required} dispensado)",
+        )
+    else:
+        _motivo = f"{words} palavras exigem >= {required_effective} imagens"
+        if distinct_frames is not None and distinct_frames < required:
+            _motivo += f" (politica {required}; {distinct_frames} frames distintos disponiveis)"
+        check(
+            "imagens_no_corpo",
+            image_count >= required_effective,
+            f"{_motivo}; conteudo tem {image_count}",
+        )
+
+    # 6b. Every inline image must be semantically related to the cited subject
+    #     (deterministic entity-overlap gate; generic concept matches fail).
+    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+
+    content_images = iter_content_images(content)
+    image_entities = extract_entities(
+        title=str(editorial.get("seo", {}).get("title") or ""),
+        content_html=str(editorial.get("cleaned_html") or ""),
+        focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),

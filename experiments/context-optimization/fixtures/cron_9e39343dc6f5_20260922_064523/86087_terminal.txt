@@ -1,0 +1,17 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86087 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:39Z
+# bytes do payload: 2088 | sha256: d377a4b0b8ff28f59ab2513b3ce8e946c5312a019f5856ec86589808c52eb558
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {"phash": "", "source_url": "https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-
+# ---- payload a partir daqui ----
+{"phash": "", "source_url": "https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X.png", "source_page": "https://windowsreport.com/xbox-series-x-just-ran-ps5-games-thanks-to-an-experimental-kytyps5-emulator-port/", "subject": "", "media_id": 114328, "article_id": null, "uses": 1}
+{"phash": "", "source_url": "https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator_full.jpg", "source_page": "https://www.tweaktown.com/news/113653/xbox-series-x-can-now-run-ps5-games-thanks-to-a-new-emulator/index.html", "subject": "", "media_id": 114327, "article_id": null, "uses": 1}
+{"phash": "", "source_url": "https://media.ixbt.games/1600x900/smart/jpeg/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png", "source_page": "https://ixbt.games/en/news/2026/09/21/na-xbox-series-x-poigrali-v-igry-dlia-playstation-5-s-pomoshhiu-emuliatora.html", "subject": "", "media_id": 114329, "article_id": null, "uses": 1}
+{"phash": "", "source_url": "https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-captura.jpg", "source_page": "https://fanaticosdelhardware.com/un-emulador-experimental-de-ps5-ya-funciona-en-xbox-series-x-pero-quake-ii-cae-por-debajo-de-20-fps/", "subject": "", "media_id": 114330, "article_id": null, "uses": 1}
+{"phash": "", "source_url": "https://img-cdn.publive.online/fit-in/1200x675/pcq/media/media_files/2026/09/21/ps5-emulation-reaches-another-milestone-as-xbox-series-x-now-runs-ps5-games-2026-09-21-17-15-07.jpg", "source_page": "https://www.pcquest.com/gaming/ps5-emulation-reaches-another-milestone-as-xbox-series-x-now-runs-ps5-games-12559618", "subject": "", "media_id": 114331, "article_id": null, "uses": 1}
+{"phash": "", "source_url": "https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg", "source_page": "https://antihype.com.br/c/games/emulador-ps5-xbox-series-x-ps5x/", "subject": "", "media_id": 114332, "article_id": null, "uses": 1}
+=== date ===
+2026-09-22T09:48:39
+Tue Sep 22 06:48:39 -03 2026

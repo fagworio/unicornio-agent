@@ -1,0 +1,74 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86080 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:09Z
+# bytes do payload: 3099 | sha256: 402a71446aba98487a04c1d3189c998cf243bd72268e1ec5764884acfe70333c
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: # checklist falhem, o trabalho editorial fica salvo e o rework corrige
+# ---- payload a partir daqui ----
+# checklist falhem, o trabalho editorial fica salvo e o rework corrige
+    # somente o componente com problema (nunca reescreve o texto nem re-gera
+    # SEO do zero).
+    _save_draft(root, post_id, editorial)
+
+    media_preflight = validate_media_plan(
+        client,
+        editorial,
+        config=config,
+        root=root,
+        post_title=_post_title(post),
+        existing_featured_id=int(post.get("featured_media") or 0) or None,
+    )
+    media_results, featured_id, featured_credit = _execute_media_plan(
+        editorial, config, client, root, preflight=media_preflight
+    )
+    if featured_id is None and not config.dry_run:
+        featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
+    html = editorial["cleaned_html"]
+    if media_results and not config.dry_run:
+        plan = [
+            {
+                "paragraph_index": result["paragraph_index"],
+                "media_url": result["media_url"],
+                "alt_text": result["alt_text"],
+                "credit_text": result["credit_text"],
+                "width": result.get("width"),
+                "height": result.get("height"),
+            }
+            for result in media_results
+            if result.get("media_url") and not result.get("featured")
+        ]
+        if plan:
+            is_list = bool(
+                detect_list_format(
+                    _post_title(post) or editorial["seo"]["title"], html
+                )
+            )
+            html = insert_media(html, plan, listicle=is_list)
+    editorial_with_media = {**editorial, "cleaned_html": html}
+    content, trailer, trailer_status = compose_final_content(
+        editorial_with_media, config, original_link_of(post), root=root
+    )
+    editorial_with_media = attach_trailer_audit(
+        editorial_with_media, trailer, search_status=trailer_status
+    )
+    # Atualiza o artefato durável com o resultado determinístico da busca. Em
+    # uma revalidação STALE, o checklist consegue auditar por que não há embed.
+    _save_editorial_latest(root, post_id, editorial_with_media)
+    if featured_credit and not config.dry_run:
+        content = append_featured_credit(content, featured_credit)
+    inline_normalization: list[dict[str, Any]] = []
+    image_entities = extract_entities(
+        title=str(editorial["seo"].get("title") or ""),
+        content_html=html,
+        focus_keyword=str(editorial["seo"].get("focus_keyword") or ""),
+        game_name=editorial.get("game_name"),
+    )
+    if not config.dry_run:
+        # Normalização técnica sem LLM (Fase 5.2): imagens inline relevantes
+        # em formato errado (JPEG/PNG) viram WebP local automaticamente —
+        # problema técnico não volta ao modelo. Irrelevantes ficam como estão:
+        # o gate relevancia_imagens bloqueia e o agente corrige.
+        content, inline_normalization = _normalize_inline_images(client, config, content, image_entities)
+        editorial_with_media = {**editorial_with_media, "cleaned_html": content}
+    # Tentativas anteriores (antes desta): base do teto deterministico de

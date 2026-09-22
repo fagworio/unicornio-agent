@@ -1,0 +1,49 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86297 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:52Z
+# bytes do payload: 1908 | sha256: cd879cbaa63bbc7eb9fee10ac3101a21459e8a18078073caa1001bd4f255dae4
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 81-    if offenders:
+# ---- payload a partir daqui ----
+81-    if offenders:
+82-        return [f"prosa_com_cjk:{''.join(offenders)}"]
+83-    return []
+84-
+85-
+86:def check_expected_fields(report: Mapping[str, Any],
+87-                          expected: Mapping[str, Any] | None) -> list[str]:
+88-    """Campos esperados: presentes, iguais byte a byte E citados literalmente.
+89-
+90-    Byte a byte: acento, caixa, pontuação e ordem das palavras contam. Traduzir,
+91-    resumir ou "melhorar" um valor de ferramenta é violação — mesmo que o texto
+92-    resultante pareça mais adequado ao idioma da resposta.
+93-    """
+94-    violations: list[str] = []
+95-    narrative = str(report.get("narrative") or "")
+96-    evidence = dict(report.get("evidence") or {})
+97-    for key, value in (expected or {}).items():
+98-        text = str(value or "")
+99-        if not text:
+100-            continue
+101-        if key not in evidence:
+102-            violations.append(f"campo_ausente:{key}")
+103-        elif str(evidence.get(key) or "") != text:
+104-            violations.append(f"valor_alterado:{key}")
+105-        if text not in narrative:
+106-            violations.append(f"valor_nao_citado:{key}")
+107-    return violations
+108-
+109-
+110-def check_literal_values(report: Mapping[str, Any],
+111-                         values: Sequence[str] | None) -> list[str]:
+112-    """Valores soltos (sem campo): precisam aparecer literais em algum lugar."""
+113-    payload = _payload_text(report)
+114-    return [f"valor_nao_literal:{value}" for value in (values or ())
+115-            if str(value or "").strip() and str(value) not in payload]
+116-
+117-
+118-def check_evidence_verbatim(report: Mapping[str, Any],
+119-                            expected: Mapping[str, Any] | None = None,
+120-                            *, values: Sequence[str] | None = None) -> list[str]:
+121-    """Composição dos dois níveis de fidelidade (campos + valores soltos)."""

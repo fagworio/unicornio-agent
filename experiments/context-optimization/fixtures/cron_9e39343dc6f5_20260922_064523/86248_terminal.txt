@@ -1,0 +1,16 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86248 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:12Z
+# bytes do payload: 522 | sha256: b092f9c6da7f8cb2a27574aa8d4c66087e6e5779ca03b41ec6eabdc8bba49507
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: #### 114321 em/en dash: 6 h2: 2 blocks: 21
+# ---- payload a partir daqui ----
+#### 114321 em/en dash: 6 h2: 2 blocks: 21
+   DASH: “Kiki’s Delivery Service Round Memo – Kiki’s Cake”
+   DASH: ▼ Kiki’s Delivery Service Round Memo – Kiki’s Cake
+   DASH: “Howl’s Moving Castle Round Memo – Calcifer’s Bacon and Eggs”
+   DASH: ▼ Howl’s Moving Castle Round Memo – Calcifer’s Bacon and Eggs
+   DASH: onyo on the Cliff by the Sea Round Memo – Lisa’s Ramen”
+   DASH: onyo on the Cliff by the Sea Round Memo – Lisa’s Ramen
+#### 114325 em/en dash: 0 h2: 3 blocks: 13

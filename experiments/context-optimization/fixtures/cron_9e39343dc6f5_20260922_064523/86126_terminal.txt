@@ -1,0 +1,129 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86126 | papel: tool | tool: terminal | ts: 2026-09-22T09:51:20Z
+# bytes do payload: 6573 | sha256: 0aa51587a602c3fc72b3e0994154bf8a00c5957a771102e64369748d2c1cb17a
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: root, "remote_url_audit", url=finding.url, reason=finding.reason
+# ---- payload a partir daqui ----
+root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    ),
+                )
+                _funnel("download", "passed", item, position)
+                # Verificacao de conteudo: a imagem baixada deve estar listada
+                # na pagina de origem (fail-closed).
+                ok, verify_reason = verify_downloaded_against_source(
+                    source_page_url=str(item.get("source_page_url") or ""),
+                    downloaded=source,
+                    direct_image_url=str(download_url),
+                    cache=page_cache,
+                    cache_lock=page_cache_lock,
+                    audit=lambda finding: append_telemetry(
+                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    ),
+                )
+                if not ok:
+                    _funnel("source_verify", "rejected", item, position, verify_reason)
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": f"verificacao de origem: {verify_reason}",
+                    }
+                _funnel("source_verify", "passed", item, position, verify_reason)
+                is_featured = bool(item.get("is_featured"))
+                transparency = "flattened" if image_has_transparency(source) else "none"
+                if is_featured:
+                    webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
+                else:
+                    webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+                # Featured "so texto" nao e key art: rejeita.
+                if is_featured and image_is_mostly_flat(webp):
+                    _funnel("conversion", "rejected", item, position, "featured plana")
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": "featured aparenta ser so texto/arte plana sem conteudo visual; "
+                        "escolha uma key art/imagem real da obra",
+                    }
+                width, height = image_dimensions(webp)
+                _funnel("conversion", "passed", item, position, f"{width}x{height}")
+                media = upload_image(client, webp, evidence)
+                media_id = media.get("id")
+                media_url = media.get("source_url")
+                if not media_id or not media_url:
+                    raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                # Fase 13: persiste o fingerprint/proveniencia da midia. Assim a
+                # proxima busca do mesmo subject (ou do mesmo frame recomprimido)
+                # reusa a imagem em vez de baixar e subir de novo.
+                from .media.library_index import register as _registrar_midia
+
+                # Erro de PROGRAMAÇÃO aqui tem de estourar (o swallow total
+                # escondia um NameError e o índice simplesmente nunca era
+                # gravado); só falha de I/O é tolerada, e mesmo assim fica
+                # registrada.
+                try:
+                    _registrar_midia(
+                        root,
+                        phash=str(item.get("phash") or ""),
+                        source_url=str(item.get("direct_image_url") or ""),
+                        source_page=str(item.get("source_page_url") or ""),
+                        subject=str(item.get("subject") or ""),
+                        media_id=int(media_id),
+                        article_id=int(post_id) if post_id else None,
+                    )
+                except (OSError, ValueError) as exc:
+                    try:
+                        from .observability import append_telemetry
+
+                        append_telemetry(root, "media_index_write_failed",
+                                         post_id=post_id, error=str(exc)[:200])
+                    except Exception:  # noqa: BLE001
+                        pass
+                # A visão cara já ocorreu no media-validate. Transfere a
+                # aprovação para a URL hospedada no WordPress; o checklist
+                # final continua fail-closed, mas consome o cache em vez de
+                # criar uma segunda chamada tardia.
+                vision = preflight_vision.get(position)
+                if is_featured and vision and vision.get("status") == "passed":
+                    subject = vision_cache_subject(editorial)
+                    set_cached_decision(
+                        root,
+                        str(media_url),
+                        subject,
+                        {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
+                    )
+                _funnel("upload", "passed", item, position)
+                return position, {
+                    "paragraph_index": item["paragraph_index"],
+                    "media_id": media_id,
+                    "media_url": media_url,
+                    "alt_text": item["alt_text"],
+                    "credit_text": item["credit_text"],
+                    "featured": is_featured,
+                    "width": width,
+                    "height": height,
+                    "transparency": transparency,
+                }
+
+            # Fase paralela (I/O-bound). Somente falha ao CRIAR o executor cai
+            # para serial: nessa altura ainda não há download nem upload. Uma
+            # falha dentro de worker vira rejeição daquele item; reexecutar o
+            # lote inteiro duplicaria anexos que já foram enviados.
+            try:
+                pool = ThreadPoolExecutor(max_workers=_MEDIA_WORKERS)
+            except Exception:
+                processed = [_process_item(pair) for pair in pending]
+            else:
+                with pool:
+                    futures = [(pair, pool.submit(_process_item, pair)) for pair in pending]
+                    processed = []
+                    for pair, future in futures:
+                        position, item = pair
+                        try:
+                            processed.append(future.result())
+                        except Exception as exc:  # noqa: BLE001 - report one failed item
+                            _funnel("worker", "error", item, position, str(exc))
+                            processed.append(
+                                (
+                                    position,
+                                    {

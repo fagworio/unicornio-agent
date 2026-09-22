@@ -1,0 +1,34 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86262 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:55Z
+# bytes do payload: 2056 | sha256: 87b9fb206deb163a0864224f5c5890dae7a7337cb01d8d1edcf7dc3c9244635a
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/builder.py:22:def append_canonical_footer(html: str, original_link: str | None) -> str:
+# ---- payload a partir daqui ----
+src/unicornio_editor/builder.py:22:def append_canonical_footer(html: str, original_link: str | None) -> str:
+src/unicornio_editor/builder.py-23-    """Replace old generated footer and append exactly one canonical footer."""
+src/unicornio_editor/builder.py-24-    if not isinstance(html, str):
+src/unicornio_editor/builder.py-25-        raise TypeError("html must be a string")
+src/unicornio_editor/builder.py-26-    url = _validate_link(original_link) if original_link else None
+src/unicornio_editor/builder.py-27-    if _has_current_footer(html, url):
+src/unicornio_editor/builder.py-28-        return html
+src/unicornio_editor/builder.py-29-    cleaned = re.sub(
+src/unicornio_editor/builder.py-30-        r'<h3>\s*Confira mais novidades em nosso Portal de .*?</h3>',
+src/unicornio_editor/builder.py-31-        "",
+src/unicornio_editor/builder.py-32-        html,
+src/unicornio_editor/builder.py-33-        flags=re.IGNORECASE | re.DOTALL,
+src/unicornio_editor/builder.py-34-    )
+src/unicornio_editor/builder.py-35-    cleaned = re.sub(r'<em>\s*Fonte:\s*.*?</em>', "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+src/unicornio_editor/builder.py-36-    cleaned = re.sub(
+src/unicornio_editor/builder.py-37-        r'<a\b[^>]*>\s*(?:<strong>\s*)?<em>\s*Fonte\s*</em>\s*(?:</strong>\s*)?</a>',
+src/unicornio_editor/builder.py-38-        "",
+src/unicornio_editor/builder.py-39-        cleaned,
+src/unicornio_editor/builder.py-40-        flags=re.IGNORECASE | re.DOTALL,
+src/unicornio_editor/builder.py-41-    )
+src/unicornio_editor/builder.py-42-    # Import-era footer artifact: a bare link labelled "Fonte Principal"
+src/unicornio_editor/builder.py-43-    # (or similar) with no target/rel attributes, e.g.
+src/unicornio_editor/builder.py-44-    # `<br><a href="...">Fonte Principal</a>`. It is NOT the canonical
+src/unicornio_editor/builder.py-45-    # Fonte block, so strip it and the surrounding <br> so the canonical
+src/unicornio_editor/builder.py-46-    # footer below is the only source block.
+src/unicornio_editor/builder.py-47-    cleaned = re.sub(

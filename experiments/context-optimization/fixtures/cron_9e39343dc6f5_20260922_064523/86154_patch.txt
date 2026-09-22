@@ -1,0 +1,9 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86154 | papel: tool | tool: patch | ts: 2026-09-22T09:54:06Z
+# bytes do payload: 1052 | sha256: 21c20bd6338f8980bb8f07dcf72e95ed7e2068bff4eeab2dcef1b00a7b89ce4e
+# redacoes de credencial: 0
+# metadata do wrapper: {}
+# primeira linha: {"success": true, "diff": "--- a//tmp/build_114312_v2.py\n+++ b//tmp/build_114312_v2.py\n@@ -54,7 +54,7 @@\n          \"
+# ---- payload a partir daqui ----
+{"success": true, "diff": "--- a//tmp/build_114312_v2.py\n+++ b//tmp/build_114312_v2.py\n@@ -54,7 +54,7 @@\n          \"Cr\\u00e9dito da imagem: Windows Report. Tela do emulador PS5X com a biblioteca de jogos de PlayStation 5 no Xbox Series X. Uso com cr\\u00e9dito.\",\n          \"Biblioteca de jogos do PS5X, emulador de PS5, rodando no Xbox Series X\"),\n     item(3, ANTI,\n-         \"https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-dedd24.webp?w=1600\",\n+         \"https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-dedd24.webp\",\n          \"Divulga\\u00e7\\u00e3o/KytyPS5\",\n          \"Cr\\u00e9dito da imagem: Divulga\\u00e7\\u00e3o/KytyPS5. SILENT HILL: The Short Message rodando no emulador KytyPS5, base do PS5X. Uso com cr\\u00e9dito.\",\n          \"SILENT HILL: The Short Message rodando no emulador KytyPS5, base do PS5X\"),\n", "files_modified": ["/tmp/build_114312_v2.py"], "lint": {"status": "ok", "output": ""}, "resolved_path": "/tmp/build_114312_v2.py"}

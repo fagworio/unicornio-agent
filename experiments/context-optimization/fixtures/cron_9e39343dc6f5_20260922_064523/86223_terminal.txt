@@ -1,0 +1,27 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86223 | papel: tool | tool: terminal | ts: 2026-09-22T09:59:53Z
+# bytes do payload: 1591 | sha256: e72c6a4f8ccb2e56b170d3cb9b015140dd3fcdee0b7d477bbd8ea99a16eee512
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: BASE featured_cosmic_everything: WEBP 1500x844
+# ---- payload a partir daqui ----
+BASE featured_cosmic_everything: WEBP 1500x844
+BASE cosmic_firstlook: WEBP 1500x844
+BASE worldofreel_hero: WEBP 1156x462
+##### variety (561310 bytes)
+   [NEW] 999x570 https://variety.com/wp-content/uploads/2026/07/batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1
+   [NEW] 999x570 https://variety.com/wp-content/uploads/2026/07/batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1
+   [NEW] 999x570 https://variety.com/wp-content/uploads/2026/07/batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1
+   [NEW] 1368x912 https://variety.com/wp-content/uploads/2026/09/Chris-Rock-Variety-Cover-Story-4.jpg?crop=0px%2C64px%2C1368px%2C912px&#038;resize=6
+   [NEW] 1500x1000 https://variety.com/wp-content/uploads/2026/08/Jack-OConnell-Variety-6.jpg?crop=0px%2C167px%2C1500px%2C1000px&#038;resize=250%2C16
+   [NEW] 1856x1237 https://variety.com/wp-content/uploads/2026/08/Mariska-Hargitay-Variety-Cover-story-3.jpg?crop=0px%2C0px%2C1856px%2C1238px&#038;re
+   [NEW] 1500x1000 https://variety.com/wp-content/uploads/2026/07/Travis-Scott-Variety-Cover-Story-4.jpg?crop=0px%2C117px%2C1500px%2C1000px&#038;resi
+##### syfy (181785 bytes)
+   [NEW] 1825x1217 https://www.syfy.com/sites/syfy/files/2026/07/article-promotes-1825x1217_2_2.jpg
+   [NEW] 1920x1080 https://www.syfy.com/sites/syfy/files/media_mpx/thumbnails/dhwkj3fo7vbn0.cloudfront.net/image/BWT3_TVE_-_Syfy/500/244/20260716_THU
+##### screenrant (129887 bytes)
+   [NEW] 1200x628 https://static0.srcdn.com/wordpress/wp-content/uploads/social/sr-og-img.png?q=70&fit=crop&w=1200&h=628&dpr=1
+##### comicbook (285586 bytes)
+##### ign (3232 bytes)
+novos distintos: 10

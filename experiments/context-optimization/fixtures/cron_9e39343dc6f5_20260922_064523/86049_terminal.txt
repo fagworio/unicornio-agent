@@ -1,0 +1,68 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86049 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:28Z
+# bytes do payload: 4127 | sha256: 6fdb19e2153c475e22ea3be22c6626ecb48be35c93813078b4867e1d5add1454
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: usage: unicornio-editor [-h] [--version]
+# ---- payload a partir daqui ----
+usage: unicornio-editor [-h] [--version]
+                        {list-pending,queue,telemetry,cards,prepare,apply,checklist,publish,publish-ready,maintenance-report,media-search,media-similar,media-search-web,media-search-listicle,content,media-validate,draft,retry,retry-all,discard,migrate-state,reconcile,uncertain}
+                        ...
+
+Processa posts WordPress pending com segurança.
+
+positional arguments:
+  {list-pending,queue,telemetry,cards,prepare,apply,checklist,publish,publish-ready,maintenance-report,media-search,media-similar,media-search-web,media-search-listicle,content,media-validate,draft,retry,retry-all,discard,migrate-state,reconcile,uncertain}
+    list-pending        lista posts pending
+    queue               estado deterministico da fila: pending x ja editados
+                        (somente leitura)
+    telemetry           resumo agregado das blocagens/resultados do pipeline
+                        (work/telemetry.jsonl; somente leitura) — responde 'a
+                        fila parou por que?'
+    cards               cartoes compactos dos posts pending (entidades, gaps,
+                        SEO, imagens, dica de jogo) — economia de tokens: UMA
+                        chamada substitui list-pending+prepare+leituras
+    prepare             cria snapshot e relatório
+    apply               valida e aplica JSON editorial
+    checklist           roda o checklist pre-publicacao (somente leitura)
+    publish             publica um post somente se o checklist pre-publicacao
+                        passar (gate PUBLISH_ENABLED)
+    publish-ready       publica os pending prontos ate a cota da janela
+                        (PUBLISH_LIMIT); silencioso quando nao ha nada
+    maintenance-report  gera diagnóstico sem escrever
+    media-search        busca imagens na Media Library local para reuso
+                        (somente leitura; nunca edita o attachment original)
+    media-similar       compara imagens por hash perceptual (pHash): aponta
+                        quais sao o MESMO frame mesmo com URL/bytes diferentes
+                        (somente leitura)
+    media-search-web    descobre candidatos de imagem via buscadores (Bing
+                        primario, Google/Yandex fallback) com filtro de
+                        tamanho (somente leitura; index de descoberta, a fonte
+                        e a pagina original)
+    media-search-listicle
+                        busca em lote candidatos para obras de uma lista; cada
+                        titulo recebe uma busca independente em paralelo (uma
+                        chamada compacta, somente leitura)
+    content             retorna o cleaned_html do post (somente leitura; use
+                        SO quando for reescrever o texto, em vez de abrir o
+                        prepared.json inteiro)
+    media-validate      valida relevancia/capacidade do media_plan e a visao
+                        da featured, sem upload (1 chamada compacta; corrija o
+                        plano antes do apply)
+    draft               imprime o editorial.draft.json do post (base do rework
+                        incremental; leia SO para corrigir o componente
+                        apontado pelo fix do card)
+    retry               reabre um post AWAITING_HUMAN/BLOCKED (revisao
+                        humana): zera tentativas e cooldown; o post volta a
+                        fila de rework — nunca força READY
+    retry-all           destrava em lote todos os posts AWAITING_HUMAN/BLOCKED
+                        elegiveis (revisao humana): zera tentativas/cooldown
+                        de cada um e volta a fila de rework — nunca força
+                        READY
+    discard             descarta um post da fila editorial (decisao humana):
+                        grava uncertain.json e estado UNCERTAIN — sai da
+                        agenda e nunca publica
+    migrate-state       migration explicita dos posts legados (sem
+                        _hermes_state): grave o estado que falta para o
+                        publish-ready exigir SOMENTE ready (dry-run por

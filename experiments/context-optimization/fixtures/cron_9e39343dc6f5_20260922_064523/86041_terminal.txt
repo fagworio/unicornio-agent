@@ -1,0 +1,88 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86041 | papel: tool | tool: terminal | ts: 2026-09-22T09:46:23Z
+# bytes do payload: 3196 | sha256: 1a6cfccb5ff72e6817ae83ccb245291b52815bda44105707113482c301ba67ef
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+  "query": "PS5X emulador PS5 Xbox Series X",
+  "size_filter": "xga|w",
+  "count": 0,
+  "candidates": [],
+  "rejected": [
+    {
+      "query": "PS5X emulador PS5 Xbox Series X",
+      "size_filter": "1024x768|w",
+      "title": "Cutest Photos of Mariah Carey and Her Twins Through the Years",
+      "direct_image_url": "https://people.com/thmb/i4A8QvYDN2CfHQyAPO73TUETJnk=/4000x0/filters:no_upscale():max_bytes(150000):strip_icc():focal(787x360:789x362)/Mariah-Carey-and-Her-Twins-5-042924-de6fa83027014796abd0b0e25b38f954.jpg",
+      "source_page_url": "https://people.com/mariah-carey-and-her-twins-over-the-years-cute-photos-11961389",
+      "thumbnail_url": "https://ts1.mm.bing.net/th?id=OIP.2rrRRH95FBkGkn9s8eXrUwHaE8&amp;pid=15.1",
+      "engine": "bing",
+      "usable": true,
+      "discovery_only": false,
+      "rejected_reason": "",
+      "subject": "PS5X emulador PS5 Xbox Series X",
+      "valid": false,
+      "valid_reason": "pagina de origem inacessivel ou sem imagens listadas",
+      "images_in_page": 0,
+      "evidence": {
+        "subject": "PS5X emulador PS5 Xbox Series X",
+        "matched": [
+          "query"
+        ],
+        "evidence": {
+          "filename": "Mariah-Carey-and-Her-Twins-5-042924-de6fa83027014796abd0b0e25b38f954.jpg",
+          "page_url": "https://people.com/mariah-carey-and-her-twins-over-the-years-cute-photos-11961389",
+          "query": "PS5X emulador PS5 Xbox Series X"
+        },
+        "score": 0,
+        "gate": "provenance",
+        "verdict": "source_mismatch",
+        "penalties": [
+          "not_in_source"
+        ],
+        "needs_vision": false,
+        "reason": "imagem não consta na página de origem (bytes/link divergem)"
+      },
+      "evidence_score": 0,
+      "needs_vision": false,
+      "source_context_used": false,
+      "official_source": false
+    },
+    {
+      "query": "PS5X emulador PS5 Xbox Series X",
+      "size_filter": "1024x768|w",
+      "title": "Mariah Carey Twins Now",
+      "direct_image_url": "https://wwd.com/wp-content/uploads/2023/10/mariah-carey-kids-photos.jpg",
+      "source_page_url": "https://animalia-life.club/qa/pictures/mariah-carey-twins-now",
+      "thumbnail_url": "https://ts2.mm.bing.net/th?id=OIP.RZBAxP1URM_n1JZ9ZT6C7wHaET&amp;pid=15.1",
+      "engine": "bing",
+      "usable": true,
+      "discovery_only": false,
+      "rejected_reason": "",
+      "subject": "PS5X emulador PS5 Xbox Series X",
+      "valid": false,
+      "valid_reason": "pagina de origem inacessivel ou sem imagens listadas",
+      "images_in_page": 0,
+      "evidence": {
+        "subject": "PS5X emulador PS5 Xbox Series X",
+        "matched": [
+          "query"
+        ],
+        "evidence": {
+          "filename": "mariah-carey-kids-photos.jpg",
+          "page_url": "https://animalia-life.club/qa/pictures/mariah-carey-twins-now",
+          "query": "PS5X emulador PS5 Xbox Series X"
+        },
+        "score": 0,
+        "gate": "provenance",
+        "verdict": "source_mismatch",
+        "penalties": [
+          "not_in_source"
+        ],
+        "needs_vision": false,
+        "reason": "imagem não consta na página de origem (bytes/link divergem)"
+      },
+      "evidence_score": 0,

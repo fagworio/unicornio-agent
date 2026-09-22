@@ -1,0 +1,20 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86025 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:33Z
+# bytes do payload: 579 | sha256: b23ff42df64dd410b2ebf7d71ac86c1a0a06cab07fa2191bca30a8261ce8a3b6
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: # PUBLISH_ENABLED). NAO editar sem entender o fluxo.
+# ---- payload a partir daqui ----
+# PUBLISH_ENABLED). NAO editar sem entender o fluxo.
+EDITOR_DRY_RUN=false
+EDITOR_BATCH_LIMIT=5
+EDITOR_MAX_POSTS_PER_RUN=5
+EDITOR_MIN_RELEVANCE_CONFIDENCE=0.80
+EDITOR_MIN_SKIP_CONFIDENCE=0.90
+EDITOR_VISION_ENABLED=true
+EDITOR_VISION_MODEL=gpt-4o-mini
+EDITOR_MAX_REWORK_ATTEMPTS=3
+EDITOR_REWORK_COOLDOWN_MINUTES=30
+SITE_TOPICS="games,xbox,playstation,nintendo,anime,cultura geek,streaming,series,séries,cinema,filmes,tecnologia,emulação,retro games,eventos,lançamentos,mídia física,indústria de games,manga,mangá,quadrinhos,geek,entretenimento"
+EDITOR_VISION_MODE=ambiguous

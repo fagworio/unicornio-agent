@@ -1,0 +1,50 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86096 | papel: tool | tool: terminal | ts: 2026-09-22T09:49:49Z
+# bytes do payload: 1352 | sha256: ccb596bd522a0db46605174a72afd96720f25c792e7246418286d7b708453c0e
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: [
+# ---- payload a partir daqui ----
+[
+  {
+    "id": 114323,
+    "status": "pending",
+    "date": "2026-09-22T04:43:38",
+    "title": "Nintendo mostra mapa de Hyrule de Zelda: Ocarina of Time no Switch 2",
+    "word_count": 521,
+    "link": "https://prod.unicorniohater.com.br/?p=114323"
+  },
+  {
+    "id": 114320,
+    "status": "pending",
+    "date": "2026-09-22T04:41:56",
+    "title": "Kojima diz que decisão sobre exclusividade de Physint é com o Xbox e comenta rumores",
+    "word_count": 676,
+    "link": "https://prod.unicorniohater.com.br/?p=114320"
+  },
+  {
+    "id": 114318,
+    "status": "pending",
+    "date": "2026-09-22T04:41:46",
+    "title": "Kojima Productions leva PHYSINT do PlayStation para o Xbox e amplia parceria com a Microsoft",
+    "word_count": 885,
+    "link": "https://prod.unicorniohater.com.br/?p=114318"
+  },
+  {
+    "id": 114316,
+    "status": "pending",
+    "date": "2026-09-22T04:41:39",
+    "title": "Criador de “Line of Fire” explica revelação do episódio de estreia (com spoilers)",
+    "word_count": 1422,
+    "link": "https://prod.unicorniohater.com.br/?p=114316"
+  },
+  {
+    "id": 114314,
+    "status": "pending",
+    "date": "2026-09-22T04:41:22",
+    "title": "Kickstarter vai relançar quatro jogos do ZX Spectrum de Matthew Smith em box físico",
+    "word_count": 934,
+    "link": "https://prod.unicorniohater.com.br/?p=114314"
+  }
+]

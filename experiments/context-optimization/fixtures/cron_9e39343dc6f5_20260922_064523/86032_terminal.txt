@@ -1,0 +1,16 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86032 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:38Z
+# bytes do payload: 770 | sha256: f1d585a3664cd6aa511acda6448c0f2de3f52ea6eecb2d57c651d5322abd4bda
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: total plan: 6
+# ---- payload a partir daqui ----
+total plan: 6
+0 True 0 https://media.ixbt.games/1600x900/smart/jpeg/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png
+1 False 0 https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X.png
+2 False 3 https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator_full.jpg
+3 False 6 https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-captura.jpg
+4 False 9 https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg
+5 False 12 https://img-cdn.publive.online/fit-in/1200x675/pcq/media/media_files/2026/09/21/ps5-emulation-reaches-another-milestone-as-xbox-series-x-now-runs-ps5-games-2026-09-21-17-15-07.jpg
+False None

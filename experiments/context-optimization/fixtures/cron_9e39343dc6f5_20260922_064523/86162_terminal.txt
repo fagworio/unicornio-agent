@@ -1,0 +1,23 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86162 | papel: tool | tool: terminal | ts: 2026-09-22T09:54:36Z
+# bytes do payload: 2498 | sha256: 80a24d33d23e87f14b0e401425976c950511d51b5a066269c80fa71ac8877802
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: words 673 p 21
+# ---- payload a partir daqui ----
+words 673 p 21
+<p></p>
+<p>O Studio Ghibli ganhou mais uma leva de itens para quem coleciona papelaria temática. Desta vez, a novidade vem da rede especializada Donguri Kyowakoku, que apresentou uma coleção de blocos de recados com comidas de filmes do estúdio, além de um suporte que homenageia o Deus do Rio de <em>A Viagem de Chihiro</em>.</p>
+<p>Para fãs do universo do estúdio e para quem gosta de papelaria japonesa, esse tipo de lançamento costuma ser um prato cheio. A coleção combina ilustrações de refeições icônicas com formatos e detalhes pensados para chamar atenção na mesa, no escritório ou na estante. E, entre os itens, há um destaque que foge do padrão: um suporte em forma do personagem, com uma parte que se move.</p>
+<h2>Blocos de recados em formato de comida</h2>
+<p>A linha começa pelos memo pads, que são blocos de recados com design arredondado e estampas inspiradas em cenas de comida de diferentes obras do Ghibli. São <strong>três modelos</strong> para escolher, todos com preço de <strong>770 ienes</strong> (aproximadamente <strong>R$ 33,00</strong>) cada.</p>
+<p>Os itens trazem refeições que remetem diretamente a momentos do cinema de animação. Um dos modelos é o <strong>“Kiki’s Delivery Service Round Memo – Kiki’s Cake”</strong>, com o bolo que Kiki recebe como presente de <strong>Madame</strong>. A reprodução do doce aparece com riqueza de detalhes, mantendo o clima acolhedor do filme.</p>
+<p></p>
+<p><strong>▼ Kiki’s Delivery Service Round Memo – Kiki’s Cake</strong></p>
+<p>
+...
+uncional. O Deus do Rio aparece como uma espécie de miniatura, com o corpo servindo de base e um clipe atrás da cabeça para prender as folhas. O detalhe que torna o item ainda mais chamativo é que a <strong>mandíbula se move</strong>, criando a sensação de que o personagem está dizendo “Well done” conforme você usa o suporte.</p>
+<p>O resultado é um objeto que mistura decoração e utilidade. Mesmo que o clipe permita prender qualquer tipo de papel, a proposta mais tentadora é usar recados que combinem com a estética do personagem, reforçando o clima dramático e divertido da cena em que o Deus do Rio surge na história.</p>
+<p>Para quem acompanha o universo do Ghibli, a referência é direta: no filme, o personagem aparece durante um momento marcante no banho do mundo dos espíritos. A peça, portanto, funciona como uma lembrança física dessa atmosfera, agora aplicada ao uso diário.</p>
+<p></p>

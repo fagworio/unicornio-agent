@@ -1,0 +1,19 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86144 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:33Z
+# bytes do payload: 1049 | sha256: acbe7402d44aedef33068d5d16f31acd214237dffc6cc790ee54d1f9233f2ba7
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/media/converter.py:11:MAX_INLINE_WIDTH = 1280
+# ---- payload a partir daqui ----
+src/unicornio_editor/media/converter.py:11:MAX_INLINE_WIDTH = 1280
+src/unicornio_editor/media/converter.py:14:MIN_INLINE_WIDTH = 640
+src/unicornio_editor/media/converter.py:172:    """Downscale inline images wider than MAX_INLINE_WIDTH (1280px).
+src/unicornio_editor/media/converter.py:180:    if image.width <= MAX_INLINE_WIDTH:
+src/unicornio_editor/media/converter.py:182:    height = max(1, round(image.height * MAX_INLINE_WIDTH / image.width))
+src/unicornio_editor/media/converter.py:183:    return image.resize((MAX_INLINE_WIDTH, height), Image.Resampling.LANCZOS)
+src/unicornio_editor/media/converter.py:194:            if image.width < MIN_INLINE_WIDTH:
+src/unicornio_editor/media/converter.py:196:                    f"inline image source is {image.width}px wide (minimum {MIN_INLINE_WIDTH}px); "
+src/unicornio_editor/checklist.py:437:    from .media.converter import MAX_INLINE_WIDTH, MIN_INLINE_WIDTH
+src/unicornio_editor/checklist.py:448:        if not MIN_INLINE_WIDTH <= width <= MAX_INLINE_WIDTH or height <= 0:
+=== convert_to_webp ===

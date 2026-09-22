@@ -1,0 +1,58 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86183 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:27Z
+# bytes do payload: 6986 | sha256: e8ac0ca3af7349e5214353daa7115765dba5e59b50cb96e76ebf3d9e363fbda4
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: ### -5-2.jpg?w=640
+# ---- payload a partir daqui ----
+### -5-2.jpg?w=640
+   ANTES: -a-spirited-away-river-god-memo-stand/" data-layout="button" data-lazy="false"> Tweet
+### ws-5.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-6.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-6.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-1.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-1.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-2.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-2.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-4.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-4.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-3.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-3.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-11.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-11.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-8.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-8.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-10.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-10.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-7.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-7.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### ws-9.jpg?w=640
+   ANTES: me-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-9.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### -120.jpg?w=640
+   ANTES: -shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-120.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-15.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-15.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-12.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-12.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-14.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-14.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-13.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-13.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-16.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-16.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-18.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-18.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-23.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-23.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-20.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-20.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-19.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-19.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### s-22.jpg?w=640
+   ANTES: e-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-22.jpg?resize=375,375 375w" data-sco-sizes="(max-width: 640px) 100vw, 640px" />
+### 100&amp;crop=1
+   ANTES: etag.cmd.push(function() { googletag.display('div-gpt-ad-sidetop'); }); MOST POPULAR jQuery(function($){ $('#widget_rankings').tabs(); }); Today Weekly Monthly Yearly Today
+### 100&amp;crop=1
+   ANTES: ttps://soranews24.com/wp-content/uploads/sites/3/2026/09/OC-Japan-Fair-2026-April_27.jpg?resize=375,375 375w" sizes="(max-width: 100px) 100vw, 100px" loading="lazy" decoding="async"> OC Japan Fair returns to California packed with all kinds of Japanese culture

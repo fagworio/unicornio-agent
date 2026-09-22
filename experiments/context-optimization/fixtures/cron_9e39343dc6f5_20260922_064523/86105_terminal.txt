@@ -1,0 +1,28 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86105 | papel: tool | tool: terminal | ts: 2026-09-22T09:50:14Z
+# bytes do payload: 740 | sha256: afaff27751cc5bc986cd268b93514f2fbfcd8732047a2d20e5cbfa8e8ba95967
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/hermes/unicornio-agent"}
+# primeira linha: ./editorial_112366_v1.json
+# ---- payload a partir daqui ----
+./editorial_112366_v1.json
+./editorial_114312_run.json
+./backups/114312/1790062063687746709.json
+./backups/114312/1790062864511665981.json
+./backups/114312/editorial.draft.json
+./backups/114312/prepared.json
+./backups/114312/editorial.blocked.json
+./backups/114312/editorial.latest.json
+./backups/112366/editorial.draft.json
+./backups/112366/prepared.json
+./backups/112366/editorial.latest.json
+./backups/110438/editorial.draft.json
+./backups/110438/editorial.latest.json
+./backups/113347/editorial.draft.json
+./backups/113347/editorial.latest.json
+./backups/114241/apply.latest.json
+./backups/114241/1789981494941076976.json
+./backups/114241/editorial.draft.json
+./backups/114241/editorial.latest.json
+./backups/110436/editorial.draft.json

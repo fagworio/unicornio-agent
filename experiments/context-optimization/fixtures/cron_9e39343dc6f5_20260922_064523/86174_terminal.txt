@@ -1,0 +1,48 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86174 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:05Z
+# bytes do payload: 4577 | sha256: 150535d5ed9c3da17bb86b1e3e6827a91ada2732c6c413eb1a892e6ec034eb78
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: OK JPEG 640x480 66496B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-not
+# ---- payload a partir daqui ----
+OK JPEG 640x480 66496B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 51561B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 28244B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 45080B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 47118B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 38793B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 48680B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 30321B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 44376B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 44101B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 50247B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 93469B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 35154B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 47936B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 42649B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 37087B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 43814B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 34785B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 42995B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 13251B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 32011B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 44728B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  OK JPEG 640x640 14866B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-s
+  skip JPEG 95x71 https://soranews24.com/wp-content/uploads/sites/3/2023/12/My-Neighbour-Totoro-pen-case-Ghi
+  skip JPEG 95x71 https://soranews24.com/wp-content/uploads/sites/3/2026/08/Studio-Ghibli-anime-shop-2027-Di
+  skip JPEG 95x71 https://soranews24.com/wp-content/uploads/sites/3/2025/08/GS-0.jpg?w=95&amp;h=70&amp;crop=
+  skip JPEG 95x71 https://soranews24.com/wp-content/uploads/sites/3/2023/07/Studio-Ghibli-perfume-fragrance-
+  skip JPEG 95x85 https://soranews24.com/wp-content/uploads/sites/3/2016/06/ghibli-5.jpg?w=95&amp;h=70&amp;c
+  skip JPEG 100x75 https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-m
+  skip JPEG 100x59 https://soranews24.com/wp-content/uploads/sites/3/2026/09/8_61b8d1.jpg?w=100&amp;h=100&amp
+  skip JPEG 100x54 https://soranews24.com/wp-content/uploads/sites/3/2026/09/2_26c3b5.jpg?w=100&amp;h=100&amp
+  skip JPEG 100x58 https://soranews24.com/wp-content/uploads/sites/3/2026/09/150909085567_TP_V4.jpg?w=100&amp
+##### kadojapan https://kadojapan.com/en/blog/studio-ghibli-stationery-secure-releases
+  OK WEBP 1920x1072 26224B https://cms.kadojapan.com/api/media/file/studio-ghibli-stationery-secure-releases-cover-3.webp
+  skip None 0x0 https://howtomakemoneywith.ai/media/blog-covers/studio-ghibli-stationery-secure-releases-i
+  skip None 0x0 https://howtomakemoneywith.ai/media/blog-covers/studio-ghibli-stationery-secure-releases-i
+  skip JPEG 467x600 https://img.amiami.jp/images/product/main/184/JIGS-003511.jpg
+  skip JPEG 485x600 https://img.amiami.jp/images/product/main/212/JIGS-005647.jpg
+  skip JPEG 431x600 https://img.amiami.jp/images/product/main/223/JIGS-006836.jpg
+saved /tmp/ghibli_imgs.json

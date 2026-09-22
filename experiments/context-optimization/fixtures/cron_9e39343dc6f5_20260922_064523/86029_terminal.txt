@@ -1,0 +1,16 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86029 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:36Z
+# bytes do payload: 1964 | sha256: 353a03487096b92dda6277cf5322b5ed3c013d664c6b76a399328c20bf1c0b21
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: === 114312_run (falhou) ===
+# ---- payload a partir daqui ----
+=== 114312_run (falhou) ===
+site_relevance = {"decision": "process", "confidence": 0.96, "reason": "Experimento de emulação de PS5 (projeto PS5X, derivado do KytyPS5) rodando no Xbox Series X, com demonstração de Quake II e limites de desempenho. Emulação e indústria de games estão na pauta do portal.", "matched_topics": ["games", "emulação", "xbox", "tecnologia"]}
+game_name = null
+needs_trailer = false
+trailer_url = null
+seo = {"title": "Emulação de PS5: PS5X tenta rodar no Xbox Series X", "meta_description": "Projeto PS5X, baseado no KytyPS5, adapta a emulação de PS5 para o Xbox Series X. Veja o que já foi demonstrado e as limitações do experimento.", "focus_keyword": "emulação de PS5"}
+media_plan = [{"paragraph_index": 0, "source_page_url": "https://ixbt.games/en/news/2026/09/21/na-xbox-series-x-poigrali-v-igry-dlia-playstation-5-s-pomoshhiu-emuliatora.html", "direct_image_url": "https://media.ixbt.games/1600x900/smart/jpeg/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png", "author": "IXBT Games", "license": "Uso com crédito", "license_url": "https://ixbt.games/en/news/2026/09/21/na-xbox-series-x-poigrali-v-igry-dlia-playstation-5-s-pomoshhiu-emuliatora.html", "captured_at": "2026-09-22", "credit_text": "Crédito da imagem: IXBT Games. Gameplay de Quake II pelo emulador PS5X no Xbox S
+cleaned_html = "<p>A emulação de PlayStation 5 segue avançando em ritmo acelerado, e um novo experimento chamou atenção por um motivo específico: um projeto baseado no emulador KytyPS5 está sendo adaptado para rodar em um ambiente diferente do original, o Xbox Series X. A iniciativa ainda está longe de entregar uma biblioteca completa de jogos de PS5, mas já mostra demonstrações iniciais que reforçam a viabilidade técnica do caminho escolhido.</p>\n<p>O ponto de partida do avanço é o <strong>PS5X</strong>, projeto liderado pelo desenvolvedor <strong>Devran Cosmo Uenal</strong>. A proposta é aproveitar o trab

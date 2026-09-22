@@ -1,0 +1,53 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86146 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:38Z
+# bytes do payload: 1724 | sha256: 90e3fb083fdd3954b992117ad829a82cd0ec11beeaff1355c394ef163059029d
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: def _item_evidence_relevant(
+# ---- payload a partir daqui ----
+def _item_evidence_relevant(
+    item: dict[str, Any],
+    entities: set[str],
+    editorial: dict[str, Any] | None = None,
+) -> bool:
+    """Relevância por EVIDÊNCIA DE ORIGEM (nunca alt/credit/search_query).
+
+    Compartilhada entre ``_execute_media_plan`` (apply) e ``validate_media_plan``
+    (media-validate): uma única política de imagem para o pipeline inteiro.
+    """
+    # A evidência é o que a ORIGEM diz (arquivo + página). O subject NÃO entra
+    # aqui: ele é o alvo da checagem (entra como entities), e incluí-lo na
+    # própria evidência o faria casar consigo mesmo — qualquer item passaria.
+    evidencia = " ".join(
+        str(item.get(key) or "")
+        for key in ("direct_image_url", "source_page_url")
+    )
+    return bool(
+        image_is_relevant(
+            alt_text="",
+            credit_text="",
+            source_url=evidencia,
+            search_query="",
+            entities=_item_entities(item, entities, editorial),
+        )
+    )
+
+
+def _media_item_rejection(
+    item: dict[str, Any],
+    entities: set[str],
+    client: WordPressClient,
+    attachment_cache: dict[int, dict[str, Any]],
+    editorial: dict[str, Any] | None = None,
+) -> str | None:
+    """Motivo de rejeicao de um item do media_plan, ou None se valido.
+
+    Compartilhada pelo ``_execute_media_plan`` (apply) e pelo
+    ``validate_media_plan`` (media-validate, 1 chamada antes do apply):
+    reuso da Media Library exige credito visivel no attachment; featured deve
+    retratar o assunto citado pela evidencia real (arquivo/pagina de origem);
+    inline deve referenciar entidade distintiva do post.
+    """
+    is_featured = bool(item.get("is_featured"))
+    media_id = item.get("media_library_id")

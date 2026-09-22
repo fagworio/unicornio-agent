@@ -1,0 +1,48 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86034 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:44Z
+# bytes do payload: 987 | sha256: c86ab62f8c3d4cd0a6db0b6bcc1699b46db29e298d2af018db849393ebebf0e8
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: },
+# ---- payload a partir daqui ----
+},
+    "www.forgestudios.com": {
+      "discovery:passed": 1
+    },
+    "windowsreport.com": {
+      "candidate:seen": 2,
+      "preflight:passed": 2,
+      "download:passed": 1,
+      "source_verify:passed": 1,
+      "conversion:passed": 1,
+      "upload:passed": 1
+    },
+    "fanaticosdelhardware.com": {
+      "candidate:seen": 2,
+      "preflight:passed": 2,
+      "download:passed": 1,
+      "source_verify:passed": 1,
+      "conversion:passed": 1,
+      "upload:passed": 1
+    },
+    "www.thewrap.com": {
+      "candidate:seen": 12,
+      "featured_vision:passed": 2,
+      "preflight:passed": 12,
+      "download:passed": 6,
+      "source_verify:passed": 6,
+      "conversion:passed": 6,
+      "upload:passed": 6
+    },
+    "nfapi.noobfeed.com": {
+      "candidate:seen": 4,
+      "preflight:passed": 4,
+      "download:passed": 2,
+      "source_verify:passed": 2,
+      "conversion:passed": 2,
+      "upload:passed": 2
+    }
+  },
+  "last_event_at": "2026-09-22T09:45:30+00:00"
+}

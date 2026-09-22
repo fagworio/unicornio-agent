@@ -1,0 +1,88 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86291 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:43Z
+# bytes do payload: 3751 | sha256: 22067374e2b08fe4ac8a9fe78534e74a212d5ec52c6c62794a6eaa96f51f80c7
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 419:            p.set_defaults(func=_cmd_report_guard)
+# ---- payload a partir daqui ----
+419:            p.set_defaults(func=_cmd_report_guard)
+420-        elif name == "impact":
+421-            p.set_defaults(func=_cmd_impact)
+422-        elif name == "set-title":
+423-            p.set_defaults(func=_cmd_set_title)
+424-        elif name == "reindex-status":
+425-            p.set_defaults(func=_cmd_reindex_status)
+426-        elif name == "expectations":
+427-            p.set_defaults(func=_cmd_expectations)
+428-        elif name == "post-audit":
+429-            p.set_defaults(func=_cmd_post_audit)
+430-        elif name == "checklist":
+431-            p.set_defaults(func=_cmd_checklist)
+432-        elif name == "link-graph":
+433-            p.set_defaults(func=_cmd_link_graph)
+434-        elif name == "demand":
+435-            p.set_defaults(func=_cmd_demand)
+436-        elif name == "content-brief":
+437-            p.set_defaults(func=_cmd_content_brief)
+438-        elif name == "editorial-backlog":
+439-            p.set_defaults(func=_cmd_editorial_backlog)
+440-        elif name == "interlinks":
+441-            p.set_defaults(func=_cmd_interlinks)
+442-        elif name == "backlog":
+443-            p.set_defaults(func=_cmd_backlog)
+444-        elif name == "schedule":
+445-            p.set_defaults(func=_cmd_schedule)
+446-        elif name == "ga4":
+447-            p.set_defaults(func=_cmd_ga4)
+448-        elif name == "opportunity-feed":
+449-            p.set_defaults(func=_cmd_opportunity_feed)
+450-        elif name == "integration-status":
+451-            p.set_defaults(func=_cmd_integration_status)
+452-        elif name == "corpus":
+453-            p.set_defaults(func=_cmd_corpus)
+454-        elif name == "topics":
+455-            p.set_defaults(func=_cmd_topics)
+456-        elif name == "market":
+457-            p.set_defaults(func=_cmd_market)
+458-        elif name == "rankability":
+459-            p.set_defaults(func=_cmd_rankability)
+460-        elif name == "rankability-v2":
+461-            p.set_defaults(func=_cmd_rankability_v2)
+462-        elif name == "calibrate":
+463-            p.set_defaults(func=_cmd_calibrate)
+464-        elif name == "competitor-crawl":
+--
+2677:def _cmd_report_guard(args: argparse.Namespace, config: Any) -> int:
+2678-    """Guard determinístico do relatório: prosa pt-BR + evidência LITERAL.
+2679-
+2680-    Zero LLM: valida um rascunho ``{narrative, evidence}`` contra os valores de
+2681-    ferramenta esperados. Serve para o job (ou um humano) recusar um relatório
+2682-    que traduziu/resumiu/reescreveu um valor real antes de mandá-lo ao Telegram.
+2683-    """
+2684-    import json as _json
+2685-    from pathlib import Path
+2686-
+2687-    from .report.language_guard import validate_report
+2688-
+2689-    try:
+2690-        draft = _json.loads(Path(args.draft).read_text(encoding="utf-8"))
+2691-    except Exception as exc:  # noqa: BLE001
+2692-        _emit({"status": "error", "error": f"rascunho inválido: {exc}"}, force_json=True)
+2693-        return 2
+2694-    expected: dict[str, Any] = {}
+2695-    if args.expected:
+2696-        try:
+2697-            expected = _json.loads(Path(args.expected).read_text(encoding="utf-8"))
+2698-        except Exception as exc:  # noqa: BLE001
+2699-            _emit({"status": "error", "error": f"esperado inválido: {exc}"},
+2700-                  force_json=True)
+2701-            return 2
+2702-    values = [str(v) for v in (args.expect or []) if str(v).strip()]
+2703-    verdict = validate_report(draft, expected=expected, values=values)
+2704-    verdict["status"] = "ok" if verdict["ok"] else "violation"
+2705-    verdict["summary"] = {
+2706-        "command": "report-guard",
+2707-        "draft": args.draft,
+2708-        "expected_fields": sorted(expected),
+2709-        "expected_values": len(values),

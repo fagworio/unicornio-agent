@@ -1,0 +1,91 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86066 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:43Z
+# bytes do payload: 3822 | sha256: 52260a2d9670bbe4d1de6900a485d551f8ddcea633eda7d66bde0b4ac58d1b8f
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: }
+# ---- payload a partir daqui ----
+}
+_RELEVANCE = {"decision", "confidence", "reason", "matched_topics"}
+_SEO = {"title", "meta_description", "focus_keyword"}
+_MEDIA = {
+    "paragraph_index",
+    "source_page_url",
+    "direct_image_url",
+    "author",
+    "license",
+    "license_url",
+    "captured_at",
+    "credit_text",
+    "alt_text",
+    "is_featured",
+    # Reuse of an existing Media Library attachment: the image is downloaded
+    # from this attachment and re-uploaded as a NEW attachment (the original
+    # title/alt/caption are never overwritten).
+    "media_library_id",
+    # Evidência determinística da descoberta (o apply RECALCULA e não confia
+    # nestes campos — eles existem para auditoria e para o índice local).
+    "subject",
+    "phash",
+    "evidence_score",
+    "evidence_verdict",
+    "candidate_id",
+    # Query de descoberta que retornou esta imagem (ex.: "redfall xbox
+    # series"). Evidencia de relevancia (fluxo manual do editor): se a busca
+    # filtrada retornou a imagem, ela e o que se procura. O agente DEVE
+    # declarar a query real usada; nunca inventar para "decorar" uma imagem
+    # errada.
+    "search_query",
+...
+        if not 120 <= len(description) <= 160:
+            raise EditorialValidationError("seo.meta_description must contain 120 to 160 characters")
+        _nonempty_string(seo["focus_keyword"], "seo.focus_keyword")
+
+    media_plan = payload["media_plan"]
+    if not isinstance(media_plan, list) or len(media_plan) > 12:
+        raise EditorialValidationError("media_plan must contain between 0 and 12 items")
+    normalized_media = []
+    featured_count = 0
+    for index, item in enumerate(media_plan):
+        media = _object(item, f"media_plan[{index}]")
+        _keys(
+            media, _MEDIA, f"media_plan[{index}]",
+            # Campos de evidência são OPCIONAIS: o apply recalcula o score e não
+            # confia no JSON (um media_plan manual/adulterado não pode passar
+            # apenas por preencher evidence_score).
+            optional={
+                "media_library_id", "search_query", "subject", "phash",
+                "evidence_score", "evidence_verdict", "candidate_id",
+            },
+        )
+        paragraph_index = media["paragraph_index"]
+        if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
+            raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")
+        for name in ("author", "license", "captured_at", "credit_text", "alt_text"):
+            _nonempty_string(media[name], f"media_plan[{index}].{name}")
+        for name in ("source_page_url", "direct_image_url", "license_url"):
+            _http_url(media[name], f"media_plan[{index}].{name}")
+        is_featured = media["is_featured"]
+        if not isinstance(is_featured, bool):
+            raise EditorialValidationError(f"media_plan[{index}].is_featured must be boolean")
+        if is_featured:
+            featured_count += 1
+        normalized_media.append(dict(media))
+    if featured_count > 1:
+        raise EditorialValidationError("media_plan must contain at most one featured image")
+
+    needs_trailer = payload["needs_trailer"]
+    if not isinstance(needs_trailer, bool):
+        raise EditorialValidationError("needs_trailer must be boolean")
+    trailer_url = payload["trailer_url"]
+    if needs_trailer:
+        _http_url(trailer_url, "trailer_url")
+    elif trailer_url is not None:
+        raise EditorialValidationError("trailer_url must be null when needs_trailer is false")
+
+    game_name = payload["game_name"]
+    if game_name is not None and (not isinstance(game_name, str) or not game_name.strip()):
+        raise EditorialValidationError("game_name must be null or a non-empty string")
+
+    trailer_unavailable = payload.get("trailer_unavailable", False)

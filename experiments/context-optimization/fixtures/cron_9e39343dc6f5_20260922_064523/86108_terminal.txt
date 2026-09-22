@@ -1,0 +1,13 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86108 | papel: tool | tool: terminal | ts: 2026-09-22T09:50:28Z
+# bytes do payload: 563 | sha256: ba1042e8fb0cf73912c595754db63938136ce6950a4a00c6e849e1d285ceb312
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: entries 860
+# ---- payload a partir daqui ----
+entries 860
+f3f5b382a763:ps5x-jogar-ps5-no-xbox-series-x-via-emulador-kyt:vision-v2 => {"status": "MATCH", "confidence": 1.0, "visual_type": "other"}
+bca2428154f1:ps5x-jogar-ps5-no-xbox-series-x-via-emulador-kyt:vision-v2 => {"status": "MATCH", "confidence": 1.0, "visual_type": "other"}
+79d145ef5f56:emula-o-de-ps5-ps5x-tenta-rodar-no-xbox-series-x:vision-v2 => {"status": "MATCH", "confidence": 1.0, "visual_type": "other"}
+4993db6c5f47:emula-o-de-ps5-ps5x-tenta-rodar-no-xbox-series-x:vision-v2 => {"status": "MATCH", "confidence": 1.0, "visual_type": "other"}

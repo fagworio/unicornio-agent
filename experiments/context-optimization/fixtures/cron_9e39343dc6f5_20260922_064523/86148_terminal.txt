@@ -1,0 +1,17 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86148 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:45Z
+# bytes do payload: 1164 | sha256: 54af1d7b07f2b3e05b22c99d1e8086f22440577a4f54d794d1c5666614329dd9
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg |ALT: YouTube
+# ---- payload a partir daqui ----
+https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg |ALT: YouTube
+https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-919de8.webp |ALT: Cena de Hellboy: Web of Wyrd rodando no emulador KytyPS5 para PC
+https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-aa4172.webp |ALT: Disgaea 6 rodando no KytyPS5 para PC
+https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-dedd24.webp |ALT: SILENT HILL: The Short Message rodando no KytyPS5 para PC
+https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-76462e.webp |ALT: Neptunia ReVerse rodando no KytyPS5 para PC
+https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-d16b56.webp |ALT: Paleo Pines rodando no KytyPS5 para PC
+https://images.antihype.com.br/posts/76e766/external/39f9367092e8.webp?w=1600 |ALT: 
+CAPTION:  Frame do vídeo em que Devran Cosmo Uenal mostra o PS5X rodando no Xbox Series X em Modo Desenvolvedor Reprodução/YouTube Devran Cosmo Uenal 
+CAPTION: Hellboy: Web of Wyrd no KytyPS5 para PC, a base que Uenal levou ao XboxDivulgação/KytyPS5

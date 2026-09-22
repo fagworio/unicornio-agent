@@ -1,0 +1,48 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86152 | papel: tool | tool: terminal | ts: 2026-09-22T09:54:03Z
+# bytes do payload: 1605 | sha256: 97f48bfd30dbfa5c98a737cf6088bfed5abc2d5b4ce7e7d53a19869870b266b9
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 73:def _image_urls_in_page(html: str, base_url: str) -> list[str]:
+# ---- payload a partir daqui ----
+73:def _image_urls_in_page(html: str, base_url: str) -> list[str]:
+74-    """URLs de imagem listadas na pagina (img/src, srcset, og:image)."""
+75-    urls: list[str] = []
+76-    for match in _SRC_RE.finditer(html):
+77-        urls.append(match.group(1))
+78-    for match in _SRCSET_RE.finditer(html):
+79-        for candidate in match.group(1).split(","):
+80-            token = candidate.strip().split(" ")[0]
+81-            if token:
+82-                urls.append(token)
+83-    for match in _OG_IMAGE_RE.finditer(html):
+84-        urls.append(match.group(1))
+85-    resolved: list[str] = []
+86-    seen: set[str] = set()
+87-    for url in urls:
+88-        full = urljoin(base_url, url.strip())
+89-        if not _IMG_EXT.search(full):
+90-            continue
+91-        if full in seen:
+92-            continue
+93-        seen.add(full)
+94-        resolved.append(full)
+95-    # Preserve the complete set found inside the bounded 2 MiB page. The old
+96-    # first-12 truncation rejected a valid direct_image_url merely because a
+97-    # theme placed it later in the markup. Download limits are enforced when
+98-    # comparing candidates, not while discovering the exact URL.
+=== normalized ===
+102:def _normalized_url(url: str) -> str:
+103-    """Normalize harmless URL differences for exact source-page matching."""
+104-    parsed = urlparse(unquote(url.strip()))
+105-    return urlunparse(
+106-        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", parsed.query, "")
+107-    )
+108-
+109-
+110-def _md5(data: bytes) -> str:
+111-    return hashlib.md5(data).hexdigest()
+112-
+113-
+114-

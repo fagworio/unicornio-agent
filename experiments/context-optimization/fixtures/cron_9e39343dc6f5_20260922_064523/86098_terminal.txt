@@ -1,0 +1,25 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86098 | papel: tool | tool: terminal | ts: 2026-09-22T09:49:56Z
+# bytes do payload: 2862 | sha256: 9012c899c5c9013618d0e21651917650d66a78e83f18c39f11096bc188d531b2
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ==== P 1 ====
+# ---- payload a partir daqui ----
+==== P 1 ====
+<p>O ponto de partida do avanço é o <strong>PS5X</strong>, projeto liderado pelo desenvolvedor <strong>Devran Cosmo Uenal</strong>. A proposta é aproveitar o trabalho já feito no KytyPS5, que utiliza uma base Vulkan, e fazer a ponte necessária para que o emulador funcione no ecossistema da Microsoft, que trabalha com <strong>DirectX 12</strong>. Na prática, isso exige uma tradução complexa de instruções gráficas, além de ajustes para compatibilidade com o hardware e com o comportamento do sistema.</p>
+
+==== P 4 ====
+<p>Uenal também mencionou que o desenvolvimento está sendo acelerado com o uso de <strong>inteligência artificial</strong>, especialmente para acelerar tarefas como conversão e otimização de código. Em projetos de emulação, esse tipo de apoio pode reduzir o tempo gasto em etapas repetitivas e em ajustes finos, mas não elimina a necessidade de correções manuais e de validação contínua de compatibilidade.</p>
+
+==== P 5 ====
+<p>Há ainda limitações práticas que influenciam desempenho. O texto original cita um limite de <strong>5 GB de RAM</strong>, o que levaria a um teto de <strong>FPS entre 25 e 40</strong>. Em termos de experiência do usuário, isso pode ser suficiente para testes e demonstrações, mas ainda está longe do nível de fluidez e estabilidade que normalmente se espera ao jogar um título de PS5.</p>
+
+==== P 7 ====
+<p>Com o PS5, o desafio é maior. Mesmo assim, a expectativa entre parte dos fãs é que, com o tempo, a emulação melhore a ponto de permitir que jogos do console cheguem a mais dispositivos. O texto menciona a possibilidade de rodar jogos em celulares, mas ressalta que isso dependeria de smartphones com especificações muito altas, já que a execução de jogos pesados exige desempenho sustentado e recursos de memória que nem sempre estão disponíveis em aparelhos comuns.</p>
+
+==== P 9 ====
+<p>O texto aponta que essa esperança esbarra em um problema prático. Recentemente, o KytyPS5 teria chamado atenção ao iniciar a versão de <strong>GTA 5</strong> para PS5 e rodar o prólogo em <strong>40 a 60 FPS</strong> em hardware de alto nível. Ainda assim, o jogo permaneceria <strong>instável</strong> e <strong>crasharia em poucos minutos</strong>. Se um título como GTA 5, lançado há mais de uma década, ainda enfrenta dificuldades para rodar de forma consistente, a chance de GTA 6 funcionar no PC via emulação antes de uma liberação oficial para essa plataforma é considerada baixa.</p>
+
+==== P 12 ====
+<p>Em paralelo, o PS5X representa uma tentativa de levar a emulação para um novo território, aproximando o trabalho do ecossistema do Xbox Series X. Por enquanto, o que existe são demonstrações e etapas iniciais. A consolidação de compatibilidade, estabilidade e desempenho ainda depende de muito desenvolvimento.</p>

@@ -1,0 +1,74 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86134 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:04Z
+# bytes do payload: 6089 | sha256: 7c2717301e3acdaaa77a1871047317a2556bb597786c5e27e1708a66492c31be
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ### ixbt http=253720 imgs=8
+# ---- payload a partir daqui ----
+### ixbt http=253720 imgs=8
+    https://media.ixbt.games/1600x900/smart/jpeg/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png
+    https://media.ixbt.games/984x384/smart/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png
+    https://media.ixbt.games/fit-in/1280x/https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg
+    https://media.ixbt.games/fit-in/1600x1200/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png
+    https://media.ixbt.games/fit-in/500x/ixbt-data/1374430/media-jmymhntklrgstoabfoldn4yp.png
+### windowsreport http=222452 imgs=15
+    https://windowsreport.com/wp-content/uploads/2025/05/Author-Photo-150x150.jpeg
+    https://windowsreport.com/wp-content/uploads/2026/02/playstation-pause-patent.jpg
+    https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X-70
+    https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X.pn
+    https://windowsreport.com/wp-content/uploads/2026/09/entra-id-passkeys.jpg
+    https://windowsreport.com/wp-content/uploads/2026/09/excel-copy-paste-fixed-all-versions.jpg
+    https://windowsreport.com/wp-content/uploads/2026/09/microsoft-365-companion-apps-shutdown.jpg
+### tweaktown http=196777 imgs=52
+    /images/authors/hamidmurtaza.jpg
+    https://m.media-amazon.com/images/I/41ZA8mUGRAL._SL160_.jpg
+    https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator.avif
+    https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator.jpg
+    https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator_full.jpg
+    https://static.tweaktown.com/news/1/1/113653_2_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator.jpg
+    https://static.tweaktown.com/news/1/1/113653_3_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator.jpg
+    https://www.tweaktown.com/images/tweakbotv1-head.png
+    https://www.tweaktown.com/images/tweakbotv1.png
+    images/applenews-v4.png
+    images/google-follow-button-v3.png
+    images/googlepreferred-v3.png
+### fanaticos http=138819 imgs=20
+    https://fanaticosdelhardware.com/wp-content/themes/fhardware-main/assets/images/authors/jawss.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/IMG_20260918_102840919_HDR-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/IMG_20260918_125810746_HDR-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/MHAJ12-1-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-captura-2.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-captura.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-portada.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/isleosreveries_banner-1-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_1_2026-08-19_17-21-20-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_1_2026-09-14_19-05-13-rotated-1-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_1_2026-09-14_19-07-01-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_1_2026-09-14_19-07-45-1-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_1_2026-09-14_19-09-02-150x150.jpg
+    https://fanaticosdelhardware.com/wp-content/uploads/2026/09/photo_22_2026-09-14_19-07-53-1-150x150.jpg
+### pcquest http=170468 imgs=6
+    https://img-cdn.publive.online/fit-in/1200x675/pcq/media/media_files/2026/09/21/ps5-emulation-reaches-another-milestone-as-xbox-series-x-now-runs-ps5-
+    https://img-cdn.publive.online/fit-in/1280x960/filters:format(webp)/pcq/media/media_files/2026/09/21/ps5-emulation-reaches-another-milestone-as-xbox-s
+    https://img-cdn.thepublive.com/fit-in/580x348/filters:format(webp)/pcq/media/media_files/2025/02/28/jLH03CIAQHSkzvNyYAtF.png
+    https://www.pcquest.com/static/images/google_news.png
+### antihype http=205615 imgs=20
+    /authors/gustavo-abrao.jpg
+    https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg
+    https://images.antihype.com.br/comparador/playstation-5.png
+    https://images.antihype.com.br/comparador/xbox-series-x.png
+    https://images.antihype.com.br/posts/09a9b2/xbox-plugins-gdk-unreal-engine-b0ef5d.webp?w=1600
+    https://images.antihype.com.br/posts/09a9b2/xbox-plugins-gdk-unreal-engine-b0ef5d.webp?w=480 480w, https://images.antihype.com.br/posts/09a9b2/xbox-pl
+    https://images.antihype.com.br/posts/6a81ef/codigos-gta-5-ps4-ps5-xbox-pc-0e04be.webp?w=1600
+    https://images.antihype.com.br/posts/6a81ef/codigos-gta-5-ps4-ps5-xbox-pc-0e04be.webp?w=480 480w, https://images.antihype.com.br/posts/6a81ef/codigos-
+    https://images.antihype.com.br/posts/76e766/external/39f9367092e8.webp?w=1600
+    https://images.antihype.com.br/posts/76e766/external/39f9367092e8.webp?w=480 480w, https://images.antihype.com.br/posts/76e766/external/39f9367092e8.w
+    https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-76462e.webp
+    https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-919de8.webp
+    https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-aa4172.webp
+    https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-d16b56.webp
+    https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-ps5x-dedd24.webp
+    https://images.antihype.com.br/posts/9eced3/sharpemu-emulador-ps5-8a795b.webp?w=1600
+    https://images.antihype.com.br/posts/9eced3/sharpemu-emulador-ps5-8a795b.webp?w=480 480w, https://images.antihype.com.br/posts/9eced3/sharpemu-emulado
+    https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X.pn

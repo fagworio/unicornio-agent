@@ -1,0 +1,95 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86031 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:38Z
+# bytes do payload: 2503 | sha256: 4e1caa5786fb7b1a9b33f28a02a39f5b68ab002e1585be3c8ace9019f365b7f4
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+ "post_id": 114312,
+ "wordpress_changed": true,
+ "dry_run": false,
+ "status": "needs_rework",
+ "state": "blocked",
+ "baseline_enriched": true,
+ "attempts": 1,
+ "next_retry_at": "2026-09-22T08:11:14+00:00",
+ "backup": "backups/114312/1790062864511665981.json",
+ "checklist": {
+  "post_id": 114312,
+  "items": [
+   {
+    "name": "backup",
+    "status": "pass",
+    "detail": "snapshot: backups/114312/1790062864511665981.json"
+   },
+   {
+    "name": "status_pending",
+    "status": "pass",
+    "detail": "status atual: pending"
+   },
+   {
+    "name": "relevancia",
+    "status": "pass",
+    "detail": "decision=process, confidence=0.96 (minimo 0.80)"
+   },
+   {
+    "name": "conteudo_nao_vazio",
+    "status": "pass",
+    "detail": "cleaned_html preenchido"
+   },
+   {
+    "name": "conteudo_sem_metadados_operacionais",
+    "status": "pass",
+    "detail": "corpo é texto editorial"
+   },
+   {
+    "name": "fonte_original_link",
+    "status": "pass",
+    "detail": "original_link presente; bloco Fonte ok"
+   },
+   {
+    "name": "imagens_no_corpo",
+    "status": "fail",
+    "detail": "1177 palavras exigem >= 6 imagens (politica 6; 5 frames distintos disponiveis); conteudo tem 5"
+   },
+   {
+    "name": "relevancia_imagens",
+    "status": "pass",
+    "detail": "5 relevante(s) de 5 imagem(ns); irrelevantes: nenhuma"
+   },
+   {
+    "name": "imagens_duplicadas",
+    "status": "pass",
+    "detail": "5 imagem(ns) distintas"
+   },
+   {
+    "name": "imagens_similares",
+    "status": "pass",
+    "detail": "5 imagem(ns) visualmente distintas"
+   },
+   {
+    "name": "imagem_destaque",
+    "status": "pass",
+    "detail": "featured_media=114329 — obrigatoria para publicar"
+   },
+   {
+    "name": "destaque_1280x720",
+    "status": "pass",
+    "detail": "dimensoes atuais: 1280x720 (exigido 1280x720)"
+   },
+   {
+    "name": "destaque_relevancia",
+    "status": "pass",
+    "detail": "destaque retrata o assunto citado (origem com entidade: celulares, como o ps5x tenta rodar jogos de ps5 no xbox series x, emulacao, emulacao de ps5, emulacao de ps5: ps5x tenta rodar no xbox series x, executar, gta, isso, liga, muda, o que isso muda para quem espera ps5 em pc e ate em celulares, por que a comunidade liga emulacao de ps5 a gta 6 no pc, ps5, ps5x, quem, rodar, tenta, xbox)"
+   },
+   {
+    "name": "imagens_webp",
+    "status": "pass",
+    "detail": "6 imagem(ns); nao-webp: 0"
+   },
+   {
+    "name": "dimensoes_imagens",
+    "status": "pass",
+    "detail": "5 imagem(ns); fora do padrao 640-1280px: n

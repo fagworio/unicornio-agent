@@ -1,0 +1,24 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86190 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:52Z
+# bytes do payload: 1283 | sha256: feb591f71acb6bf8033c65e1aa1c5a3d73c7dda5fdca1a4afb57440622c4adec
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/prod.unicorniohater.com.br"}
+# primeira linha: ### 114321
+# ---- payload a partir daqui ----
+### 114321
+  rank_math_internal_links_processed = 1
+  rank_math_title = Studio Ghibli: papelaria com comidas e suporte do Deus do Rio
+  rank_math_description = Coleção de papelaria do Studio Ghibli traz memo pads com comidas de filmes e um suporte do Deus do Rio de A Viagem de Chihiro.
+  rank_math_focus_keyword = papelaria do Studio Ghibli
+  _diletecagentsai_meta_title = Studio Ghibli: papelaria com comidas e suporte do Deus do Rio
+  _diletecagentsai_meta_description = Coleção de papelaria do Studio Ghibli traz memo pads com comidas de filmes e um suporte do Deus do Rio de A Viagem de Chihiro.
+  _diletecagentsai_focus_keyword = papelaria do Studio Ghibli
+### 114325
+  rank_math_internal_links_processed = 1
+  rank_math_title = The Batman Part II é adiado para 18/02/2028
+  rank_math_description = A Warner Bros. adiou The Batman Part II para 18 de fevereiro de 2028. Entenda os motivos citados e os rumores sobre a DC.
+  rank_math_focus_keyword = The Batman Part II adiado
+  _diletecagentsai_meta_title = The Batman Part II é adiado para 18/02/2028
+  _diletecagentsai_meta_description = A Warner Bros. adiou The Batman Part II para 18 de fevereiro de 2028. Entenda os motivos citados e os rumores sobre a DC.
+  _diletecagentsai_focus_keyword = The Batman Part II adiado

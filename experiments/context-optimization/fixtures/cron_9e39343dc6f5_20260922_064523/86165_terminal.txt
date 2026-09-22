@@ -1,0 +1,48 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86165 | papel: tool | tool: terminal | ts: 2026-09-22T09:54:42Z
+# bytes do payload: 2382 | sha256: 982643a9a43aa60e0bf14a06a122576dd3ee75dbd1d039c1cfdb6ad9078ba532
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: =========== 114321 ===========
+# ---- payload a partir daqui ----
+=========== 114321 ===========
+--- Fonte block? False
+ 0   0w 
+ 1  53w O Studio Ghibli ganhou mais uma leva de itens para quem coleciona
+ 2  67w Para fãs do universo do estúdio e para quem gosta de papelaria ja
+ 3  41w A linha começa pelos memo pads, que são blocos de recados com des
+ 4  51w Os itens trazem refeições que remetem diretamente a momentos do c
+ 5   0w 
+ 6   9w ▼ Kiki’s Delivery Service Round Memo – Kiki’s Cake
+ 7  25w Por dentro, o bloco traz 100 folhas com ilustrações que remetem a
+ 8  45w O segundo modelo é o “Howl’s Moving Castle Round Memo – Calcifer’
+ 9   0w 
+10  11w ▼ Howl’s Moving Castle Round Memo – Calcifer’s Bacon and Eggs
+11  44w O terceiro modelo é o “Ponyo on the Cliff by the Sea Round Memo –
+12   0w 
+13  13w ▼ Ponyo on the Cliff by the Sea Round Memo – Lisa’s Ramen
+14  23w Assim como os outros, o bloco também vem com 100 páginas, desta v
+15  47w Além dos blocos, a coleção inclui um item que chama atenção mesmo
+16  50w O suporte foi produzido pela Movic, empresa que atua dentro do gr
+17  71w No caso do suporte, a ideia é transformar o personagem em um “por
+18  51w O resultado é um objeto que mistura decoração e utilidade. Mesmo 
+19  41w Para quem acompanha o universo do Ghibli, a referência é direta: 
+20   0w 
+h2: 2 ul: 0 imgs: 0
+=========== 114325 ===========
+--- Fonte block? False
+ 0  46w O retorno de Robert Pattinson como Batman vai demorar mais do que
+ 1  57w Até aqui, a justificativa divulgada é que o diretor Matt Reeves q
+ 2  46w Reeves também é descrito em relatos anteriores como um perfeccion
+ 3  55w Com a nova data, a distância entre The Batman (de 2022) e a conti
+ 4  45w Para os fãs, a espera também se torna mais difícil porque o filme
+ 5  42w Com o adiamento, a discussão mais visível em torno do longa conti
+ 6  53w Durante meses, uma das teorias mais repetidas era a de que Sebast
+ 7  57w Outras conversas também apontam para a possibilidade de Scarlett 
+ 8  59w Além do cronograma, outro tema que aparece nas discussões é a sup
+ 9  54w Essas versões afirmam que Matt Reeves estaria disposto a “esperar
+10  45w Mesmo sem detalhes verificáveis, o pano de fundo ajuda a explicar
+11  50w Enquanto The Batman Part II não chega aos cinemas, resta acompanh
+12   1w [embed]https://www.youtube.com/watch?v=aG8U7-XK7PI[/embed]
+h2: 3 ul: 0 imgs: 0

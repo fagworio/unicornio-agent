@@ -1,0 +1,1079 @@
+{
+  "sessao": "cron_9e39343dc6f5_20260922_064523",
+  "state_db": "/root/.hermes/state.db",
+  "capturado_em_utc": "2026-09-22T17:17:26Z",
+  "filtro_tool": null,
+  "min_bytes": 500,
+  "entregas": [
+    {
+      "arquivo": "86020_terminal.txt",
+      "mensagem": 86020,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:26Z",
+      "payload_bytes": 6117,
+      "sha256": "b1cc6fa2b928afbf5f7a615e6666f66043b724b31d19cbbea32daa4956783796",
+      "redacoes": 1,
+      "primeira_linha": "ARCHITECTURE.md"
+    },
+    {
+      "arquivo": "86021_terminal.txt",
+      "mensagem": 86021,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:27Z",
+      "payload_bytes": 740,
+      "sha256": "823d48c22fc7b6915b671627524ae9730773908df9d0f18f541a3034b739e45e",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86023_terminal.txt",
+      "mensagem": 86023,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:30Z",
+      "payload_bytes": 2353,
+      "sha256": "d03bafdcea34faf9b598c3e79c4662b37e2c1ed6289cca3f849c9ef69444eb1b",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86025_terminal.txt",
+      "mensagem": 86025,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:33Z",
+      "payload_bytes": 579,
+      "sha256": "b23ff42df64dd410b2ebf7d71ac86c1a0a06cab07fa2191bca30a8261ce8a3b6",
+      "redacoes": 0,
+      "primeira_linha": "# PUBLISH_ENABLED). NAO editar sem entender o fluxo."
+    },
+    {
+      "arquivo": "86026_skill_view.txt",
+      "mensagem": 86026,
+      "tool": "skill_view",
+      "ts": "2026-09-22T09:45:33Z",
+      "payload_bytes": 6719,
+      "sha256": "7f1b5235a9904fd16279dbbb66680c703a1f41ddee138d41d8e7ee477027b918",
+      "redacoes": 0,
+      "primeira_linha": "{\"success\": true, \"name\": \"unicorniohater-editor\", \"file\": \"references/politica-imagens.md\", \"content\": \"# Política de I"
+    },
+    {
+      "arquivo": "86028_terminal.txt",
+      "mensagem": 86028,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:36Z",
+      "payload_bytes": 5017,
+      "sha256": "f90859eb495d8fb78968d9b0b58cbe16cb30f6dc8d2112e5129d5323e0e150fb",
+      "redacoes": 0,
+      "primeira_linha": "=== draft 114312 ==="
+    },
+    {
+      "arquivo": "86029_terminal.txt",
+      "mensagem": 86029,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:36Z",
+      "payload_bytes": 1964,
+      "sha256": "353a03487096b92dda6277cf5322b5ed3c013d664c6b76a399328c20bf1c0b21",
+      "redacoes": 0,
+      "primeira_linha": "=== 114312_run (falhou) ==="
+    },
+    {
+      "arquivo": "86031_terminal.txt",
+      "mensagem": 86031,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:38Z",
+      "payload_bytes": 2503,
+      "sha256": "4e1caa5786fb7b1a9b33f28a02a39f5b68ab002e1585be3c8ace9019f365b7f4",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86032_terminal.txt",
+      "mensagem": 86032,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:38Z",
+      "payload_bytes": 770,
+      "sha256": "f1d585a3664cd6aa511acda6448c0f2de3f52ea6eecb2d57c651d5322abd4bda",
+      "redacoes": 0,
+      "primeira_linha": "total plan: 6"
+    },
+    {
+      "arquivo": "86034_terminal.txt",
+      "mensagem": 86034,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:44Z",
+      "payload_bytes": 987,
+      "sha256": "c86ab62f8c3d4cd0a6db0b6bcc1699b46db29e298d2af018db849393ebebf0e8",
+      "redacoes": 0,
+      "primeira_linha": "},"
+    },
+    {
+      "arquivo": "86037_terminal.txt",
+      "mensagem": 86037,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:47Z",
+      "payload_bytes": 2817,
+      "sha256": "bb14b412f48499fe0c108df30485d86eaca174c2bbda0c65a45eafbb30d62b2d",
+      "redacoes": 0,
+      "primeira_linha": "total 27080"
+    },
+    {
+      "arquivo": "86038_terminal.txt",
+      "mensagem": 86038,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:49Z",
+      "payload_bytes": 2108,
+      "sha256": "8b9a93c2b745f3888aab8850533f1eb21e7bf5bba477a4992c83bf77d81e0ce4",
+      "redacoes": 0,
+      "primeira_linha": "["
+    },
+    {
+      "arquivo": "86040_terminal.txt",
+      "mensagem": 86040,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:45:55Z",
+      "payload_bytes": 745,
+      "sha256": "cb59425f18852b94db4316cf0153fdd573a3c849cd3da1ec9cb83c85932f2b88",
+      "redacoes": 0,
+      "primeira_linha": "10"
+    },
+    {
+      "arquivo": "86041_terminal.txt",
+      "mensagem": 86041,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:46:23Z",
+      "payload_bytes": 3196,
+      "sha256": "1a6cfccb5ff72e6817ae83ccb245291b52815bda44105707113482c301ba67ef",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86043_terminal.txt",
+      "mensagem": 86043,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:46:32Z",
+      "payload_bytes": 1878,
+      "sha256": "a5ca4ee8b0893a3b1fc7007dcda73be698bcea9338534b0d7a8dda692e9805ef",
+      "redacoes": 0,
+      "primeira_linha": "114332 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044110/quake-"
+    },
+    {
+      "arquivo": "86048_terminal.txt",
+      "mensagem": 86048,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:28Z",
+      "payload_bytes": 2672,
+      "sha256": "cc1b25bf8f46ba9c73a3f3a98467ee14b28f76dcadb2e3cc37d7278c2e1bcaba",
+      "redacoes": 0,
+      "primeira_linha": "work/apply_full2_101880.json"
+    },
+    {
+      "arquivo": "86049_terminal.txt",
+      "mensagem": 86049,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:28Z",
+      "payload_bytes": 4127,
+      "sha256": "6fdb19e2153c475e22ea3be22c6626ecb48be35c93813078b4867e1d5add1454",
+      "redacoes": 0,
+      "primeira_linha": "usage: unicornio-editor [-h] [--version]"
+    },
+    {
+      "arquivo": "86052_terminal.txt",
+      "mensagem": 86052,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:31Z",
+      "payload_bytes": 945,
+      "sha256": "74a0dcfcc2d110c9d51435097ec8c00c2ac1723022760f6eb1754717147f587b",
+      "redacoes": 0,
+      "primeira_linha": "usage: unicornio-editor media-validate [-h] [--post-id POST_ID] [--root ROOT]"
+    },
+    {
+      "arquivo": "86054_terminal.txt",
+      "mensagem": 86054,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:32Z",
+      "payload_bytes": 1602,
+      "sha256": "dd9c40a10022a2c0d487090dc709098bfabeed83edd28d179163e246cd4233dd",
+      "redacoes": 0,
+      "primeira_linha": "exigido\""
+    },
+    {
+      "arquivo": "86059_terminal.txt",
+      "mensagem": 86059,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:37Z",
+      "payload_bytes": 2043,
+      "sha256": "154fa0eaddcfc97b19b6ea27f706e388ca297a95f7d0f84a090a37b30dd4eee3",
+      "redacoes": 0,
+      "primeira_linha": "=== library_sweep ==="
+    },
+    {
+      "arquivo": "86060_terminal.txt",
+      "mensagem": 86060,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:37Z",
+      "payload_bytes": 2669,
+      "sha256": "c074f8f52af4851903efcded1314f6b5d1370cf48fedc5b4d8d376ed1b787cea",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/media/library_index.py:81:    media_id: int | None = None,"
+    },
+    {
+      "arquivo": "86062_terminal.txt",
+      "mensagem": 86062,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:39Z",
+      "payload_bytes": 5710,
+      "sha256": "ff192a5cc4613c355cb51a8098154fb8c69f6e8d8488b0a09ac808c448e9f0c5",
+      "redacoes": 0,
+      "primeira_linha": ") -> str | None:"
+    },
+    {
+      "arquivo": "86064_terminal.txt",
+      "mensagem": 86064,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:41Z",
+      "payload_bytes": 1521,
+      "sha256": "5b17af6152dff8dcb47c715ec31f72c763347abfaa5a9f2edbcad08e037c9555",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/workflow.py:935:    media_id = item.get(\"media_library_id\")"
+    },
+    {
+      "arquivo": "86066_terminal.txt",
+      "mensagem": 86066,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:43Z",
+      "payload_bytes": 3822,
+      "sha256": "52260a2d9670bbe4d1de6900a485d551f8ddcea633eda7d66bde0b4ac58d1b8f",
+      "redacoes": 0,
+      "primeira_linha": "}"
+    },
+    {
+      "arquivo": "86070_terminal.txt",
+      "mensagem": 86070,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:50Z",
+      "payload_bytes": 3336,
+      "sha256": "4c5745b0a13470f8e5ef4b33fc2292cb7dd789243215869082f700d976f193e4",
+      "redacoes": 0,
+      "primeira_linha": "distinct_frames = None"
+    },
+    {
+      "arquivo": "86073_terminal.txt",
+      "mensagem": 86073,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:54Z",
+      "payload_bytes": 1915,
+      "sha256": "7a68ad9d760af405983ae916d19b84a5faf33b222e9aa6fb700018d64f827766",
+      "redacoes": 0,
+      "primeira_linha": "has_fonte = \"Fonte:\" in content and original_link in content"
+    },
+    {
+      "arquivo": "86075_terminal.txt",
+      "mensagem": 86075,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:47:56Z",
+      "payload_bytes": 3764,
+      "sha256": "6d8c50c02d65ea6415055e0d9928438d53ee3c10a0e4acb9bdbca35c62fc37e2",
+      "redacoes": 0,
+      "primeira_linha": "if not credit.startswith(\"Crédito da imagem:\"):"
+    },
+    {
+      "arquivo": "86078_terminal.txt",
+      "mensagem": 86078,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:07Z",
+      "payload_bytes": 662,
+      "sha256": "376d005ec0049f33b593e600a6c74ecb1e48741b2b7f2574fbcede5ca4a86eb5",
+      "redacoes": 0,
+      "primeira_linha": "type <class 'str'>"
+    },
+    {
+      "arquivo": "86080_terminal.txt",
+      "mensagem": 86080,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:09Z",
+      "payload_bytes": 3099,
+      "sha256": "402a71446aba98487a04c1d3189c998cf243bd72268e1ec5764884acfe70333c",
+      "redacoes": 0,
+      "primeira_linha": "# checklist falhem, o trabalho editorial fica salvo e o rework corrige"
+    },
+    {
+      "arquivo": "86082_terminal.txt",
+      "mensagem": 86082,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:14Z",
+      "payload_bytes": 1331,
+      "sha256": "6dbbdbff5d288d33ed276a7d27d93e824d381a2067beb4f2a5e99fcc0925bd54",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/workflow.py:334:            media_exhausted = bool(editorial.get(\"media_exhausted\"))"
+    },
+    {
+      "arquivo": "86083_terminal.txt",
+      "mensagem": 86083,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:15Z",
+      "payload_bytes": 1226,
+      "sha256": "e7fb5a9aaabc733485c749eac74730dd813a33f8747d761cbc2922c71952f67f",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/workflow.py:1291:        \"verified_inline_capacity\": available,"
+    },
+    {
+      "arquivo": "86085_terminal.txt",
+      "mensagem": 86085,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:17Z",
+      "payload_bytes": 4224,
+      "sha256": "998ad7efdd0b14247727505a0ad4de941c71d7c3c4b877b900aeb0b0ed8cd245",
+      "redacoes": 0,
+      "primeira_linha": "# Tentativas anteriores (antes desta): base do teto deterministico de"
+    },
+    {
+      "arquivo": "86087_terminal.txt",
+      "mensagem": 86087,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:48:39Z",
+      "payload_bytes": 2088,
+      "sha256": "d377a4b0b8ff28f59ab2513b3ce8e946c5312a019f5856ec86589808c52eb558",
+      "redacoes": 0,
+      "primeira_linha": "{\"phash\": \"\", \"source_url\": \"https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-"
+    },
+    {
+      "arquivo": "86090_terminal.txt",
+      "mensagem": 86090,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:49:23Z",
+      "payload_bytes": 3267,
+      "sha256": "955aee0821c96391b52ccc2cd872ee0aad3d8c5671c525e3bc4023511b5e9f8e",
+      "redacoes": 0,
+      "primeira_linha": "### Batman"
+    },
+    {
+      "arquivo": "86091_terminal.txt",
+      "mensagem": 86091,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:49:23Z",
+      "payload_bytes": 1051,
+      "sha256": "67a0f1cba56c1d94d756f3fd0ca87183d59474af82e47e553cfe438d4ce45dd5",
+      "redacoes": 0,
+      "primeira_linha": "p blocks 14"
+    },
+    {
+      "arquivo": "86096_terminal.txt",
+      "mensagem": 86096,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:49:49Z",
+      "payload_bytes": 1352,
+      "sha256": "ccb596bd522a0db46605174a72afd96720f25c792e7246418286d7b708453c0e",
+      "redacoes": 0,
+      "primeira_linha": "["
+    },
+    {
+      "arquivo": "86098_terminal.txt",
+      "mensagem": 86098,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:49:56Z",
+      "payload_bytes": 2862,
+      "sha256": "9012c899c5c9013618d0e21651917650d66a78e83f18c39f11096bc188d531b2",
+      "redacoes": 0,
+      "primeira_linha": "==== P 1 ===="
+    },
+    {
+      "arquivo": "86103_terminal.txt",
+      "mensagem": 86103,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:50:08Z",
+      "payload_bytes": 3100,
+      "sha256": "b3a288217c76bbaefb38ebc1af3cc870412f638ebc3bca6c9c35837a9cd3f936",
+      "redacoes": 0,
+      "primeira_linha": "Warning: The `mcp-adapter serve` command is registering an argument '--user' that conflicts with a global argument of th"
+    },
+    {
+      "arquivo": "86105_terminal.txt",
+      "mensagem": 86105,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:50:14Z",
+      "payload_bytes": 740,
+      "sha256": "afaff27751cc5bc986cd268b93514f2fbfcd8732047a2d20e5cbfa8e8ba95967",
+      "redacoes": 0,
+      "primeira_linha": "./editorial_112366_v1.json"
+    },
+    {
+      "arquivo": "86106_terminal.txt",
+      "mensagem": 86106,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:50:14Z",
+      "payload_bytes": 17364,
+      "sha256": "7f335350e4ddab4db45d25f4d8b043bbfe011c14e4e55aafd5b641ba23cef1ca",
+      "redacoes": 0,
+      "primeira_linha": "work/ed_113408_v2.json:5:  \"reason\": \"Noticia sobre o avanco da emulacao de PlayStation 5 no PC: a versao de PS5 de GTA "
+    },
+    {
+      "arquivo": "86108_terminal.txt",
+      "mensagem": 86108,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:50:28Z",
+      "payload_bytes": 563,
+      "sha256": "ba1042e8fb0cf73912c595754db63938136ce6950a4a00c6e849e1d285ceb312",
+      "redacoes": 0,
+      "primeira_linha": "entries 860"
+    },
+    {
+      "arquivo": "86112_terminal.txt",
+      "mensagem": 86112,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:50:36Z",
+      "payload_bytes": 1287,
+      "sha256": "2a9ad50e9515e5b4dfa3c51e61300760b1ca4bf30dcf7532bd58e43853e63822",
+      "redacoes": 0,
+      "primeira_linha": "866:def _item_entities("
+    },
+    {
+      "arquivo": "86122_terminal.txt",
+      "mensagem": 86122,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:51:14Z",
+      "payload_bytes": 1772,
+      "sha256": "4bcf00069e8fca41d74868d2ebb7f2a177053e11f4e4b1490918cd9d8c5c469b",
+      "redacoes": 0,
+      "primeira_linha": "['post_id', 'wordpress_changed', 'dry_run', 'status', 'state', 'baseline_enriched', 'attempts', 'next_retry_at', 'backup"
+    },
+    {
+      "arquivo": "86124_terminal.txt",
+      "mensagem": 86124,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:51:18Z",
+      "payload_bytes": 4684,
+      "sha256": "a9d96e8a34c114880b065722ac4231a2482dd730f0f0413a5d8238a5dace9514",
+      "redacoes": 0,
+      "primeira_linha": "status=status,"
+    },
+    {
+      "arquivo": "86126_terminal.txt",
+      "mensagem": 86126,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:51:20Z",
+      "payload_bytes": 6573,
+      "sha256": "0aa51587a602c3fc72b3e0994154bf8a00c5957a771102e64369748d2c1cb17a",
+      "redacoes": 0,
+      "primeira_linha": "root, \"remote_url_audit\", url=finding.url, reason=finding.reason"
+    },
+    {
+      "arquivo": "86130_terminal.txt",
+      "mensagem": 86130,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:51:29Z",
+      "payload_bytes": 4599,
+      "sha256": "7f3470afce5cfb7fbb2c450422534980e1801fa0c2d8744d29797ca2d9f54c9b",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/media/source_verify.py:192:def verify_downloaded_against_source("
+    },
+    {
+      "arquivo": "86134_terminal.txt",
+      "mensagem": 86134,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:04Z",
+      "payload_bytes": 6089,
+      "sha256": "7c2717301e3acdaaa77a1871047317a2556bb597786c5e27e1708a66492c31be",
+      "redacoes": 0,
+      "primeira_linha": "### ixbt http=253720 imgs=8"
+    },
+    {
+      "arquivo": "86138_terminal.txt",
+      "mensagem": 86138,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:12Z",
+      "payload_bytes": 2295,
+      "sha256": "c44f3b6576b412883aae378238c754cce66ea2335a618a06d12db87e91adec36",
+      "redacoes": 0,
+      "primeira_linha": "def _phash(url: str, *, timeout: float = 20.0):"
+    },
+    {
+      "arquivo": "86140_terminal.txt",
+      "mensagem": 86140,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:23Z",
+      "payload_bytes": 1565,
+      "sha256": "a877ccec3125d62027d9f45215a8373f7dbb64c985abb088c1f33cc811db16f4",
+      "redacoes": 0,
+      "primeira_linha": "=== dimensoes dos candidatos ==="
+    },
+    {
+      "arquivo": "86142_terminal.txt",
+      "mensagem": 86142,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:31Z",
+      "payload_bytes": 1821,
+      "sha256": "cbfda6f90149652c78b7ef1cc5e95441c051bf5437b92bf7bcf6cdce9a7e2376",
+      "redacoes": 0,
+      "primeira_linha": "442-        height_match = re.search(r'\\bheight=\"(\\d+)\"', tag, flags=re.IGNORECASE)"
+    },
+    {
+      "arquivo": "86144_terminal.txt",
+      "mensagem": 86144,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:33Z",
+      "payload_bytes": 1049,
+      "sha256": "acbe7402d44aedef33068d5d16f31acd214237dffc6cc790ee54d1f9233f2ba7",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/media/converter.py:11:MAX_INLINE_WIDTH = 1280"
+    },
+    {
+      "arquivo": "86146_terminal.txt",
+      "mensagem": 86146,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:38Z",
+      "payload_bytes": 1724,
+      "sha256": "90e3fb083fdd3954b992117ad829a82cd0ec11beeaff1355c394ef163059029d",
+      "redacoes": 0,
+      "primeira_linha": "def _item_evidence_relevant("
+    },
+    {
+      "arquivo": "86148_terminal.txt",
+      "mensagem": 86148,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:53:45Z",
+      "payload_bytes": 1164,
+      "sha256": "54af1d7b07f2b3e05b22c99d1e8086f22440577a4f54d794d1c5666614329dd9",
+      "redacoes": 0,
+      "primeira_linha": "https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg |ALT: YouTube"
+    },
+    {
+      "arquivo": "86152_terminal.txt",
+      "mensagem": 86152,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:54:03Z",
+      "payload_bytes": 1605,
+      "sha256": "97f48bfd30dbfa5c98a737cf6088bfed5abc2d5b4ce7e7d53a19869870b266b9",
+      "redacoes": 0,
+      "primeira_linha": "73:def _image_urls_in_page(html: str, base_url: str) -> list[str]:"
+    },
+    {
+      "arquivo": "86154_patch.txt",
+      "mensagem": 86154,
+      "tool": "patch",
+      "ts": "2026-09-22T09:54:06Z",
+      "payload_bytes": 1052,
+      "sha256": "21c20bd6338f8980bb8f07dcf72e95ed7e2068bff4eeab2dcef1b00a7b89ce4e",
+      "redacoes": 0,
+      "primeira_linha": "{\"success\": true, \"diff\": \"--- a//tmp/build_114312_v2.py\\n+++ b//tmp/build_114312_v2.py\\n@@ -54,7 +54,7 @@\\n          \\\""
+    },
+    {
+      "arquivo": "86156_terminal.txt",
+      "mensagem": 86156,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:54:14Z",
+      "payload_bytes": 1131,
+      "sha256": "f34385fae41e84e464bcbafd55a9f8ecd332689356a3a39d60b15aefae0b5d4b",
+      "redacoes": 0,
+      "primeira_linha": "escrito: /tmp/editorial_114312_v2.json"
+    },
+    {
+      "arquivo": "86162_terminal.txt",
+      "mensagem": 86162,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:54:36Z",
+      "payload_bytes": 2498,
+      "sha256": "80a24d33d23e87f14b0e401425976c950511d51b5a066269c80fa71ac8877802",
+      "redacoes": 0,
+      "primeira_linha": "words 673 p 21"
+    },
+    {
+      "arquivo": "86163_terminal.txt",
+      "mensagem": 86163,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:54:36Z",
+      "payload_bytes": 2166,
+      "sha256": "c2f8178f3578206f63d278631ba60a3095e7cb0b5bf7f92cd0a9e5c90009d142",
+      "redacoes": 0,
+      "primeira_linha": "words 639 p 13"
+    },
+    {
+      "arquivo": "86165_terminal.txt",
+      "mensagem": 86165,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:54:42Z",
+      "payload_bytes": 2382,
+      "sha256": "982643a9a43aa60e0bf14a06a122576dd3ee75dbd1d039c1cfdb6ad9078ba532",
+      "redacoes": 0,
+      "primeira_linha": "=========== 114321 ==========="
+    },
+    {
+      "arquivo": "86167_terminal.txt",
+      "mensagem": 86167,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:55:25Z",
+      "payload_bytes": 1730,
+      "sha256": "07cce5e851be7a58a8765f7dc0d61ab52488fca8a27bdc13a214bace0cb2338a",
+      "redacoes": 0,
+      "primeira_linha": "##### Studio Ghibli Donguri Kyowakoku memo pad collection"
+    },
+    {
+      "arquivo": "86169_web_search.txt",
+      "mensagem": 86169,
+      "tool": "web_search",
+      "ts": "2026-09-22T09:55:37Z",
+      "payload_bytes": 4814,
+      "sha256": "ae98c4b794ef3141b0da9c15633c45c4edd39249db0115c0cb691e4fcd233ccf",
+      "redacoes": 0,
+      "primeira_linha": "<untrusted_tool_result source=\"web_search\">"
+    },
+    {
+      "arquivo": "86170_web_search.txt",
+      "mensagem": 86170,
+      "tool": "web_search",
+      "ts": "2026-09-22T09:55:37Z",
+      "payload_bytes": 4368,
+      "sha256": "17610a5fee2f8e1bf9e7bf1e47d12236e076232f1ccb79ab4865bb1a570842fd",
+      "redacoes": 0,
+      "primeira_linha": "<untrusted_tool_result source=\"web_search\">"
+    },
+    {
+      "arquivo": "86174_terminal.txt",
+      "mensagem": 86174,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:05Z",
+      "payload_bytes": 4577,
+      "sha256": "150535d5ed9c3da17bb86b1e3e6827a91ada2732c6c413eb1a892e6ec034eb78",
+      "redacoes": 0,
+      "primeira_linha": "OK JPEG 640x480 66496B https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-not"
+    },
+    {
+      "arquivo": "86179_terminal.txt",
+      "mensagem": 86179,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:17Z",
+      "payload_bytes": 2657,
+      "sha256": "81e5688617a52fd9a82a9e928df110ef785a93e219fda79dd7a757e68ba78e96",
+      "redacoes": 0,
+      "primeira_linha": "total 24"
+    },
+    {
+      "arquivo": "86181_terminal.txt",
+      "mensagem": 86181,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:21Z",
+      "payload_bytes": 5320,
+      "sha256": "e4f9556358dc112cb9e1f3b77b2b15eb8e55c6fe454654fc10dd0a516a1b8652",
+      "redacoes": 0,
+      "primeira_linha": "Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-c"
+    },
+    {
+      "arquivo": "86183_terminal.txt",
+      "mensagem": 86183,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:27Z",
+      "payload_bytes": 6986,
+      "sha256": "e8ac0ca3af7349e5214353daa7115765dba5e59b50cb96e76ebf3d9e363fbda4",
+      "redacoes": 0,
+      "primeira_linha": "### -5-2.jpg?w=640"
+    },
+    {
+      "arquivo": "86187_terminal.txt",
+      "mensagem": 86187,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:38Z",
+      "payload_bytes": 3781,
+      "sha256": "c088f44edeb3b0bf414576b8ee5eeccc8b84275172180901a1a1ae05de9369d6",
+      "redacoes": 0,
+      "primeira_linha": "278800 /tmp/sora.html"
+    },
+    {
+      "arquivo": "86189_terminal.txt",
+      "mensagem": 86189,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:50Z",
+      "payload_bytes": 781,
+      "sha256": "4837d6165dd04d458992b908a58caa19b7b0ad43e0c4c7a834d19ba3a3797f47",
+      "redacoes": 0,
+      "primeira_linha": "<meta property=\"og:image\" content=\"https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-s"
+    },
+    {
+      "arquivo": "86190_terminal.txt",
+      "mensagem": 86190,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:52Z",
+      "payload_bytes": 1283,
+      "sha256": "feb591f71acb6bf8033c65e1aa1c5a3d73c7dda5fdca1a4afb57440622c4adec",
+      "redacoes": 0,
+      "primeira_linha": "### 114321"
+    },
+    {
+      "arquivo": "86192_terminal.txt",
+      "mensagem": 86192,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:55Z",
+      "payload_bytes": 3378,
+      "sha256": "a69d0b890f0a0369790d25f21b069c1089f8e0529f257c89532ee6f87ff11972",
+      "redacoes": 0,
+      "primeira_linha": "236-    # 6b. Every inline image must be semantically related to the cited subject"
+    },
+    {
+      "arquivo": "86194_terminal.txt",
+      "mensagem": 86194,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:56:57Z",
+      "payload_bytes": 4058,
+      "sha256": "7d87a3063cf0e22224d5ce4242b63b6639f305a352502fdf882296624fc1dffe",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/content_quality.py:62:def validate_content_quality("
+    },
+    {
+      "arquivo": "86196_terminal.txt",
+      "mensagem": 86196,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:57:04Z",
+      "payload_bytes": 2241,
+      "sha256": "14a58be05ee268c479bbc264420eef99e1ee9b895ce86d26977c7d27e49e4bb5",
+      "redacoes": 0,
+      "primeira_linha": "17-_PT_STOPWORDS = frozenset("
+    },
+    {
+      "arquivo": "86197_terminal.txt",
+      "mensagem": 86197,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:57:36Z",
+      "payload_bytes": 4975,
+      "sha256": "d12a68d0204a9d0ca9f30b28afd0406952c954e703dfd1006d9e656bd11b4253",
+      "redacoes": 0,
+      "primeira_linha": "skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB"
+    },
+    {
+      "arquivo": "86199_terminal.txt",
+      "mensagem": 86199,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:57:53Z",
+      "payload_bytes": 23868,
+      "sha256": "4cc48b4d2b99e4329dca843bb337b4c1146a74201e5d495508303332ec9626f9",
+      "redacoes": 0,
+      "primeira_linha": "##### variety 22"
+    },
+    {
+      "arquivo": "86205_terminal.txt",
+      "mensagem": 86205,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:58:07Z",
+      "payload_bytes": 4497,
+      "sha256": "b175b0840171e47524a87208442c046a45ed14aa03e06e1d1eb3e943a34f7cb9",
+      "redacoes": 0,
+      "primeira_linha": "##### variety (2 imgs)"
+    },
+    {
+      "arquivo": "86207_terminal.txt",
+      "mensagem": 86207,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:58:12Z",
+      "payload_bytes": 3437,
+      "sha256": "cc2329c10f24260e7a5546ff21c75996e1cb99fb51927888b8b9af0ded4ff64e",
+      "redacoes": 0,
+      "primeira_linha": "##### worldofreel"
+    },
+    {
+      "arquivo": "86210_terminal.txt",
+      "mensagem": 86210,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:58:27Z",
+      "payload_bytes": 2761,
+      "sha256": "77f56d31b1706bfded0ea05e634b0ead4c03173057a1310e97fc74c1587b4de3",
+      "redacoes": 0,
+      "primeira_linha": "##### latimes (14 imgs)"
+    },
+    {
+      "arquivo": "86212_terminal.txt",
+      "mensagem": 86212,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:58:32Z",
+      "payload_bytes": 3715,
+      "sha256": "445bdb0b4e076da25665abe9927e0e0c106b7e20e412bd93a0644b7f535810bf",
+      "redacoes": 0,
+      "primeira_linha": "##### variety"
+    },
+    {
+      "arquivo": "86216_terminal.txt",
+      "mensagem": 86216,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:59:00Z",
+      "payload_bytes": 935,
+      "sha256": "046460aac9702de123fceda2275481cbfc9fe60ffdc84a5900ef9fde56920adf",
+      "redacoes": 0,
+      "primeira_linha": "featured_cosmic_firstlook    WEBP 1500x844 47228B  phash=9bb7681b866c6760"
+    },
+    {
+      "arquivo": "86223_terminal.txt",
+      "mensagem": 86223,
+      "tool": "terminal",
+      "ts": "2026-09-22T09:59:53Z",
+      "payload_bytes": 1591,
+      "sha256": "e72c6a4f8ccb2e56b170d3cb9b015140dd3fcdee0b7d477bbd8ea99a16eee512",
+      "redacoes": 0,
+      "primeira_linha": "BASE featured_cosmic_everything: WEBP 1500x844"
+    },
+    {
+      "arquivo": "86227_terminal.txt",
+      "mensagem": 86227,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:09Z",
+      "payload_bytes": 1048,
+      "sha256": "10795f87c93f126853c7cd35f10690c17ca08946a948cf4de6e3a16fe5ef990a",
+      "redacoes": 0,
+      "primeira_linha": "featured           WEBP 1500x844 106256B | OK   URL exata confirmada na pagina de origem (bytes iguais)"
+    },
+    {
+      "arquivo": "86229_terminal.txt",
+      "mensagem": 86229,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:14Z",
+      "payload_bytes": 711,
+      "sha256": "9676bcc603f3ddb07b9807eb81ed6356bfb15bcb415ca5939e9cff40b45af823",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/media/downloader.py:69:    request = Request(url, headers={\"Accept\": \"image/*\", \"User-Agent\": \"unic"
+    },
+    {
+      "arquivo": "86231_terminal.txt",
+      "mensagem": 86231,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:17Z",
+      "payload_bytes": 1004,
+      "sha256": "1ea06b3b6caac72b5a8d2b39028dfa1f33d10378829018d9838f42da5104d578",
+      "redacoes": 0,
+      "primeira_linha": "29:_UA = ("
+    },
+    {
+      "arquivo": "86237_terminal.txt",
+      "mensagem": 86237,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:37Z",
+      "payload_bytes": 2240,
+      "sha256": "109dff8f4ccd80bf152b3308d2346db446b4b04f3bac7cc6b5d262787555f46a",
+      "redacoes": 0,
+      "primeira_linha": "### 114321"
+    },
+    {
+      "arquivo": "86239_terminal.txt",
+      "mensagem": 86239,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:44Z",
+      "payload_bytes": 632,
+      "sha256": "4f9c5959b6c31321745dd2b77375b15c8626d24af7c9b19ea659c3e77c6c3706",
+      "redacoes": 0,
+      "primeira_linha": "https://boundingintocomics.com/movies/the-batman-part-ii-pushed"
+    },
+    {
+      "arquivo": "86241_terminal.txt",
+      "mensagem": 86241,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:47Z",
+      "payload_bytes": 1066,
+      "sha256": "2e5f803b4b9a83a0714580f63632738634488764d4a97c444227114d4d7c950d",
+      "redacoes": 0,
+      "primeira_linha": "##### bic (9 imgs)"
+    },
+    {
+      "arquivo": "86243_terminal.txt",
+      "mensagem": 86243,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:00:55Z",
+      "payload_bytes": 1669,
+      "sha256": "aeb60e455c8d62b9173ecf3879969cb8b3ed346c3a99e149343074b5cb9123c9",
+      "redacoes": 0,
+      "primeira_linha": "https://boundingintocomics.com/wp-content/uploads/2024/03/Bat-computer-scaled.jpg"
+    },
+    {
+      "arquivo": "86248_terminal.txt",
+      "mensagem": 86248,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:12Z",
+      "payload_bytes": 522,
+      "sha256": "b092f9c6da7f8cb2a27574aa8d4c66087e6e5779ca03b41ec6eabdc8bba49507",
+      "redacoes": 0,
+      "primeira_linha": "#### 114321 em/en dash: 6 h2: 2 blocks: 21"
+    },
+    {
+      "arquivo": "86250_terminal.txt",
+      "mensagem": 86250,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:21Z",
+      "payload_bytes": 2490,
+      "sha256": "b6be186b93cd25e8ca633c82eb9ca7afe2add4e3085c0d32365e6795993d47f5",
+      "redacoes": 0,
+      "primeira_linha": "216:def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path:"
+    },
+    {
+      "arquivo": "86252_terminal.txt",
+      "mensagem": 86252,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:24Z",
+      "payload_bytes": 2786,
+      "sha256": "afdc80fc10e3e67f30bdfbb641066c8255adab9b5c837e8e4912b36505a31d3b",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/media/converter.py:23:def image_is_mostly_flat(path, *, sample_px=12000, edge_threshold=18.0) -> bo"
+    },
+    {
+      "arquivo": "86254_terminal.txt",
+      "mensagem": 86254,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:30Z",
+      "payload_bytes": 6971,
+      "sha256": "c5d7664f55cc81e8ab6b5038675cfed3727e77b8fdea7f1df39cb63ed77b72ce",
+      "redacoes": 0,
+      "primeira_linha": "news-5-1.jpg | https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-stand-"
+    },
+    {
+      "arquivo": "86258_terminal.txt",
+      "mensagem": 86258,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:42Z",
+      "payload_bytes": 1215,
+      "sha256": "31967fe882f9b7b07b63050d1eef1245380aa5cdfcf6386c1a0bccbc1ac6d62b",
+      "redacoes": 0,
+      "primeira_linha": "grupo_5    JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)"
+    },
+    {
+      "arquivo": "86260_terminal.txt",
+      "mensagem": 86260,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:53Z",
+      "payload_bytes": 2625,
+      "sha256": "b65acd49a17648decb686eb36f5fc37f224b6f7727cc49680931f99da5e2f15b",
+      "redacoes": 0,
+      "primeira_linha": "def compose_final_content("
+    },
+    {
+      "arquivo": "86262_terminal.txt",
+      "mensagem": 86262,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:01:55Z",
+      "payload_bytes": 2056,
+      "sha256": "87b9fb206deb163a0864224f5c5890dae7a7337cb01d8d1edcf7dc3c9244635a",
+      "redacoes": 0,
+      "primeira_linha": "src/unicornio_editor/builder.py:22:def append_canonical_footer(html: str, original_link: str | None) -> str:"
+    },
+    {
+      "arquivo": "86280_terminal.txt",
+      "mensagem": 86280,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:08Z",
+      "payload_bytes": 860,
+      "sha256": "ef51279a3cff985de9441f4623a090f0d3cabcb7c57f8c6bb171e496854bf12f",
+      "redacoes": 0,
+      "primeira_linha": "=== cards ==="
+    },
+    {
+      "arquivo": "86282_terminal.txt",
+      "mensagem": 86282,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:23Z",
+      "payload_bytes": 722,
+      "sha256": "5535c4a354ebeb9c3ada0fcbf253652aaf11ce8bd3cc17e679848cf57581f47c",
+      "redacoes": 0,
+      "primeira_linha": "===== 114312"
+    },
+    {
+      "arquivo": "86284_terminal.txt",
+      "mensagem": 86284,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:27Z",
+      "payload_bytes": 671,
+      "sha256": "bcad6097b9dcdfa14b70b23847e7cb810dc36439652e2e67d9a8af2184a90694",
+      "redacoes": 0,
+      "primeira_linha": "usage: hermes-seo-agent report-guard [-h] [--limit LIMIT] [--json]"
+    },
+    {
+      "arquivo": "86289_terminal.txt",
+      "mensagem": 86289,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:41Z",
+      "payload_bytes": 12258,
+      "sha256": "9932f2d7e7d9685c63b79798144747698c4fcf35b0746c2f358a43b2b5a9b811",
+      "redacoes": 0,
+      "primeira_linha": "DESIGN.md"
+    },
+    {
+      "arquivo": "86291_terminal.txt",
+      "mensagem": 86291,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:43Z",
+      "payload_bytes": 3751,
+      "sha256": "22067374e2b08fe4ac8a9fe78534e74a212d5ec52c6c62794a6eaa96f51f80c7",
+      "redacoes": 0,
+      "primeira_linha": "419:            p.set_defaults(func=_cmd_report_guard)"
+    },
+    {
+      "arquivo": "86293_terminal.txt",
+      "mensagem": 86293,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:46Z",
+      "payload_bytes": 2779,
+      "sha256": "1fab23d73619de87b97af12e20844d457f3a5b27af5e4b6b6474ff117ac1d08c",
+      "redacoes": 0,
+      "primeira_linha": "126:def validate_report(report: Mapping[str, Any], *,"
+    },
+    {
+      "arquivo": "86295_terminal.txt",
+      "mensagem": 86295,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:49Z",
+      "payload_bytes": 3128,
+      "sha256": "181d23286457ab566ca1693cdbf38664ac045b6f81c87927c1e6edb0fa0a1e87",
+      "redacoes": 0,
+      "primeira_linha": "113-    payload = _payload_text(report)"
+    },
+    {
+      "arquivo": "86297_terminal.txt",
+      "mensagem": 86297,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:03:52Z",
+      "payload_bytes": 1908,
+      "sha256": "cd879cbaa63bbc7eb9fee10ac3101a21459e8a18078073caa1001bd4f255dae4",
+      "redacoes": 0,
+      "primeira_linha": "81-    if offenders:"
+    },
+    {
+      "arquivo": "86301_terminal.txt",
+      "mensagem": 86301,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:04:08Z",
+      "payload_bytes": 976,
+      "sha256": "43f0d7d219e855957638737188504f04146c59d042211a97b01eed8ae10ada1e",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86307_patch.txt",
+      "mensagem": 86307,
+      "tool": "patch",
+      "ts": "2026-09-22T10:04:20Z",
+      "payload_bytes": 4532,
+      "sha256": "2a8ae2230df02c25f3c3b8cad151ad30c98767fd1687698cddf5611eb5fd47bc",
+      "redacoes": 0,
+      "primeira_linha": "{\"success\": true, \"diff\": \"--- a//tmp/guard_editorial_report.py\\n+++ b//tmp/guard_editorial_report.py\\n@@ -4,7 +4,7 @@\\n"
+    },
+    {
+      "arquivo": "86309_patch.txt",
+      "mensagem": 86309,
+      "tool": "patch",
+      "ts": "2026-09-22T10:04:23Z",
+      "payload_bytes": 4096,
+      "sha256": "81266db62c90755ee8e856d88ec7e7b6e51e8db2ba8b3771d6b687e48211faf8",
+      "redacoes": 0,
+      "primeira_linha": "{\"success\": true, \"diff\": \"--- a//tmp/guard_editorial_report.py\\n+++ b//tmp/guard_editorial_report.py\\n@@ -6,7 +6,7 @@\\n"
+    },
+    {
+      "arquivo": "86311_terminal.txt",
+      "mensagem": 86311,
+      "tool": "terminal",
+      "ts": "2026-09-22T10:04:25Z",
+      "payload_bytes": 557,
+      "sha256": "839a82d39efe01f40890965b3143033c20b2f98b0f72e92504dd2314f13a0897",
+      "redacoes": 0,
+      "primeira_linha": "{"
+    },
+    {
+      "arquivo": "86317_read_file.txt",
+      "mensagem": 86317,
+      "tool": "read_file",
+      "ts": "2026-09-22T10:04:40Z",
+      "payload_bytes": 2417,
+      "sha256": "d42b6b698b672eb23d6a52b8fa593c134d6b1b1aa3236384f7b50cc7653941de",
+      "redacoes": 0,
+      "primeira_linha": "{\"content\": \"1|{\\n2| \\\"narrative\\\": \\\"Fila editorial (write mode, status sempre pending): 3 posts foram levados a READY "
+    }
+  ]
+}

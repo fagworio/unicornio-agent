@@ -1,0 +1,59 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86280 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:08Z
+# bytes do payload: 860 | sha256: ef51279a3cff985de9441f4623a090f0d3cabcb7c57f8c6bb171e496854bf12f
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: === cards ===
+# ---- payload a partir daqui ----
+=== cards ===
+{
+  "count": 0,
+  "cards": []
+}
+=== queue ===
+{
+  "pending": 17,
+  "edited": 8,
+  "blocked": 0,
+  "uncertain": 8,
+  "awaiting_human": 0,
+  "skipped": 1,
+  "unprocessed_ids": [],
+  "recent_unprocessed_ids": [],
+  "blocked_ids": [],
+  "recent_blocked_ids": [],
+  "eligible_rework_ids": [],
+  "ready_ids": [
+    114312,
+    114314,
+    114316,
+    114318,
+    114320,
+    114321,
+    114323,
+    114325
+  ],
+  "awaiting_human_ids": [],
+  "uncertain_ids": [
+    112354,
+    112356,
+    112445,
+    112714,
+    113041,
+    113708,
+    114050,
+    114245
+  ],
+  "skipped_ids": [
+    113349
+  ],
+  "recent_days": 7,
+  "posts": [
+    {
+      "id": 112354,
+      "title": "Carlisle United promove Retro Kit Day contra o Southend United",
+      "state": "uncertain",
+      "attempts": 0,
+      "last_error": "off-topic/lixo: fora da pauta do portal"
+    },

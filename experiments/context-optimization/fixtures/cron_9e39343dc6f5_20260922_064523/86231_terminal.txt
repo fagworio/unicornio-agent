@@ -1,0 +1,34 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86231 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:17Z
+# bytes do payload: 1004 | sha256: 1ea06b3b6caac72b5a8d2b39028dfa1f33d10378829018d9838f42da5104d578
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 29:_UA = (
+# ---- payload a partir daqui ----
+29:_UA = (
+51:            headers={"User-Agent": _UA, "Accept": accept},
+src/unicornio_editor/media/search.py:42:_UA = (
+src/unicornio_editor/media/source_verify.py:29:_UA = (
+src/unicornio_editor/media/visual_hash.py:26:_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0"
+
+
+def _fetch(url: str, accept: str, max_bytes: int, budget: list[int], audit=None) -> bytes | None:
+    if budget[0] <= 0:
+        return None
+    try:
+        finding = inspect_remote_url(url)
+        if finding and audit:
+            audit(finding)
+        request = Request(
+            url,
+            headers={"User-Agent": _UA, "Accept": accept},
+        )
+        with urlopen(request, timeout=_FETCH_TIMEOUT) as response:
+            finding = inspect_remote_url(response.geturl())
+            if finding and audit:
+                audit(finding)
+            data = response.read(min(max_bytes, budget[0]) + 1)
+            if len(data) > max_bytes:
+                return None
+            budget[0] -= len(data)

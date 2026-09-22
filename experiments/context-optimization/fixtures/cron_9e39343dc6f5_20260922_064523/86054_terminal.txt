@@ -1,0 +1,58 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86054 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:32Z
+# bytes do payload: 1602 | sha256: dd9c40a10022a2c0d487090dc709098bfabeed83edd28d179163e246cd4233dd
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: exigido"
+# ---- payload a partir daqui ----
+exigido"
+      },
+      {
+        "name": "cta_canonico",
+        "status": "pass",
+        "detail": "CTA canonico presente"
+      },
+      {
+        "name": "qualidade_texto",
+        "status": "fail",
+        "detail": "content with 1824 words requires at least 10 relevant images"
+      },
+      {
+        "name": "estrutura_lista",
+        "status": "fail",
+        "detail": "item 2 must have its image immediately after H2"
+      },
+      {
+        "name": "schema_editorial",
+        "status": "pass",
+        "detail": "JSON editorial valido no schema estrito"
+      },
+      {
+        "name": "imagens_visao",
+        "status": "skip",
+        "detail": "post ja bloqueado por outro gate; verificacao de visao nao executada"
+      }
+    ],
+    "passed": 14,
+    "skipped": 2,
+    "failed": 3,
+    "all_passed": false
+  },
+  "media_plan_results": [
+    {
+      "paragraph_index": 0,
+      "media_id": 111122,
+      "media_url": "https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/08/27233001/featured_0-124.webp",
+      "alt_text": "Only Yesterday, filme de Isao Takahata",
+      "credit_text": "Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme de Isao Takahata. Uso com crédito.",
+      "featured": true,
+      "width": 1280,
+      "height": 720,
+      "transparency": "none"
+    },
+    {
+      "paragraph_index": 2,
+      "media_id": 111123,
+      "media_url": "https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/08/27233003/inline_1-258.webp",
+      "alt_text": "Seita e Setsuko em O Túmulo dos Vagalum

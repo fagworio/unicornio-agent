@@ -1,0 +1,24 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86227 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:09Z
+# bytes do payload: 1048 | sha256: 10795f87c93f126853c7cd35f10690c17ca08946a948cf4de6e3a16fe5ef990a
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: featured           WEBP 1500x844 106256B | OK   URL exata confirmada na pagina de origem (bytes iguais)
+# ---- payload a partir daqui ----
+featured           WEBP 1500x844 106256B | OK   URL exata confirmada na pagina de origem (bytes iguais)
+cosmic_firstlook   WEBP 1500x844 47228B | OK   URL exata confirmada na pagina de origem (bytes iguais)
+worldofreel_hero   WEBP 1156x462 17644B | OK   URL exata confirmada na pagina de origem (bytes iguais)
+syfy_thumb         JPEG 1920x1080 182146B | FAIL CDN serviu conteudo divergente da pagina de origem para a mesma imagem (bytes diferentes);
+variety_41d7ae     PNG 999x570 500419B | FAIL CDN serviu conteudo divergente da URL exata listada na pagina de origem (bytes diferentes)
+--- pares (<=6 mesmo frame) ---
+  featured           cosmic_firstlook   22
+  featured           worldofreel_hero   26
+  featured           syfy_thumb         36
+  featured           variety_41d7ae     26
+  cosmic_firstlook   worldofreel_hero   28
+  cosmic_firstlook   syfy_thumb         34
+  cosmic_firstlook   variety_41d7ae     28
+  worldofreel_hero   syfy_thumb         28
+  worldofreel_hero   variety_41d7ae     28
+  syfy_thumb         variety_41d7ae     22

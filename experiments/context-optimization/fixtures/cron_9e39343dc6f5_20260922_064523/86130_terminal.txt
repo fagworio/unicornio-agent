@@ -1,0 +1,60 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86130 | papel: tool | tool: terminal | ts: 2026-09-22T09:51:29Z
+# bytes do payload: 4599 | sha256: 7f3470afce5cfb7fbb2c450422534980e1801fa0c2d8744d29797ca2d9f54c9b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/media/source_verify.py:192:def verify_downloaded_against_source(
+# ---- payload a partir daqui ----
+src/unicornio_editor/media/source_verify.py:192:def verify_downloaded_against_source(
+src/unicornio_editor/media/source_verify.py:192:def verify_downloaded_against_source(
+src/unicornio_editor/media/source_verify.py-193-    *,
+src/unicornio_editor/media/source_verify.py-194-    source_page_url: str,
+src/unicornio_editor/media/source_verify.py-195-    downloaded: Path,
+src/unicornio_editor/media/source_verify.py-196-    direct_image_url: str,
+src/unicornio_editor/media/source_verify.py-197-    cache: dict[str, list[str] | None] | None = None,
+src/unicornio_editor/media/source_verify.py-198-    cache_lock: Lock | None = None,
+src/unicornio_editor/media/source_verify.py-199-    audit=None,
+src/unicornio_editor/media/source_verify.py-200-) -> tuple[bool, str]:
+src/unicornio_editor/media/source_verify.py-201-    """Confirma que ``downloaded`` corresponde a uma imagem listada na pagina.
+src/unicornio_editor/media/source_verify.py-202-
+src/unicornio_editor/media/source_verify.py-203-    Returns ``(ok, reason)``. Fail-closed: pagina inacessivel, imagem nao
+src/unicornio_editor/media/source_verify.py-204-    listada, ou bytes divergentes -> ``(False, motivo)``.
+src/unicornio_editor/media/source_verify.py-205-    """
+src/unicornio_editor/media/source_verify.py-206-    if not isinstance(source_page_url, str) or not source_page_url.strip():
+src/unicornio_editor/media/source_verify.py-207-        return False, "source_page_url ausente; impossivel verificar a imagem contra a origem"
+src/unicornio_editor/media/source_verify.py-208-    cache = cache if cache is not None else {}
+src/unicornio_editor/media/source_verify.py-209-    budget = [_VERIFY_TOTAL_MAX_BYTES]
+src/unicornio_editor/media/source_verify.py-210-    def populate_page_cache() -> None:
+src/unicornio_editor/media/source_verify.py-211-        if source_page_url in cache:
+src/unicornio_editor/media/source_verify.py-212-            return
+src/unicornio_editor/media/source_verify.py-213-        page_html = _fetch(source_page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+src/unicornio_editor/media/source_verify.py-214-        cache[source_page_url] = (
+src/unicornio_editor/media/source_verify.py-215-            _image_urls_in_page(page_html.decode("utf-8", "ignore"), source_page_url)
+src/unicornio_editor/media/source_verify.py-216-            if page_html is not None
+src/unicornio_editor/media/source_verify.py-217-            else None
+src/unicornio_editor/media/source_verify.py-218-        )
+src/unicornio_editor/media/source_verify.py-219-
+src/unicornio_editor/media/source_verify.py-220-    # Varios itens do plano podem apontar para a mesma galeria. O lock protege
+src/unicornio_editor/media/source_verify.py-221-    # o "ausente -> baixar -> gravar": evita requests duplicadas, sem pular a
+src/unicornio_editor/media/source_verify.py-222-    # comparacao byte-a-byte da imagem individual logo abaixo.
+src/unicornio_editor/media/source_verify.py-223-    if cache_lock is None:
+src/unicornio_editor/media/source_verify.py-224-        populate_page_cache()
+src/unicornio_editor/media/source_verify.py-225-    else:
+src/unicornio_editor/media/source_verify.py-226-        with cache_lock:
+src/unicornio_editor/media/source_verify.py-227-            populate_page_cache()
+src/unicornio_editor/media/source_verify.py-228-    listed = cache[source_page_url]
+src/unicornio_editor/media/source_verify.py-229-    if not listed:
+src/unicornio_editor/media/source_verify.py-230-        return False, (
+src/unicornio_editor/media/source_verify.py-231-            "pagina de origem inacessivel ou sem imagens listadas; "
+src/unicornio_editor/media/source_verify.py-232-            "nao e possivel confirmar a origem da imagem (fonte instavel)"
+src/unicornio_editor/media/source_verify.py-233-        )
+src/unicornio_editor/media/source_verify.py-234-    try:
+src/unicornio_editor/media/source_verify.py-235-        downloaded_hash = _md5(downloaded.read_bytes())
+src/unicornio_editor/media/source_verify.py-236-    except OSError as exc:
+src/unicornio_editor/media/source_verify.py-237-        return False, f"falha ao ler o arquivo baixado: {exc}"
+src/unicornio_editor/media/source_verify.py-238-
+src/unicornio_editor/media/source_verify.py-239-    direct_normalized = _normalized_url(direct_image_url)
+src/unicornio_editor/media/source_verify.py-240-    exact = [url for url in listed if _normalized_url(url) == direct_normalized]
+src/unicornio_editor/media/source_verify.py-241-    for url in exact:
+src/unicornio_editor/media/source_verify.py-242-        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)

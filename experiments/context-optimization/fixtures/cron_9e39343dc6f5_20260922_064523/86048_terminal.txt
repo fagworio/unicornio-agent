@@ -1,0 +1,51 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86048 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:28Z
+# bytes do payload: 2672 | sha256: cc1b25bf8f46ba9c73a3f3a98467ee14b28f76dcadb2e3cc37d7278c2e1bcaba
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: work/apply_full2_101880.json
+# ---- payload a partir daqui ----
+work/apply_full2_101880.json
+work/apply_full_101880.json
+work/library_sweep.json
+work/media_index.json
+work/search_113868.json
+---
+work/apply_full2_101880.json:"media_id": 111122
+work/apply_full2_101880.json:"media_id": 111123
+work/apply_full2_101880.json:"media_id": 111124
+work/apply_full2_101880.json:"media_id": 111125
+work/apply_full2_101880.json:"media_id": 111126
+--- README media_plan ---
+207:  removidas e exigem redescobrimento no media_plan.
+208-- Escolher novas imagens por contexto da secao.
+209-- Minimo OBRIGATORIO 2/4/6 (2 <= 600 palavras, 4 <= 1000, 6 acima; listicle =
+210-  max(2, itens)) — sem waiver; o apply recusa abaixo do minimo.
+211-- Listicle é planejado pela mídia: uma imagem inline distinta e validada por
+212-  item; a featured não entra na conta. Quatro imagens inline permitem no máximo
+213-  quatro itens. `media-validate editorial.json --post-id ID` informa capacidade
+214-  e déficit antes do upload.
+215-- Inserir apos um paragrafo que introduza visualmente o assunto, normalmente apos 2-4 paragrafos.
+216-- Minimo de 3 paragrafos entre imagens.
+217-- Converter para WebP antes do upload (normalizacao tecnica e automatica no apply).
+218-- Google Images é somente índice de descoberta; a fonte é a página ORIGINAL da imagem (preview do Google não é fonte).
+219-- Política de imagens (2026-08): qualquer imagem da web pode ser usada com CRÉDITO VISÍVEL — o crédito é a evidência. Licenças livres (CC0, CC BY, domínio público, permissão) são preferidas; para as demais, usar o marcador "Uso com crédito".
+220-- Não usar imagem apenas porque aparece como “pública” no Google; registrar URL da página original, autor, licença (ou "Uso com crédito"), termos e data da captura.
+221-- Baixar e hospedar a cópia na Media Library do WordPress, sem bucket/CDN externo.
+222-- Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
+223-- Sem crédito visível, descartar a imagem e procurar outra.
+224-
+225-### Trailer
+226-
+227-- Jogos usam somente trailer oficial validado; conteúdo fan-made nunca satisfaz
+228-  o gate.
+229-- Quando a busca oficial termina sem resultado, o código persiste query,
+230-  provedor, horário e `official_not_found`, concedendo waiver auditável.
+231-- Falha técnica da busca permanece bloqueante e não é tratada como ausência.
+232-
+233-### Telemetria de produção
+234-
+235-`unicornio-editor telemetry --root .` inclui posts únicos iniciados/bloqueados/
+236-READY, taxa de READY na primeira tentativa, tentativas e duração médias, além do
+237-funil de mídia por etapa e domínio: descoberta, preflight, visão da featured,

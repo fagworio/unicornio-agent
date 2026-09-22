@@ -1,0 +1,49 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86194 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:57Z
+# bytes do payload: 4058 | sha256: 7d87a3063cf0e22224d5ce4242b63b6639f305a352502fdf882296624fc1dffe
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/content_quality.py:62:def validate_content_quality(
+# ---- payload a partir daqui ----
+src/unicornio_editor/content_quality.py:62:def validate_content_quality(
+src/unicornio_editor/content_quality.py-63-    html: str,
+src/unicornio_editor/content_quality.py-64-    *,
+src/unicornio_editor/content_quality.py-65-    title: str,
+src/unicornio_editor/content_quality.py-66-    focus_keyword: str,
+src/unicornio_editor/content_quality.py-67-    matched_topics: Iterable[str],
+src/unicornio_editor/content_quality.py-68-    allowed_topics: Iterable[str] = (),
+src/unicornio_editor/content_quality.py-69-    related_terms: Iterable[str] = (),
+src/unicornio_editor/content_quality.py-70-) -> dict[str, int | bool]:
+src/unicornio_editor/content_quality.py-71-    if not isinstance(html, str) or not html.strip():
+src/unicornio_editor/content_quality.py-72-        raise ContentQualityError("content must contain readable text")
+src/unicornio_editor/content_quality.py-73-    if not isinstance(title, str) or not title.strip():
+src/unicornio_editor/content_quality.py-74-        raise ContentQualityError("title is required")
+src/unicornio_editor/content_quality.py-75-    if not isinstance(focus_keyword, str) or not focus_keyword.strip():
+src/unicornio_editor/content_quality.py-76-        raise ContentQualityError("focus keyword is required")
+src/unicornio_editor/content_quality.py-77-    words = word_count(html)
+src/unicornio_editor/content_quality.py-78-    # Quantidade de imagens pertence exclusivamente ao gate
+src/unicornio_editor/content_quality.py-79-    # ``imagens_no_corpo``. Mantê-la aqui também produzia duas falhas para a
+src/unicornio_editor/content_quality.py-80-    # mesma causa e tornava ``qualidade_texto`` impossível de interpretar na
+src/unicornio_editor/content_quality.py-81-    # telemetria.
+src/unicornio_editor/content_quality.py-82-    topics = {item.strip().casefold() for item in matched_topics if isinstance(item, str) and item.strip()}
+src/unicornio_editor/content_quality.py-83-    allowed = {item.strip().casefold() for item in allowed_topics if isinstance(item, str) and item.strip()}
+src/unicornio_editor/content_quality.py-84-    if not topics:
+src/unicornio_editor/content_quality.py-85-        raise ContentQualityError("content must have matched editorial topics")
+src/unicornio_editor/content_quality.py-86-    if allowed and not topics.intersection(allowed):
+src/unicornio_editor/content_quality.py-87-        raise ContentQualityError("content has no topic aligned with the site")
+src/unicornio_editor/content_quality.py-88-    body = re.sub(r"<[^>]+>", " ", html).casefold()
+src/unicornio_editor/content_quality.py-89-    title_folded = title.casefold()
+src/unicornio_editor/content_quality.py-90-    keyword = focus_keyword.casefold().strip()
+src/unicornio_editor/content_quality.py-91-    if not _keyword_in_text(keyword, title_folded) or not _keyword_in_text(keyword, body):
+src/unicornio_editor/content_quality.py-92-        raise ContentQualityError("focus keyword must occur naturally in title and content")
+src/unicornio_editor/content_quality.py-93-    for term in related_terms:
+src/unicornio_editor/content_quality.py-94-        if isinstance(term, str) and term.strip() and term.casefold() not in body:
+src/unicornio_editor/content_quality.py-95-            raise ContentQualityError(f"semantic related term is absent: {term}")
+src/unicornio_editor/content_quality.py-96-    if re.search(r"[—–]", html):
+src/unicornio_editor/content_quality.py-97-        raise ContentQualityError("recurrent em/en dashes are not allowed in editorial copy")
+src/unicornio_editor/content_quality.py-98-    if any(pattern in body for pattern in _AI_PATTERNS):
+src/unicornio_editor/content_quality.py-99-        raise ContentQualityError("generic AI-like phrasing detected")
+src/unicornio_editor/content_quality.py-100-    if words > 600 and not re.search(r"<h[2-4]\b", html, re.IGNORECASE):
+src/unicornio_editor/content_quality.py-101-        raise ContentQualityError("long content requires descriptive subheadings")
+src/unicornio_editor/content_quality.py-102-    return {"words": words, "passed": True}

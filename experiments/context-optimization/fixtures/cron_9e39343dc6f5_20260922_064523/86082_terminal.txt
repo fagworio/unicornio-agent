@@ -1,0 +1,21 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86082 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:14Z
+# bytes do payload: 1331 | sha256: 6dbbdbff5d288d33ed276a7d27d93e824d381a2067beb4f2a5e99fcc0925bd54
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/workflow.py:334:            media_exhausted = bool(editorial.get("media_exhausted"))
+# ---- payload a partir daqui ----
+src/unicornio_editor/workflow.py:334:            media_exhausted = bool(editorial.get("media_exhausted"))
+src/unicornio_editor/workflow.py:335:            deterministic_exhausted = attempts >= config.max_media_search_attempts
+src/unicornio_editor/workflow.py:336:            if (media_exhausted or deterministic_exhausted) and detect_list_format(
+src/unicornio_editor/checklist.py:195:    # Waiver "media_exhausted": quando a busca de imagens foi honestamente
+src/unicornio_editor/checklist.py:206:    media_exhausted = False
+src/unicornio_editor/checklist.py:208:    # completa), decide SEM depender do campo do LLM. O media_exhausted do
+src/unicornio_editor/checklist.py:213:    deterministic_exhausted = False
+src/unicornio_editor/checklist.py:214:    exhausted = media_exhausted or deterministic_exhausted
+src/unicornio_editor/editorial_schema.py:29:    "media_exhausted",
+src/unicornio_editor/editorial_schema.py:72:            "cleaned_html", "seo", "media_exhausted",
+src/unicornio_editor/editorial_schema.py:199:    media_exhausted = payload.get("media_exhausted", False)
+src/unicornio_editor/editorial_schema.py:200:    if media_exhausted is not None and not isinstance(media_exhausted, bool):
+src/unicornio_editor/editorial_schema.py:201:        raise EditorialValidationError("media_exhausted must be a boolean or null")

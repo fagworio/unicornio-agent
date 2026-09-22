@@ -1,0 +1,56 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86181 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:21Z
+# bytes do payload: 5320 | sha256: e4f9556358dc112cb9e1f3b77b2b15eb8e55c6fe454654fc10dd0a516a1b8652
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-c
+# ---- payload a partir daqui ----
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5-1.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5-2.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-6.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-1.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-2.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-4.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-3.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-11.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-8.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-10.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-7.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-9.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-120.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-15.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-12.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-14.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-13.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-16.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-18.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-23.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-20.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-19.jpg
+    ALT: 
+Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-22.jpg
+    ALT:

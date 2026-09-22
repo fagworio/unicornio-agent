@@ -1,0 +1,33 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86311 | papel: tool | tool: terminal | ts: 2026-09-22T10:04:25Z
+# bytes do payload: 557 | sha256: 839a82d39efe01f40890965b3143033c20b2f98b0f72e92504dd2314f13a0897
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+  "ok": true,
+  "violations": [],
+  "checks": {
+    "narrative_present": true,
+    "narrative_pt_br": true,
+    "evidence_verbatim": true,
+    "evidence_fields_with_cjk": [],
+    "quoted_literals": 14
+  },
+  "retry_instruction": "",
+  "cjk_in_narrative": [],
+  "status": "ok",
+  "summary": {
+    "command": "report-guard",
+    "draft": "/tmp/editorial-report-draft.json",
+    "expected_fields": [
+      "post_id",
+      "slug",
+      "source_url"
+    ],
+    "expected_values": 12,
+    "violations": 0,
+    "cjk_in_narrative": [],
+    "cjk_in_evidence": []

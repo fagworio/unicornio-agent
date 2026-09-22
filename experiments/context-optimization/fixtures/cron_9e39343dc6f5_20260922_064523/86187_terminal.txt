@@ -1,0 +1,35 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86187 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:38Z
+# bytes do payload: 3781 | sha256: c088f44edeb3b0bf414576b8ee5eeccc8b84275172180901a1a1ae05de9369d6
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: 278800 /tmp/sora.html
+# ---- payload a partir daqui ----
+278800 /tmp/sora.html
+partes 219
+-5-2.jpg?w=640   <- Oona McGee 16 hours ago Tweet
+ws-5.jpg?w=640   <-  purchasing the whole collection and share the find with you straight away. Starting with the memo pads, there are three to choose from , priced at 770 yen (US$4.93) each, and they all look delicious.
+ws-6.jpg?w=640   <- ▼ Kiki&#8217;s Delivery Service Round Memo – Kiki&#8217;s Cake
+ws-1.jpg?w=640   <- ▼ Kiki&#8217;s Delivery Service Round Memo – Kiki&#8217;s Cake
+ws-2.jpg?w=640   <- As fans will know, the cake on this memo pad is the one that Kiki receives as a gift from Madame , and it&#8217;s been beautifully recreated.
+ws-4.jpg?w=640   <- As fans will know, the cake on this memo pad is the one that Kiki receives as a gift from Madame , and it&#8217;s been beautifully recreated.
+ws-3.jpg?w=640   <- Inside the cake, you&#8217;ll find a 100-sheet memo pad, with Kiki and Madame bringing a dash of joy and warmth to each page.
+s-11.jpg?w=640   <- ▼ Howl&#8217;s Moving Castle Round Memo – Calcifer&#8217;s Bacon and Eggs
+ws-8.jpg?w=640   <- ▼ Howl&#8217;s Moving Castle Round Memo – Calcifer&#8217;s Bacon and Eggs
+s-10.jpg?w=640   <- This memo pad features the sizzling bacon and eggs from Howl&#8217;s Moving Castle , which is beautifully printed so you can even see the smoke rising from the pan.
+ws-7.jpg?w=640   <- Inside, you&#8217;ll find 100 pages of Markl, happily gobbling up the meal, just as we would if it were placed before us.
+ws-9.jpg?w=640   <- Inside, you&#8217;ll find 100 pages of Markl, happily gobbling up the meal, just as we would if it were placed before us.
+-120.jpg?w=640   <- ▼ Ponyo on the Cliff by the Sea Round Memo – Lisa&#8217;s Ramen
+s-15.jpg?w=640   <- ▼ Ponyo on the Cliff by the Sea Round Memo – Lisa&#8217;s Ramen
+s-12.jpg?w=640   <- Sosuke&#8217;s mum Lisa makes this iconic meal for him and Ponyo, bringing them comfort during a heavy storm.
+s-14.jpg?w=640   <- Sosuke&#8217;s mum Lisa makes this iconic meal for him and Ponyo, bringing them comfort during a heavy storm.
+s-13.jpg?w=640   <- k slices of ham, a boiled egg, and green onions is one of the most delicious-looking meals in the Ghibli cannon, and with this pad on the table, we&#8217;ll be reminded of its deliciousness every day.
+s-16.jpg?w=640   <- ime, manga and video games, each pad is carefully designed for quality and ease of use. ▼ The most exciting product in the lineup for us, though, is the Spirited Away River God Memo Stand (4,950 yen).
+s-18.jpg?w=640   <- lso produced by Movic, this stand is like a figurine, capturing the quiet, mysterious presence of the River God who appears out of the water during a pivotal moment in the bathhouse in Spirited Away .
+s-23.jpg?w=640   <- Here, the River God acts as a memo stand, holding memos in the clip behind its head.
+s-20.jpg?w=640   <-  clip any type of paper into the stand, we&#8217;re tempted to tear a note out of the round memo pads and write the character&#8217;s iconic words, &#8220; Well done &#8221; on it for dramatic effect.
+s-19.jpg?w=640   <- Adding to the drama is the character&#8217;s jaw, which actually moves, so you really can feel like it&#8217;s saying &#8220;Well done&#8221; whenever you finish a difficult task.
+s-22.jpg?w=640   <- ment is a very nice touch, and as it&#8217;s made of metal and quite weighty, it&#8217;s designed to put up with all your character roleplays. ▼ The stand is as solid as the presence of the character.
+100&amp;crop=1   <- onery collection, with a Spirited Away River God memo stand My night trapped in Nagoya&#8217;s flood: what do you do when Japan&#8217;s trains shut down? MOST POPULAR Today Weekly Monthly Yearly Today
+100&amp;crop=1   <- OC Japan Fair returns to California packed with all kinds of Japanese culture

@@ -1,0 +1,103 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86023 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:30Z
+# bytes do payload: 2353 | sha256: d03bafdcea34faf9b598c3e79c4662b37e2c1ed6289cca3f849c9ef69444eb1b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+  "count": 3,
+  "cards": [
+    {
+      "id": 114312,
+      "title": "Emulação de PS5 avança: experimento do PS5X roda jogos no Xbox Series X",
+      "state": "blocked",
+      "attempts": 1,
+      "seo_exists": true,
+      "images": {
+        "required": 6,
+        "valid": 0,
+        "missing": 6,
+        "irrelevant": 0,
+        "non_webp": 0,
+        "duplicates": 0
+      },
+      "featured": {
+        "exists": true,
+        "relevant": true,
+        "webp": false,
+        "dimensions": "1197x675",
+        "valid": false,
+        "action": "normalize"
+      },
+      "game_hint": true,
+      "blocked": true,
+      "blocked_reason": "checklist: imagens_no_corpo",
+      "fix": {
+        "find_inline_images": 6,
+        "normalize_featured": true,
+        "replace_featured": false,
+        "provide_featured": false,
+        "normalize_inline": false,
+        "remove_irrelevant_images": false,
+        "fix_list_structure": false,
+        "rewrite_text": false,
+        "provide_trailer": false,
+        "fix_dimensions": false,
+        "remove_duplicate_images": false
+      },
+      "draft": "backups/114312/editorial.draft.json"
+    },
+    {
+      "id": 114321,
+      "title": "Studio Ghibli lança coleção de papelaria com comidas de filmes e suporte do Deus do Rio",
+      "state": "new",
+      "attempts": 0,
+      "seo_exists": true,
+      "images": {
+        "required": 4,
+        "valid": 0,
+        "missing": 4,
+        "irrelevant": 0,
+        "non_webp": 0,
+        "duplicates": 0
+      },
+      "featured": {
+        "exists": true,
+        "relevant": true,
+        "webp": false,
+        "dimensions": "580x305",
+        "valid": false,
+        "action": "normalize"
+      },
+      "game_hint": false,
+      "blocked": false
+    },
+    {
+      "id": 114325,
+      "title": "The Batman Part II é adiado para 18 de fevereiro de 2028",
+      "state": "new",
+      "attempts": 0,
+      "seo_exists": true,
+      "images": {
+        "required": 4,
+        "valid": 0,
+        "missing": 4,
+        "irrelevant": 0,
+        "non_webp": 0,
+        "duplicates": 0
+      },
+      "featured": {
+        "exists": true,
+        "relevant": false,
+        "webp": false,
+        "dimensions": "2560x1067",
+        "valid": false,
+        "action": "replace"
+      },
+      "game_hint": false,
+      "blocked": false
+    }
+  ]
+}

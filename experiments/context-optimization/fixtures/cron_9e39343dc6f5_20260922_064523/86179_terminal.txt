@@ -1,0 +1,36 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86179 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:17Z
+# bytes do payload: 2657 | sha256: 81e5688617a52fd9a82a9e928df110ef785a93e219fda79dd7a757e68ba78e96
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: total 24
+# ---- payload a partir daqui ----
+total 24
+0 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+1 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+2 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+3 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+4 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+5 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+6 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+7 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+8 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+9 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+10 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+11 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+12 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+13 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+14 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+15 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+16 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+17 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+18 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+19 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+20 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+21 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+22 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+23 Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kiki
+--- pares similares: 1
+   Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spi ~ Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spi 0
+frames distintos: 23

@@ -1,0 +1,13 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86239 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:44Z
+# bytes do payload: 632 | sha256: 4f9c5959b6c31321745dd2b77375b15c8626d24af7c9b19ea659c3e77c6c3706
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: https://boundingintocomics.com/movies/the-batman-part-ii-pushed
+# ---- payload a partir daqui ----
+https://boundingintocomics.com/movies/the-batman-part-ii-pushed
+---oembed---
+<iframe title="The Batman Part 2 - Official &amp;apos;Camera Test&amp;apos; Teaser Trailer (2028) Robert Pattinson" width="860" height="484" src="https://www.youtube.com/embed/aG8U7-XK7PI?feature=oembed" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></ifram
+--- 114321 original ---
+https://soranews24.com/2026/09/22/studio-ghibli-unveils-new-anime-stationery-collection-with-a-spirited-away-river-god-memo-stand/

@@ -1,0 +1,38 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86210 | papel: tool | tool: terminal | ts: 2026-09-22T09:58:27Z
+# bytes do payload: 2761 | sha256: 77f56d31b1706bfded0ea05e634b0ead4c03173057a1310e97fc74c1587b4de3
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ##### latimes (14 imgs)
+# ---- payload a partir daqui ----
+##### latimes (14 imgs)
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F6e%2
+      <- 
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F6e%2
+      <- 
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F6e%2
+      <- de Show Search Search Query Submit Search Advertisement Movies ‘Batman 2’ is delayed again. Here’s everything we know so far about Matt Reeves’ sequel
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F50%2
+      <- Robert Pattinson in “The Batman.” The release date of the sequel has been pushed back again. (Jonathan Olley / DC Comics)
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Fdd%2
+      <- omers venturing into Gotham for this next installment include Sebastian Stan, Scarlett Johansson, Charles Dance, Sebastian Koch and Brian Tyree Henry.
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F50%2
+      <- e morally gray than his previous worldview, and that the film’s big villain will be someone who hasn’t appeared on the big screen before. More to Read
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Fde%2
+      <- ‘The Devil Wears Prada’ sequel: Here’s what we know so far July 9, 2025
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Ff1%2
+      <- James Gunn on why ‘movie industry is dying,’ what ‘killed’ Marvel and ‘The Batman’ sequel’s status June 17, 2025
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F50%2
+      <- ies, for the purposes set forth in our Privacy Policy such as personalizing your experience and ads. Login or register with email Agree &amp; Continue
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F38%2
+      <- Follow Us X Email Tracy Brown is a reporter for the Los Angeles Times covering television, film and other pop culture. More From the Los Angeles Times
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Fc8%2
+      <- Entertainment &amp; Arts Former Disney child star sentenced to more than 2 years in federal prison Sept. 21, 2026
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Ff3%2
+      <- California Inglewood mayor, embroiled in groping allegations, accuses rivals of smear campaign Sept. 21, 2026
+   ?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2Fee%2
+      <- California Wild California crime rampage: Man linked to slaying, stolen guns and forest fires, police say Sept. 21, 2026
+   art-caltimes-trademark-3x.png
+      <- rk comedy Sept. 18, 2026 Advertisement Advertisement Advertisement Advertisement Advertisement Advertisement Advertisement Advertisement Advertisement
+##### yahoo (0 imgs)

@@ -1,0 +1,21 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86284 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:27Z
+# bytes do payload: 671 | sha256: bcad6097b9dcdfa14b70b23847e7cb810dc36439652e2e67d9a8af2184a90694
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/hermes/unicornio-agent"}
+# primeira linha: usage: hermes-seo-agent report-guard [-h] [--limit LIMIT] [--json]
+# ---- payload a partir daqui ----
+usage: hermes-seo-agent report-guard [-h] [--limit LIMIT] [--json]
+                                     [--markdown] --draft DRAFT
+                                     [--expected EXPECTED] [--expect EXPECT]
+
+options:
+  -h, --help           show this help message and exit
+  --limit LIMIT        cap URLs audited (0 = config max)
+  --json               force JSON output
+  --markdown           Markdown report output
+  --draft DRAFT        JSON do rascunho {narrative, evidence}
+  --expected EXPECTED  JSON com os valores de ferramenta esperados (campo ->
+                       valor) que devem vir LITERAIS
+  --expect EXPECT      valor literal obrigatório (repetível)

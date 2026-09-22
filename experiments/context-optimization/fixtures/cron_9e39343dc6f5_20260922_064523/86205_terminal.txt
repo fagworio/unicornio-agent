@@ -1,0 +1,78 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86205 | papel: tool | tool: terminal | ts: 2026-09-22T09:58:07Z
+# bytes do payload: 4497 | sha256: b175b0840171e47524a87208442c046a45ed14aa03e06e1d1eb3e943a34f7cb9
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ##### variety (2 imgs)
+# ---- payload a partir daqui ----
+##### variety (2 imgs)
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1
+      <- );try{U=(Q=S[n]=S[n]||{}).cmd=Q.cmd||[],typeof Q.pubads===V?e():typeof U.unshift===V?U.unshift(e):U.push(e)}catch(p){}})(window,decodeURI,"function");
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1
+      <- Acting in &#8216;Scream 7&#8217; After Melissa Barrera Got Fired: &#8216;I Blew That. I&#8217;m on the Wrong Side of History&#8217; 6 days ago See All
+##### syfy (32 imgs)
+   article-promotes-1825x1217_2_2.jpg
+      <- 
+   20260716_THUMB_BATMAN_II_DELAY.jpg
+      <- art II 's latest release date delay by sharing new camera test footage of Robert Pattinson suited up as Batman. By Josh Weiss Jul 15, 2026, 8:24 PM ET
+   20260716_THUMB_BATMAN_II_DELAY.jpg
+      <- The Batman Part II Delayed to 2028: Matt Reeves Shares First Look at Robert Pattinson
+   20260911_THUMB_STAR_WARS_STARFIGHTER.jpg
+      <- Now Playing 1:39 Web Exclusive The Batman Part II Delayed to 2028: Matt Reeves Shares First Look at Robert Pattinson
+   260910_SPIDERNOIR_PLANS.jpg
+      <- 3:13 Web Exclusive Everything We Know About Ryan Gosling&#039;s Star Wars: Starfighter, From the Timeline to Tom Cruise
+   article-promotes-1825x1217_18.jpg
+      <- e performances as Oz Cobb and Sofia Gigante. Read more about: DC Movies Matt Reeves Robert Pattinson Scarlett Johansson Sebastian Stan Related Stories
+   article-promotes-1825x1217_15.jpg
+      <- Brad Pitt&#039;s World War Z Sequel Finally Moving Forward
+   article-promotes-1825x1217_2_2.jpg
+      <- The Ending of Zach Cregger&#039;s Resident Evil Movie Explained
+   2-split-article-promotes-1825x1217_1.jpg
+      <- John Hammond Had Global Plans for Jurassic Park
+   20260916_DRUPAL_HUNGER_GAMES_TRAILER.jpg
+      <- New Book Explores Unexpected Origins of Spielberg&#039;s E.T.
+   article-promotes-1825x1217_14.jpg
+      <- The Hunger Games: Sunrise on the Reaping Easter Eggs Revealed
+   2-split-article-promotes-1825x1217_2_0.jpg
+      <- Why Lilly Wachowski is &quot;Kinda Done&quot; With The Matrix
+   2-split-article-promotes-1825x1217_3.jpg
+      <- Guillermo del Toro Explains Why It’s So Hard to Adapt H.P. Lovecraft
+   article-promotes-1825x1217_12.jpg
+      <- Andrew Garfield, Jamie Bell Break Silence on Competing for Spider-Man
+   inset-article-promotes-1825x1217_2_0.jpg
+      <- How The Uprising Connects To The Robin Hood Myth
+   article-promotes-1825x1217_11.jpg
+      <- James McAvoy Offers Advice to Professor X Successor
+   article-promotes-1825x1217_6.jpg
+      <- Alan Rickman&#039;s Un-Snape-Like Behavior On Harry Potter Film Set
+   SYFYBUFFY091426.jpg
+      <- Everything We Know About Ryan Gosling&#039;s Star Wars: Starfighter Trending Videos
+   20260917_THUMB_RESIDENT_EVIL_ENDING.jpg
+      <- 1:23 Sarah Michelle Gellar Throws Shade At Canceled Buffy the Vampire Slayer Reboot at 2026 Emmy Awards
+   TheArk_preview_308_1__v2_SD_1920x1080_269724741925.jpg
+      <- 2:23 The Ending of Zach Cregger&#039;s Resident Evil Movie Explained
+   ATARK_EP8_CrewPt02_16x9_H264_SD_1920x1080_270032965845.jpg
+      <- 2:17 The Ark Avega Demands Answers from Garnet
+   RESIDENTEVIL.jpg
+      <- 7:08 The Ark After the Ark: The Crew Part 2
+   TheArk_preview_308_2__v2_thumb_4.jpg
+      <- 2:54 Resident Evil Director Zach Cregger Reveals the Movie&#039;s Video Game Connections
+   TA212_AFTERSHOW_QT_100124_800x450_2377674819848.jpg
+      <- 1:31 The Ark Brice is Alive...But Something&#039;s Amiss
+   GLEESON.jpg
+      <- 49:46 The Ark After The Ark: Season 2, Episode 12
+   OUTLANDERBOMB.jpg
+      <- 1:38 Star Wars&#039; Domhnall Gleeson Got Spotted By Stormtroopers While Sneaking Into Rise of the Resistance
+   20260916_THUMB_SPIDERMAN_ANDREW_JAMIE.jpg
+      <- 4:23 How Outlander: Blood of My Blood Season 2 Tests Brian &amp; Ellen, Henry &amp; Julia&#039;s Love
+   260915_HP_ARTHUR_WEASLEY_RAVE.jpg
+      <- 1:38 Andrew Garfield and Jamie Bell Break Silence on Competing for Spider-Man Role
+   20260915_THUMB_THE_CREEP_TAPES.jpg
+      <- 1:46 Harry Potter TV Show’s New Arthur Weasley Has Surprising Tie to OG Peter Pettigrew
+   nup_203573_00008_lowres.jpg
+      <- 2:43 Creep Tapes’ Kate Siegel Breaks Down the Sex Prosthetic She Became “Obsessed” With Recommended for You
+   gettyimages-145710954.jpg
+      <- SYFY WIRE Linda Hamilton on Resident Alien Role: &quot;I&#039;m Not the Funny Girl, I&#039;m the Straight Man&quot;
+   nup_200571_00965.jpg
+      <- SYFY WIRE The Classic Twilight Zone Episode That Inspired Jordan Peele&#039;s Us

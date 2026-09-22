@@ -1,0 +1,69 @@
+# cron_9e39343dc6f5_20260922_090524
+requests (api_call_count): 14 | duracao: 83.5s | mensagens: 34 | tool_calls: 19
+prompt tokens: main 494,408 (input 10,568 + cache_read 483,840 + cache_write 0) | aux 0 | GRAND TOTAL 494,408
+cache_read = 97.86% do prompt main (reenvio do MESMO contexto a cada request)
+output 10,317 | reasoning 6,193 | custo US$ 0.005723
+auxiliar: 0 chamadas {}
+prompt por request: 35,314.9 tokens | prompt de sistema: 31,374 B (fixo por request)
+conversa (bytes): total 43,161 | por papel {'user': {'msgs': 1, 'bytes': 20187}, 'assistant': {'msgs': 14, 'bytes': 1943}, 'tool': {'msgs': 19, 'bytes': 21031}}
+tool stdout: 19 entregas, 19 distintas, 0 repetidas | bytes 21,031 | unicos 21,031 | repetidos 0
+crescimento proxy: 1o request 20,187 B -> ultimo 43,161 B (x2.1); pico 43,161 B | compactadas 0
+custo decomposto (bytes x reenvios — peso real de cada componente):
+   tools stdout              196,385  21.34%
+   abertura (SKILL)          282,618  30.71%  (20,187 B x 14 requests)
+   prompt de sistema         439,236  47.73%
+   TOTAL                     920,182
+calibracao: bytes_por_token implicito 1.86 | residuo 16535.6 tokens/request nao explicados por sistema+mensagens (hipotese 3.5 B/token)
+maiores entregas de tool:
+   msg 86440 terminal        4,959 B  sha256:38d0dccb9e1bceee
+   msg 86451 terminal        4,277 B  sha256:7172837b283fb1a8
+   msg 86454 terminal        3,104 B  sha256:7aea9a0d11243dc5
+   msg 86447 terminal        1,458 B  sha256:a4190897aab97cad
+   msg 86448 terminal        1,047 B  sha256:d5845b8fff3dd2fe
+
+# cron_9e39343dc6f5_20260922_064523
+requests (api_call_count): 136 | duracao: 1162.8s | mensagens: 301 | tool_calls: 164
+prompt tokens: main 20,404,820 (input 130,132 + cache_read 20,274,688 + cache_write 0) | aux 12,551 | GRAND TOTAL 20,417,371
+cache_read = 99.36% do prompt main (reenvio do MESMO contexto a cada request)
+output 116,922 | reasoning 76,378 | custo US$ 0.107726
+auxiliar: 20 chamadas {'approval': {'chamadas': 20, 'tokens': 12551}}
+prompt por request: 150,127.7 tokens | prompt de sistema: 31,374 B (fixo por request)
+conversa (bytes): total 371,967 | por papel {'user': {'msgs': 1, 'bytes': 18089}, 'assistant': {'msgs': 136, 'bytes': 4162}, 'tool': {'msgs': 164, 'bytes': 349716}}
+tool stdout: 164 entregas, 159 distintas, 5 repetidas | bytes 349,716 | unicos 349,113 | repetidos 603
+crescimento proxy: 1o request 18,089 B -> ultimo 371,967 B (x20.6); pico 371,967 B | compactadas 0
+custo decomposto (bytes x reenvios — peso real de cada componente):
+   tools stdout           26,730,139  79.88%
+   abertura (SKILL)        2,460,104  7.35%  (18,089 B x 136 requests)
+   prompt de sistema       4,266,864  12.75%
+   TOTAL                  33,461,269
+calibracao: bytes_por_token implicito 1.64 | residuo 79738.7 tokens/request nao explicados por sistema+mensagens (hipotese 3.5 B/token)
+maiores entregas de tool:
+   msg 86199 terminal       24,257 B  sha256:bd7a4b6666cd6750
+   msg 86106 terminal       18,104 B  sha256:de0473e65848cb2a
+   msg 86289 terminal       12,726 B  sha256:839f752a787b7ecc
+   msg 86183 terminal        7,261 B  sha256:5f7b905da23335a5
+   msg 86254 terminal        7,142 B  sha256:96b72f8c202cf35f
+
+# cron_9e39343dc6f5_20260922_042722
+requests (api_call_count): 97 | duracao: 1059.6s | mensagens: 208 | tool_calls: 110
+prompt tokens: main 14,047,546 (input 149,690 + cache_read 13,897,856 + cache_write 0) | aux 10,012 | GRAND TOTAL 14,057,558
+cache_read = 98.93% do prompt main (reenvio do MESMO contexto a cada request)
+output 72,920 | reasoning 41,908 | custo US$ 0.080288
+auxiliar: 15 chamadas {'approval': {'chamadas': 15, 'tokens': 10012}}
+prompt por request: 144,923.3 tokens | prompt de sistema: 31,374 B (fixo por request)
+conversa (bytes): total 386,342 | por papel {'user': {'msgs': 1, 'bytes': 18057}, 'assistant': {'msgs': 97, 'bytes': 3856}, 'tool': {'msgs': 110, 'bytes': 364429}}
+tool stdout: 110 entregas, 103 distintas, 7 repetidas | bytes 364,429 | unicos 363,187 | repetidos 1,242
+crescimento proxy: 1o request 18,143 B -> ultimo 386,342 B (x21.3); pico 386,342 B | compactadas 0
+custo decomposto (bytes x reenvios — peso real de cada componente):
+   tools stdout           24,644,327  83.63%
+   abertura (SKILL)        1,751,529  5.94%  (18,057 B x 97 requests)
+   prompt de sistema       3,043,278  10.33%
+   TOTAL                  29,468,859
+calibracao: bytes_por_token implicito 2.1 | residuo 58019.3 tokens/request nao explicados por sistema+mensagens (hipotese 3.5 B/token)
+maiores entregas de tool:
+   msg 85326 skill_view     77,487 B  sha256:f9a8ede96c930f6d
+   msg 85683 delegate_task   41,287 B  sha256:8fb87d82c23c9f17
+   msg 85685 terminal       21,497 B  sha256:f425ba7f7b92928b
+   msg 85744 read_file      16,843 B  sha256:a6b494cd48336da3
+   msg 85357 terminal       10,743 B  sha256:f93faa974ebe0f13
+

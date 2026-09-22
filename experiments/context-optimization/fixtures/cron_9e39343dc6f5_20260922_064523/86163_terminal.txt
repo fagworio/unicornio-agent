@@ -1,0 +1,26 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86163 | papel: tool | tool: terminal | ts: 2026-09-22T09:54:36Z
+# bytes do payload: 2166 | sha256: c2f8178f3578206f63d278631ba60a3095e7cb0b5bf7f92cd0a9e5c90009d142
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: words 639 p 13
+# ---- payload a partir daqui ----
+words 639 p 13
+<p>O retorno de Robert Pattinson como Batman vai demorar mais do que o público esperava. A Warner Bros. adiou oficialmente <em>The Batman Part II</em> para 18 de fevereiro de 2028, empurrando o lançamento do novo filme do Cavaleiro das Trevas para bem mais longe no calendário.</p>
+
+<p>Até aqui, a justificativa divulgada é que o diretor Matt Reeves quer mais tempo para a finalização do filme. Na prática, porém, o adiamento se soma a uma sequência de obstáculos que vêm afetando o projeto, incluindo impactos da greve de roteiristas, problemas no desenvolvimento do roteiro e um histórico de produção que avança em ritmo lento.</p>
+
+<p>Reeves também é descrito em relatos anteriores como um perfeccionista, alguém que tende a buscar ajustes constantes antes de considerar o trabalho pronto. Em reportagens já publicadas, esse perfil foi associado ao prolongamento do processo, com menções a dificuldades pessoais que teriam contribuído para o atraso.</p>
+
+<h2>Um hiato de seis anos entre o filme de 2022 e a sequência</h2>
+
+<p>Com a nova data, a distância entre <em>The Batman</em> (de 2022) e a continuação chega a cerca de seis anos. Isso significa que Pattinson deve estar em uma fase bem mais a
+...
+m especule que, quando a Paramount assumir oficialmente o controle do grupo Warner Bros., Gunn e Peter Safran poderiam deixar a DC Studios. Por enquanto, trata-se de conversa de mercado, sem confirmação oficial.</p>
+
+<p>Mesmo sem detalhes verificáveis, o pano de fundo ajuda a explicar por que o atraso ganhou contornos de “novela” entre fãs e profissionais do entretenimento. Em um projeto que já enfrenta dificuldades de desenvolvimento, qualquer sinal de instabilidade tende a aumentar a quantidade de rumores.</p>
+
+<p>Enquanto <em>The Batman Part II</em> não chega aos cinemas, resta acompanhar como a produção vai reorganizar prazos, elenco e decisões criativas. A nova data, ao mesmo tempo em que dá fôlego para a finalização, prolonga a espera por respostas que o público vem buscando desde o lançamento do primeiro filme.</p>
+
+<p>[embed]https://www.youtube.com/watch?v=aG8U7-XK7PI[/embed]</p>

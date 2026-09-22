@@ -1,0 +1,14 @@
+# Criterio A x B — janela 24h, job 9e39343dc6f5
+eventos da fatia oficial: 0 (instrumentados 0) | READY unicos: 0
+sessoes do job na janela: 3 | requests: 247 | prompt tokens (grand total): 34,969,337
+tool_context_bytes_per_ready : None
+prompt_tokens_per_ready      : None
+requests_per_ready           : None
+cache_read_share             : 99.11%
+tool_weighted_share          : 80.77% (peso do stdout de tool no custo)
+recomendacao                 : A primeiro — stdout de tool pesa 80.8% do custo por request (>= 50.0%): payload e a maior massa identificada
+sensibilidade: fracao do prompt NAO explicada por sistema+mensagens
+   2.0_bytes_por_token      explicados   31,925,155 | nao explicado 8.7%
+   2.5_bytes_por_token      explicados   25,540,124 | nao explicado 27.0%
+   3.0_bytes_por_token      explicados   21,283,437 | nao explicado 39.1%
+   3.5_bytes_por_token      explicados   18,242,946 | nao explicado 47.8%

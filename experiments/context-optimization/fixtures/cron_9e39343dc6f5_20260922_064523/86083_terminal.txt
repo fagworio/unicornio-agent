@@ -1,0 +1,32 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86083 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:15Z
+# bytes do payload: 1226 | sha256: e7fb5a9aaabc733485c749eac74730dd813a33f8747d761cbc2922c71952f67f
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/workflow.py:1291:        "verified_inline_capacity": available,
+# ---- payload a partir daqui ----
+src/unicornio_editor/workflow.py:1291:        "verified_inline_capacity": available,
+src/unicornio_editor/workflow.py:1363:            f"mas possui capacidade validada para {planning.get('verified_inline_capacity')} "
+=== capacity fn ===
+1037:def validate_media_plan(
+1038-    client: WordPressClient,
+1039-    editorial: dict[str, Any],
+1040-    *,
+1041-    config: Config | None = None,
+1042-    root: Path | None = None,
+1043-    post_title: str = "",
+1044-    existing_featured_id: int | None = None,
+1045-) -> dict[str, Any]:
+1046-    """Valida o media_plan de um editorial SEM executar download/upload.
+1047-
+1048-    Retorna ``{valid, rejected: [{index, reason}]}`` — o agente corrige o
+1049-    plano antes do apply (1 chamada compacta em vez de aplicar e ver itens
+1050-    rejeitados no resultado). Deterministico e somente leitura.
+1051-    """
+1052-    plan = editorial.get("media_plan") or []
+1053-    entities = extract_entities(
+1054-        title=str((editorial.get("seo") or {}).get("title") or ""),
+1055-        content_html=str(editorial.get("cleaned_html") or ""),
+1056-        focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
+1057-        game_name=editorial.get("game_name"),

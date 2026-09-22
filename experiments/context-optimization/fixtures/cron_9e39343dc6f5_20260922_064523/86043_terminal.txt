@@ -1,0 +1,18 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86043 | papel: tool | tool: terminal | ts: 2026-09-22T09:46:32Z
+# bytes do payload: 1878 | sha256: a5ca4ee8b0893a3b1fc7007dcda73be698bcea9338534b0d7a8dda692e9805ef
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: 114332 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044110/quake-
+# ---- payload a partir daqui ----
+114332 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044110/quake-ii-em-execu | Quake II em execução no PS5X, emulador de PS5 para Xbox Seri
+114331 1197x675 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044109/xbox-series-x-e-p | Xbox Series X e PlayStation 5, consoles do teste de emulação
+114330 1202x675 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044108/tela-de-abertura- | Tela de abertura de Quake II no emulador PS5X rodando no Xbo
+114329 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044107/gameplay-de-quake | Gameplay de Quake II pelo emulador PS5X rodando no Xbox Seri
+114327 1200x675 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044106/quake-ii-rodando- | Quake II rodando pelo emulador PS5X no Xbox Series X
+114328 1280x750 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/22044106/biblioteca-de-jog | Biblioteca de jogos do PS5X, emulador de PS5, rodando no Xbo
+114295 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/21060458/ps5x-no-xbox-seri | PS5X no Xbox Series X: frame da demonstração em vídeo
+114296 768x404 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/21060458/ps5x-captura-do-p | PS5X: captura do port experimental no Xbox Series X
+114294 1280x720 True https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/09/21060457/ps5x-emulador-kyt | PS5X: emulador KytyPS5 rodando jogo de PS5
+94316 1280x720 False https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2025/03/22021509/ps5xbox-174250497 | ps5xbox-1742504979469.jpg

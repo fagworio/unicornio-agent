@@ -1,0 +1,49 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86250 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:21Z
+# bytes do payload: 2490 | sha256: b6be186b93cd25e8ca633c82eb9ca7afe2add4e3085c0d32365e6795993d47f5
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 216:def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path:
+# ---- payload a partir daqui ----
+216:def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path:
+217-    """Center-crop and resize to exactly 1280x720 (16:9) and save as WebP.
+218-
+219-    Featured images must always obey the portal's 1280x720 ratio, so the
+220-    source is cover-cropped from its center and resized to the exact target
+221-    (upscaling allowed so the guaranteed size holds for small sources).
+222-
+223-    The EXIF orientation is applied first (a photo stored sideways would
+224-    otherwise be published lying down) and PORTRAIT sources are rejected:
+225-    cover-cropping a portrait into 16:9 destroys more than half the frame, so
+226-    a portrait featured image is a wrong image — the agent must pick a
+227-    landscape key art instead (fail-closed policy).
+228-    """
+229-    source = Path(source)
+230-    destination = destination or source.with_name(source.stem + "_featured.webp")
+231-    try:
+232-        image = _open_authoritative(source)
+233-        with image:
+234-            if image.width < 64 or image.height < 64:
+235-                raise MediaConversionError("image resolution is below 64x64")
+236-            if image.width < image.height:
+237-                raise MediaConversionError(
+238-                    f"featured source is portrait ({image.width}x{image.height} after EXIF transpose); "
+239-                    "a 1280x720 featured image requires a landscape source — pick landscape key art"
+240-                )
+241-            work = image.convert("RGBA") if image.mode not in {"RGB", "RGBA"} else image
+242-            # Politica de transparencia: imagem vazia e rejeitada; o resto e
+243-            # achatado sobre branco — o destaque publicado nunca tem alpha.
+244-            work = _flatten_if_transparent(work)
+245-            target_ratio = FEATURED_WIDTH / FEATURED_HEIGHT
+246-            width, height = work.size
+247-            current_ratio = width / height
+248-            if current_ratio > target_ratio:
+249-                new_width = int(height * target_ratio)
+250-                left = (width - new_width) // 2
+251-                work = work.crop((left, 0, left + new_width, height))
+252-            elif current_ratio < target_ratio:
+253-                new_height = int(width / target_ratio)
+254-                top = (height - new_height) // 2
+255-                work = work.crop((0, top, width, top + new_height))
+256-            work = work.resize((FEATURED_WIDTH, FEATURED_HEIGHT), Image.Resampling.LANCZOS)

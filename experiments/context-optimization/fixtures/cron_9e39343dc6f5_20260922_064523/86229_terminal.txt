@@ -1,0 +1,14 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86229 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:14Z
+# bytes do payload: 711 | sha256: 9676bcc603f3ddb07b9807eb81ed6356bfb15bcb415ca5939e9cff40b45af823
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/media/downloader.py:69:    request = Request(url, headers={"Accept": "image/*", "User-Agent": "unic
+# ---- payload a partir daqui ----
+src/unicornio_editor/media/downloader.py:69:    request = Request(url, headers={"Accept": "image/*", "User-Agent": "unicornio-editor/0.1"})
+src/unicornio_editor/media/search.py:71:    request = Request(url, headers={"User-Agent": _UA, "Accept": "text/html"})
+src/unicornio_editor/media/search.py:403:# rate-limit com rotação de User-Agent). Estratégia: backoff com jitter, cache
+src/unicornio_editor/media/search.py:555:        # pipeline segue com as outras fontes (sem trocar User-Agent).
+src/unicornio_editor/media/source_verify.py:51:            headers={"User-Agent": _UA, "Accept": accept},
+src/unicornio_editor/media/visual_hash.py:33:    req = urllib.request.Request(url, headers={"User-Agent": _UA})

@@ -1,0 +1,89 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86085 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:17Z
+# bytes do payload: 4224 | sha256: 998ad7efdd0b14247727505a0ad4de941c71d7c3c4b877b900aeb0b0ed8cd245
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: # Tentativas anteriores (antes desta): base do teto deterministico de
+# ---- payload a partir daqui ----
+# Tentativas anteriores (antes desta): base do teto deterministico de
+    # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
+    checklist = run_pre_publish_checklist(
+        post={**post, "featured_media": featured_id or post.get("featured_media")},
+        editorial=editorial_with_media,
+        content=content,
+        backup_path=backup,
+        config=config,
+        client=client,
+        attempts=attempts_before,
+    )
+    # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
+    # item do checklist com falha impede READY — o apply NUNCA grava um post
+    # que o publish-ready bloquearia depois. O editorial fica arquivado em
+    # editorial.blocked.json (rascunho preservado em editorial.draft.json) e
+    # o post volta à fila de rework com backoff (30m/2h -> AWAITING_HUMAN).
+    if not config.dry_run:
+        failed_items = [
+            item
+            for item in (checklist.get("items") or [])
+            if item.get("status") in ("fail", "error") and item.get("name")
+        ]
+        if failed_items:
+            # O gate continua impedindo READY/publicacao, mas nao descartamos
+            # aprimoramentos mecanicos e seguros do post: CTA, Fonte e links
+            # internos persistem no conteudo original antes de ele entrar em
+            # rework ou AWAITING_HUMAN. O editorial incompleto (texto/midia)
+            # fica somente no draft, para nunca gravar um post que falhou no
+            # checklist.
+            baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
+            state_info = read_state(post)
+            attempts = state_info["attempts"] + 1
+            # Listicle com busca de imagens esgotada -> AWAITING_HUMAN direto
+            # (revisao manual), sem loop de rework que so queimaria token.
+            media_exhausted = bool(editorial.get("media_exhausted"))
+            deterministic_exhausted = attempts >= config.max_media_search_attempts
+            if (media_exhausted or deterministic_exhausted) and detect_list_format(
+                _post_title(post) or editorial["seo"]["title"], content
+            ) is not None:
+                backoff = {
+                    "state": STATE_AWAITING_HUMAN,
+                    "attempts": attempts,
+                    "next_retry_at": "",
+                }
+            else:
+                backoff = rework_backoff(
+                    attempts,
+                    cooldown_minutes=config.rework_cooldown_minutes,
+                    max_attempts=config.max_rework_attempts,
+                )
+            last_error = "; ".join(
+                f"{item['name']}: {str(item.get('detail') or '')[:120]}"
+                for item in failed_items[:5]
+            )
+            _save_blocked(root, post_id, editorial, checklist)
+            # Fase 17 (fail-closed) nos estados terminais do rework; BLOCKED
+            # tolera falha de escrita (o post continua na fila de qualquer
+            # forma), mas devolve `state_persisted` no relatorio.
+            _state_ok = _write_state_markers(
+                client,
+                config,
+                post_id,
+                backoff["state"],
+                root=root,
+                attempts=backoff["attempts"],
+                next_retry_at=backoff["next_retry_at"],
+                last_error=last_error,
+            )
+            if not _state_ok and backoff["state"] in (STATE_AWAITING_HUMAN, STATE_UNCERTAIN):
+                raise WorkflowError(
+                    f"estado {backoff['state']} nao persistiu no WordPress "
+                    f"(post {post_id}); sem estado o post nao entra na fila humana "
+                    "de forma confiavel — verifique a conexao e reaplique"
+                )
+            featured_normalized = False
+            # AWAITING_HUMAN sai da fila de trilhagem: move o status WP para o
+            # filtro "Awaiting Human" (visivel para decisao humana). Falha de
+            # status nao derruba o apply — a meta _hermes_state ja marca.
+            if backoff["state"] == STATE_AWAITING_HUMAN:
+                # A imagem de destaque já pode ter sido normalizada durante o
+                # preflight, mas um apply bloqueado não chega ao payload READY

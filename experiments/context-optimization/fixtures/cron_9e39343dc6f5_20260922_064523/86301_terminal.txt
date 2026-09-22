@@ -1,0 +1,39 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86301 | papel: tool | tool: terminal | ts: 2026-09-22T10:04:08Z
+# bytes do payload: 976 | sha256: 43f0d7d219e855957638737188504f04146c59d042211a97b01eed8ae10ada1e
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/hermes/unicornio-agent"}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+  "ok": false,
+  "violations": [
+    "valor_nao_literal:https://soranews24.com/2026/09/22/studio-ghibli-unveils-new-anime-stationery-collection-with-a-spirited-away-river-god-memo-stand/"
+  ],
+  "checks": {
+    "narrative_present": true,
+    "narrative_pt_br": true,
+    "evidence_verbatim": false,
+    "evidence_fields_with_cjk": [],
+    "quoted_literals": 14
+  },
+  "retry_instruction": "Reescreva SOMENTE a prosa (narrative) em português do Brasil e reproduza os valores de evidência exatamente como vieram das ferramentas (sem traduzir, resumir, corrigir acento/caixa ou reformatar). Revalide com o guard antes de enviar.",
+  "cjk_in_narrative": [],
+  "status": "violation",
+  "summary": {
+    "command": "report-guard",
+    "draft": "/tmp/editorial-report-draft.json",
+    "expected_fields": [
+      "post_id",
+      "slug",
+      "source_url"
+    ],
+    "expected_values": 12,
+    "violations": 1,
+    "cjk_in_narrative": [],
+    "cjk_in_evidence": []
+  }
+}
+
+STDERR:

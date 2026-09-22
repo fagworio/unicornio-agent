@@ -1,0 +1,19 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86040 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:55Z
+# bytes do payload: 745 | sha256: cb59425f18852b94db4316cf0153fdd573a3c849cd3da1ec9cb83c85932f2b88
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 10
+# ---- payload a partir daqui ----
+10
+114332 1280x720 Quake II em execução no PS5X, emulador de PS5 para Xbox Series X
+114331 1197x675 Xbox Series X e PlayStation 5, consoles do teste de emulação de PS5 pelo PS5X
+114330 1202x675 Tela de abertura de Quake II no emulador PS5X rodando no Xbox Series X
+114329 1280x720 Gameplay de Quake II pelo emulador PS5X rodando no Xbox Series X
+114327 1200x675 Quake II rodando pelo emulador PS5X no Xbox Series X
+114328 1280x750 Biblioteca de jogos do PS5X, emulador de PS5, rodando no Xbox Series X
+114295 1280x720 PS5X no Xbox Series X: frame da demonstração em vídeo
+114296 768x404 PS5X: captura do port experimental no Xbox Series X
+114294 1280x720 PS5X: emulador KytyPS5 rodando jogo de PS5
+94316 1280x720 ps5xbox-1742504979469.jpg

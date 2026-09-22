@@ -1,0 +1,38 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86282 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:23Z
+# bytes do payload: 722 | sha256: 5535c4a354ebeb9c3ada0fcbf253652aaf11ce8bd3cc17e679848cf57581f47c
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/prod.unicorniohater.com.br"}
+# primeira linha: ===== 114312
+# ---- payload a partir daqui ----
+===== 114312
+{"ID":114312,"post_status":"pending","post_title":"Emula\u00e7\u00e3o de PS5 avan\u00e7a: experimento do PS5X roda jogos no Xbox Series X"}ready
+-- imgs no conteudo:
+6
+-- imgs distintas:
+6
+-- featured:
+114363
+-- credito visivel:
+6
+===== 114321
+{"ID":114321,"post_status":"pending","post_title":"Studio Ghibli lan\u00e7a cole\u00e7\u00e3o de papelaria com comidas de filmes e suporte do Deus do Rio"}ready
+-- imgs no conteudo:
+4
+-- imgs distintas:
+4
+-- featured:
+114373
+-- credito visivel:
+5
+===== 114325
+{"ID":114325,"post_status":"pending","post_title":"The Batman Part II \u00e9 adiado para 18 de fevereiro de 2028"}ready
+-- imgs no conteudo:
+4
+-- imgs distintas:
+4
+-- featured:
+114379
+-- credito visivel:
+4

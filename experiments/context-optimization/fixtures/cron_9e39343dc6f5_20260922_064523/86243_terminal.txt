@@ -1,0 +1,17 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86243 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:55Z
+# bytes do payload: 1669 | sha256: aeb60e455c8d62b9173ecf3879969cb8b3ed346c3a99e149343074b5cb9123c9
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: https://boundingintocomics.com/wp-content/uploads/2024/03/Bat-computer-scaled.jpg
+# ---- payload a partir daqui ----
+https://boundingintocomics.com/wp-content/uploads/2024/03/Bat-computer-scaled.jpg
+https://boundingintocomics.com/cdn-cgi/image/width=150%2Cheight=53%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/cropped-BIC-New-Logo_1_cropped.png
+https://boundingintocomics.com/cdn-cgi/image/width=30%2Cheight=30%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/The-Ooze-is-back.png
+https://boundingintocomics.com/cdn-cgi/image/width=788%2Cheight=444%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/2024/03/Bat-computer.jpg
+https://boundingintocomics.com/cdn-cgi/image/width=788%2Cheight=443%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/There-is-no-escape-from-this.png
+https://boundingintocomics.com/cdn-cgi/image/width=788%2Cheight=330%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/2023/12/7999059.jpg
+https://boundingintocomics.com/cdn-cgi/image/width=70%2Cheight=70%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/The-Ooze-is-back.png
+https://boundingintocomics.com/cdn-cgi/image/width=180%2Cheight=60%2Cfit=crop%2Cquality=75%2Cgravity=auto%2Csharpen=1%2Cmetadata=none%2Cformat=auto%2Conerror=redirect/wp-content/uploads/2023/11/cropped-BIC-New-Logo.png
+https://boundingintocomics.com/wp-content/themes/tpd-theme/img/google_preferred_source_badge.png

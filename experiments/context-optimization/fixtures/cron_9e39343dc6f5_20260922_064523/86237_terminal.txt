@@ -1,0 +1,38 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86237 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:37Z
+# bytes do payload: 2240 | sha256: 109dff8f4ccd80bf152b3308d2346db446b4b04f3bac7cc6b5d262787555f46a
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/prod.unicorniohater.com.br"}
+# primeira linha: ### 114321
+# ---- payload a partir daqui ----
+### 114321
+  fsp_schedule_group_id = bdb66ed7-1c98-4db4-a24d-37f386ff4280
+  fsp_enable_auto_share = 1
+  rank_math_internal_links_processed = 1
+  wp_automatic_camp = 91983
+  bf72915763200f2d5d12e613d94e7aa5 = Studio Ghibli unveils new anime stationery collection, with a Spirited Away River God memo stand
+  original_link = https://soranews24.com/2026/09/22/studio-ghibli-unveils-new-anime-stationery-collection-with-a-spirited-away-river-god-m
+  _thumbnail_id = 114322
+  rank_math_title = Studio Ghibli: papelaria com comidas e suporte do Deus do Rio
+  rank_math_description = Coleção de papelaria do Studio Ghibli traz memo pads com comidas de filmes e um suporte do Deus do Rio de A Viagem de Ch
+  rank_math_focus_keyword = papelaria do Studio Ghibli
+  _diletecagentsai_meta_title = Studio Ghibli: papelaria com comidas e suporte do Deus do Rio
+  _diletecagentsai_meta_description = Coleção de papelaria do Studio Ghibli traz memo pads com comidas de filmes e um suporte do Deus do Rio de A Viagem de Ch
+  _diletecagentsai_focus_keyword = papelaria do Studio Ghibli
+### 114325
+  fsp_schedule_group_id = a31b1638-9ca0-4ec2-9604-8ed42eb7fb96
+  fsp_enable_auto_share = 1
+  rank_math_internal_links_processed = 1
+  wp_automatic_camp = 112486
+  9c03adbfbac9d38430064ad9e477b052 = 'The Batman Part II' Pushed to 2028 Amid Rumors of DC Friction
+  original_link = https://boundingintocomics.com/movies/the-batman-part-ii-pushed
+  _thumbnail_id = 114326
+  rank_math_title = The Batman Part II é adiado para 18/02/2028
+  rank_math_description = A Warner Bros. adiou The Batman Part II para 18 de fevereiro de 2028. Entenda os motivos citados e os rumores sobre a DC
+  rank_math_focus_keyword = The Batman Part II adiado
+  _diletecagentsai_meta_title = The Batman Part II é adiado para 18/02/2028
+  _diletecagentsai_meta_description = A Warner Bros. adiou The Batman Part II para 18 de fevereiro de 2028. Entenda os motivos citados e os rumores sobre a DC
+  _diletecagentsai_focus_keyword = The Batman Part II adiado
+  _oembed_25dfd90b7208d58af0650fbcebf09d53 = <iframe title="The Batman Part 2 - Official &amp;apos;Camera Test&amp;apos; Teaser Trailer (2028) Robert Pattinson" widt
+  _oembed_time_25dfd90b7208d58af0650fbcebf09d53 = 1790062042

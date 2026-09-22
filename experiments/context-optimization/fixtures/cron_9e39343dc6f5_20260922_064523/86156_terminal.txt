@@ -1,0 +1,17 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86156 | papel: tool | tool: terminal | ts: 2026-09-22T09:54:14Z
+# bytes do payload: 1131 | sha256: f34385fae41e84e464bcbafd55a9f8ecd332689356a3a39d60b15aefae0b5d4b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: escrito: /tmp/editorial_114312_v2.json
+# ---- payload a partir daqui ----
+escrito: /tmp/editorial_114312_v2.json
+indices: [0, 0, 3, 6, 9, 12, 15] featured: [True, False, False, False, False, False, False]
+[0] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://media.ixbt.games/1600x900/smart/jpeg/ixbt-data/1374430/media-jmymhntklrg
+[1] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbo
+[2] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+[3] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games
+[4] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://img-cdn.publive.online/fit-in/1200x675/pcq/media/media_files/2026/09/21/
+[5] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-ca
+[6] OK  URL exata confirmada na pagina de origem (bytes iguais) | https://i.ytimg.com/vi/KeNCzJgsDyQ/maxresdefault.jpg

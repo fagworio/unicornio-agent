@@ -1,0 +1,22 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86241 | papel: tool | tool: terminal | ts: 2026-09-22T10:00:47Z
+# bytes do payload: 1066 | sha256: 2e5f803b4b9a83a0714580f63632738634488764d4a97c444227114d4d7c950d
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "cwd": "/www/wwwroot/hermes/unicornio-agent"}
+# primeira linha: ##### bic (9 imgs)
+# ---- payload a partir daqui ----
+##### bic (9 imgs)
+   Bat-computer-scaled.jpg
+      <- &#039;The Batman Part II&#039; Pushed to 2028 Amid Rumors of DC Friction
+   The-Ooze-is-back.png
+      <- ibles and Toys Video Games Video Game Reviews TTRPGs/TCGs Go Ad-Free Movies &#8216;The Batman Part II&#8217; Pushed to 2028 Amid Rumors of DC Friction
+   Bat-computer.jpg
+      <- Reddit Reddit Share on NewsBreak NewsBreak Share on Telegram Telegram Share on WhatsApp WhatsApp Share via Email Email Copy Link Copy Link Link Copied
+   There-is-no-escape-from-this.png
+      <- son Ivy, Two-Face, and Victor Zsasz to the narrative. For months, fans assumed Sebastian Stan was a lock to play tragic district attorney Harvey Dent.
+   7999059.jpg
+      <- er Bros. empire, Gunn and Peter Safran will be ousted from DC Studios altogether. It is all just trade-chatter for now, but it adds drama to the wait.
+   The-Ooze-is-back.png
+      <- l dark, you have to wonder: is this project just navigating the usual Hollywood speed bumps, or is Matt Reeves&#8217; return to Gotham quietly cursed?
+##### bic2 (1 imgs)

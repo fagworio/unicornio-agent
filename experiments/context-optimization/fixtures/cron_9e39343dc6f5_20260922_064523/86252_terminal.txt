@@ -1,0 +1,39 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86252 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:24Z
+# bytes do payload: 2786 | sha256: afdc80fc10e3e67f30bdfbb641066c8255adab9b5c837e8e4912b36505a31d3b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/media/converter.py:23:def image_is_mostly_flat(path, *, sample_px=12000, edge_threshold=18.0) -> bo
+# ---- payload a partir daqui ----
+src/unicornio_editor/media/converter.py:23:def image_is_mostly_flat(path, *, sample_px=12000, edge_threshold=18.0) -> bool:
+src/unicornio_editor/media/converter.py-24-    """Heuristic: a mostly-flat image (no real artwork, only text/banner).
+src/unicornio_editor/media/converter.py-25-
+src/unicornio_editor/media/converter.py-26-    An image that is essentially a solid/very-low-detail graphic (a text
+src/unicornio_editor/media/converter.py-27-    banner, a logo on a plain background, a coming soon card) carries no
+src/unicornio_editor/media/converter.py-28-    editorial artwork. We detect it deterministically by downsampling to a
+src/unicornio_editor/media/converter.py-29-    small grid and measuring the mean edge magnitude (Sobel-ish via neighbor
+src/unicornio_editor/media/converter.py-30-    deltas). Below edge_threshold it is treated as mostly flat and the
+src/unicornio_editor/media/converter.py-31-    featured candidate should be rejected (a text-only featured is not key art).
+src/unicornio_editor/media/converter.py-32-
+src/unicornio_editor/media/converter.py-33-    Returns True when the image has almost no structural detail.
+src/unicornio_editor/media/converter.py-34-    """
+src/unicornio_editor/media/converter.py-35-    try:
+src/unicornio_editor/media/converter.py-36-        with Image.open(path) as image:
+src/unicornio_editor/media/converter.py-37-            image = ImageOps.exif_transpose(image)
+src/unicornio_editor/media/converter.py-38-            image = image.convert("L")
+src/unicornio_editor/media/converter.py-39-            ratio = max(1.0, (image.width * image.height) / float(sample_px))
+src/unicornio_editor/media/converter.py-40-            small = image.resize(
+src/unicornio_editor/media/converter.py-41-                (max(1, int(image.width / ratio ** 0.5)),
+src/unicornio_editor/media/converter.py-42-                 max(1, int(image.height / ratio ** 0.5))),
+src/unicornio_editor/media/converter.py-43-                Image.Resampling.BOX,
+src/unicornio_editor/media/converter.py-44-            )
+src/unicornio_editor/media/converter.py-45-            w, h = small.size
+src/unicornio_editor/media/converter.py-46-            pixels = list(small.getdata())
+src/unicornio_editor/media/converter.py-47-            total = 0.0
+src/unicornio_editor/media/converter.py-48-            count = 0
+src/unicornio_editor/media/converter.py-49-            for y in range(1, h - 1):
+src/unicornio_editor/media/converter.py-50-                row = y * w
+src/unicornio_editor/media/converter.py-51-                for x in range(1, w - 1):
+src/unicornio_editor/media/converter.py-52-                    c = pixels[row + x]
+src/unicornio_editor/media/converter.py-53-                    dx = abs(pixels[row + x + 1] - c) + abs(pixels[row + x - 1] - c)

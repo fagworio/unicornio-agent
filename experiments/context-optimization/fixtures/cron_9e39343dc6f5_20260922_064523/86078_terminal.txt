@@ -1,0 +1,26 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86078 | papel: tool | tool: terminal | ts: 2026-09-22T09:48:07Z
+# bytes do payload: 662 | sha256: 376d005ec0049f33b593e600a6c74ecb1e48741b2b7f2574fbcede5ca4a86eb5
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: type <class 'str'>
+# ---- payload a partir daqui ----
+type <class 'str'>
+p blocks: 14
+img count: 0
+words: 1012
+iais. A consolidação de compatibilidade, estabilidade e desempenho ainda depende de muito desenvolvimento.</p>
+<p><strong>Também lido:</strong></p>
+<ul>
+<li>PS5 Emulator Running PS5 <a href="https://www.unicorniohater.com.br/games/">Games</a> Like Astro Bot Raises Hopes on GTA 6 PC Playability</li>
+<li>Sony’s Next-Gen PSP 3 Rumored to Run PS4 and PS5 Games Natively</li>
+<li>Rockstar Warns GTA 6 Voice Actors-NDA Still in Effect, Fans Need to Wait for Lucia and Jason Reveal</li>
+<li>GTA 6 Leak-GTA 5 200 GB Source Code Leak Uncovers Cut Online Content, Assets, and Map</li>
+</ul>
+
+<hr />
+
+
+
+<hr />

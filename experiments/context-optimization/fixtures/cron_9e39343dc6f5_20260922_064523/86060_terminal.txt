@@ -1,0 +1,39 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86060 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:37Z
+# bytes do payload: 2669 | sha256: c074f8f52af4851903efcded1314f6b5d1370cf48fedc5b4d8d376ed1b787cea
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/media/library_index.py:81:    media_id: int | None = None,
+# ---- payload a partir daqui ----
+src/unicornio_editor/media/library_index.py:81:    media_id: int | None = None,
+src/unicornio_editor/media/library_index.py:90:                            media_id=media_id, article_id=article_id)
+src/unicornio_editor/media/library_index.py:100:    media_id: int | None = None,
+src/unicornio_editor/media/library_index.py:110:            if media_id:
+src/unicornio_editor/media/library_index.py:111:                entrada["media_id"] = media_id
+src/unicornio_editor/media/library_index.py:119:        "media_id": media_id,
+src/unicornio_editor/workflow.py:935:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:937:    if media_id:
+src/unicornio_editor/workflow.py:938:        if media_id not in attachment_cache:
+src/unicornio_editor/workflow.py:939:            attachment_cache[media_id] = client.get_media(media_id)
+src/unicornio_editor/workflow.py:940:        attachment = attachment_cache[media_id]
+src/unicornio_editor/workflow.py:1017:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:1018:    if media_id:
+src/unicornio_editor/workflow.py:1019:        return f"lib:{media_id}"
+src/unicornio_editor/workflow.py:1175:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:1177:    if media_id:
+src/unicornio_editor/workflow.py:1178:        attachment = attachment_cache.get(media_id)
+src/unicornio_editor/workflow.py:1180:            attachment = client.get_media(media_id)
+src/unicornio_editor/workflow.py:1181:            attachment_cache[media_id] = attachment
+src/unicornio_editor/workflow.py:1188:    if config.vision_mode == "ambiguous" and not media_id:
+=== schema ===
+src/unicornio_editor/media/source_resolver.py:82:    imagem = str(candidate.get("direct_image_url") or "")
+src/unicornio_editor/media/source_resolver.py:157:            if _mesma_url(url, str(candidate.get("direct_image_url") or "")):
+src/unicornio_editor/media/wordpress_media.py:27:        source_stem = Path(str(candidate.get("direct_image_url") or "").split("?", 1)[0]).stem
+src/unicornio_editor/media/search.py:17:The direct_image_url returned is the real image URL found in the result
+src/unicornio_editor/media/search.py:136:            motivo = "invalid_direct_image_url"
+src/unicornio_editor/media/search.py:141:        "direct_image_url": direct,
+src/unicornio_editor/media/search.py:575:            url = str(cand.get("direct_image_url") or "")
+src/unicornio_editor/media/license.py:25:    "direct_image_url",
+src/unicornio_editor/media/license.py:64:    direct = _url(candidate["direct_image_url"], "direct_image_url")
+src/unicornio_editor/media/license.py:86:            "direct_image_url": direct,

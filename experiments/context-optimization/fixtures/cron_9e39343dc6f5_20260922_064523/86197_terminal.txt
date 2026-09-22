@@ -1,0 +1,53 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86197 | papel: tool | tool: terminal | ts: 2026-09-22T09:57:36Z
+# bytes do payload: 4975 | sha256: d12a68d0204a9d0ca9f30b28afd0406952c954e703dfd1006d9e656bd11b4253
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+# ---- payload a partir daqui ----
+skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+  skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+  skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+  skip PNG 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+  skip WEBP 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+  skip PNG 163x163 https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1539608303185-FB0LB
+##### cosmicbook https://cosmicbook.news/the-batman-part-ii
+  OK WEBP 1500x844 106256B https://cosmicbook.news/wp-content/uploads/2026/08/the-batman-part-2-everything-we-know.webp
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/batman-kamaen-rider-collab-300x169.webp
+  OK WEBP 1500x844 42780B https://cosmicbook.news/wp-content/uploads/2026/04/gamesradar-closes-newsarama.webp
+  skip WEBP 100x56 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56
+  skip WEBP 100x56 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56
+  skip WEBP 100x56 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56
+  OK WEBP 768x432 92996B https://cosmicbook.news/wp-content/uploads/2026/09/batman-kamaen-rider-collab-768x432.webp
+  OK WEBP 768x432 53314B https://cosmicbook.news/wp-content/uploads/2026/09/alan-ritchson-helldivers-movie-768x432.webp
+  OK WEBP 768x432 71056B https://cosmicbook.news/wp-content/uploads/2026/09/dc-nycc-2026-schedule-panels-768x432.webp
+  OK WEBP 768x432 61644B https://cosmicbook.news/wp-content/uploads/2026/09/zack-snyder-wb-right-everything-dc-768x432.webp
+  OK WEBP 768x432 46416B https://cosmicbook.news/wp-content/uploads/2026/09/injustice-3-rumors-development-neatherrealm-768x4
+  OK WEBP 768x432 26300B https://cosmicbook.news/wp-content/uploads/2026/09/robert-pattinson-first-look-batman-2-set-768x432.
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/08/the-batman-part-2-everything-we-know-30
+  OK WEBP 768x432 31824B https://cosmicbook.news/wp-content/uploads/2026/08/the-batman-part-2-everything-we-know-768x432.webp
+  OK WEBP 1500x844 295636B https://cosmicbook.news/wp-content/uploads/2026/09/batman-kamaen-rider-collab.webp
+  skip WEBP 150x84 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56
+  skip WEBP 200x112 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56
+  skip WEBP 250x140 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56
+  skip WEBP 300x168 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56
+  skip WEBP 150x84 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56
+  skip WEBP 200x112 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56
+  skip WEBP 250x140 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56
+  skip WEBP 300x168 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56
+  skip WEBP 150x84 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56
+  skip WEBP 200x112 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56
+  skip WEBP 250x140 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56
+  skip WEBP 300x168 https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/alan-ritchson-helldivers-movie-300x169.
+  OK WEBP 1500x844 161412B https://cosmicbook.news/wp-content/uploads/2026/09/alan-ritchson-helldivers-movie.webp
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/dc-nycc-2026-schedule-panels-300x169.we
+  OK WEBP 1500x844 232036B https://cosmicbook.news/wp-content/uploads/2026/09/dc-nycc-2026-schedule-panels.webp
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/zack-snyder-wb-right-everything-dc-300x
+  OK WEBP 1500x844 187480B https://cosmicbook.news/wp-content/uploads/2026/09/zack-snyder-wb-right-everything-dc.webp
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/injustice-3-rumors-development-neatherr
+  OK WEBP 1500x844 127906B https://cosmicbook.news/wp-content/uploads/2026/09/injustice-3-rumors-development-neatherrealm.webp
+  skip WEBP 300x169 https://cosmicbook.news/wp-content/uploads/2026/09/robert-pattinson-first-look-batman-2-se
+  OK WEBP 1500x844 47228B https://cosmicbook.news/wp-content/uploads/2026/09/robert-pattinson-first-look-batman-2-set.webp
+saved /tmp/batman_imgs.json

@@ -1,0 +1,13 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86189 | papel: tool | tool: terminal | ts: 2026-09-22T09:56:50Z
+# bytes do payload: 781 | sha256: 4837d6165dd04d458992b908a58caa19b7b0ad43e0c4c7a834d19ba3a3797f47
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: <meta property="og:image" content="https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-s
+# ---- payload a partir daqui ----
+<meta property="og:image" content="https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5-1.jpg?w=580&amp;h=305&amp;crop=1">
+<meta property="og:image:width" content="580">
+<meta property="og:image:height" content="305">
+=== twitter ===
+<meta name="twitter:image" content="https://soranews24.com/wp-content/uploads/sites/3/2026/09/Studio-Ghibli-Japan-anime-shop-memo-note-stand-food-Spirited-Away-river-god-Japanese-stationery-Kikis-Delivery-Service-cake-Howls-Moving-Castle-Ponyo-Bacon-eggs-movie-film-character-Donguri-Kyowakoku-news-5-1.jpg?w=580&amp;h=305&amp;crop=1">

@@ -1,0 +1,54 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86207 | papel: tool | tool: terminal | ts: 2026-09-22T09:58:12Z
+# bytes do payload: 3437 | sha256: cc2329c10f24260e7a5546ff21c75996e1cb99fb51927888b8b9af0ded4ff64e
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: ##### worldofreel
+# ---- payload a partir daqui ----
+##### worldofreel
+  IMG_7772.webp
+     <- ‘The Batman: Part II’ Delayed, Again, to February 18, 2028 Release &mdash; World of Reel
+  IMG_9792.webp
+     <- Street Address City, State, Zip Phone Number Home
+  IMG_9788.webp
+     <- tars Maika Monroe, Jackie Earle Haley, Justine Lupe, Michael Gandolfini, and Naomi Ackie, is no doubt eyeing 2027 release. Read more &#8594;
+  IMG_9791.jpeg
+     <- ory says he retired with three more "Star Wars" films still on his plate, and he let them go, selling Lucasfilm to Disney. Read more &#8594;
+  IMG_9785.jpeg
+     <- he 12 AGs are allowing Paramount to swallow Warner Bros. Discovery in a $111 billion deal, we need details. Here they are. Read more &#8594;
+  IMG_9780.jpeg
+     <- ges from Brad Bird’s “Ray Gunn.” The film still doesn’t have a trailer, let alone a teaser, so we’ll take what we can get. Read more &#8594;
+  IMG_9738.jpeg
+     <- film news, rumors and industry stories delivered straight to your inbox. Email Address Sign Up Thank you! No results found Trending Featured
+  IMG_9642.jpeg
+     <- et's new film — no official reason given. She had the lead role. Corbet has replaced her, last minute, with Lily McInerny. Read more &#8594;
+  IMG_9603.jpeg
+     <- tz. It wrapped production in February and has been in post-production ever since. The film test-screened a few months ago. Read more &#8594;
+  IMG_9478.jpeg
+     <- rmerly “October,” still has no release date. You’d think, given that it has been in post-production for almost a year now. Read more &#8594;
+  IMG_4965.jpeg
+     <- d and carrying a $14M budget, will be "largely English-language" and feature a "high-profile cast." Read more &#8594; Critics Polls Featured
+  B16BAC21-5652-44F6-9E83-A1A5C5DF61D7.jpeg
+     <- igo” has topped our best of the ’50s poll, besting Gene Kelly and Stanley Donen’s “Singin’ in the Rain” by just two votes. Read more &#8594;
+  3x4-placeholder-image-3-new.jpg
+     <- 0s. Read more &#8594; &nbsp; SEND NEWS TIPS --> Summary Block This block is invalid. Please check the block settings and try again. Featured
+##### cosmicbook
+  the-batman-part-2-everything-we-know.webp
+     <- The Batman Part II: Everything We Know About Matt Reeves&#039; Sequel - Cosmic Book News
+  batman-kamaen-rider-collab-300x169.webp
+     <-  new Batsuit , with longer ears on the cowl exactly as Matt Reeves said, plus Batman riding away on a commandeered GCPD police bike. RELATED
+  gamesradar-closes-newsarama.webp
+     <- cretly filming alongside Part II . The Batman Part II Story Reeves is keeping the plot locked down, but the evidence is stacking up. RELATED
+  batman-kamaen-rider-collab-768x432.webp
+     <- Tom King Exits Wonder Woman; Insiders Say It Wasn’t His Decision (Exclusive) Recommended
+  alan-ritchson-helldivers-movie-768x432.webp
+     <- Batman x Kamen Rider Crossover Comic Announced For Batman Day
+  dc-nycc-2026-schedule-panels-768x432.webp
+     <- Alan Ritchson Chooses Helldivers Movie Over Batman
+  zack-snyder-wb-right-everything-dc-768x432.webp
+     <- DC&#8217;s NYCC 2026 Plans: Jim Lee &#038; Friends, Lanterns Rings, First Clayface Movie Merch
+  injustice-3-rumors-development-neatherrealm-768x432.webp
+     <- Zack Snyder Reveals WB Executive Told Him: &#8216;You Were Right About Everything&#8217;
+  robert-pattinson-first-look-batman-2-set-768x432.webp
+     <- Injustice 3 Just Got Playtested In Warner Bros.&#8217; Backyard (Rumor)

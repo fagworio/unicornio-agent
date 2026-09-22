@@ -1,0 +1,35 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86052 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:31Z
+# bytes do payload: 945 | sha256: 74a0dcfcc2d110c9d51435097ec8c00c2ac1723022760f6eb1754717147f587b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: usage: unicornio-editor media-validate [-h] [--post-id POST_ID] [--root ROOT]
+# ---- payload a partir daqui ----
+usage: unicornio-editor media-validate [-h] [--post-id POST_ID] [--root ROOT]
+                                       editorial_file
+
+positional arguments:
+  editorial_file
+
+options:
+  -h, --help         show this help message and exit
+  --post-id POST_ID  ID opcional para validar a promessa do título real do
+                     WordPress
+  --root ROOT
+=== apply help ===
+usage: unicornio-editor apply [-h] [--root ROOT] [--dry-run] [--compact]
+                              post_id editorial_file
+
+positional arguments:
+  post_id
+  editorial_file
+
+options:
+  -h, --help      show this help message and exit
+  --root ROOT
+  --dry-run       valida e mostra o resultado (checklist + preview) sem
+                  escrever no WordPress
+  --compact       grava o relatorio completo em backups/<id>/apply.latest.json
+                  e imprime apenas o resumo (economia de tokens): success =
+                  minimo, failure = so o que corrigir

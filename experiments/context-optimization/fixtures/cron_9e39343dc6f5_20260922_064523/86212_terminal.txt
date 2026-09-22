@@ -1,0 +1,43 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86212 | papel: tool | tool: terminal | ts: 2026-09-22T09:58:32Z
+# bytes do payload: 3715 | sha256: 445bdb0b4e076da25665abe9927e0e0c106b7e20e412bd93a0644b7f535810bf
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: ##### variety
+# ---- payload a partir daqui ----
+##### variety
+   https://variety.com/wp-content/uploads/2026/07/batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1
+##### worldofreel
+   http://static1.squarespace.com/static/5bbcad0f2727be3646b9fee1/t/6a5793d784f56500135834ec/1784124375941/IMG_7772.webp?format=1500w
+   //images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1549326329716-MI9ZYW330RHJB4N4MNMT/World+of+Reel+tagline.PNG?format=1500w
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/5c9ca519-4d28-4df9-a533-721e2895787b/IMG_9792.webp
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/c8c33083-ece4-46df-8541-060312338826/IMG_9788.webp
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/7253bfcf-0667-4702-a905-d7612295fa62/IMG_9791.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/62564ede-e977-4eec-bce5-7c4e4c1f7e1c/IMG_9785.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/6eb49594-5fde-4beb-b897-bb471777cd99/IMG_9780.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/1566262747881-9HR0L5E4HWK2AUQL7Y1A/Capture.PNG
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/a130711b-5dfa-471f-889c-0bb7765d13ce/IMG_9738.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/35e58498-284b-42d3-bb57-e255ea5c9319/IMG_9642.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/f5c0a8b2-7508-4ed1-8624-60091c27379d/IMG_9603.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/9d79b225-50e1-4392-b912-ff3a712e87a8/IMG_9478.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/c59962d8-eb63-4740-8116-3a72ac86eb05/IMG_4965.jpeg
+   https://images.squarespace-cdn.com/content/v1/5bbcad0f2727be3646b9fee1/ba882c18-e02f-4576-8e73-03a224e124bb/B16BAC21-5652-44F6-9E83-A1A5C5DF61D7.jpeg
+   https://assets.squarespace.com/universal/images-v6/configuration/placeholder/3x4-placeholder-image-3-new.jpg
+##### cosmicbook
+   https://cosmicbook.news/wp-content/uploads/2026/08/the-batman-part-2-everything-we-know.webp
+   https://cosmicbook.news/wp-content/uploads/2026/05/cropped-cosmic-book-news-logo-1.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/batman-kamaen-rider-collab-300x169.webp
+   https://cosmicbook.news/wp-content/uploads/2026/04/gamesradar-closes-newsarama.webp
+   https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015891-featured-100x56.webp
+   https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015931-featured-100x56.webp
+   https://cosmicbook.news/wp-content/uploads/wordpress-popular-posts/1015907-featured-100x56.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/batman-kamaen-rider-collab-768x432.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/alan-ritchson-helldivers-movie-768x432.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/dc-nycc-2026-schedule-panels-768x432.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/zack-snyder-wb-right-everything-dc-768x432.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/injustice-3-rumors-development-neatherrealm-768x432.webp
+   https://cosmicbook.news/wp-content/uploads/2026/09/robert-pattinson-first-look-batman-2-set-768x432.webp
+##### latimes
+   https://ca-times.brightspotcdn.com/dims4/default/85a40a3/2147483647/strip/true/crop/6000x3150+0+0/resize/1200x630!/quality/75/?url=https%3A%2F%2Fcalifornia-times-brightspot.s3.amazonaws.com%2F6e%2F69%2Ff4686f214459b8a3adbed6265475%2Fthebatmanrobertpattinson1.jpg
+   https://ca-times.brightspotcdn.com/a6/d6/eea0f1094fb281dbea09e0aa79cd/art-caltimes-trademark-3x.png

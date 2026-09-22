@@ -1,0 +1,42 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86059 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:37Z
+# bytes do payload: 2043 | sha256: 154fa0eaddcfc97b19b6ea27f706e388ca297a95f7d0f84a090a37b30dd4eee3
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: === library_sweep ===
+# ---- payload a partir daqui ----
+=== library_sweep ===
+{
+ "101845": [
+  {
+   "paragraph_index": 2,
+   "term": "Cardcaptor Sakura",
+   "alt": "Sakura Kinomoto em sua sequência de transformação em Cardcaptor Sakura",
+   "found": true,
+   "media_id": 111146,
+   "url": "https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/08/28002051/inline_0-123.webp",
+   "tem_credito": true,
+   "dims": "1280x720",
+   "title": "Crédito da imagem: Madhouse (via CBR). Sequência de transformação de Sakura Kinomoto em Ca"
+  },
+  {
+   "paragraph_index": 4,
+   "term": "Tokyo Mew Mew",
+   "alt": "Ichigo Momomiya em Tokyo Mew Mew",
+   "found": true,
+   "media_id": 111057,
+   "url": "https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2026/08/27102530/inline_0-116.webp",
+   "tem_credito": true,
+   "dims": "1000x500",
+   "title": "Crédito da imagem: CBR. Imagem de Tokyo Mew Mew, usada com crédito (página original)."
+  },
+  {
+   "paragraph_index": 6,
+   "term": "Revolutionary Girl Utena",
+   "alt": "Utena Tenjou em Revolutionary Girl Utena",
+   "found": true,
+   "media_id": 22155,
+   "url": "https://s3.us-east-2.amazonaws.com/unicorniohater.com.br/wp-content/uploads/2020/10/20062009/Revolutionary-Girl-Ute
+=== media_index ===
+{"entries": [{"phash": "", "source_url": "https://windowsreport.com/wp-content/uploads/2026/09/Running-PS5-software-on-Xbox-Series-X-KytyPS5-on-Xbox-A-Research-Project-PS5X-on-Xbox-Series-X.png", "source_page": "https://windowsreport.com/xbox-series-x-just-ran-ps5-games-thanks-to-an-experimental-kytyps5-emulator-port/", "subject": "", "media_id": 114328, "article_id": null, "uses": 1}, {"phash": "", "source_url": "https://static.tweaktown.com/news/1/1/113653_1_xbox-series-can-now-run-ps5-games-thanks-to-new-emulator_full.jpg", "source_page": "https://www.tweaktown.com/news/113653/xbox-series-x-can-now-run-ps5-games-thanks-to-a-new-emulator/index.html", "subject": "", "media_id": 114327, "article_id": null, "uses": 1}, {"phash": "", "source_url": "https://media.ixbt.games/1600x900/smart/jpe

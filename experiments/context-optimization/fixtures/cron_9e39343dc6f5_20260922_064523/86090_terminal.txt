@@ -1,0 +1,50 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86090 | papel: tool | tool: terminal | ts: 2026-09-22T09:49:23Z
+# bytes do payload: 3267 | sha256: 955aee0821c96391b52ccc2cd872ee0aad3d8c5671c525e3bc4023511b5e9f8e
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: ### Batman
+# ---- payload a partir daqui ----
+### Batman
+12
+114326 2560x1067 False Bat-computer-scaled.jpg
+114000 808x455 True Arte de quadrinhos do Batman em ação, referencia visual de The Brave and th
+113996 837x407 True Silhueta do Batman em telhado sob raios em arte do DCU de The Brave and the
+113997 1000x534 True Batman e Damian Wayne em quadrinhos da fase de Grant Morrison, base de The 
+113998 1024x683 True Batman em pose de ação em arte de quadrinhos, personagem de The Brave and t
+113999 1280x720 True Batman sob a chuva em arte do personagem central de The Brave and the Bold 
+112488 1024x1629 False swo.jpg
+111208 1280x720 False LEGO-Retro-Video-Game-Batman-Minifigure-Feature.png
+111207 1000x1000 True Crédito da imagem: LEGO (via Jay&#8217;s Brick Blog). Material promocional 
+111206 1280x1049 True Crédito da imagem: Jay&#8217;s Brick Blog. Minifigura 30762 Retro Video Gam
+111205 1280x1072 True Crédito da imagem: Jay&#8217;s Brick Blog. Batman: The Video Game (NES, 198
+111204 900x900 True Crédito da imagem: LEGO (via Jay&#8217;s Brick Blog). Key art de LEGO Batma
+### Ghibli
+12
+114322 580x305 False Studio Ghibli unveils new anime stationery collection, with a Spirited
+112265 1600x900 False isao-takahata-s-only-yesterday-from-studio-ghibli
+111150 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111149 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111123 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111122 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111118 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111117 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111114 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111111 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111098 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+107795 640x640 False Studio-Ghibli-anime
+### Studio Ghibli
+12
+114322 580x305 False Studio Ghibli unveils new anime stationery collection, with a Spirited
+112265 1600x900 False isao-takahata-s-only-yesterday-from-studio-ghibli
+111150 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111149 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111123 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111122 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111118 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111117 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Cena de Only Yesterday, filme d
+111114 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111111 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+111098 1280x720 True Crédito da imagem: Studio Ghibli (via CBR). Seita e Setsuko sob o céu cheio
+107795 640x640 False Studio-Ghibli-anime

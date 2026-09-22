@@ -1,0 +1,65 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86196 | papel: tool | tool: terminal | ts: 2026-09-22T09:57:04Z
+# bytes do payload: 2241 | sha256: 14a58be05ee268c479bbc264420eef99e1ee9b895ce86d26977c7d27e49e4bb5
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 17-_PT_STOPWORDS = frozenset(
+# ---- payload a partir daqui ----
+17-_PT_STOPWORDS = frozenset(
+18-    "de e o a os as do da dos das em para com que no na num numa por ao aos à às um uma".split()
+19-)
+20-
+21-
+22:def _keyword_in_text(keyword: str, text: str) -> bool:
+23-    """Keyword relevance: every significant token of the keyword must occur
+24-    in the text, in order (gaps allowed).
+25-
+26-    A strict substring check is too brittle for Portuguese SEO keywords:
+27-    "bass x machina netflix" never matches "Bass x Machina: Netflix ..." due
+28-    to punctuation, while "vazamentos gta 6" never matches "vazamentos de
+29-    GTA 6" due to the stopword. The tokens are the signal, and they must
+30-    still appear in the same relative order in the target text.
+31-    """
+32-    tokens = re.findall(r"[\wÀ-ÿ]+", keyword.casefold())
+33-    significant = [t for t in tokens if t not in _PT_STOPWORDS]
+34-    if not significant:
+35-        return keyword.casefold() in text.casefold()
+36-    haystack = iter(re.findall(r"[\wÀ-ÿ]+", text.casefold()))
+37-    return all(any(token == candidate for candidate in haystack) for token in significant)
+38-
+39-
+40-_AI_PATTERNS = (
+41-    "em conclusão",
+42-    "é importante destacar que",
+43-    "vale ressaltar que",
+44-    "neste artigo",
+45-    "no mundo dos",
+46-)
+47-
+=== AI patterns ===
+40:_AI_PATTERNS = (
+41-    "em conclusão",
+42-    "é importante destacar que",
+43-    "vale ressaltar que",
+44-    "neste artigo",
+45-    "no mundo dos",
+46-)
+47-
+48-
+49-def word_count(html: str) -> int:
+50-    text = unescape(re.sub(r"<[^>]+>", " ", html))
+51-    return len(re.findall(r"\b[\wÀ-ÿ]+\b", text))
+52-
+--
+98:    if any(pattern in body for pattern in _AI_PATTERNS):
+99-        raise ContentQualityError("generic AI-like phrasing detected")
+100-    if words > 600 and not re.search(r"<h[2-4]\b", html, re.IGNORECASE):
+101-        raise ContentQualityError("long content requires descriptive subheadings")
+102-    return {"words": words, "passed": True}
+103-
+104-
+105-def validate_centered_images(html: str) -> None:
+106-    images = re.findall(r"<figure\b[^>]*>.*?</figure>|<img\b[^>]*>", html, re.IGNORECASE | re.DOTALL)
+107-    for image in images:
+108-        if not re.search(r"aligncenter|text-align\s*:\s*center", image, re.IGNORECASE):

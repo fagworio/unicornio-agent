@@ -1,0 +1,48 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86064 | papel: tool | tool: terminal | ts: 2026-09-22T09:47:41Z
+# bytes do payload: 1521 | sha256: 5b17af6152dff8dcb47c715ec31f72c763347abfaa5a9f2edbcad08e037c9555
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: src/unicornio_editor/workflow.py:935:    media_id = item.get("media_library_id")
+# ---- payload a partir daqui ----
+src/unicornio_editor/workflow.py:935:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:1017:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:1119:            "media_library_id": existing_featured_id,
+src/unicornio_editor/workflow.py:1175:    media_id = item.get("media_library_id")
+src/unicornio_editor/workflow.py:1403:        """Resolve a Media Library attachment referenced by ``media_library_id``.
+src/unicornio_editor/workflow.py:1410:        media_id = item.get("media_library_id")
+src/unicornio_editor/editorial_schema.py:47:    "media_library_id",
+src/unicornio_editor/editorial_schema.py:142:                "media_library_id", "search_query", "subject", "phash",
+=== license.py 15-100 ===
+from typing import Any
+from urllib.parse import urlparse
+
+
+class LicenseError(ValueError):
+    """Raised when an image credit evidence cannot be validated."""
+
+
+_REQUIRED = {
+    "source_page_url",
+    "direct_image_url",
+    "author",
+    "license",
+    "license_url",
+    "captured_at",
+    "credit_text",
+    "alt_text",
+}
+_ALLOWED_LICENSE_PREFIXES = ("cc0", "cc by", "public domain", "permission granted")
+# Use-with-credit markers: the visible credit block is the evidence, so no
+# free license is required for these images (Google Images / any web source).
+_CREDIT_LICENSE_PREFIXES = (
+    "uso com credito",
+    "uso com crédito",
+    "uso com creditos",
+    "uso com créditos",
+    "credito",
+    "crédito",
+    "creditos",
+    "créditos",
+    "fair use",

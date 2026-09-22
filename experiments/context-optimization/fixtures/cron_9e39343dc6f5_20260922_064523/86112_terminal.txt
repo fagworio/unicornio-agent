@@ -1,0 +1,34 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86112 | papel: tool | tool: terminal | ts: 2026-09-22T09:50:36Z
+# bytes do payload: 1287 | sha256: 2a9ad50e9515e5b4dfa3c51e61300760b1ca4bf30dcf7532bd58e43853e63822
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 866:def _item_entities(
+# ---- payload a partir daqui ----
+866:def _item_entities(
+867-    item: dict[str, Any],
+868-    entities: set[str],
+869-    editorial: dict[str, Any] | None = None,
+870-) -> set[str]:
+871-    """Entidades que valem para ESTE item (P1 da auditoria).
+872-
+873-    ATENÇÃO — estado ATUAL: usa o `subject` DECLARADO no media_plan (dado do
+874-    agente) e, sem ele, as entidades do artigo. O subject derivado da SEÇÃO
+875-    (`_expected_subject`) ainda NÃO substitui o declarado: o mapeamento
+876-    H2<->paragraph_index precisa de mais cuidado (ativar antes disso rejeitou
+877-    itens legítimos de listicle nos testes). Ou seja, a proteção contra um plano
+878-    inconsistente (seção = Bleach, subject = Naruto) ainda NÃO existe.
+879-    """
+880-    declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
+881-    # O subject esperado da SEÇÃO fica disponível (auditoria/futuro), mas ainda
+882-    # NÃO substitui o declarado: o mapeamento seção<->item precisa de mais
+883-    # cuidado (um H2 numerado nem sempre corresponde ao paragraph_index).
+884-    if declarado:
+885-        locais = {declarado}
+886-        locais.update(e for e in entities if e and e.lower() in declarado)
+887-        return locais
+888-    return set(entities)
+889-
+890-
+891-def _item_evidence_relevant(

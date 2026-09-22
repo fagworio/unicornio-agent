@@ -1,0 +1,58 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86021 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:27Z
+# bytes do payload: 740 | sha256: 823d48c22fc7b6915b671627524ae9730773908df9d0f18f541a3034b739e45e
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: {
+# ---- payload a partir daqui ----
+{
+  "pending": 17,
+  "edited": 5,
+  "blocked": 1,
+  "uncertain": 8,
+  "awaiting_human": 0,
+  "skipped": 1,
+  "unprocessed_ids": [
+    114321,
+    114325
+  ],
+  "recent_unprocessed_ids": [
+    114321,
+    114325
+  ],
+  "blocked_ids": [
+    114312
+  ],
+  "recent_blocked_ids": [
+    114312
+  ],
+  "eligible_rework_ids": [
+    114312
+  ],
+  "ready_ids": [
+    114314,
+    114316,
+    114318,
+    114320,
+    114323
+  ],
+  "awaiting_human_ids": [],
+  "uncertain_ids": [
+    112354,
+    112356,
+    112445,
+    112714,
+    113041,
+    113708,
+    114050,
+    114245
+  ],
+  "skipped_ids": [
+    113349
+  ],
+  "recent_days": 7,
+  "posts": [
+    {
+      "id": 112354,
+      "title": "Carlisle United promove Retro Kit Day contra o Southend United",

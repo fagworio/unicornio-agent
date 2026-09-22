@@ -1,0 +1,26 @@
+# Inventario de payload por comando — fatia: /www/wwwroot/hermes/unicornio-agent/work/telemetry.jsonl (horas=todas, run_source=todos, job=-)
+eventos cmd_output: 3928 | bytes totais: 19324063 (18871.2 KB) | eventos com run_source: 31
+posts READY unicos na mesma fatia: 211
+context_bytes_per_ready: 91583 B (89.4 KB)
+
+comando                eventos     total B      %    media      p50      p90       max  por READY
+-------------------------------------------------------------------------------------------------
+content                    514     3812238  19.7%     7417     6189    12905     33867      18067
+queue                      449     3683455  19.1%     8204     7258    17455     22229      17457
+cards                      541     2813378  14.6%     5200     3830    11497     44264      13334
+telemetry                   94     2716437  14.1%    28898     1821   105208    120109      12874
+media-search-web          1016     2497183  12.9%     2458     2184     3927     25620      11835
+media-search              1004     1772951   9.2%     1766     1153     3950     16392       8403
+draft                      105     1558360   8.1%    14842    14009    23771     25850       7386
+list-pending               106      295332   1.5%     2786     1319     1354     83793       1400
+media-search-listicle       21      119052   0.6%     5669     5573     9802     11342        564
+prepare                     66       34512   0.2%      523      316      366     13838        164
+checklist                   11       20606   0.1%     1873      622     4046      4103         98
+media-validate               1         559   0.0%      559      559      559       559          3
+
+por kind: {'read': 19324063}
+
+mesma tabela restrita aos eventos instrumentados (run_source presente):
+  telemetry                  26849 B
+  media-search-web            1804 B
+  cards                        352 B

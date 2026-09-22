@@ -1,0 +1,80 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86037 | papel: tool | tool: terminal | ts: 2026-09-22T09:45:47Z
+# bytes do payload: 2817 | sha256: bb14b412f48499fe0c108df30485d86eaca174c2bbda0c65a45eafbb30d62b2d
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: total 27080
+# ---- payload a partir daqui ----
+total 27080
+drwxr-xr-x 13 root root   36864 Sep 22 04:43 .
+drwxr-xr-x 15 www  www    12288 Sep 22 04:43 ..
+-rw-r--r--  1 root root   28138 Aug 28 17:51 101669-editorial.json
+-rw-r--r--  1 root root   28871 Aug 28 17:51 101669_editorial.py
+-rw-r--r--  1 root root   18719 Aug 27 22:14 101763-editorial.json
+-rw-r--r--  1 root root   18752 Sep  2 18:26 101763-rework-editorial.json
+-rw-r--r--  1 root root   26051 Aug 27 02:19 108248-editorial.json
+-rw-r--r--  1 root root    5326 Aug 26 00:50 108316-editorial.json
+-rw-r--r--  1 root root    9878 Aug 26 00:56 108318-editorial.json
+-rw-r--r--  1 root root   22948 Sep  2 12:55 109116-editorial.json
+-rw-r--r--  1 root root   15700 Aug 24 18:59 109132-editorial.json
+-rw-r--r--  1 root root    4845 Aug 24 18:59 109146-editorial.json
+-rw-r--r--  1 root root    6935 Aug 24 06:56 109661.editorial.json
+-rw-r--r--  1 root root    6201 Aug 24 08:17 109663.editorial.json
+-rw-r--r--  1 root root    2388 Aug 30 03:46 112018-editorial.json
+-rw-r--r--  1 root root    1737 Sep  2 05:14 112319-editorial.json
+-rw-r--r--  1 root root    4668 Sep  2 05:06 112321-editorial.json
+-rw-r--r--  1 root root    5651 Sep  2 05:09 112323-editorial.json
+-rw-r--r--  1 root root    5506 Sep  2 12:59 112327-editorial.json
+-rw-r--r--  1 root root   11161 Sep  6 08:11 112765-editorial-b.json
+-rw-r--r--  1 root root   10990 Sep  6 08:10 112765-editorial.json
+-rw-r--r--  1 root root    4491 Sep  6 04:51 112765-editorial2.json
+-rw-r--r--  1 root root    1374 Sep  6 04:53 112767-editorial.json
+-rw-r--r--  1 root root    1863 Sep  6 04:55 112769-editorial.json
+-rw-r--r--  1 root root    5023 Sep  6 04:57 112769-editorial2.json
+-rw-r--r--  1 root root    5661 Sep  6 04:57 112769-editorial3.json
+-rw-r--r--  1 root root    5837 Sep  6 04:58 112769-editorial4.json
+-rw-r--r--  1 root root    6064 Sep  6 04:59 112769-editorial5.json
+-rw-r--r--  1 root root    2781 Sep  6 04:55 112771-editorial.json
+=== keyart ===
+<class 'dict'> 269
+'redfall'
+'xenoblade chronicles 2'
+'remothered red nun s legacy'
+'the duskbloods'
+'forza horizon'
+'the legend of zelda ocarina of time'
+'the witcher 3 wild hunt'
+'destiny 2'
+'black myth wukong'
+'dino crisis'
+'incredible crisis'
+'parappa the rapper'
+'medievil'
+'hogs of war'
+'tokyo ghoul'
+'soul eater'
+'claymore'
+'deadman wonderland'
+'berserk'
+"disney's atlantis the lost empire"
+'call of duty: modern warfare 4'
+'psblackout'
+'silo (apple tv+)'
+'severance (apple tv+)'
+'dark matter (apple tv+)'
+'pluribus (apple tv+)'
+'murderbot (apple tv+)'
+'slow horses (apple tv+)'
+'ted lasso (apple tv+)'
+'shrinking (apple tv+)'
+'for all mankind (apple tv+)'
+"widow's bay (apple tv+)"
+'the legend of zelda tears of the kingdom'
+'72 hours'
+'king of the hill'
+'star trek strange new worlds'
+'the dink'
+'nirvanna the band the show the movie'
+'scream'
+'pompeii out of time'

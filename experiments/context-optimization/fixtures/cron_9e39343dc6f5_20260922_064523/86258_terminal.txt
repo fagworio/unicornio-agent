@@ -1,0 +1,21 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86258 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:42Z
+# bytes do payload: 1215 | sha256: 31967fe882f9b7b07b63050d1eef1245380aa5cdfcf6386c1a0bccbc1ac6d62b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: grupo_5    JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+# ---- payload a partir daqui ----
+grupo_5    JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+kiki_6     JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+kiki_1     JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+howl_11    JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+howl_8     JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+ponyo_120  JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+ponyo_15   JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+stand_16   JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+stand_18   JPEG 640x640         flat=False | OK   URL exata confirmada na pagina de origem (bytes iguais)
+stand_22   JPEG 640x640         flat=True | OK   URL exata confirmada na pagina de origem (bytes iguais)
+stand_23   JPEG 640x640         flat=True | OK   URL exata confirmada na pagina de origem (bytes iguais)
+--- pares (<=6 mesmo frame) ---
+total distintos: 11

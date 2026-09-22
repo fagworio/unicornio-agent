@@ -1,0 +1,17 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86216 | papel: tool | tool: terminal | ts: 2026-09-22T09:59:00Z
+# bytes do payload: 935 | sha256: 046460aac9702de123fceda2275481cbfc9fe60ffdc84a5900ef9fde56920adf
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: featured_cosmic_firstlook    WEBP 1500x844 47228B  phash=9bb7681b866c6760
+# ---- payload a partir daqui ----
+featured_cosmic_firstlook    WEBP 1500x844 47228B  phash=9bb7681b866c6760
+cosmic_everything            WEBP 1500x844 106256B  phash=b3d7c95c84ce0c6a
+worldofreel_hero             WEBP 1156x462 17644B  phash=f6f6c088091c3fe3
+latimes_still                ERR HTTPError HTTP Error 504: Gateway Time-out | https://ca-times.brightspotcdn.com/dims4/default/85a40a3/2147483647/strip/true/crop/6000x3
+syfy_thumb                   ERR ValueError unknown url type: '/sites/syfy/files/styles/16_9_medium/public/media_mpx/thumbnails/dhwkj3fo7vbn0.cloudfront.net/image/BWT3_TVE_-_Syfy/500/244/20260716_THUMB_BATMAN_II_DELAY.jpg' | /sites/syfy/files/styles/16_9_medium/public/media_mpx/thumbnails/dhwkj3fo7vbn0.cloudfront.
+--- distancias (<=6 = mesmo frame) ---
+  featured_cosmic_firstlook    cosmic_everything            22
+  featured_cosmic_firstlook    worldofreel_hero             28
+  cosmic_everything            worldofreel_hero             26

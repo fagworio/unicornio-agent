@@ -1,0 +1,31 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86140 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:23Z
+# bytes do payload: 1565 | sha256: a877ccec3125d62027d9f45215a8373f7dbb64c985abb088c1f33cc811db16f4
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: === dimensoes dos candidatos ===
+# ---- payload a partir daqui ----
+=== dimensoes dos candidatos ===
+tweak2       JPEG 620x349 25130B  https://static.tweaktown.com/news/1/1/113653_2_xbox-series-can-now-run-ps5-games
+tweak3       JPEG 620x348 25775B  https://static.tweaktown.com/news/1/1/113653_3_xbox-series-can-now-run-ps5-games
+fan_cap2     JPEG 1197x675 70932B  https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-ca
+fan_portada  JPEG 1197x675 61217B  https://fanaticosdelhardware.com/wp-content/uploads/2026/09/emulador-PS5-Xbox-po
+anti_a       WEBP 1600x898 186194B  https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+anti_b       WEBP 1600x900 180742B  https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+anti_c       WEBP 1600x899 122258B  https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+anti_d       WEBP 1600x896 127826B  https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+anti_e       WEBP 1600x898 71554B  https://images.antihype.com.br/posts/77f599/external/emulador-ps5-xbox-series-x-
+=== dimensoes dos usados ===
+used_ixbt_featured   JPEG 1600x900 159928B
+used_windowsreport   PNG 1280x750 545740B
+used_tweak1          JPEG 1200x675 86648B
+used_fan_cap         JPEG 1202x675 60706B
+used_pcquest         JPEG 1197x675 125949B
+used_ytimg           JPEG 1280x720 119581B
+=== hashes: 15 de 15
+PAR tweak2 ~ fan_portada dist=0
+PAR tweak2 ~ used_windowsreport dist=4
+PAR tweak3 ~ used_fan_cap dist=0
+PAR fan_cap2 ~ used_tweak1 dist=0
+PAR fan_portada ~ used_windowsreport dist=4

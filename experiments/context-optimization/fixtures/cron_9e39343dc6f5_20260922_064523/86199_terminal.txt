@@ -1,0 +1,250 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86199 | papel: tool | tool: terminal | ts: 2026-09-22T09:57:53Z
+# bytes do payload: 23868 | sha256: 4cc48b4d2b99e4329dca843bb337b4c1146a74201e5d495508303332ec9626f9
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null, "approval": "Command was flagged (script execution via heredoc) and auto-approved by smart approval."}
+# primeira linha: ##### variety 22
+# ---- payload a partir daqui ----
+##### variety 22
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 a3562cd2
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 a3562cd2
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 a3562cd2
+   Chris-Rock-Variety-Cover-Story-4.jpg?crop=0px%2C64px%2C1368px%2C912px&#038;resize=681%2C45 f8ce05f4
+   Jack-OConnell-Variety-6.jpg?crop=0px%2C167px%2C1500px%2C1000px&#038;resize=250%2C167 ecbd1232
+   Mariska-Hargitay-Variety-Cover-story-3.jpg?crop=0px%2C0px%2C1856px%2C1238px&#038;resize=25 f8c18799
+   Travis-Scott-Variety-Cover-Story-4.jpg?crop=0px%2C117px%2C1500px%2C1000px&#038;resize=250% fca28c19
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920%2C1280 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360%2C907 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000%2C667 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910%2C607 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681%2C454 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450%2C300 a3562cd2
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250%2C167 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=1920%2C1280 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=1360%2C907 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=1000%2C667 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910%2C607 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681%2C454 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450%2C300 a3562cd2
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250%2C167 a3562cd2
+##### syfy 3
+   article-promotes-1825x1217_2_2.jpg b152add8
+   20260716_THUMB_BATMAN_II_DELAY.jpg b26d3cb2
+   20260716_THUMB_BATMAN_II_DELAY.jpg b26d3cb2
+##### worldofreel 21
+   IMG_7772.webp?format=1500w f6f6c088
+   World+of+Reel+tagline.PNG?format=1500w 83f8dfff
+   IMG_9792.webp 8df3e392
+   IMG_9788.webp cc4d185c
+   IMG_9791.jpeg f3733333
+   IMG_9785.jpeg 81263ab5
+   IMG_9780.jpeg dbc352cb
+   Capture.PNG a999205e
+   IMG_7772.webp f6f6c088
+   IMG_9738.jpeg d2ea27e3
+   IMG_9642.jpeg 80522b8f
+   IMG_9603.jpeg e0234e9e
+   IMG_9478.jpeg a00b6f6c
+   IMG_4965.jpeg 9bd36d84
+   Capture.PNG cc275a57
+   Capture.PNG c45235a7
+   B16BAC21-5652-44F6-9E83-A1A5C5DF61D7.jpeg 965e171f
+   IMG_7772.webp?format=750w f6f6c088
+   IMG_7772.webp?format=1000w f6f6c088
+   IMG_7772.webp?format=1500w f6f6c088
+   IMG_7772.webp?format=2500w f6f6c088
+##### cosmicbook 15
+   the-batman-part-2-everything-we-know.webp b3d7c95c
+   gamesradar-closes-newsarama.webp c0b5975a
+   batman-kamaen-rider-collab-768x432.webp 9457eada
+   alan-ritchson-helldivers-movie-768x432.webp bdd1d0cd
+   dc-nycc-2026-schedule-panels-768x432.webp 8997c6d9
+   zack-snyder-wb-right-everything-dc-768x432.webp 9dd20cd6
+   injustice-3-rumors-development-neatherrealm-768x432.webp d3903b3c
+   robert-pattinson-first-look-batman-2-set-768x432.webp 9bb7681b
+   the-batman-part-2-everything-we-know-768x432.webp b3d7c95c
+   batman-kamaen-rider-collab.webp 9457eada
+   alan-ritchson-helldivers-movie.webp bdd1d0cd
+   dc-nycc-2026-schedule-panels.webp 8997c6d9
+   zack-snyder-wb-right-everything-dc.webp 9dd00cd6
+   injustice-3-rumors-development-neatherrealm.webp d3903b3c
+   robert-pattinson-first-look-batman-2-set.webp 9bb7681b
+=== pares similares entre todas ===
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&#038;h=454&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&#038;h=563&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=563&amp;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&#038;h=667&#038;crop=1 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1920 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1360 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=1000 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=910% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=681% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=450% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=681&amp;h=454&amp;crop=1&amp;resize=250% ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=192 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=136 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=100 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=910 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=681 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=450 ~ batman_41d7ae.png?w=1000&amp;h=667&amp;crop=1&amp;resize=250 0
+   20260716_THUMB_BATMAN_II_DELAY.jpg ~ 20260716_THUMB_BATMAN_II_DELAY.jpg 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp?format=750w 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp?format=1000w 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp?format=1500w 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp?format=2500w 0
+   IMG_7772.webp ~ IMG_7772.webp?format=750w 0
+   IMG_7772.webp ~ IMG_7772.webp?format=1000w 0
+   IMG_7772.webp ~ IMG_7772.webp?format=1500w 0
+   IMG_7772.webp ~ IMG_7772.webp?format=2500w 0
+   IMG_7772.webp?format=750w ~ IMG_7772.webp?format=1000w 0
+   IMG_7772.webp?format=750w ~ IMG_7772.webp?format=1500w 0
+   IMG_7772.webp?format=750w ~ IMG_7772.webp?format=2500w 0
+   IMG_7772.webp?format=1000w ~ IMG_7772.webp?format=1500w 0
+   IMG_7772.webp?format=1000w ~ IMG_7772.webp?format=2500w 0
+   IMG_7772.webp?format=1500w ~ IMG_7772.webp?format=2500w 0
+   the-batman-part-2-everything-we-know.webp ~ the-batman-part-2-everything-we-know-768x432.webp 0
+   batman-kamaen-rider-collab-768x432.webp ~ batman-kamaen-rider-collab.webp 0
+   alan-ritchson-helldivers-movie-768x432.webp ~ alan-ritchson-helldivers-movie.webp 0
+   dc-nycc-2026-schedule-panels-768x432.webp ~ dc-nycc-2026-schedule-panels.webp 0
+   zack-snyder-wb-right-everything-dc-768x432.webp ~ zack-snyder-wb-right-everything-dc.webp 2
+   injustice-3-rumors-development-neatherrealm-768x432.webp ~ injustice-3-rumors-development-neatherrealm.webp 0
+   robert-pattinson-first-look-batman-2-set-768x432.webp ~ robert-pattinson-first-look-batman-2-set.webp 0

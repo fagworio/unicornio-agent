@@ -1,0 +1,79 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86260 | papel: tool | tool: terminal | ts: 2026-09-22T10:01:53Z
+# bytes do payload: 2625 | sha256: b65acd49a17648decb686eb36f5fc37f224b6f7727cc49680931f99da5e2f15b
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: def compose_final_content(
+# ---- payload a partir daqui ----
+def compose_final_content(
+    editorial: dict[str, Any],
+    config: Config,
+    original_link: str | None,
+    *,
+    root: Path | None = None,
+) -> tuple[str, dict[str, str] | None, str]:
+    """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
+
+    Returns ``(content, trailer)`` so callers can report what was embedded.
+
+    Internal category links are added deterministically (no LLM) to the body
+    HTML BEFORE the trailer/footer are appended, so the CTA/Fonte blocks and
+    the trailer embed are never linked. The enrichment runs on the same final
+    content the checklist validates and the manifest hashes.
+    """
+    html = editorial["cleaned_html"]
+    if config.internal_links_enabled:
+        from .internal_links import add_internal_links
+
+        html = add_internal_links(html)
+    # Remove figuras orfas de credito duplicado (figcaption repetido sem <img>).
+    from .media.text import dedupe_credit_figures
+
+    html = dedupe_credit_figures(html)
+    trailer, trailer_status = _discover_trailer(editorial, config, root=root)
+    if trailer is not None:
+        html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
+    return append_canonical_footer(html, original_link), trailer, trailer_status
+
+
+def original_link_of(post: dict[str, Any]) -> str | None:
+    """Read the ``original_link`` custom field from the post meta (REST edit context)."""
+    return _original_link(post)
+
+
+def _require_pending(post: dict[str, Any]) -> None:
+    if post.get("status") != "pending":
+        raise WorkflowError("post is no longer pending; refusing to process")
+
+
+def _raw_content(post: dict[str, Any]) -> str:
+    content = post.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("raw"), str):
+        raise WorkflowError("post content.raw is missing")
+    return content["raw"]
+
+
+def _post_title(post: dict[str, Any]) -> str | None:
+    title = post.get("title")
+    if isinstance(title, dict) and isinstance(title.get("raw"), str):
+        return sanitize_title(title["raw"]) or None
+    if isinstance(title, str):
+        return sanitize_title(title) or None
+    return None
+
+
+
+def migrate_legacy_state(
+    client: Any,
+    config: Any,
+    root: Path,
+    *,
+    apply: bool = False,
+    limit: int = 0,
+) -> dict[str, Any]:
+    """Migration EXPLÍCITA dos posts legados (P3.7).
+
+    O ``publish-ready`` aceitava ``state is None`` para não travar a fila antiga.
+    Com a máquina de estados madura, o modo legado sai do caminho: esta função
+src/unicornio_editor/checklist.py:26:_CTA_MARKER = "Confira mais novidades em nosso Portal de"

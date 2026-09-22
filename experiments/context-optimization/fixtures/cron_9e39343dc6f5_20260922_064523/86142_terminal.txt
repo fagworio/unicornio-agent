@@ -1,0 +1,45 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86142 | papel: tool | tool: terminal | ts: 2026-09-22T09:53:31Z
+# bytes do payload: 1821 | sha256: cbfda6f90149652c78b7ef1cc5e95441c051bf5437b92bf7bcf6cdce9a7e2376
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 442-        height_match = re.search(r'\bheight="(\d+)"', tag, flags=re.IGNORECASE)
+# ---- payload a partir daqui ----
+442-        height_match = re.search(r'\bheight="(\d+)"', tag, flags=re.IGNORECASE)
+443-        if not width_match or not height_match:
+444-            bad_dimensions.append("sem width/height")
+445-            continue
+446-        width = int(width_match.group(1))
+447-        height = int(height_match.group(1))
+448-        if not MIN_INLINE_WIDTH <= width <= MAX_INLINE_WIDTH or height <= 0:
+449-            bad_dimensions.append(f"{width}x{height}")
+450-    if inline_images:
+451-        check(
+452:            "dimensoes_imagens",
+453-            not bad_dimensions,
+454-            f"{len(inline_images)} imagem(ns); fora do padrao {MIN_INLINE_WIDTH}-{MAX_INLINE_WIDTH}px: "
+455-            f"{', '.join(bad_dimensions) or 'nenhuma'}",
+456-        )
+457-    else:
+458:        check("dimensoes_imagens", True, "sem imagens para verificar", skipped=True)
+459-
+460-    # 9. Trailer: game content must carry a validated YouTube embed.
+461-    game_name = editorial.get("game_name")
+462-    if isinstance(game_name, str) and game_name.strip():
+463-        has_trailer = bool(_IFRAME_RE.search(content))
+464-        unavailable = bool(editorial.get("trailer_unavailable"))
+465-        evidence = editorial.get("trailer_search_evidence")
+466-        audited_waiver = (
+467-            unavailable
+468-            and isinstance(evidence, Mapping)
+469-            and evidence.get("result") == "official_not_found"
+470-            and bool(evidence.get("searched_at"))
+471-        )
+472-        if has_trailer:
+473-            check("trailer_youtube", True, f"game_name={game_name!r}; embed presente")
+474-        elif audited_waiver:
+475-            check(
+476-                "trailer_youtube",
+477-                True,
+478-                f"waived: busca oficial auditada sem resultado em {evidence.get('searched_at')}",

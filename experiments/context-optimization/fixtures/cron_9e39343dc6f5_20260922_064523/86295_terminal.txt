@@ -1,0 +1,65 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86295 | papel: tool | tool: terminal | ts: 2026-09-22T10:03:49Z
+# bytes do payload: 3128 | sha256: 181d23286457ab566ca1693cdbf38664ac045b6f81c87927c1e6edb0fa0a1e87
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: 113-    payload = _payload_text(report)
+# ---- payload a partir daqui ----
+113-    payload = _payload_text(report)
+114-    return [f"valor_nao_literal:{value}" for value in (values or ())
+115-            if str(value or "").strip() and str(value) not in payload]
+116-
+117-
+118:def check_evidence_verbatim(report: Mapping[str, Any],
+119-                            expected: Mapping[str, Any] | None = None,
+120-                            *, values: Sequence[str] | None = None) -> list[str]:
+121-    """Composição dos dois níveis de fidelidade (campos + valores soltos)."""
+122-    return (check_expected_fields(report, expected)
+123-            + check_literal_values(report, values))
+124-
+125-
+126-def validate_report(report: Mapping[str, Any], *,
+127-                    expected: Mapping[str, Any] | None = None,
+128-                    values: Sequence[str] | None = None) -> dict[str, Any]:
+129-    """Valida o relatório: prosa pt-BR + evidência literal e citada.
+130-
+131-    ``report`` = {"narrative": "<prosa pt-BR>", "evidence": {campo: valor}}.
+132-    ``expected`` = valores de ferramenta que o relatório DEVE carregar e citar
+133-    literais. ``values`` = literais que precisam aparecer no payload (sem campo).
+134-    """
+135-    narrative = str(report.get("narrative") or "")
+136-    missing = [key for key in NARRATIVE_REQUIRED_KEYS if key not in report]
+137-    violations: list[str] = [f"campo_ausente:{key}" for key in missing]
+138-    if not narrative.strip():
+139-        violations.append("prosa_vazia")
+140-    literals = [str(v) for v in (expected or {}).values() if str(v or "").strip()]
+141-    literals += [str(v) for v in (values or ()) if str(v or "").strip()]
+142-    violations += check_narrative_locale(narrative, allowed_literals=literals)
+143-    violations += check_evidence_verbatim(report, expected, values=values)
+144-    evidence_fields_with_cjk = [key for key, value in (report.get("evidence") or {}).items()
+145-                                if has_cjk(str(value or ""))]
+146-    checks = {
+147-        "narrative_present": bool(narrative.strip()),
+148-        "narrative_pt_br": not cjk_characters(strip_allowed_literals(narrative, literals)),
+149-        "evidence_verbatim": not any(v.startswith(("valor_alterado", "valor_nao_citado",
+150-                                                   "valor_nao_literal"))
+151-                                     for v in violations),
+152-        "evidence_fields_with_cjk": evidence_fields_with_cjk,
+153-        "quoted_literals": len(literals),
+154-    }
+155-    instruction = ""
+156-    if violations:
+157-        instruction = (
+158-            "Reescreva SOMENTE a prosa (narrative) em português do Brasil e "
+159-            "reproduza os valores de evidência exatamente como vieram das "
+160-            "ferramentas (sem traduzir, resumir, corrigir acento/caixa ou "
+161-            "reformatar). Revalide com o guard antes de enviar.")
+162-    return {
+163-        "ok": not violations,
+38:NARRATIVE_REQUIRED_KEYS = ("narrative",)
+39-
+40-
+41-def cjk_characters(text: str) -> list[str]:
+42-    """Caracteres CJK/coreanos presentes no texto, sem repetição e em ordem."""
+43-    seen: list[str] = []

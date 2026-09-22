@@ -1,0 +1,23 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86091 | papel: tool | tool: terminal | ts: 2026-09-22T09:49:23Z
+# bytes do payload: 1051 | sha256: 67a0f1cba56c1d94d756f3fd0ca87183d59474af82e47e553cfe438d4ce45dd5
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: p blocks 14
+# ---- payload a partir daqui ----
+p blocks 14
+0 68 A emulação de PlayStation 5 segue avançando em ritmo acelerado, e um n
+1 74 O ponto de partida do avanço é o PS5X, projeto liderado pelo desenvolv
+2 72 O PS5X foi descrito como uma adaptação do KytyPS5. O projeto tenta man
+3 57 Em demonstrações iniciais, o projeto teria conseguido rodar títulos cl
+4 59 Uenal também mencionou que o desenvolvimento está sendo acelerado com 
+5 64 Há ainda limitações práticas que influenciam desempenho. O texto origi
+6 79 O avanço do KytyPS5 e de projetos derivados, como o PS5X, reforça uma 
+7 78 Com o PS5, o desafio é maior. Mesmo assim, a expectativa entre parte d
+8 61 Outro efeito colateral desse tipo de progresso é a expectativa em torn
+9 92 O texto aponta que essa esperança esbarra em um problema prático. Rece
+10 86 O argumento central é técnico. GTA 6 é descrito como um jogo que press
+11 62 Por isso, mesmo que a emulação avance, rodar um jogo tão pesado quanto
+12 46 Em paralelo, o PS5X representa uma tentativa de levar a emulação para 
+13 2 Também lido:

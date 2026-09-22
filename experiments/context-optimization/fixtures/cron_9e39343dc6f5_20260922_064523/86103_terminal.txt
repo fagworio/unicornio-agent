@@ -1,0 +1,19 @@
+# FIXTURE do Experimento A (payload real entregue ao LLM)
+# origem: /root/.hermes/state.db (somente leitura), sessao cron_9e39343dc6f5_20260922_064523
+# mensagem: 86103 | papel: tool | tool: terminal | ts: 2026-09-22T09:50:08Z
+# bytes do payload: 3100 | sha256: b3a288217c76bbaefb38ebc1af3cc870412f638ebc3bca6c9c35837a9cd3f936
+# redacoes de credencial: 0
+# metadata do wrapper: {"exit_code": 0, "error": null}
+# primeira linha: Warning: The `mcp-adapter serve` command is registering an argument '--user' that conflicts with a global argument of th
+# ---- payload a partir daqui ----
+Warning: The `mcp-adapter serve` command is registering an argument '--user' that conflicts with a global argument of the same name.
+ID,post_title,post_excerpt,guid
+114332,"Quake II em execução no PS5X, emulador de PS5 para Xbox Series X","Crédito da imagem: Devran Cosmo Uenal. Demonstração de Quake II no emulador PS5X rodando no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/quake-ii-em-execucao-no-ps5x-emulador-de-ps5-para-xbox-series-x.webp
+114331,"Xbox Series X e PlayStation 5, consoles do teste de emulação de PS5 pelo PS5X","Crédito da imagem: PCQuest. Xbox Series X e PlayStation 5, os consoles envolvidos na emulação de PS5 pelo projeto PS5X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/xbox-series-x-e-playstation-5-consoles-do-teste-de-emulacao-de-ps5-pelo-ps5x.webp
+114330,"Tela de abertura de Quake II no emulador PS5X rodando no Xbox Series X","Crédito da imagem: Fanáticos del Hardware. Tela de abertura de Quake II exibida no Xbox Series X pelo emulador PS5X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/tela-de-abertura-de-quake-ii-no-emulador-ps5x-rodando-no-xbox-series-x.webp
+114329,"Gameplay de Quake II pelo emulador PS5X rodando no Xbox Series X","Crédito da imagem: IXBT Games. Gameplay de Quake II pelo emulador PS5X no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/gameplay-de-quake-ii-pelo-emulador-ps5x-rodando-no-xbox-series-x.webp
+114327,"Quake II rodando pelo emulador PS5X no Xbox Series X","Crédito da imagem: TweakTown. Quake II em execução pelo emulador PS5X no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/quake-ii-rodando-pelo-emulador-ps5x-no-xbox-series-x.webp
+114328,"Biblioteca de jogos do PS5X, emulador de PS5, rodando no Xbox Series X","Crédito da imagem: Windows Report. Tela do emulador PS5X com a biblioteca de jogos de PlayStation 5 no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/biblioteca-de-jogos-do-ps5x-emulador-de-ps5-rodando-no-xbox-series-x.webp
+114295,"PS5X no Xbox Series X: frame da demonstração em vídeo","Crédito da imagem: Devran Cosmo Uenal. Frame da demonstração do PS5X rodando jogos de PS5 no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/ps5x-no-xbox-series-x-frame-da-demonstracao-em-video.webp
+114296,"PS5X: captura do port experimental no Xbox Series X","Crédito da imagem: Devran Cosmo Uenal. Captura do port experimental PS5X no Xbox Series X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/ps5x-captura-do-port-experimental-no-xbox-series-x.webp
+114294,"PS5X: emulador KytyPS5 rodando jogo de PS5","Crédito da imagem: Projeto KytyPS5 (GitHub). Screenshot do emulador KytyPS5 rodando jogo de PlayStation 5, base do PS5X. Uso com crédito.",http://prod.unicorniohater.com.br/wp-content/uploads/2026/09/ps5x-emulador-kytyps5-rodando-jogo-de-ps5.webp
