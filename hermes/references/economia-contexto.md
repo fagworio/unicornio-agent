@@ -166,3 +166,12 @@ stdout pequeno orientado à próxima ação:
 O card traz `requires_content`: `false` em rework de mídia/SEO/trailer e em post
 novo cujo texto existente serve. Leia o conteúdo **só** quando `requires_content`
 for `true` ou quando você DECIDIR reescrever o texto (aí sim `content POST_ID`).
+
+## Verificação local (antes de commitar)
+
+- Rode a suíte também com ambiente LIMPO (`env -i PATH=/usr/bin:/bin HOME=/tmp/x
+  .venv/bin/python -m unittest discover -s tests`): o CI do GitHub não tem nenhuma
+  variável `HERMES_*`, e um teste que dependa de `HERMES_EDITORIAL_CRON_JOB_ID` ou
+  de `HERMES_SESSION_ID` vazado do shell passa localmente e quebra no CI.
+- Testes que medem fatia do cron/telemetria devem FIXAR a origem
+  (`UNICORNIO_RUN_SOURCE` + `HERMES_*`), nunca depender do ambiente de quem roda.

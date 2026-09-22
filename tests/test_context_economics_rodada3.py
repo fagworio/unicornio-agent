@@ -307,16 +307,20 @@ class RunSourceIsolationTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {"HERMES_SESSION_ID": "20260922_090601_abc123",
-                 "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": str(banco)},
+                 "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": str(banco),
+                 "HERMES_EDITORIAL_CRON_JOB_ID": ""},
                 clear=False,
             ):
+                # Sessão FILHA de uma sessão de cron: além do run_source, o id do
+                # JOB tem de sair da sessão RAIZ (senão o KPI fica sem job).
                 self.assertEqual(run_context()["run_source"], "cron")
                 self.assertEqual(run_context()["cron_job_id"], "9e39343dc6f5")
             observability._RUN_CONTEXT_MEMO.clear()
             with mock.patch.dict(
                 os.environ,
                 {"HERMES_SESSION_ID": "20260922_103317_904836",
-                 "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": str(banco)},
+                 "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": str(banco),
+                 "HERMES_EDITORIAL_CRON_JOB_ID": ""},
                 clear=False,
             ):
                 self.assertEqual(run_context()["run_source"], "manual")
@@ -330,11 +334,28 @@ class RunSourceIsolationTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {"HERMES_SESSION_ID": "cron_editorial_20260922_090923",
-             "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": "/nao/existe.db"},
+             "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": "/nao/existe.db",
+             "HERMES_EDITORIAL_CRON_JOB_ID": ""},
             clear=False,
         ):
             self.assertEqual(run_context()["run_source"], "cron")
             self.assertEqual(run_context()["cron_job_id"], "editorial")
+
+    def test_session_id_desconhecido_cai_no_prefixo(self):
+        """Id de sessão que não está no banco (ex.: CI) não vira "manual" sozinho."""
+        from unicornio_editor import observability
+
+        observability._RUN_CONTEXT_MEMO.clear()
+        self.addCleanup(observability._RUN_CONTEXT_MEMO.clear)
+        with mock.patch.dict(
+            os.environ,
+            {"HERMES_SESSION_ID": "cron_9e39343dc6f5_20260922_090524",
+             "UNICORNIO_RUN_SOURCE": "", "HERMES_STATE_DB": "/nao/existe.db",
+             "HERMES_EDITORIAL_CRON_JOB_ID": "9e39343dc6f5"},
+            clear=False,
+        ):
+            self.assertEqual(run_context()["run_source"], "cron")
+            self.assertEqual(run_context()["cron_job_id"], "9e39343dc6f5")
 
     def test_every_event_carries_the_run_source(self):
         with tempfile.TemporaryDirectory() as directory:

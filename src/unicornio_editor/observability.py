@@ -76,22 +76,25 @@ def decisions_path(root: str | Path) -> Path:
 _RUN_CONTEXT_MEMO: dict[str, dict[str, Any]] = {}
 
 
-def _session_source(session_id: str) -> str:
-    """``source`` da sessão no state.db do Hermes (autoritativo), com cache.
+def _session_info(session_id: str) -> dict[str, str]:
+    """``source`` e id RAIZ da sessão no state.db do Hermes (autoritativo), com cache.
 
     O id da sessão do agente pode ser o da sessão principal ou o de uma sessão
     FILHA (subagente/ferramenta) — por isso o prefixo do id não basta. A coluna
     `source` do banco é a classificação autoritativa, e `parent_session_id`
-    permite subir a cadeia até a raiz. Uma consulta por processo (memoizada),
-    somente-leitura: se o banco não existir/estiver quebrado devolve "".
+    permite subir a cadeia até a raiz (que é de onde sai o id do JOB quando o
+    processo roda numa sessão filha: sem isso o run_source saía cron mas o
+    cron_job_id vinha vazio). Uma consulta por processo (memoizada),
+    somente-leitura: se o banco não existir/estiver quebrado devolve vazio.
     """
     if not session_id:
-        return ""
+        return {"source": "", "root_id": ""}
     if session_id in _RUN_CONTEXT_MEMO:
-        return str(_RUN_CONTEXT_MEMO[session_id].get("source") or "")
+        return _RUN_CONTEXT_MEMO[session_id]
     banco = os.environ.get("HERMES_STATE_DB") or str(Path.home() / ".hermes" / "state.db")
     atual = session_id
     fonte = ""
+    raiz = ""
     try:
         import sqlite3
 
@@ -105,18 +108,17 @@ def _session_source(session_id: str) -> str:
                 if not linha:
                     break
                 fonte = str(linha[0] or "")
+                raiz = atual
                 pai = str(linha[1] or "")
-                if not pai or pai == atual:
-                    break
-                if fonte == "cron":
+                if fonte == "cron" or not pai or pai == atual:
                     break
                 atual = pai
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - classificação é instrumentação
-        fonte = ""
-    _RUN_CONTEXT_MEMO[session_id] = {"source": fonte, "root_id": atual}
-    return fonte
+        fonte, raiz = "", ""
+    _RUN_CONTEXT_MEMO[session_id] = {"source": fonte, "root_id": raiz}
+    return _RUN_CONTEXT_MEMO[session_id]
 
 
 def run_context() -> dict[str, Any]:
@@ -134,7 +136,8 @@ def run_context() -> dict[str, Any]:
     sessao = str(os.environ.get("HERMES_SESSION_ID") or "").strip()
     job = str(os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID") or "").strip()
     origem = str(os.environ.get("UNICORNIO_RUN_SOURCE") or "").strip().lower()
-    fonte_db = "" if origem else _session_source(sessao)
+    info = {"source": "", "root_id": ""} if origem else _session_info(sessao)
+    fonte_db = info["source"]
     if origem:
         pass
     elif fonte_db == "cron":
@@ -153,12 +156,18 @@ def run_context() -> dict[str, Any]:
     else:
         origem = "unknown"
     if origem == "cron":
-        # cron_<job_id>_<YYYYMMDD>_<HHMMSS>
-        partes = sessao.split("_")
-        if len(partes) >= 3 and partes[0] == "cron":
-            job = partes[1]
-        elif not job:
-            job = ""
+        # cron_<job_id>_<YYYYMMDD>_<HHMMSS> — o id do job sai da sessão RAIZ
+        # (quando o processo roda numa sessão filha, o id do processo não tem o
+        # prefixo cron_ e o job ficaria vazio).
+        candidatos_id = [sessao, str(info.get("root_id") or "")]
+        for candidato in candidatos_id:
+            partes = candidato.split("_")
+            if len(partes) >= 3 and partes[0] == "cron":
+                job = partes[1]
+                break
+        else:
+            if not job:
+                job = ""
     else:
         job = ""
     return {"run_source": origem, "session_id": sessao, "cron_job_id": job}
