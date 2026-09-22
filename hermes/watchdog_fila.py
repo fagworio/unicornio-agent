@@ -93,7 +93,19 @@ if feed_count == 0:
         "— o alimentador (usuario 'redacao') parou? Sem entrada a fila seca e o pipeline fica ocioso"
     )
 if uncertain:
-    problems.append(f"{uncertain} post(s) em uncertain.json aguardando revisao humana")
+    # Separa DECIDIDOS de PENDENTES: o discard grava uncertain.json com
+    # discarded=true (triagem feita). Usa os IDs do WP (report) — varrer
+    # backups/ contaria tambem arquivos antigos de posts ja publicados.
+    pendentes = 0
+    for pid in report.get("uncertain_ids") or []:
+        f = ROOT / "backups" / str(pid) / "uncertain.json"
+        try:
+            if not json.loads(f.read_text()).get("discarded"):
+                pendentes += 1
+        except (OSError, ValueError):
+            pendentes += 1
+    if pendentes:
+        problems.append(f"{pendentes} post(s) em uncertain.json aguardando revisao humana")
 
 if problems:
     print("watchdog fila: " + " | ".join(problems))

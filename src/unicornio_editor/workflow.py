@@ -1892,11 +1892,20 @@ def _save_uncertain(root: Path, post_id: int, editorial: dict[str, Any]) -> None
     try:
         directory = root / "backups" / str(post_id)
         directory.mkdir(parents=True, exist_ok=True)
+        # Preserva campos extras do editorial (ex.: discarded/discarded_at da
+        # triagem): antes tudo fora de post_id/status/site_relevance era
+        # silenciosamente descartado na gravacao.
+        extra = {
+            k: v
+            for k, v in editorial.items()
+            if k not in ("post_id", "status", "site_relevance")
+        }
         atomic_write_text(directory / "uncertain.json", json.dumps(
                 {
                     "post_id": post_id,
                     "status": "uncertain",
                     "site_relevance": editorial.get("site_relevance"),
+                    **extra,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3151,7 +3160,15 @@ def discard_post(
     motivo = reason or "descartado"
     if anterior and anterior != motivo and anterior not in motivo:
         motivo = f"{motivo} | motivo anterior do pipeline: {anterior}"
-    editorial = {"site_relevance": {"decision": "skip", "confidence": 1.0, "reason": motivo}}
+    editorial = {
+        "site_relevance": {"decision": "skip", "confidence": 1.0, "reason": motivo},
+        # Marcador de DECISAO (triagem): distingue o descarte deliberado ("nao
+        # atende ao filtro do portal") do UNCERTAIN que ainda aguarda revisao
+        # humana. Sem ele o watchdog seguiria alertando incertos ja decididos e
+        # a fila nunca apareceria limpa para o operador.
+        "discarded": True,
+        "discarded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }
     _save_uncertain(root, post_id, editorial)
     _write_state_markers(
         client,
