@@ -88,6 +88,41 @@ operador**, e cada re-sincronização entra em "Registros durante a coleta" com 
 Última: 2026-09-22T17:27:39Z, `88eff3b8…` → `a79f5d84…`. Nunca em silêncio: enquanto a
 cópia implantada estiver atrasada em relação a `main`, isso está escrito aqui.
 
+### Superfície de execução dos cron de produção (o que cada job executa de fato)
+
+O snapshot acima cobre o editorial. Esta tabela estende a varredura para TODOS os jobs, para
+que a afirmação "produção == código da main" seja verificável item a item e não por
+suposição:
+
+| job | o que executa | origem do código |
+|---|---|---|
+| `9e39343dc6f5` UnicornioHater editorial pending | `--workdir` = este checkout → `src/unicornio_editor` | **versionado** (tree `cfa8375`) |
+| `11a5ba82f27a` UnicornioHater publicacao | `~/.hermes/scripts/unicorniohater-publish.sh` → `exec hermes/publish-cron.sh` | **versionado** (`1942096`) |
+| `894cc5179ae8` UnicornioHater limpeza | `.../unicorniohater-cleanup.sh` → `exec hermes/cleanup-cron.sh` | **versionado** (`1942096`) |
+| `5bf1f32f83e1` UnicornioHater watchdog fila | `.../unicorniohater-watchdog.sh` → `.venv/bin/python work/watchdog_fila.py` | **NÃO versionado** (`work/` é git-ignored — `.gitignore:54`) |
+| `832c68f9cec7` UnicornioHater custo | `.../unicorniohater-custo.sh` → `.venv/bin/python work/watchdog_custo.py` | **NÃO versionado** |
+| `2c06be2188b0` UnicornioHater linkcheck | `.../unicorniohater-linkcheck.sh` → `.venv/bin/python work/check_links.py` | **NÃO versionado** |
+| (nenhum job) | `~/.hermes/scripts/unicorniohater-queue-monitor.sh` | **órfão**: nenhum job o referencia e não há equivalente no repo |
+| monitor de todos os jobs | apenas `unicornio-editor-monitor.sh` (derivado de `hermes/monitor.sh`) | **versionado** (hash conferido) |
+
+Hashes (sha256, prefixo) dos artefatos fora do Git citados nesta tabela:
+
+```text
+work/watchdog_fila.py                                0b54a1495a273cb2   2388 B   2026-08-22T15:32:20Z
+work/watchdog_custo.py                               b47e0cba26606f5c   3561 B   2026-08-22T16:24:07Z
+work/check_links.py                                  6e6dd54d8af4568c   2731 B   2026-08-22T15:37:15Z
+~/.hermes/scripts/unicorniohater-watchdog.sh          74bab69314fe84be    257 B
+~/.hermes/scripts/unicorniohater-custo.sh             001fc771abe6fa92    258 B
+~/.hermes/scripts/unicorniohater-linkcheck.sh         051e844ab35d6d82    255 B
+~/.hermes/scripts/unicorniohater-queue-monitor.sh     9b61f63dfef645d7    877 B   (órfão)
+```
+
+Consequência declarada: o experimento de contexto mede só o caminho do editorial (job
+`9e39343dc6f5`), então esses três scripts **não** contaminam a amostra. Mas eles são código
+de produção sem origem no Git: nenhuma revisão da `main` descreve o que roda ali. Igual aos
+dois scripts órfãos da skill, a decisão (versionar ou remover) fica para DEPOIS de encerrar
+a coleta — durante a coleta só se registra.
+
 ## Critério de sessão cron VÁLIDA (início efetivo da amostra)
 
 Uma sessão só inicia a amostra se TODAS as condições valerem:
@@ -260,6 +295,37 @@ exit=1
 
 Ou seja: além de contaminar a coleta, o editorial pararia (monitor sem assinatura estável e
 sessão sem credenciais/config). Por isso a regra 5 acima.
+
+### 2026-09-22T17:33Z — verificação "produção está com o código atual da main?" (a pedido do operador)
+
+Checagem executada e resultado:
+
+```text
+git fetch origin            -> HEAD local == origin/main == f779d5d (0 atrás, 0 à frente)
+git status --short          -> worktree limpo (apenas editorial.json untracked)
+último commit de CÓDIGO     -> cfa8375 ; HEAD:src == cfa8375:src (c02820616e…)
+.venv/bin/unicornio-editor  -> shebang do venv deste checkout
+import unicornio_editor     -> /www/wwwroot/hermes/unicornio-agent/src/unicornio_editor/__init__.py
+unicornio-editor --version  -> 0.1.0                        (executado)
+unicornio-editor telemetry --sessions -> rodou; fatia oficial 0 eventos (esperado: ainda ARMADO)
+```
+
+Conclusão: para o pipeline **não existe deploy pendente** — o venv é editable install deste
+checkout e o cron executa exatamente o código da `main` no disco. O commit mais recente da
+`main` (`f779d5d`) é docs-only, então "código atual" = o código congelado de `cfa8375`.
+
+Dois efeitos desta leitura, registrados por honestidade:
+
+- `telemetry --sessions` é um comando de leitura instrumentado: gravou **1 evento**
+  `cmd_output/telemetry` de 4203 B às 17:33:13Z com `run_source=manual` — fora da fatia
+  oficial (que exige `run_source=cron`), como os outros 31 eventos manuais do arquivo.
+  A fatia oficial segue com **0 eventos**.
+- Nada foi alterado em código, parâmetro, SKILL ou job por esta verificação.
+
+Achado desta varredura (já incorporado à tabela "Superfície de execução dos cron de
+produção"): três jobs de produção executam arquivos de `work/`, que é git-ignored, e um
+script de monitor está órfão. Registrado, não corrigido — a decisão fica para depois de
+encerrar a coleta.
 
 ## Isolamento da próxima fase (branch + worktree)
 
