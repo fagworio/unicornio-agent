@@ -1,0 +1,6 @@
+# Fixtures do Experimento A sao payloads REAIS, byte a byte: espaco no fim de linha faz
+# parte da evidencia (os bytes sao o que se mede e o que se compara). Normalizar mudaria
+# a prova, entao o check de whitespace e desligado APENAS nesses caminhos.
+# Sem isso, `git diff --check <base>...HEAD` reprova no CI (step "Check whitespace") ao
+# mergear a branch, por causa de linhas de stdout real — falso positivo, nao sujeira.
+experiments/context-optimization/fixtures/** -whitespace

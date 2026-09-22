@@ -263,7 +263,6 @@ def imprimir(d: dict[str, Any], top: int) -> None:
     print("maiores entregas de tool:")
     for mid, tool_name, tamanho, digest in conv["maiores_tool"][:top]:
         print(f"   msg {mid} {tool_name:12s} {tamanho:8,d} B  sha256:{digest[:16]}")
-    print()
 
 
 def main() -> int:
@@ -290,7 +289,9 @@ def main() -> int:
     if args.json:
         print(json.dumps(dados, ensure_ascii=False, indent=2))
     else:
-        for d in dados:
+        for posicao, d in enumerate(dados):
+            if posicao:
+                print()  # separa blocos; o ultimo nao termina com linha vazia
             imprimir(d, args.top)
     return 0
 

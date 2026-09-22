@@ -66,4 +66,3 @@ maiores entregas de tool:
    msg 85685 terminal       21,497 B  sha256:f425ba7f7b92928b
    msg 85744 read_file      16,843 B  sha256:a6b494cd48336da3
    msg 85357 terminal       10,743 B  sha256:f93faa974ebe0f13
-

@@ -78,6 +78,26 @@ python3 tools/ab_criterion.py --hours 72 --include-historical   # referência co
 python3 tools/capture_payloads.py --session cron_9e39343dc6f5_20260922_064523 --min-bytes 500
 ```
 
+## Pitfalls já encontrados (não repetir)
+
+1. **Payload real tem espaço no fim de linha.** As fixtures são stdout de verdade e várias
+   linhas terminam com espaço; `git diff --check` reprova e o step "Check whitespace" do CI
+   falharia no merge. Normalizar as fixtures seria falsificar a evidência (os bytes são o
+   que se mede). Solução adotada: `.gitattributes` desliga o check de whitespace **apenas**
+   em `experiments/context-optimization/fixtures/**` — está documentado no próprio arquivo.
+2. **Saída de ferramenta não pode terminar com linha vazia.** Um `print()` final em
+   `session_replay.py` gerava `new blank line at EOF` nos arquivos de `results/` e reprovava
+   o mesmo step. Corrigido na ferramenta (regenerar a rodada, não editar o arquivo).
+3. **`git diff --check origin/main...HEAD` só vale depois do commit**: ele compara commits,
+   não o índice. Conferir antes de commitar dá falso verde.
+4. **`bytes` da telemetria ≠ tamanho do payload que você tem em mãos.** `cmd_output.bytes`
+   é o JSON *pretty-printed* que o comando imprimiu; a fixture é o texto que o agente
+   recebeu. Cruzar as duas fontes, nunca tratar uma como a outra.
+5. **`input_tokens` sozinho engana.** O prompt real é `input + cache_read + cache_write`;
+   `cache_read` é ~98-99% dele. Qualquer conta que ignore isso subestima em ~100x.
+6. **`messages.token_count` está vazio** nesta base: crescimento por request é proxy em
+   bytes. Declare o proxy; não o apresente como token medido.
+
 ## Primeiros números reais (pré-congelamento, só como referência)
 
 Três sessões de cron instrumentadas por sessão (não é a amostra oficial: o marco oficial

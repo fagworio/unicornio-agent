@@ -23,3 +23,11 @@ registra o comando exato e o RÓTULO da fatia — sem isso um número "de 30 dia
 4. Toda leitura de KPI oficial (`telemetry --sessions`) continua sendo feita no projeto
    (`unicornio-editor telemetry --sessions`), não aqui: esta pasta mede o mecanismo, não
    substitui o KPI.
+
+## Histórico de correções
+
+- `2026-09-22` — a rodada `2026-09-22T1718Z` foi **regenerada** pelas mesmas ferramentas
+  após dois ajustes de forma, sem mudança de número: (a) `session_replay.py` deixou de
+  emitir uma linha vazia no fim da saída (isso reprovava o step "Check whitespace" do CI
+  por um `new blank line at EOF`); (b) a rodada foi repetida depois disso para que o
+  arquivo versionado seja exatamente a saída da ferramenta. Nenhum valor medido mudou.
