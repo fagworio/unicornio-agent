@@ -19,7 +19,7 @@ comparação de bytes deixa de ser auditável.
 | sessão | `cron_9e39343dc6f5_20260922_064523` |
 | entregas | 107 (de 164; as < 500 B foram descartadas como ruído) |
 | bytes | 318.447 |
-| tools presentes | `terminal`, `skill_view` |
+| tools presentes | `terminal` 100, `patch` 3, `web_search` 2, `skill_view` 1, `read_file` 1 |
 | menor entrega mantida | 500 B |
 
 Como recapturar (ou capturar outra sessão):
