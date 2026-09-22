@@ -86,12 +86,74 @@ def cost_measurement_in_last_24h(
     return usage["cost_usd"], usage["runs"], usage["scope"]
 
 
+def vision_direct_usage(
+    telemetry_path: Path | None,
+    *,
+    hours: int = 24,
+    job_id: str = "",
+    run_source: str = "cron",
+) -> dict[str, int | bool]:
+    """Uso das chamadas DIRETAS de visão do Unicornio Agent (fora do Hermes).
+
+    O Vision Gate fala com o provedor por conta própria (``urlopen``): essas
+    chamadas NÃO entram no accounting do Hermes (nem em `sessions`, nem em
+    `session_model_usage`), então sem esta leitura o "grand total" não é o total.
+
+    ATENÇÃO: no formato OpenAI, ``prompt_tokens`` JÁ inclui os tokens em cache —
+    ``cached_tokens`` é informativo e NÃO pode ser somado (duplo cômputo).
+    """
+    vazio: dict[str, int | bool] = {
+        "requests": 0, "prompt_tokens": 0, "cached_tokens": 0,
+        "output_tokens": 0, "errors": 0, "measurable": False,
+    }
+    if telemetry_path is None or not Path(telemetry_path).is_file():
+        return vazio
+    limite = datetime.now(timezone.utc) - timedelta(hours=int(hours))
+    dados = dict(vazio)
+    dados["measurable"] = True
+    try:
+        for line in Path(telemetry_path).read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("event") != "vision_api_request":
+                continue
+            if run_source and record.get("run_source") != run_source:
+                continue
+            if job_id and str(record.get("cron_job_id") or "") != str(job_id):
+                continue
+            ts = record.get("ts")
+            if isinstance(ts, str) and ts:
+                try:
+                    quando = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+                if quando.tzinfo is None:
+                    quando = quando.replace(tzinfo=timezone.utc)
+                if quando < limite:
+                    continue
+            dados["requests"] = int(dados["requests"]) + 1
+            for campo, chave in (("input_tokens", "prompt_tokens"),
+                                 ("cached_tokens", "cached_tokens"),
+                                 ("output_tokens", "output_tokens")):
+                valor = record.get(campo)
+                if isinstance(valor, int):
+                    dados[chave] = int(dados[chave]) + valor
+            if str(record.get("error") or "").strip():
+                dados["errors"] = int(dados["errors"]) + 1
+    except OSError:
+        return vazio
+    return dados
+
+
 def usage_measurement_in_last_24h(
     state_db: Path,
     job_id: str = "",
     project_root: str = "",
     *,
     hours: int = 24,
+    telemetry_path: Path | None = None,
 ) -> dict | None:
     """Custo E volume de CONTEXTO das sessoes da janela (fail-soft).
 
@@ -136,10 +198,12 @@ def usage_measurement_in_last_24h(
         # somá-lo aqui contava o custo do main-loop DUAS vezes.
         custo_aux = 0.0
         tokens_aux = 0
+        chamadas_aux = 0
         try:
             aux_row = db.execute(
                 "SELECT COALESCE(SUM(estimated_cost_usd),0), "
-                "COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens),0) "
+                "COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens),0), "
+                "COALESCE(SUM(api_call_count),0) "
                 "FROM session_model_usage "
                 "WHERE COALESCE(task,'') != '' AND session_id IN ("
                 "SELECT id FROM sessions WHERE source='cron' "
@@ -147,9 +211,10 @@ def usage_measurement_in_last_24h(
                 (int(hours) * 3600, *params),
             ).fetchone()
             custo_aux = float((aux_row or [0])[0] or 0)
-            tokens_aux = int((aux_row or [0, 0])[1] or 0)
+            tokens_aux = int((aux_row or [0, 0, 0])[1] or 0)
+            chamadas_aux = int((aux_row or [0, 0, 0])[2] or 0)
         except sqlite3.Error:
-            custo_aux, tokens_aux = 0.0, 0
+            custo_aux, tokens_aux, chamadas_aux = 0.0, 0, 0
         db.close()
     except sqlite3.Error:
         return None
@@ -158,22 +223,41 @@ def usage_measurement_in_last_24h(
     cache_write = int(row[6] or 0)
     custo_main = float(row[0] or 0)
     prompt_main = entrada + cache_read + cache_write
+    # Visão DIRETA (fora do Hermes) fecha o "grand total": sem ela, o total não é
+    # o total. Sem telemetria disponível, entra como não mensurável (flag).
+    visao = vision_direct_usage(
+        telemetry_path, hours=hours, job_id=job_id, run_source="cron"
+    )
+    visao_prompt = int(visao["prompt_tokens"])
+    main_requests = int(row[2] or 0)
     return {
         "cost_usd": round(custo_main + custo_aux, 6),
         "cost_main_usd": round(custo_main, 6),
         "cost_aux_usd": round(custo_aux, 6),
+        # Direct vision não tem preço/accounting próprio: o custo acima é
+        # Hermes main + auxiliar (documentado, sem inventar número).
+        "cost_direct_vision_usd": None,
         "runs": int(row[1] or 0),
-        "requests": int(row[2] or 0),
+        # REQUESTS em três camadas + total.
+        "main_requests": main_requests,
+        "aux_requests": chamadas_aux,
+        "direct_vision_requests": int(visao["requests"]),
+        "grand_total_requests": main_requests + chamadas_aux + int(visao["requests"]),
+        "requests": main_requests + chamadas_aux + int(visao["requests"]),
         "input_tokens": entrada,
         "output_tokens": int(row[4] or 0),
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
-        # Três níveis explícitos: main-loop, auxiliar e o GRAND TOTAL. O teto de
-        # prompt tokens usa o grand total (o auxiliar também consome contexto).
+        # PROMPT TOKENS em três camadas + total (o teto usa o grand total).
         "main_prompt_tokens": prompt_main,
         "aux_prompt_tokens": tokens_aux,
-        "grand_total_prompt_tokens": prompt_main + tokens_aux,
-        "prompt_tokens": prompt_main + tokens_aux,
+        "direct_vision_prompt_tokens": visao_prompt,
+        "direct_vision_cached_tokens": int(visao["cached_tokens"]),
+        "direct_vision_output_tokens": int(visao["output_tokens"]),
+        "direct_vision_errors": int(visao["errors"]),
+        "direct_vision_measurable": bool(visao["measurable"]),
+        "grand_total_prompt_tokens": prompt_main + tokens_aux + visao_prompt,
+        "prompt_tokens": prompt_main + tokens_aux + visao_prompt,
         "scope": scope,
     }
 
@@ -282,7 +366,11 @@ def main() -> int:
         print(json.dumps({"decision": "allow", "reason": "limit_disabled"}))
         return 0
     usage = usage_measurement_in_last_24h(
-        args.state_db, args.job_id.strip(), args.project_root.strip(), hours=args.hours
+        args.state_db,
+        args.job_id.strip(),
+        args.project_root.strip(),
+        hours=args.hours,
+        telemetry_path=args.telemetry,
     )
     if usage is None:
         print(json.dumps({"decision": "allow", "reason": "attribution_unavailable"}))
@@ -314,15 +402,26 @@ def main() -> int:
                 "scope": escopo,
                 "runs": usage["runs"],
                 "measured": {chave: round(valor, 4) for chave, valor in medidos.items()},
-                # Buckets separados: o total de prompt tokens e a soma, mas o
-                # diagnostico precisa saber DE ONDE ele veio (input novo x cache).
+                # Buckets separados por CAMADA (main / auxiliar / visão direta) e
+                # o total; o diagnóstico precisa saber DE ONDE vem cada token.
                 "tokens": {
+                    "main_prompt": usage["main_prompt_tokens"],
+                    "aux_prompt": usage["aux_prompt_tokens"],
+                    "direct_vision_prompt": usage["direct_vision_prompt_tokens"],
+                    "direct_vision_cached": usage["direct_vision_cached_tokens"],
+                    "grand_total_prompt": usage["grand_total_prompt_tokens"],
                     "input": usage["input_tokens"],
                     "cache_read": usage["cache_read_tokens"],
                     "cache_write": usage["cache_write_tokens"],
-                    "prompt": usage["prompt_tokens"],
                     "output": usage["output_tokens"],
                 },
+                "requests": {
+                    "main": usage["main_requests"],
+                    "aux": usage["aux_requests"],
+                    "direct_vision": usage["direct_vision_requests"],
+                    "grand_total": usage["grand_total_requests"],
+                },
+                "direct_vision_errors": usage["direct_vision_errors"],
                 "limits": {chave: valor for chave, valor in limites.items() if valor},
             },
             ensure_ascii=False,

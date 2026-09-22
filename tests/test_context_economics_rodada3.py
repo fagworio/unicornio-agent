@@ -538,11 +538,14 @@ class DecisionQualityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # O rótulo vem do LEDGER (pelo id), não do texto do plano.
+            record_media_decision(root, 7, decision="choose", decision_id="aaa")
             campos = _decision_fields(
-                root, 7, [{"decision_id": "aaa", "decision": "choose"}]
+                root, 7, [{"decision_id": "aaa", "decision": "auto"}]  # texto MENTE
             )
             self.assertEqual(campos["decision"], "choose")
             self.assertEqual(campos["decision_ids"], ["aaa"])
+            self.assertEqual(campos["decision_attribution"], "resolved")
 
 
 class AutoMarginCalibrationTests(unittest.TestCase):

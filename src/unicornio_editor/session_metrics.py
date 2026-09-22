@@ -101,7 +101,8 @@ def _hermes_totals(
         # `grand_total` (e a reconciliacao com o provedor) ficaria incompleto.
         aux: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
                                "cache_read_tokens": 0, "cache_write_tokens": 0,
-                               "reasoning_tokens": 0, "cost_usd": 0.0, "tasks": {}}
+                               "reasoning_tokens": 0, "cost_usd": 0.0,
+                               "tasks": {}, "requests": 0}
         try:
             for tarefa, chamadas, entrada, saida, cache_r, cache_w, raciocinio, custo in db.execute(
                 "SELECT task, COALESCE(SUM(api_call_count),0), "
@@ -121,6 +122,7 @@ def _hermes_totals(
                 aux["reasoning_tokens"] += int(raciocinio or 0)
                 aux["cost_usd"] += float(custo or 0)
                 aux["tasks"][str(tarefa)] = int(chamadas or 0)
+                aux["requests"] = int(aux["requests"]) + int(chamadas or 0)
         except sqlite3.Error:
             aux["unavailable"] = True
         db.close()
@@ -159,8 +161,11 @@ def _hermes_totals(
                 prompt_main + prompt_aux + saida + aux["output_tokens"]
                 + reasoning + aux["reasoning_tokens"]
             ),
+            "requests": int(row[1] or 0) + int(aux.get("requests") or 0),
             "cost_usd": round(float(row[7] or 0) + float(aux["cost_usd"] or 0), 6),
         },
+        "main_requests": int(row[1] or 0),
+        "aux_requests": int(aux.get("requests") or 0),
         "scope": scope,
     }
 
@@ -201,7 +206,8 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
             ).fetchone()
             aux: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
                                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                                   "reasoning_tokens": 0, "cost_usd": 0.0, "tasks": {}}
+                                   "reasoning_tokens": 0, "cost_usd": 0.0,
+                                   "tasks": {}, "requests": 0}
             try:
                 for tarefa, chamadas, entrada, saida, cache_r, cache_w, raciocinio, custo in db.execute(
                     "SELECT task, COALESCE(SUM(api_call_count),0), "
@@ -226,7 +232,7 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
                 # medido (nunca transformar ausência de aux em medição vazia).
                 aux = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
                        "cache_write_tokens": 0, "reasoning_tokens": 0, "cost_usd": 0.0,
-                       "tasks": {}, "unavailable": True}
+                       "tasks": {}, "requests": 0, "unavailable": True}
         finally:
             db.close()
     except sqlite3.Error:
@@ -245,6 +251,8 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
         "session_ids": list(session_ids),
         "sessions": int(linha[0] or 0),
         "requests": int(linha[1] or 0),
+        "main_requests": int(linha[1] or 0),
+        "aux_requests": int(aux.get("requests") or 0),
         "main": {
             "input_tokens": entrada, "output_tokens": saida,
             "cache_read_tokens": cache_read, "cache_write_tokens": cache_write,
@@ -252,6 +260,7 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
             "total_model_tokens": prompt_main + saida + raciocinio,
             "cost_usd": round(float(linha[7] or 0), 6),
             "tool_calls": int(linha[8] or 0),
+            "requests": int(linha[1] or 0),
         },
         "aux": {**aux, "prompt_tokens": prompt_aux,
                 "total_model_tokens": prompt_aux + aux["output_tokens"] + aux["reasoning_tokens"],
@@ -264,6 +273,7 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
                 prompt_main + prompt_aux + saida + aux["output_tokens"]
                 + raciocinio + aux["reasoning_tokens"]
             ),
+            "requests": int(linha[1] or 0) + int(aux.get("requests") or 0),
             "cost_usd": round(float(linha[7] or 0) + float(aux["cost_usd"] or 0), 6),
         },
     }
@@ -294,7 +304,19 @@ def _per_ready(
     requests = hermes["requests"] if hermes else None
     gasto = hermes["cost_usd"] if hermes else None
     aux = (hermes or {}).get("aux") or {}
-    grande = (hermes or {}).get("grand_total") or {}
+    grande = dict((hermes or {}).get("grand_total") or {})
+    # VISÃO DIRETA (chamadas próprias do pipeline, fora do accounting do Hermes):
+    # entra no "observed grand total" — sem ela o total não é o total. Custo da
+    # visão direta não tem preço/accounting próprio, então NÃO é inventado.
+    visao_requests = int(media_economy.get("vision_api_requests") or 0)
+    visao_prompt = int(media_economy.get("vision_input_tokens") or 0)
+    visao_output = int(media_economy.get("vision_output_tokens") or 0)
+    if grande:
+        grande["requests"] = int(grande.get("requests") or 0) + visao_requests
+        grande["prompt_tokens"] = int(grande.get("prompt_tokens") or 0) + visao_prompt
+        grande["total_model_tokens"] = (
+            int(grande.get("total_model_tokens") or 0) + visao_prompt + visao_output
+        )
     return {
         # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: mede o
         # que o pipeline DEVOLVEU ao modelo (nao o tamanho dos arquivos de
@@ -306,19 +328,25 @@ def _per_ready(
         "prompt_tokens_per_post_touched": _ratio(prompt, tocados),
         "output_tokens_per_ready": _ratio(saida, ready),
         "total_model_tokens_per_ready": _ratio(total, ready),
-        # Consumo AUXILIAR do Hermes (vision/compressao/titulo) e GRAND TOTAL:
-        # sem isso a reconciliacao com o dashboard do provedor nao fecha.
+        # Consumo AUXILIAR do Hermes (vision/compressao/titulo) e GRAND TOTAL
+        # OBSERVADO (Hermes main + auxiliar + visão DIRETA do pipeline).
         "aux_prompt_tokens_per_ready": _ratio(aux.get("prompt_tokens"), ready),
         "aux_cost_per_ready_usd": (
             round(float(aux.get("cost_usd") or 0) / ready, 6) if aux and ready else None
         ),
+        "direct_vision_requests_per_ready": _ratio(visao_requests, ready),
+        "grand_total_prompt_tokens_per_ready": _ratio(grande.get("prompt_tokens"), ready),
         "grand_total_model_tokens_per_ready": _ratio(
             grande.get("total_model_tokens"), ready
         ),
+        "grand_total_requests_per_ready": _ratio(grande.get("requests"), ready),
+        # Custo: Hermes main + auxiliar. A visão direta NÃO tem accounting de
+        # custo no state.db — o número aqui é marcado como parcial.
         "grand_total_cost_per_ready_usd": (
             round(float(grande.get("cost_usd") or 0) / ready, 6)
             if grande and ready else None
         ),
+        "grand_total_cost_partial": bool(visao_requests),
         "requests_per_ready": _ratio(requests, ready),
         "requests_per_post_touched": _ratio(requests, tocados),
         "cost_per_ready_usd": (
@@ -412,6 +440,35 @@ def session_metrics(
             "post_context_detail": resumo.get("post_context_detail") or {},
             "media_economy": media_economy,
             "decision_quality": resumo.get("decision_quality") or {},
+            "decision_attribution": resumo.get("decision_attribution") or {},
+        },
+        # Camada própria do pipeline (fora do accounting do Hermes): entra no
+        # "observed grand total" e é exposta separada para reconciliar com o
+        # provedor. Prompt tokens JÁ incluem os cached (não somar de novo).
+        "direct_vision": {
+            "requests": int(media_economy.get("vision_api_requests") or 0),
+            "low_requests": int(media_economy.get("vision_low_requests") or 0),
+            "high_requests": int(media_economy.get("vision_high_requests") or 0),
+            "prompt_tokens": int(media_economy.get("vision_input_tokens") or 0),
+            "cached_tokens": int(media_economy.get("vision_cached_tokens") or 0),
+            "output_tokens": int(media_economy.get("vision_output_tokens") or 0),
+            "errors": int(media_economy.get("vision_errors") or 0),
+            "cost_usd": None,  # sem accounting de custo no state.db
+        },
+        "observed_grand_total": {
+            "prompt_tokens": (
+                int((hermes or {}).get("grand_total", {}).get("prompt_tokens") or 0)
+                + int(media_economy.get("vision_input_tokens") or 0)
+            ),
+            "requests": (
+                int((hermes or {}).get("grand_total", {}).get("requests") or 0)
+                + int(media_economy.get("vision_api_requests") or 0)
+            ),
+            "note": (
+                "Hermes main + auxiliar + visao DIRETA do pipeline. O custo em USD "
+                "cobre apenas as camadas do Hermes (a visao direta nao tem preco no "
+                "state.db)."
+            ),
         },
         # Todas as origens (cron + manual + teste): mostra a contaminacao em vez
         # de esconde-la.

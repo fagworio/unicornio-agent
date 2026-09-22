@@ -99,7 +99,11 @@ class ObservabilityTests(unittest.TestCase):
             )
             summary = read_telemetry_summary(root)
             self.assertEqual(summary["production"]["unique_ready_posts"], 2)
-            self.assertEqual(summary["production"]["first_pass_ready_rate"], 0.5)
+            # NOME CORRETO: dos READY, quantos foram de primeira (não é taxa de
+            # sucesso de primeira tentativa).
+            self.assertEqual(summary["production"]["ready_first_pass_share"], 0.5)
+            self.assertIn("first_pass_success_rate", summary["production"])
+            self.assertIn("first_pass_attempts", summary["production"])
             self.assertEqual(summary["production"]["average_attempts_per_ready"], 1.5)
             self.assertEqual(summary["production"]["average_ready_duration_ms"], 1500)
             self.assertEqual(summary["media_funnel"]["source_verify"]["passed"], 1)

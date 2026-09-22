@@ -1669,14 +1669,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 / f"{args.post_id or _audit_key(args.editorial_file.name)}.json",
                 result,
             )
-            # Evento de QUALIDADE. Quando o `media_plan` traz `decision_id` por
-            # item, o resultado sai POR ITEM (é o que liga causalmente a decisão
-            # à imagem: num plano com auto/choose/auto, o agregado do post
-            # culpava a última decisão). O agregado continua sendo emitido para os
-            # contadores do post, mas SEM rótulo de decisão — do contrário a mesma
-            # rejeição entraria duas vezes em `decision_quality`.
+            # Evento de QUALIDADE. O dado AUTORITATIVO é o `decision_id`: o
+            # `decision`/`score_gap` do item vêm do LEDGER, nunca do JSON do
+            # agente (que pode copiar errado). Sem isso, o item AAA podia sair
+            # rotulado com o `score_gap` da ÚLTIMA decisão do post. Cada item do
+            # plano emite seu evento com o estado da atribuição
+            # (resolved/missing/invalid); o agregado do post sai SEM rótulo de
+            # decisão para não duplicar em `decision_quality`.
             try:
-                from .observability import append_telemetry, read_media_decision
+                from .observability import append_telemetry, attribution_of, read_media_decision_by_id
 
                 plano = payload.get("media_plan") or []
                 rejeitados_idx = {
@@ -1684,24 +1685,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for row in (result.get("rejected") or [])
                     if isinstance(row.get("index"), int)
                 }
-                ultima = read_media_decision(args.root, args.post_id or 0)
-                com_id = [
-                    item for item in plano
-                    if isinstance(item, dict) and str(item.get("decision_id") or "")
-                ]
+                ids_plano: list[str] = []
                 for indice, item in enumerate(plano):
-                    if not isinstance(item, dict) or not str(item.get("decision_id") or ""):
+                    if not isinstance(item, dict):
                         continue
+                    identificador = str(item.get("decision_id") or "")
+                    estado = attribution_of(args.root, args.post_id or 0, identificador)
+                    # `decision`/`score_gap` SÓ do ledger; o texto do plano é
+                    # ignorado para medição (fica no JSON como documentação).
+                    do_ledger = (
+                        read_media_decision_by_id(args.root, args.post_id or 0, identificador)
+                        if estado == "resolved" else {}
+                    )
+                    if identificador:
+                        ids_plano.append(identificador)
                     append_telemetry(
                         args.root, "media_validate_result",
                         post_id=args.post_id or 0,
                         item_index=indice,
                         valid=indice not in rejeitados_idx,
                         rejected_items=1 if indice in rejeitados_idx else 0,
-                        decision=str(item.get("decision") or ultima.get("decision") or ""),
-                        decision_id=str(item.get("decision_id") or ""),
-                        score_gap=ultima.get("score_gap"),
+                        attribution=estado,
+                        decision=str(do_ledger.get("decision") or ""),
+                        decision_id=identificador,
+                        score_gap=do_ledger.get("score_gap"),
                     )
+                agregado = "mixed" if len(set(ids_plano)) > 1 else attribution_of(
+                    args.root, args.post_id or 0, ids_plano[0] if ids_plano else ""
+                )
                 append_telemetry(
                     args.root, "media_validate_result",
                     post_id=args.post_id or 0,
@@ -1710,9 +1721,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     featured_status=str(
                         ((result.get("featured_vision") or [{}])[0] or {}).get("status") or ""
                     ),
-                    decision="" if com_id else str(ultima.get("decision") or ""),
-                    score_gap=None if com_id else ultima.get("score_gap"),
-                    decision_id="" if com_id else str(ultima.get("decision_id") or ""),
+                    attribution=agregado,
+                    decision="" if ids_plano else "",
+                    score_gap=None,
+                    decision_id="" if len(set(ids_plano)) != 1 else ids_plano[0],
                 )
             except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
                 pass

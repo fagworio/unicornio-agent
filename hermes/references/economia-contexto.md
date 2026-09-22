@@ -163,10 +163,20 @@ stdout pequeno orientado à próxima ação:
   (READY) era só dos eventos novos, inflando `prompt_tokens_per_ready`. Sem
   evento instrumentado o resultado cai para `attribution: window_job` e isso
   vem MARCADO.
-- **main-loop x auxiliar**: `prompt_tokens_per_ready` é o MAIN-LOOP (tabela
-  `sessions`); `aux_prompt_tokens_per_ready`/`aux_cost_per_ready_usd` vêm de
-  `session_model_usage` (vision, compressão, título, aprovação — que NÃO entram
-  nos contadores de `sessions`); `grand_total_*` soma tudo, no custo também.
+- **main-loop x auxiliar x visão DIRETA**: `prompt_tokens_per_ready` é o
+  MAIN-LOOP (tabela `sessions`); `aux_*` vem de `session_model_usage`
+  (vision/compressão/título/aprovação do Hermes, que NÃO entram em `sessions`); e
+  a visão do NOSSO Vision Gate é medida em `direct_vision` (evento
+  `vision_api_request`), porque ela fala com o provedor por conta própria e não
+  passa pelo accounting do Hermes. O `observed_grand_total` soma as três camadas
+  (tokens e requests) — sem isso "total" não é total. **`cached_tokens` NÃO é
+  somado a `prompt_tokens`** (no formato OpenAI ele já está incluído); somar
+  duplicaria. O custo em USD cobre só as camadas do Hermes (a visão direta não tem
+  preço no state.db — `grand_total_cost_partial` sinaliza isso).
+- **Requests em camadas**: `main_requests` + `aux_requests` +
+  `direct_vision_requests` = `grand_total_requests`; os limites do guard
+  (`REQUEST_LIMIT`, `PROMPT_TOKEN_LIMIT`) comparam os TOTAIS, com as camadas
+  expostas no JSON para diagnóstico.
 - **Qualidade por decisão** (`decision_quality`): a decisão de mídia fica no
   ledger append-only `work/media_decisions.jsonl` — uma entrada por busca/ITEM,
   com `decision_id` (o mesmo id vai no `media_plan[]`, no `media_search_result` e
@@ -174,15 +184,17 @@ stdout pequeno orientado à próxima ação:
   eventos. Assim dá para comparar `auto` x `choose` x `reuse` em
   `validate_rejected_items_per_event`, `validate_posts_with_rejection_rate`,
   `media_block_rate`, `ready_first_pass_share` (dos READY, quantos foram de
-  primeira) e `first_pass_success_rate` (das PRIMEIRAS tentativas, quantas deram
-  READY: 1 READY + 10 bloqueados = 9,1%, não 100%).
-- **Ligação causal por ITEM**: o `media-validate` emite um evento por item do
-  `media_plan` que traz `decision_id` (valid/rejected DAQUELE item); o agregado do
-  post sai sem rótulo de decisão para não duplicar. No apply, o `media_plan`
-  manda: `decision_ids` lista os ids das imagens do post e `decision` só aparece
-  com UM valor único — plano misto (auto + choose) não é atribuído a uma decisão
-  só. Sem o `decision_id` no plano, a atribuição volta a ser a última decisão do
-  post (e aí `decision_quality` não serve para calibrar margem).
+  primeira) e `first_pass_success_rate` (das **primeiras tentativas**, quantas
+  deram READY: 1 READY + 10 bloqueados na primeira = 9,1%, não 100%).
+- **O `decision_id` é a única fonte de verdade da medição**: `decision`,
+  `score_gap`, `coverage` e `selected_url` saem do LEDGER pelo id — o texto que o
+  agente copiou para o `media_plan` é ignorado para métrica (erro de cópia não
+  pode virar medição). Cada item do `media_plan` emite um evento de
+  `media-validate` com o estado da atribuição:
+  `resolved` (id no ledger) | `missing` (item sem id) | `invalid` (id inexistente)
+  | `mixed` (plano com mais de uma decisão, sem rótulo único). O resumo publica
+  `decision_attribution` + `decision_attribution_rate` — sem isso a leitura de
+  `auto` x `choose` pode ficar enviesada por itens não atribuídos.
 - O arquivo legado `work/media_decisions.json` (mapa post → última decisão) só é
   usado para posts SEM registro no JSONL — o log novo é autoritativo.
 - `EDITOR_AUTO_SCORE_MARGIN` (default 2) é a margem de `evidence_score` para o

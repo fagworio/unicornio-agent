@@ -27,7 +27,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from unicornio_editor.config import Config
-from unicornio_editor.observability import append_telemetry, read_media_decision, record_media_decision
+from unicornio_editor.observability import (
+    append_telemetry,
+    read_media_decision,
+    read_telemetry_summary,
+    record_media_decision,
+)
 
 CRON_ENV = {"UNICORNIO_RUN_SOURCE": "cron",
             "HERMES_SESSION_ID": "cron_9e39343dc6f5_20260922_090524"}
@@ -158,34 +163,39 @@ class LedgerPriorityTests(unittest.TestCase):
 class MediaValidatePerItemTests(unittest.TestCase):
     """media-validate emite resultado POR ITEM (decisão ligada à imagem)."""
 
-    def _payload(self) -> dict:
+    def _payload(self, *, com_ids: bool = True) -> dict:
+        itens = [
+            {
+                "paragraph_index": 0, "source_page_url": "https://pagina/1",
+                "direct_image_url": "https://cdn/1.jpg", "author": "a", "license": "l",
+                "license_url": "https://lic/1", "captured_at": "2026-01-01",
+                "credit_text": "c", "alt_text": "alt", "is_featured": False,
+                "decision_id": "aaa", "decision": "auto",
+            },
+            {
+                "paragraph_index": 1, "source_page_url": "https://pagina/2",
+                "direct_image_url": "https://cdn/2.jpg", "author": "a", "license": "l",
+                "license_url": "https://lic/2", "captured_at": "2026-01-01",
+                "credit_text": "c", "alt_text": "alt", "is_featured": False,
+                "decision_id": "bbb", "decision": "choose",
+            },
+        ]
+        if not com_ids:
+            for item in itens:
+                item.pop("decision_id", None)
+                item.pop("decision", None)
         return {
             "site_relevance": {"verdict": "relevant", "reason": "ok"},
             "seo": {"title": "Titulo", "meta_description": "d", "slug": "s", "focus_keyword": "k"},
-            "media_plan": [
-                {
-                    "paragraph_index": 0, "source_page_url": "https://pagina/1",
-                    "direct_image_url": "https://cdn/1.jpg", "author": "a", "license": "l",
-                    "license_url": "https://lic/1", "captured_at": "2026-01-01",
-                    "credit_text": "c", "alt_text": "alt", "is_featured": False,
-                    "decision_id": "aaa", "decision": "auto",
-                },
-                {
-                    "paragraph_index": 1, "source_page_url": "https://pagina/2",
-                    "direct_image_url": "https://cdn/2.jpg", "author": "a", "license": "l",
-                    "license_url": "https://lic/2", "captured_at": "2026-01-01",
-                    "credit_text": "c", "alt_text": "alt", "is_featured": False,
-                    "decision_id": "bbb", "decision": "choose",
-                },
-            ],
+            "media_plan": itens,
             "cleaned_html": "<p>" + ("palavra " * 400) + "</p>",
         }
 
-    def _run(self, root: Path) -> None:
+    def _run(self, root: Path, *, com_ids: bool = True) -> None:
         from unicornio_editor import cli
 
         arquivo = root / "editorial.json"
-        arquivo.write_text(json.dumps(self._payload()), encoding="utf-8")
+        arquivo.write_text(json.dumps(self._payload(com_ids=com_ids)), encoding="utf-8")
         client = mock.Mock()
         client.get_post.return_value = {"id": 5, "title": {"raw": "Titulo"}, "featured_media": 0}
         resultado_plano = {
@@ -213,24 +223,73 @@ class MediaValidatePerItemTests(unittest.TestCase):
     def test_resultado_por_item_carrega_decision_id(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # O ledger é a fonte autoritativa: os ids do plano têm de existir.
+            record_media_decision(root, 5, decision="auto", score_gap=4,
+                                  decision_id="aaa")
+            record_media_decision(root, 5, decision="choose", score_gap=0,
+                                  decision_id="bbb")
             self._run(root)
             eventos = self._eventos(root)
         por_item = [e for e in eventos if e.get("decision_id")]
         self.assertEqual(len(por_item), 2, eventos)
         self.assertEqual([e["decision_id"] for e in por_item], ["aaa", "bbb"])
+        # `decision`/`score_gap` vêm do LEDGER (pelo id), não do texto do plano.
         self.assertEqual([e["decision"] for e in por_item], ["auto", "choose"])
+        self.assertEqual([e["score_gap"] for e in por_item], [4, 0])
+        self.assertEqual([e["attribution"] for e in por_item], ["resolved", "resolved"])
         self.assertEqual([e["item_index"] for e in por_item], [0, 1])
         # O item 1 (índice 1) foi o rejeitado: a decisão `choose` é a culpada.
         self.assertEqual(por_item[0]["valid"], True)
         self.assertEqual(por_item[0]["rejected_items"], 0)
         self.assertEqual(por_item[1]["valid"], False)
         self.assertEqual(por_item[1]["rejected_items"], 1)
-        # Agregado do post entra SEM rótulo (não duplica em decision_quality).
+        # Agregado do post entra SEM rótulo; dois ids distintos = plano MISTO.
         agregados = [e for e in eventos if not e.get("decision_id")]
         self.assertEqual(len(agregados), 1)
         self.assertEqual(agregados[0]["decision"], "")
+        self.assertEqual(agregados[0]["attribution"], "mixed")
         self.assertEqual(agregados[0]["rejected_items"], 1)
         self.assertEqual(agregados[0]["featured_status"], "passed")
+
+    def test_texto_do_plano_nao_mente_para_a_telemetria(self):
+        """O plano diz "auto", o ledger diz "choose": vale o ledger."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_media_decision(root, 5, decision="choose", score_gap=1,
+                                  decision_id="aaa")
+            record_media_decision(root, 5, decision="choose", score_gap=1,
+                                  decision_id="bbb")
+            self._run(root)
+            eventos = self._eventos(root)
+        por_item = [e for e in eventos if e.get("decision_id")]
+        # O plano (fixture) copiou "auto"/"choose" do agente; o ledger manda.
+        self.assertEqual([e["decision"] for e in por_item], ["choose", "choose"])
+        self.assertEqual([e["score_gap"] for e in por_item], [1, 1])
+
+    def test_id_inexistente_no_ledger_e_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Só um dos dois ids existe no ledger.
+            record_media_decision(root, 5, decision="auto", score_gap=4,
+                                  decision_id="aaa")
+            self._run(root)
+            eventos = self._eventos(root)
+        por_item = [e for e in eventos if e.get("decision_id")]
+        self.assertEqual([e["attribution"] for e in por_item], ["resolved", "invalid"])
+        # Id inválido NÃO ganha rótulo: sem invenção.
+        self.assertEqual(por_item[1]["decision"], "")
+        self.assertIsNone(por_item[1]["score_gap"])
+
+    def test_plano_sem_id_conta_como_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, com_ids=False)
+            eventos = self._eventos(root)
+            resumo = read_telemetry_summary(root)
+        por_item = [e for e in eventos if "item_index" in e]
+        self.assertEqual([e["attribution"] for e in por_item], ["missing", "missing"])
+        self.assertEqual(resumo["decision_attribution"]["missing"], 3)  # 2 itens + agregado
+        self.assertEqual(resumo["decision_attribution"]["decision_attribution_rate"], 0.0)
 
 
 class ResolverMemoAliasTests(unittest.TestCase):

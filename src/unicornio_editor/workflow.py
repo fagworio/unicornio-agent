@@ -2989,31 +2989,55 @@ def _decision_fields(
         return {}
     campos: dict[str, Any] = {}
     ids: list[str] = []
-    decisoes_plano: list[str] = []
     for item in plan or []:
         if not isinstance(item, dict):
             continue
         identificador = str(item.get("decision_id") or "")
         if identificador:
             ids.append(identificador)
-            if str(item.get("decision") or ""):
-                decisoes_plano.append(str(item["decision"]))
-    if ids:
-        campos["decision_ids"] = sorted(set(ids))
-        distintas = {d for d in decisoes_plano if d}
-        if len(distintas) == 1:
-            campos["decision"] = next(iter(distintas))
     try:
-        from .observability import read_media_decision
-
-        decisao = read_media_decision(root, post_id)
+        from .observability import read_media_decision, read_media_decision_by_id
     except Exception:  # noqa: BLE001 - telemetria nunca quebra o apply
         return campos
-    if "decision" not in campos and not ids and decisao.get("decision"):
+    if ids:
+        campos["decision_ids"] = sorted(set(ids))
+        # `decision` vem do LEDGER (pelo id), nunca do texto que o agente copiou
+        # para o plano: um erro de cópia não pode virar medição.
+        do_ledger: list[str] = []
+        resolvidos = 0
+        for identificador in ids:
+            registro = read_media_decision_by_id(root, post_id, identificador)
+            if registro:
+                resolvidos += 1
+                if str(registro.get("decision") or ""):
+                    do_ledger.append(str(registro["decision"]))
+        distintas = {d for d in do_ledger if d}
+        if len(distintas) == 1:
+            campos["decision"] = next(iter(distintas))
+        if len(distintas) > 1:
+            campos["decision_attribution"] = "mixed"
+        elif resolvidos == len(ids):
+            campos["decision_attribution"] = "resolved"
+        else:
+            # Algum id não existe no ledger: erro de cópia/invenção do agente.
+            campos["decision_attribution"] = "invalid"
+        return campos
+    try:
+        decisao = read_media_decision(root, post_id)
+    except Exception:  # noqa: BLE001
+        return campos
+    if not plan and not decisao:
+        # Nem plano nem histórico: o post não teve decisão de mídia — nada a
+        # atribuir (não é "missing", é ausência legítima).
+        return {}
+    # Plano (ou apply) sem `decision_id`: a atribuição FALTA — e a medição sabe
+    # disso; o rótulo da última decisão entra só como contexto.
+    campos["decision_attribution"] = "missing"
+    if decisao.get("decision"):
         campos["decision"] = str(decisao["decision"])
     if decisao.get("score_gap") is not None:
         campos["score_gap"] = decisao["score_gap"]
-    if decisao.get("decision_id") and "decision_ids" not in campos:
+    if decisao.get("decision_id"):
         campos["decision_id"] = str(decisao["decision_id"])
     return campos
 

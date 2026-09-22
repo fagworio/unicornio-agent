@@ -294,6 +294,49 @@ def read_media_decision(root: str | Path, post_id: int) -> dict[str, Any]:
     return registros[-1] if registros else {}
 
 
+def read_media_decision_by_id(
+    root: str | Path, post_id: int, decision_id: str
+) -> dict[str, Any]:
+    """Decisão do ledger pelo seu ``decision_id`` (o ÚNICO dado autoritativo).
+
+    O `media_plan` traz `decision_id` e, opcionalmente, um texto `decision` — mas
+    esse texto é do AGENTE e pode estar errado (cópia/edição). Para MEDIR, o
+    `decision`, o `score_gap`, o `coverage` e o `selected_url` têm de vir daqui:
+    caso contrário o evento do item AAA podia sair rotulado com o `score_gap` da
+    ÚLTIMA decisão do post (BBB), envenenando `decision_quality` e a calibração
+    da margem.
+
+    Procura nas entradas DESTE post e nas não atribuídas (``post_id = 0``, caso de
+    listicle sem `--post-id`) — nunca em outro post, para não "resolver" um id
+    trocado. Devolve ``{}`` quando o id não existe.
+    """
+    if not decision_id:
+        return {}
+    identificador = str(decision_id)
+    alvos = {str(int(post_id or 0)), "0"}
+    for registro in reversed(_ler_decisoes(root)):
+        if str(registro.get("decision_id") or "") != identificador:
+            continue
+        if str(registro.get("post_id") or "0") in alvos:
+            return registro
+    return {}
+
+
+def attribution_of(root: str | Path, post_id: int, decision_id: str) -> str:
+    """Estado da ATRIBUIÇÃO de um item: resolved | missing | invalid.
+
+    * ``resolved`` — o `decision_id` existe no ledger do post;
+    * ``missing`` — o item não trouxe `decision_id`;
+    * ``invalid`` — trouxe um id que NÃO está no ledger (erro de cópia/invenção).
+
+    É o que permite medir a COBERTURA da atribuição e não olhar `auto` x `choose`
+    enviesado por itens que nunca foram atribuídos.
+    """
+    if not decision_id:
+        return "missing"
+    return "resolved" if read_media_decision_by_id(root, post_id, decision_id) else "invalid"
+
+
 def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
     """Registra um evento do pipeline no telemetry.jsonl central (fail-soft).
 
@@ -347,6 +390,9 @@ def read_telemetry_summary(
     ready_posts: set[int] = set()
     ready_with_first_pass = 0
     first_pass_ready = 0
+    first_pass_blocked = 0
+    # Cobertura da ATRIBUIÇÃO de decisão: resolved | missing | invalid | mixed.
+    atribuicao: dict[str, int] = {"resolved": 0, "missing": 0, "invalid": 0, "mixed": 0}
     ready_attempts = 0
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
@@ -450,6 +496,10 @@ def read_telemetry_summary(
                 duration = record.get("duration_ms")
                 if isinstance(duration, int):
                     ready_durations.append(duration)
+            if event == "apply_blocked" and record.get("first_pass"):
+                # Bloqueio na PRIMEIRA tentativa: entra no denominador da taxa de
+                # sucesso de primeira tentativa (junto com os READY de primeira).
+                first_pass_blocked += 1
             if event == "media_search_result":
                 midia["searches"] += 1
                 for campo in ("needed", "reuse", "strong", "ambiguous", "accepted",
@@ -485,6 +535,13 @@ def read_telemetry_summary(
                 # Formato anterior (sem usage): conta como chamada para não
                 # quebrar a série histórica, sem inflar os tokens.
                 midia["vision_calls"] += 1
+            # COBERTURA da atribuição: conta para TODO evento de media-validate,
+            # inclusive os SEM rótulo de decisão (é justamente aí que a atribuição
+            # falta — contar só dentro do bloco de decisão escondia o buraco).
+            if event == "media_validate_result":
+                estado = str(record.get("attribution") or "")
+                if estado in atribuicao:
+                    atribuicao[estado] += 1
             # QUALIDADE por decisão: cruza a decisão de busca (auto/choose/reuse)
             # com o que os gates fizeram depois. É a prova que falta de que a
             # economia de julgamento NÃO piorou a imagem escolhida.
@@ -520,7 +577,10 @@ def read_telemetry_summary(
                     if record.get("first_pass"):
                         bucket_decisao["apply_first_pass_ready"] += 1
                         bucket_decisao["first_pass_ready"] += 1
-                    bucket_decisao["first_pass_attempts"] += 1
+                        # `first_pass_attempts` conta SÓ primeiras tentativas: um
+                        # READY na 2ª tentativa não é primeira tentativa (antes o
+                        # denominador inflava e a taxa de sucesso mentia).
+                        bucket_decisao["first_pass_attempts"] += 1
                 elif event == "apply_blocked":
                     motivos = record.get("failure_reasons")
                     nomes = motivos if isinstance(motivos, list) else []
@@ -568,9 +628,20 @@ def read_telemetry_summary(
             "unique_ready_posts": len(ready_posts),
             "unique_touched_posts": len(started_posts | blocked_posts | ready_posts),
             "first_pass_ready": first_pass_ready,
-            "first_pass_ready_rate": (
+            # NOME CORRETO do que a conta mede: DOS READY, quantos foram de
+            # primeira. Não é taxa de sucesso de primeira tentativa (um post
+            # bloqueado na primeira não aparece no denominador).
+            "ready_first_pass_share": (
                 round(first_pass_ready / ready_with_first_pass, 4)
                 if ready_with_first_pass else None
+            ),
+            # TAXA DE SUCESSO de primeira tentativa: das PRIMEIRAS tentativas
+            # (ready + blocked), quantas viraram READY. É a métrica que faltava.
+            "first_pass_attempts": first_pass_ready + first_pass_blocked,
+            "first_pass_blocked": first_pass_blocked,
+            "first_pass_success_rate": (
+                round(first_pass_ready / (first_pass_ready + first_pass_blocked), 4)
+                if (first_pass_ready + first_pass_blocked) else None
             ),
             "average_attempts_per_ready": (
                 round(ready_attempts / ready_with_first_pass, 2)
@@ -592,6 +663,17 @@ def read_telemetry_summary(
         },
         "run_sources": por_origem,
         "root_sessions": sorted(sessoes_filtradas),
+        # COBERTURA da atribuição: quantos itens tiveram a decisão resolvida pelo
+        # ledger, quantos não trouxeram id, quantos trouxeram id inexistente e
+        # quantos planos são mistos (sem rótulo único). Sem isso, `auto` x `choose`
+        # podia ser lido com amostra enviesada por itens não atribuídos.
+        "decision_attribution": {
+            **atribuicao,
+            "decision_attribution_rate": (
+                round(atribuicao["resolved"] / sum(atribuicao.values()), 4)
+                if sum(atribuicao.values()) else None
+            ),
+        },
         "decision_quality": {
             decisao: {
                 **numeros,
