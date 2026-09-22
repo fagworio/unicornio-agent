@@ -227,5 +227,104 @@ class RequestsPerReadySymmetryTests(unittest.TestCase):
         self.assertEqual(sem_join["hermes_sessions"]["requests_total"], 12)
 
 
+class JoinParcialCaiNoFallbackTests(unittest.TestCase):
+    """Join com correspondência PARCIAL não pode ser apresentado como exato."""
+
+    def test_uma_de_duas_sessoes_no_banco_nao_vira_join(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            banco = root / "state.db"
+            db = sqlite3.connect(banco)
+            db.execute(
+                "CREATE TABLE sessions (id TEXT, source TEXT, started_at INTEGER, "
+                "api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, tool_call_count INTEGER)"
+            )
+            db.execute(
+                "CREATE TABLE session_model_usage (session_id TEXT, model TEXT, task TEXT, "
+                "api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL)"
+            )
+            agora = int(time.time())
+            # Só a sessão A existe no banco; B (mais recente) ainda não consolidou.
+            db.execute(
+                "INSERT INTO sessions VALUES ('cron_9e39343dc6f5_20260922_090524','cron',?,"
+                "10,10000,100,0,0,0,0.05,10)",
+                (agora,),
+            )
+            db.commit()
+            db.close()
+            with mock.patch.dict(os.environ, CRON_ENV, clear=False):
+                append_telemetry(root, "apply_ready", post_id=1, first_pass=True)
+            with mock.patch.dict(
+                os.environ,
+                {"UNICORNIO_RUN_SOURCE": "cron",
+                 "HERMES_SESSION_ID": "cron_9e39343dc6f5_20260922_235959"},
+                clear=False,
+            ):
+                append_telemetry(root, "apply_ready", post_id=2, first_pass=True)
+            metricas = session_metrics(
+                root, state_db=banco, job_id="9e39343dc6f5",
+                project_root=str(root), hours=24,
+            )
+        # 2 sessões na telemetria, 1 no banco => NUNCA join_sessions.
+        self.assertEqual(metricas["attribution"], "window_job")
+        self.assertNotEqual(metricas["attribution"], "join_sessions")
+        # O numerador do fallback é rotulado (window_job), nunca apresentado como
+        # join exato das 2 sessões.
+        self.assertIn("prefixo do id da sessao", str(metricas["hermes_sessions"]["scope"]))
+
+    def test_join_completo_de_duas_sessoes_vira_join(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            banco = root / "state.db"
+            db = sqlite3.connect(banco)
+            db.execute(
+                "CREATE TABLE sessions (id TEXT, source TEXT, started_at INTEGER, "
+                "api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, tool_call_count INTEGER)"
+            )
+            db.execute(
+                "CREATE TABLE session_model_usage (session_id TEXT, model TEXT, task TEXT, "
+                "api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL)"
+            )
+            agora = int(time.time())
+            for session_id, tokens in (
+                ("cron_9e39343dc6f5_20260922_090524", 10_000),
+                ("cron_9e39343dc6f5_20260922_235959", 80_000),
+            ):
+                db.execute(
+                    "INSERT INTO sessions VALUES (?,'cron',?,10,?,100,0,0,0,0.05,10)",
+                    (session_id, agora, tokens),
+                )
+            db.commit()
+            db.close()
+            for indice, session_id in enumerate(
+                ("cron_9e39343dc6f5_20260922_090524",
+                 "cron_9e39343dc6f5_20260922_235959"),
+                start=1,
+            ):
+                with mock.patch.dict(
+                    os.environ,
+                    {"UNICORNIO_RUN_SOURCE": "cron", "HERMES_SESSION_ID": session_id},
+                    clear=False,
+                ):
+                    # Posts DIFERENTES: o READY é contado por post.
+                    append_telemetry(root, "apply_ready", post_id=indice, first_pass=True)
+            metricas = session_metrics(
+                root, state_db=banco, job_id="9e39343dc6f5",
+                project_root=str(root), hours=24,
+            )
+        self.assertEqual(metricas["attribution"], "join_sessions")
+        # 90.000 tokens de prompt / 2 READY = 45.000.
+        self.assertEqual(metricas["derived"]["prompt_tokens_per_ready"], 45_000.0)
+        self.assertIn("2 de 2", metricas["hermes_sessions"]["scope"])
+
+
 if __name__ == "__main__":
     unittest.main()

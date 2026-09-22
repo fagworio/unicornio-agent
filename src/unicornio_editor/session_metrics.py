@@ -244,10 +244,14 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
             db.close()
     except sqlite3.Error:
         return None
-    if int(linha[0] or 0) == 0:
-        # Nenhuma das sessões da telemetria existe no banco (ex.: sessão ainda não
-        # consolidada, banco rotacionado): NÃO se reporta zero como verdade do
-        # join — o chamador cai no fallback por janela e isso vem marcado.
+    # JOIN COMPLETO OU NADA: o denominador (READY) vem de TODAS as sessões da
+    # telemetria; se só uma parte delas existe no banco, o numerador cobriria
+    # menos sessões que o denominador e a razão sairia SUBESTIMADA (ex.: 2 READY
+    # no denominador, tokens de 1 sessão só). Correspondência parcial (uma sessão
+    # não consolidada ou perdida numa rotação) cai no fallback `window_job`, que é
+    # explicitamente marcado — melhor um número rotulado do que um join inexato.
+    encontradas = int(linha[0] or 0)
+    if encontradas != len(session_ids):
         return None
     entrada = int(linha[2] or 0)
     cache_read = int(linha[4] or 0)
@@ -259,7 +263,10 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
         aux["input_tokens"] + aux["cache_read_tokens"] + aux["cache_write_tokens"]
     )
     return {
-        "scope": f"mesmas sessoes da telemetria ({len(session_ids)} sessao(oes))",
+        "scope": (
+            f"mesmas sessoes da telemetria ({encontradas} de "
+            f"{len(session_ids)} sessao(oes))"
+        ),
         "session_ids": list(session_ids),
         "sessions": int(linha[0] or 0),
         # MAIN-ONLY, em simetria com o caminho `window_job` e com
