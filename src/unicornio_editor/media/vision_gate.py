@@ -151,6 +151,7 @@ def _call_vision(
     model: str,
     detail: str,
     timeout: float,
+    root: Any = None,
 ) -> dict[str, Any]:
     payload = {
         "model": model,
@@ -185,17 +186,72 @@ def _call_vision(
         with urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
+                           erro=f"HTTP {exc.code}")
         raise VisionGateError(f"API de visao respondeu HTTP {exc.code}") from exc
     except (URLError, OSError, ValueError) as exc:
+        _registrar_chamada(root, detail=detail, model=model, base_url=base_url, erro=str(exc))
         raise VisionGateError(f"falha ao chamar a API de visao: {exc}") from exc
     try:
         answer = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
+        _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
+                           erro="resposta invalida")
         raise VisionGateError("resposta invalida da API de visao") from exc
+    # Uma requisição HTTP = um evento, com o `usage` devolvido pelo provedor.
+    # `verify_image_subject` pode chamar DUAS vezes (low + high): contar em volta
+    # da função subestimava o custo real de visão e impedia reconciliar com o
+    # dashboard do provedor.
+    _registrar_chamada(
+        root, detail=detail, model=model, base_url=base_url, usage=body.get("usage") or {}
+    )
     return _parse_response(answer)
 
 
-def _decide(result: dict[str, Any], *, require_key_art: bool = False) -> tuple[bool, str]:
+def _registrar_chamada(
+    root: Any,
+    *,
+    detail: str,
+    model: str,
+    base_url: str,
+    usage: dict[str, Any] | None = None,
+    erro: str = "",
+) -> None:
+    """Evento de UMA chamada HTTP à API de visão (com tokens quando houver)."""
+    if root is None:
+        return
+    try:
+        from ..observability import append_telemetry
+
+        dados = usage or {}
+        detalhes = dados.get("prompt_tokens_details") or {}
+        append_telemetry(
+            root,
+            "vision_api_request",
+            scope="vision",
+            detail=str(detail),
+            model=str(model),
+            provider=str(base_url)[:120],
+            input_tokens=int(dados.get("prompt_tokens") or 0),
+            cached_tokens=int(detalhes.get("cached_tokens") or 0),
+            output_tokens=int(dados.get("completion_tokens") or 0),
+            error=str(erro or "")[:160],
+        )
+    except Exception:  # noqa: BLE001 - telemetria nunca quebra o gate
+        pass
+
+
+def _decide_tri(
+    result: dict[str, Any], *, require_key_art: bool = False
+) -> tuple[str, str]:
+    """Decisão TRIPLA: ``accept`` | ``reject`` | ``inconclusive``.
+
+    A decisão binária antiga colapsava "modelo não tem certeza" em ``True``, o
+    que fazia ``verify_image_subject`` retornar ANTES de escalar para
+    ``detail=high`` — justamente no caso (AMBIGUOUS / MATCH de baixa confiança /
+    PARTIAL_MATCH) para o qual a escalada existe. Aqui o inconclusivo é um estado
+    próprio: quem escala decide o que fazer com ele.
+    """
     status = result["status"]
     confidence = result["confidence"]
     visual_type = result.get("visual_type", "other")
@@ -204,16 +260,22 @@ def _decide(result: dict[str, Any], *, require_key_art: bool = False) -> tuple[b
     # share card, infografico) mesmo que o texto cite a obra — nao e a arte da
     # obra em si. Preserva wordmarks/title-treatments legitimos (o modelo julga).
     if require_key_art and visual_type in {"text_banner", "infographic"}:
-        return False, f"imagem e banner tipografico/infografico, nao key art {detail}"
+        return "reject", f"imagem e banner tipografico/infografico, nao key art {detail}"
     if status == "UNRELATED" and confidence >= _REJECT_THRESHOLD:
-        return False, f"modelo NEGOU o assunto {detail}"
-    # MATCH alto -> aceita.
+        return "reject", f"modelo NEGOU o assunto {detail}"
     if status == "MATCH" and confidence >= _ACCEPT_THRESHOLD:
-        return True, f"modelo confirmou o assunto {detail}"
-    # Inconclusivo (MATCH baixo, PARTIAL_MATCH, AMBIGUOUS ou UNRELATED de baixa
-    # confianca) NAO bloqueia: a imagem pode estar correta, apenas o modelo
-    # nao esta confiante. Passa com aviso para nao prender posts em rework.
-    return True, f"inconclusivo (sem rejeicao clara) {detail}"
+        return "accept", f"modelo confirmou o assunto {detail}"
+    return "inconclusive", f"inconclusivo (sem rejeicao clara) {detail}"
+
+
+def _decide(result: dict[str, Any], *, require_key_art: bool = False) -> tuple[bool, str]:
+    """Decisão binária (compatível): inconclusivo NÃO bloqueia.
+
+    Mantida para chamadas que não escalam (visão inline). Quem tem escalada usa
+    :func:`_decide_tri`.
+    """
+    veredito, razao = _decide_tri(result, require_key_art=require_key_art)
+    return veredito != "reject", razao
 
 
 def verify_image_subject(
@@ -230,12 +292,15 @@ def verify_image_subject(
     detail: str = "low",
     allow_high: bool = False,
     require_key_art: bool = False,
+    root: Any = None,
 ) -> tuple[bool, str]:
     """Ask the vision model whether ``image_url`` is consistent with ``subject``.
 
-    Returns ``(ok, reason)``. Uses ``detail`` (default `low`). When the
-    result is ambiguous/inconclusive and ``allow_high`` is True, re-asks at
-    `detail: high` once before deciding (cost escalation only on hard cases).
+    Returns ``(ok, reason)``. Uses ``detail`` (default `low`). A decisão é
+    TRIPLA: ACCEPT devolve na hora; INCONCLUSIVO escala para ``detail: high``
+    (uma vez) quando ``allow_high``; REJECT bloqueia. Só depois do `high` sai a
+    decisão final — antes o inconclusivo retornava como aceito e a escalada era
+    inalcançável no caso que a motivou.
     Raises :class:`VisionGateError` on API failures (fail-closed).
     """
     if not api_key:
@@ -252,19 +317,25 @@ def verify_image_subject(
     )
     result = _call_vision(
         image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
-        model=model, detail=detail, timeout=timeout,
+        model=model, detail=detail, timeout=timeout, root=root,
     )
-    ok, reason = _decide(result, require_key_art=require_key_art)
-    if ok or not allow_high:
-        return ok, reason
-    if result["status"] == "AMBIGUOUS" or result["confidence"] < _ACCEPT_THRESHOLD:
-        # Escalate to high once for the hard cases.
+    veredito, razao = _decide_tri(result, require_key_art=require_key_art)
+    if veredito == "accept":
+        return True, razao
+    if veredito == "inconclusive" and allow_high:
         high_result = _call_vision(
             image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
-            model=model, detail="high", timeout=timeout,
+            model=model, detail="high", timeout=timeout, root=root,
         )
-        return _decide(high_result, require_key_art=require_key_art)
-    return ok, reason
+        final, razao_final = _decide_tri(high_result, require_key_art=require_key_art)
+        # Só o ACCEPT passa depois do high: "inconclusivo no detalhe máximo" não
+        # é prova de que a imagem é a certa (é o gate cumprindo o que promete).
+        return final == "accept", f"{razao} | high: {razao_final}"
+    if veredito == "inconclusive":
+        # Sem escalada permitida (inline): mantém a política histórica de não
+        # prender o post em rework por falta de confiança do modelo.
+        return True, razao
+    return False, razao
 
 
 def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:

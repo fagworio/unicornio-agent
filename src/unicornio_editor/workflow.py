@@ -1231,32 +1231,9 @@ def _validate_featured_candidate_vision(
             detail=config.vision_detail,
             allow_high=True,
             require_key_art=True,
+            root=root,  # uma requisicao HTTP = um evento vision_api_request
         )
-        if root is not None:
-            # Contador DETERMINISTICO de chamada real de visao (cache e bypass
-            # deterministico nao contam): e o `vision_calls_per_ready` da
-            # telemetria, sem o qual nao da para provar que a economia de
-            # julgamento nao virou custo escondido (nem que ela funcionou).
-            try:
-                from .observability import append_telemetry
-
-                append_telemetry(
-                    root, "vision_call", scope="featured_preflight",
-                    ok=bool(ok), cached=False, detail=config.vision_detail,
-                )
-            except Exception:  # noqa: BLE001
-                pass
     except (VisionGateError, Exception) as exc:  # noqa: BLE001 - fail closed
-        if root is not None:
-            try:
-                from .observability import append_telemetry
-
-                append_telemetry(
-                    root, "vision_call", scope="featured_preflight",
-                    ok=False, cached=False, error=str(exc)[:160],
-                )
-            except Exception:  # noqa: BLE001
-                pass
         return {"status": "rejected", "reason": f"visao da featured falhou: {exc}", "cached": False}
     set_cached_decision(
         cache_root,

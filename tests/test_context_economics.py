@@ -287,6 +287,28 @@ class MediaSelectionTests(unittest.TestCase):
         self.assertIn("faltam 1", resultado["action"])
 
     def test_reuse_alone_covers_the_deficit(self):
+        """Acervo local cobrindo TODA a necessidade => `reuse` (nada de julgamento).
+
+        O caso MISTO (1 local + 1 web com needed=2) NÃO é `reuse` — é decisão
+        sobre o candidato da web com `coverage: mixed` (ver
+        `test_reuse_parcial_nao_vira_reuse`).
+        """
+        from unicornio_editor.cli import _compact_media_search
+
+        resultado = _compact_media_search(
+            query="obra", subject="Obra", needed=1,
+            reuso=[{"url": "https://a/1.jpg", "source": "https://pagina/1", "media_id": 9}],
+            aprovados=[], rejeitados=[],
+            engines=[], audit="",
+        )
+        self.assertEqual(resultado["capacity"]["reuse"], 1)
+        self.assertEqual(resultado["capacity"]["missing"], 0)
+        self.assertIn("reuse", resultado)
+        self.assertEqual(resultado["decision"], "reuse")
+        self.assertEqual(resultado["coverage"], "local")
+
+    def test_reuse_parcial_nao_vira_reuse(self):
+        """1 imagem local + 1 da web (needed=2) NÃO é `reuse`: é `mixed`."""
         from unicornio_editor.cli import _compact_media_search
 
         resultado = _compact_media_search(
@@ -295,11 +317,12 @@ class MediaSelectionTests(unittest.TestCase):
             aprovados=[self._candidate("https://a/2.jpg", 12)], rejeitados=[],
             engines=[], audit="",
         )
+        # O acervo cobria METADE: a decisão é sobre o candidato da web, e a
+        # cobertura diz que parte das imagens veio do acervo e parte da web.
+        self.assertEqual(resultado["decision"], "auto")
+        self.assertEqual(resultado["coverage"], "mixed")
+        self.assertIn("mista", resultado["decision_reason"])
         self.assertEqual(resultado["capacity"]["reuse"], 1)
-        self.assertEqual(resultado["capacity"]["missing"], 0)
-        self.assertIn("reuse", resultado)
-        # O acervo local cobriu o déficit: nao ha julgamento a fazer.
-        self.assertEqual(resultado["decision"], "reuse")
 
 
 class LibraryFirstTests(unittest.TestCase):
@@ -413,7 +436,7 @@ class EnrichmentMemoTests(unittest.TestCase):
             side_effect=fake_validate,
         ), mock.patch(
             "unicornio_editor.media.evidence.dedupe_by_phash",
-            side_effect=lambda aprovados, rejeitados: (aprovados, rejeitados),
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
         ):
             for _ in range(2):
                 aprovados, rejeitados, _deferidos = cli._enriquecer_candidatos(
@@ -455,8 +478,19 @@ class EnrichmentMemoTests(unittest.TestCase):
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
             return_value={"valid": True, "reason": "ok", "images_in_page": 1},
         ), mock.patch(
+            # A capacidade agora conta FORTE + frame distinto (rodada 4): o
+            # candidato 1 é forte de verdade (é ele que atende a capacidade).
+            "unicornio_editor.media.evidence.evidence_score",
+            side_effect=lambda subject, *, filename="", **kwargs: {
+                "subject": subject, "matched": ["filename"], "evidence": {},
+                "local_score": 9 if filename == "1.jpg" else 0,
+                "score": 9 if filename == "1.jpg" else 0,
+                "gate": "relevance", "penalties": [], "needs_vision": False,
+                "verdict": "deterministic_match" if filename == "1.jpg" else "reject",
+            },
+        ), mock.patch(
             "unicornio_editor.media.evidence.dedupe_by_phash",
-            side_effect=lambda aprovados, rejeitados: (aprovados, rejeitados),
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
         ):
             _aprovados, rejeitados, deferidos = cli._enriquecer_candidatos(
                 candidatos, subject="Redfall", termo="redfall", capacity=1

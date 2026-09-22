@@ -115,18 +115,54 @@ class VisionGateTests(unittest.TestCase):
         # Structured Outputs pede JSON com status/confidence/visual_type.
         self.assertEqual(payload.get("response_format", {}).get("type"), "json_object")
 
-    def test_ambiguous_passes_without_escalation(self):
-        # AMBIGUOUS (sem rejeicao clara) NAO bloqueia: passa direto, sem escalar
-        # para high — evita prender posts em rework por confianca baixa.
+    def test_ambiguous_escala_para_high_e_decide_depois(self):
+        """AMBIGUOUS com allow_high: escala para `high` e SÓ então decide.
+
+        Antes o inconclusivo retornava como aceito (`ok=True`), o que fazia a
+        função sair ANTES da escalada — o caminho `detail=high` era inalcançável
+        justamente no caso que o motivou.
+        """
         VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}'
         ok, reason = self._verify(detail="low", allow_high=True)
-        self.assertTrue(ok, reason)
-        self.assertIn("inconclusivo", reason)
         details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
-        self.assertEqual(details, ["low"])  # nao escala
+        self.assertEqual(details, ["low", "high"])  # escalou
+        # Inconclusivo no detalhe MÁXIMO não é prova: o gate bloqueia.
+        self.assertFalse(ok, reason)
+        self.assertIn("high:", reason)
+
+    def test_ambiguo_no_low_mas_confirmado_no_high_e_aceito(self):
+        VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.55, "visual_type": "other"}'
+
+        def resposta_por_chamada():
+            # 1ª chamada (low): inconclusivo; 2ª (high): confirmado.
+            if len(VisionHandler.calls) >= 1:
+                VisionHandler.answer = '{"status": "MATCH", "confidence": 0.95, "visual_type": "key_art"}'
+
+        original = VisionHandler.do_POST
+
+        def do_POST_com_escalada(self):  # noqa: N802
+            original(self)
+            resposta_por_chamada()
+
+        VisionHandler.do_POST = do_POST_com_escalada
+        try:
+            ok, reason = self._verify(detail="low", allow_high=True)
+        finally:
+            VisionHandler.do_POST = original
+        details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
+        self.assertEqual(details, ["low", "high"])
+        self.assertTrue(ok, reason)
+
+    def test_reject_no_low_nao_escala(self):
+        VisionHandler.answer = '{"status": "UNRELATED", "confidence": 0.95, "visual_type": "other"}'
+        ok, reason = self._verify(detail="low", allow_high=True)
+        self.assertFalse(ok, reason)
+        details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
+        self.assertEqual(details, ["low"])  # rejeição clara: não gasta high
 
     def test_inline_ambiguous_passes(self):
-        # Inline AMBIGUOUS tambem passa (nao bloqueia por confianca baixa).
+        # Inline AMBIGUOUS tambem passa (nao bloqueia por confianca baixa) — sem
+        # escalada, porque inline não tem `allow_high`.
         VisionHandler.answer = '{"status": "AMBIGUOUS", "confidence": 0.60, "visual_type": "other"}'
         ok, reason = self._verify(detail="low", allow_high=False)
         self.assertTrue(ok, reason)

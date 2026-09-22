@@ -96,6 +96,33 @@ def _hermes_totals(
             "FROM sessions WHERE " + " AND ".join(where),
             params,
         ).fetchone()
+        # Uso AUXILIAR (vision/compressao/titulo/aprovacao) das MESMAS sessoes:
+        # fica fora dos contadores de `sessions`, entao sem esta soma o
+        # `grand_total` (e a reconciliacao com o provedor) ficaria incompleto.
+        aux: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
+                               "cache_read_tokens": 0, "cache_write_tokens": 0,
+                               "reasoning_tokens": 0, "cost_usd": 0.0, "tasks": {}}
+        try:
+            for tarefa, chamadas, entrada, saida, cache_r, cache_w, raciocinio, custo in db.execute(
+                "SELECT task, COALESCE(SUM(api_call_count),0), "
+                "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+                "COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0), "
+                "COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(estimated_cost_usd),0) "
+                "FROM session_model_usage WHERE session_id IN ("
+                "SELECT id FROM sessions WHERE " + " AND ".join(where) + ") GROUP BY task",
+                params,
+            ):
+                if str(tarefa or "") == "":
+                    continue
+                aux["input_tokens"] += int(entrada or 0)
+                aux["output_tokens"] += int(saida or 0)
+                aux["cache_read_tokens"] += int(cache_r or 0)
+                aux["cache_write_tokens"] += int(cache_w or 0)
+                aux["reasoning_tokens"] += int(raciocinio or 0)
+                aux["cost_usd"] += float(custo or 0)
+                aux["tasks"][str(tarefa)] = int(chamadas or 0)
+        except sqlite3.Error:
+            aux["unavailable"] = True
         db.close()
     except sqlite3.Error:
         return None
@@ -104,6 +131,10 @@ def _hermes_totals(
     cache_write = int(row[5] or 0)
     saida = int(row[3] or 0)
     reasoning = int(row[6] or 0)
+    prompt_main = entrada + cache_read + cache_write
+    prompt_aux = (
+        aux["input_tokens"] + aux["cache_read_tokens"] + aux["cache_write_tokens"]
+    )
     return {
         "sessions": int(row[0] or 0),
         "requests": int(row[1] or 0),
@@ -112,11 +143,129 @@ def _hermes_totals(
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
         "reasoning_tokens": reasoning,
-        "prompt_tokens": entrada + cache_read + cache_write,
-        "total_model_tokens": entrada + cache_read + cache_write + saida + reasoning,
-        "cost_usd": round(float(row[7] or 0), 6),
+        "prompt_tokens": prompt_main,
+        "total_model_tokens": prompt_main + saida + reasoning,
+        "cost_usd": round(float(row[7] or 0) + float(aux["cost_usd"] or 0), 6),
+        "cost_main_usd": round(float(row[7] or 0), 6),
         "tool_calls": int(row[8] or 0),
+        "aux": {**aux, "prompt_tokens": prompt_aux,
+                "total_model_tokens": prompt_aux + aux["output_tokens"] + aux["reasoning_tokens"],
+                "cost_usd": round(float(aux["cost_usd"] or 0), 6)},
+        "grand_total": {
+            "prompt_tokens": prompt_main + prompt_aux,
+            "output_tokens": saida + aux["output_tokens"],
+            "reasoning_tokens": reasoning + aux["reasoning_tokens"],
+            "total_model_tokens": (
+                prompt_main + prompt_aux + saida + aux["output_tokens"]
+                + reasoning + aux["reasoning_tokens"]
+            ),
+            "cost_usd": round(float(row[7] or 0) + float(aux["cost_usd"] or 0), 6),
+        },
         "scope": scope,
+    }
+
+
+def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | None:
+    """Uso das MESMAS sessões observadas na telemetria (join por id).
+
+    É o que alinha numerador e denominador do KPI: os tokens/custo vêm das
+    sessões que de fato produziram os eventos da janela, e não de "tudo que rodou
+    nas últimas 24h" (que inflava `prompt_tokens_per_ready` com sessões antigas
+    enquanto o READY era só dos eventos novos).
+
+    Separa também o MAIN-LOOP do uso AUXILIAR do Hermes: chamadas de vision,
+    compressão, geração de título e aprovação são gravadas em
+    ``session_model_usage`` com ``task != ''`` e NÃO entram nos contadores da
+    tabela ``sessions``. Somar só `sessions` chamando o resultado de "todos os
+    tokens" era impreciso (e o teto de custo também as ignorava).
+    """
+    if not state_db.is_file() or not session_ids:
+        return None
+    marcadores = ",".join("?" * len(session_ids))
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+        try:
+            colunas = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+
+            def _soma(coluna: str) -> str:
+                return f"COALESCE(SUM({coluna}),0)" if coluna in colunas else "0"
+
+            linha = db.execute(
+                "SELECT COUNT(*), "
+                f"{_soma('api_call_count')}, {_soma('input_tokens')}, "
+                f"{_soma('output_tokens')}, {_soma('cache_read_tokens')}, "
+                f"{_soma('cache_write_tokens')}, {_soma('reasoning_tokens')}, "
+                f"{_soma('estimated_cost_usd')}, {_soma('tool_call_count')} "
+                f"FROM sessions WHERE id IN ({marcadores})",
+                list(session_ids),
+            ).fetchone()
+            aux: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
+                                   "cache_read_tokens": 0, "cache_write_tokens": 0,
+                                   "reasoning_tokens": 0, "cost_usd": 0.0, "tasks": {}}
+            try:
+                for tarefa, chamadas, entrada, saida, cache_r, cache_w, raciocinio, custo in db.execute(
+                    "SELECT task, COALESCE(SUM(api_call_count),0), "
+                    "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+                    "COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0), "
+                    "COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(estimated_cost_usd),0) "
+                    f"FROM session_model_usage WHERE session_id IN ({marcadores}) "
+                    "GROUP BY task",
+                    list(session_ids),
+                ):
+                    if str(tarefa or "") == "":
+                        continue  # main-loop: já contabilizado na tabela sessions
+                    aux["input_tokens"] += int(entrada or 0)
+                    aux["output_tokens"] += int(saida or 0)
+                    aux["cache_read_tokens"] += int(cache_r or 0)
+                    aux["cache_write_tokens"] += int(cache_w or 0)
+                    aux["reasoning_tokens"] += int(raciocinio or 0)
+                    aux["cost_usd"] += float(custo or 0)
+                    aux["tasks"][str(tarefa)] = int(chamadas or 0)
+            except sqlite3.Error:
+                # Banco legado sem a tabela de uso por modelo: o main-loop segue
+                # medido (nunca transformar ausência de aux em medição vazia).
+                aux = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                       "cache_write_tokens": 0, "reasoning_tokens": 0, "cost_usd": 0.0,
+                       "tasks": {}, "unavailable": True}
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    entrada = int(linha[2] or 0)
+    cache_read = int(linha[4] or 0)
+    cache_write = int(linha[5] or 0)
+    saida = int(linha[3] or 0)
+    raciocinio = int(linha[6] or 0)
+    prompt_main = entrada + cache_read + cache_write
+    prompt_aux = (
+        aux["input_tokens"] + aux["cache_read_tokens"] + aux["cache_write_tokens"]
+    )
+    return {
+        "scope": f"mesmas sessoes da telemetria ({len(session_ids)} sessao(oes))",
+        "session_ids": list(session_ids),
+        "sessions": int(linha[0] or 0),
+        "requests": int(linha[1] or 0),
+        "main": {
+            "input_tokens": entrada, "output_tokens": saida,
+            "cache_read_tokens": cache_read, "cache_write_tokens": cache_write,
+            "reasoning_tokens": raciocinio, "prompt_tokens": prompt_main,
+            "total_model_tokens": prompt_main + saida + raciocinio,
+            "cost_usd": round(float(linha[7] or 0), 6),
+            "tool_calls": int(linha[8] or 0),
+        },
+        "aux": {**aux, "prompt_tokens": prompt_aux,
+                "total_model_tokens": prompt_aux + aux["output_tokens"] + aux["reasoning_tokens"],
+                "cost_usd": round(float(aux["cost_usd"] or 0), 6)},
+        "grand_total": {
+            "prompt_tokens": prompt_main + prompt_aux,
+            "output_tokens": saida + aux["output_tokens"],
+            "reasoning_tokens": raciocinio + aux["reasoning_tokens"],
+            "total_model_tokens": (
+                prompt_main + prompt_aux + saida + aux["output_tokens"]
+                + raciocinio + aux["reasoning_tokens"]
+            ),
+            "cost_usd": round(float(linha[7] or 0) + float(aux["cost_usd"] or 0), 6),
+        },
     }
 
 
@@ -144,16 +293,32 @@ def _per_ready(
     total = hermes["total_model_tokens"] if hermes else None
     requests = hermes["requests"] if hermes else None
     gasto = hermes["cost_usd"] if hermes else None
+    aux = (hermes or {}).get("aux") or {}
+    grande = (hermes or {}).get("grand_total") or {}
     return {
         # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: mede o
         # que o pipeline DEVOLVEU ao modelo (nao o tamanho dos arquivos de
         # auditoria, que ficam em disco).
         "tool_context_bytes_per_ready": _ratio(bytes_contexto, ready),
         "tool_context_bytes_per_post_touched": _ratio(bytes_contexto, tocados),
+        # Tokens do MAIN-LOOP (tabela `sessions`) por READY.
         "prompt_tokens_per_ready": _ratio(prompt, ready),
         "prompt_tokens_per_post_touched": _ratio(prompt, tocados),
         "output_tokens_per_ready": _ratio(saida, ready),
         "total_model_tokens_per_ready": _ratio(total, ready),
+        # Consumo AUXILIAR do Hermes (vision/compressao/titulo) e GRAND TOTAL:
+        # sem isso a reconciliacao com o dashboard do provedor nao fecha.
+        "aux_prompt_tokens_per_ready": _ratio(aux.get("prompt_tokens"), ready),
+        "aux_cost_per_ready_usd": (
+            round(float(aux.get("cost_usd") or 0) / ready, 6) if aux and ready else None
+        ),
+        "grand_total_model_tokens_per_ready": _ratio(
+            grande.get("total_model_tokens"), ready
+        ),
+        "grand_total_cost_per_ready_usd": (
+            round(float(grande.get("cost_usd") or 0) / ready, 6)
+            if grande and ready else None
+        ),
         "requests_per_ready": _ratio(requests, ready),
         "requests_per_post_touched": _ratio(requests, tocados),
         "cost_per_ready_usd": (
@@ -190,9 +355,31 @@ def session_metrics(
     tocados = int(producao.get("unique_touched_posts") or 0)
     bytes_contexto = int(resumo.get("context_bytes_total") or 0)
     banco = Path(state_db or Path.home() / ".hermes" / "state.db")
-    hermes = _hermes_totals(
-        banco, hours=max(1, int(hours)), job_id=job_id, project_root=project_root
-    )
+    sessoes = [str(s) for s in (resumo.get("root_sessions") or []) if s]
+    hermes = None
+    atribuicao = "window_job"
+    if sessoes:
+        # PREFERIDO: join pelas MESMAS sessões que produziram os eventos —
+        # numerador e denominador passam a falar do mesmo conjunto.
+        hermes = _usage_sessoes(banco, sessoes)
+        if hermes is not None:
+            atribuicao = "join_sessions"
+            hermes = {
+                **hermes["main"],
+                "sessions": hermes["sessions"],
+                "requests": hermes["requests"],
+                "scope": hermes["scope"],
+                "session_ids": hermes["session_ids"],
+                "aux": hermes["aux"],
+                "grand_total": hermes["grand_total"],
+                "cost_usd": hermes["grand_total"]["cost_usd"],
+            }
+    if hermes is None:
+        # Fallback (janela + atribuição por job): só quando ainda não há evento
+        # instrumentado com sessão — aí o número é explicitamente marcado.
+        hermes = _hermes_totals(
+            banco, hours=max(1, int(hours)), job_id=job_id, project_root=project_root
+        )
     media_economy = resumo.get("media_economy") or {}
     origens = completo.get("run_sources") or {}
     nota = (
@@ -234,6 +421,9 @@ def session_metrics(
             "ready": int((completo.get("production") or {}).get("unique_ready_posts") or 0),
         },
         "hermes_sessions": hermes,
+        "attribution": (
+            "join_sessions" if atribuicao == "join_sessions" else "window_job"
+        ),
         "derived": _per_ready(
             hermes,
             ready=ready,

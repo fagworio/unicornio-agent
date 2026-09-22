@@ -62,8 +62,10 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
    (N = `images.missing`); listicle: UMA chamada
    `media-search-listicle "OBRA 1" "OBRA 2" ... --limit 3`.
 6. Escolha a imagem: `decision: auto` → use `select` direto. `choose` →
-   escolha entre 2-3 `options`. `reuse` → o acervo local já cobre o déficit (não
-   houve busca web). `none` → nada utilizável: `uncertain`. O bloco `reuse`
+   escolha entre 2-3 `options`. `reuse` → o acervo local já cobre a necessidade
+   INTEIRA (não houve busca web); cobertura PARCIAL vem como `coverage: mixed` e a
+   decisão é sobre o candidato da web. `none` → nada utilizável: `uncertain`. O
+   bloco `reuse`
    (Media Library/índice local) vem ANTES da web: use-o primeiro. Google Images é
    só índice; a página original é a fonte. Não faça pré-verificação manual.
 7. Mídia nova → `media-validate editorial.json --post-id POST_ID` (1 chamada;

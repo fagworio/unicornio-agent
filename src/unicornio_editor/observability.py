@@ -35,7 +35,7 @@ def build_processing_markers(
 
 def log_event(stream: TextIO, event: str, **fields: Any) -> None:
     safe_fields = {
-        key: value for key, value in fields.items() if not _is_sensitive(key)
+        key: value for key, value in fields.items() if not _is_sensitive(key, value)
     }
     record = {"event": event, **safe_fields}
     stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
@@ -58,7 +58,8 @@ def telemetry_path(root: str | Path) -> Path:
     return Path(root) / "work" / TELEMETRY_FILENAME
 
 
-_DECISIONS_FILENAME = "media_decisions.json"
+_DECISIONS_FILENAME = "media_decisions.jsonl"
+_LEGACY_DECISIONS_FILENAME = "media_decisions.json"
 
 # Gates que representam problema de MIDIA no bloqueio do apply (usado para medir
 # a taxa de bloqueio por decisao de busca: auto/reuse nao podem piorar isso).
@@ -170,7 +171,62 @@ def run_context() -> dict[str, Any]:
                 job = ""
     else:
         job = ""
-    return {"run_source": origem, "session_id": sessao, "cron_job_id": job}
+    # root_session_id é o que permite CRUZAR telemetria e state.db pelas MESMAS
+    # sessões: o processo pode rodar numa sessão filha (ferramenta/subagente) e o
+    # numerador (tokens/custo) tem de vir da sessão RAIZ que o banco registra.
+    raiz = str(info.get("root_id") or "") or sessao
+    return {
+        "run_source": origem,
+        "session_id": sessao,
+        "root_session_id": raiz,
+        "cron_job_id": job,
+    }
+
+
+def _ler_decisoes(root: str | Path) -> list[dict[str, Any]]:
+    """Todas as decisões de mídia registradas (append-only), em ordem.
+
+    Um post faz VÁRIAS buscas (uma por imagem/item). O formato antigo
+    (``media_decisions.json``, mapa post -> última decisão) sobrescrevia a
+    anterior: ``imagem 1 -> auto`` seguido de ``imagem 2 -> choose`` ficava
+    registrado apenas como ``choose``, e um bloqueio posterior era atribuído à
+    decisão errada. O log append-only preserva cada decisão com seu
+    ``decision_id``, que é o que permite calibrar a margem do `auto` com dado.
+    """
+    caminho = decisions_path(root)
+    decisoes: list[dict[str, Any]] = []
+    if caminho.is_file():
+        for linha in caminho.read_text(encoding="utf-8").splitlines():
+            linha = linha.strip()
+            if not linha:
+                continue
+            try:
+                registro = json.loads(linha)
+            except ValueError:
+                continue
+            if isinstance(registro, dict):
+                decisoes.append(registro)
+    legado = Path(root) / "work" / _LEGACY_DECISIONS_FILENAME
+    if legado.is_file():
+        # Compatibilidade com o arquivo antigo (mapa). Entra DEPOIS do log para
+        # não perder o histórico novo.
+        try:
+            dados = json.loads(legado.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            dados = {}
+        if isinstance(dados, dict):
+            for post_id, valor in dados.items():
+                if isinstance(valor, dict):
+                    decisoes.append({**valor, "post_id": post_id, "legacy": True})
+    return decisoes
+
+
+def read_media_decisions(root: str | Path, post_id: int | None = None) -> list[dict[str, Any]]:
+    """Decisões de mídia registradas (todas, ou só as de um post)."""
+    decisoes = _ler_decisoes(root)
+    if post_id is None:
+        return decisoes
+    return [d for d in decisoes if str(d.get("post_id") or "") == str(int(post_id))]
 
 
 def record_media_decision(
@@ -180,50 +236,56 @@ def record_media_decision(
     decision: str,
     score_gap: int | None = None,
     query: str = "",
-) -> None:
-    """Guarda a decisão de mídia do post (auto/choose/reuse/none).
+    subject: str = "",
+    item_index: int | None = None,
+    selected_url: str = "",
+    coverage: str = "",
+    decision_id: str = "",
+) -> str:
+    """Registra UMA decisão de mídia (append-only) e devolve o ``decision_id``.
 
-    É o que permite CRUZAR economia com QUALIDADE depois: os gates seguintes
-    (media-validate, apply, first-pass) carregam essa decisão nos eventos, então
-    dá para comparar taxa de rejeição/bloqueio entre `auto` e `choose` — a prova
-    de que dispensar julgamento não piorou a imagem escolhida.
+    O id entra no ``media_plan`` e nos eventos dos gates seguintes, então o
+    ``media-validate`` consegue dizer exatamente qual candidato/ITEM foi rejeitado
+    e qual decisão o escolheu (``auto`` com gap X, ``choose``, ``reuse``). Listas
+    (listicle) registram uma decisão POR ITEM — antes gravavam ``post_id=0`` e
+    ficavam fora de qualquer cruzamento de qualidade.
     """
-    if not post_id:
-        return
-    caminho = decisions_path(root)
-    try:
-        dados = json.loads(caminho.read_text(encoding="utf-8"))
-        if not isinstance(dados, dict):
-            dados = {}
-    except (OSError, ValueError):
-        dados = {}
-    dados[str(int(post_id))] = {
-        "decision": str(decision or ""),
-        "score_gap": score_gap,
+    if not post_id and item_index is None:
+        return ""
+    identificador = decision_id or uuid.uuid4().hex[:12]
+    registro = {
+        "decision_id": identificador,
+        "post_id": int(post_id or 0),
         "query": str(query or "")[:120],
+        "subject": str(subject or "")[:120],
+        "decision": str(decision or ""),
+        "coverage": str(coverage or ""),
+        "score_gap": score_gap,
+        "item_index": item_index,
+        "selected_url": str(selected_url or "")[:300],
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    caminho = decisions_path(root)
     try:
         caminho.parent.mkdir(parents=True, exist_ok=True)
-        temporario = caminho.with_name(caminho.name + f".{os.getpid()}.tmp")
-        temporario.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporario, caminho)
+        with caminho.open("a", encoding="utf-8") as arquivo:
+            arquivo.write(json.dumps(registro, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - ledger é instrumentação
         pass
+    return identificador
 
 
 def read_media_decision(root: str | Path, post_id: int) -> dict[str, Any]:
-    """Decisão de mídia registrada para o post (vazio quando não há)."""
+    """Última decisão de mídia do post (vazio quando não há).
+
+    Continua devolvendo UM registro (o último) porque é o que os gates seguintes
+    precisam para se autoclassificar; o histórico completo fica em
+    :func:`read_media_decisions`.
+    """
     if not post_id:
         return {}
-    try:
-        dados = json.loads(decisions_path(root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(dados, dict):
-        return {}
-    valor = dados.get(str(int(post_id)))
-    return valor if isinstance(valor, dict) else {}
+    registros = read_media_decisions(root, post_id)
+    return registros[-1] if registros else {}
 
 
 def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
@@ -300,10 +362,21 @@ def read_telemetry_summary(
         "deferred_total": 0,
         "examined_total": 0,
         "vision_calls": 0,
+        "vision_api_requests": 0,
+        "vision_input_tokens": 0,
+        "vision_cached_tokens": 0,
+        "vision_output_tokens": 0,
+        "vision_errors": 0,
+        "vision_low_requests": 0,
+        "vision_high_requests": 0,
     }
-    # Balanço por ORIGEM (cron x manual x teste) e qualidade POR DECISÃO.
+            # Balanço por ORIGEM (cron x manual x teste) e qualidade POR DECISÃO.
     por_origem: dict[str, dict[str, int]] = {}
     decisao_qualidade: dict[str, dict[str, Any]] = {}
+    # Sessões RAIZ que produziram os eventos da fatia filtrada: é por elas que o
+    # numerador (tokens/custo do state.db) é cruzado com o denominador (READY) —
+    # sem isso o KPI mistura "READY novos" com "tokens de 24h".
+    sessoes_filtradas: set[str] = set()
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -329,6 +402,9 @@ def read_telemetry_summary(
                 continue
             if cron_job_id is not None and str(record.get("cron_job_id") or "") != cron_job_id:
                 continue
+            raiz_evento = str(record.get("root_session_id") or record.get("session_id") or "")
+            if raiz_evento:
+                sessoes_filtradas.add(raiz_evento)
             counts[event] = counts.get(event, 0) + 1
             reason = record.get("reason")
             if isinstance(reason, str) and reason.strip():
@@ -380,7 +456,28 @@ def read_telemetry_summary(
                                                             "examined"} else campo] += valor
                 if isinstance(record.get("engines_queried"), int) and record["engines_queried"] > 0:
                     midia["searches_with_web"] += 1
-            if event == "vision_call":
+            if event == "vision_api_request":
+                # UMA requisição HTTP = UM evento (low e high contam): é a
+                # unidade que reconcilia com o custo de visão do provedor.
+                midia["vision_api_requests"] += 1
+                midia["vision_calls"] += 1
+                for campo, chave in (
+                    ("input_tokens", "vision_input_tokens"),
+                    ("cached_tokens", "vision_cached_tokens"),
+                    ("output_tokens", "vision_output_tokens"),
+                ):
+                    valor = record.get(campo)
+                    if isinstance(valor, int):
+                        midia[chave] += valor
+                if str(record.get("error") or "").strip():
+                    midia["vision_errors"] += 1
+                if str(record.get("detail") or "") == "high":
+                    midia["vision_high_requests"] += 1
+                else:
+                    midia["vision_low_requests"] += 1
+            elif event == "vision_call":
+                # Formato anterior (sem usage): conta como chamada para não
+                # quebrar a série histórica, sem inflar os tokens.
                 midia["vision_calls"] += 1
             # QUALIDADE por decisão: cruza a decisão de busca (auto/choose/reuse)
             # com o que os gates fizeram depois. É a prova que falta de que a
@@ -398,6 +495,9 @@ def read_telemetry_summary(
                         "apply_first_pass_ready": 0,
                         "apply_media_blocks": 0,
                         "apply_other_blocks": 0,
+                        "first_pass_attempts": 0,
+                        "first_pass_ready": 0,
+                        "first_pass_blocked": 0,
                     },
                 )
                 if event == "media_search_result":
@@ -413,6 +513,8 @@ def read_telemetry_summary(
                     bucket_decisao["apply_ready"] += 1
                     if record.get("first_pass"):
                         bucket_decisao["apply_first_pass_ready"] += 1
+                        bucket_decisao["first_pass_ready"] += 1
+                    bucket_decisao["first_pass_attempts"] += 1
                 elif event == "apply_blocked":
                     motivos = record.get("failure_reasons")
                     nomes = motivos if isinstance(motivos, list) else []
@@ -420,6 +522,13 @@ def read_telemetry_summary(
                         bucket_decisao["apply_media_blocks"] += 1
                     else:
                         bucket_decisao["apply_other_blocks"] += 1
+                    if record.get("first_pass"):
+                        bucket_decisao["first_pass_blocked"] += 1
+                        bucket_decisao["first_pass_attempts"] += 1
+            if event == "apply_ready":
+                # `run_sources.ready` precisa contar de verdade (antes ficava
+                # sempre 0 e o diagnóstico por origem mentia).
+                bucket_origem["ready"] += 1
             if event == "media_funnel":
                 stage = record.get("stage")
                 status = record.get("status")
@@ -476,13 +585,14 @@ def read_telemetry_summary(
             ),
         },
         "run_sources": por_origem,
+        "root_sessions": sorted(sessoes_filtradas),
         "decision_quality": {
             decisao: {
                 **numeros,
                 # "ficou tão bom quanto antes?" por decisão: itens rejeitados por
                 # preflight (absoluto e por evento), taxa de BLOQUEIO DE MÍDIA no
-                # apply e primeira passada. Se `auto` piorar isso, a hipótese da
-                # margem (EDITOR_AUTO_SCORE_MARGIN) cai.
+                # apply e sucesso de PRIMEIRA TENTATIVA. Se `auto` piorar isso, a
+                # hipótese da margem (EDITOR_AUTO_SCORE_MARGIN) cai.
                 "validate_rejected_items_per_event": (
                     round(numeros["validate_rejected_items"] / numeros["validate_events"], 4)
                     if numeros["validate_events"] else None
@@ -495,9 +605,18 @@ def read_telemetry_summary(
                     )
                     if numeros["validate_events"] else None
                 ),
-                "first_pass_ready_rate": (
+                # `ready_first_pass_share`: dos posts que ficaram READY, quantos
+                # ficaram na primeira. NÃO é taxa de sucesso (um post bloqueado na
+                # primeira não aparece aqui).
+                "ready_first_pass_share": (
                     round(numeros["apply_first_pass_ready"] / numeros["apply_ready"], 4)
                     if numeros["apply_ready"] else None
+                ),
+                # `first_pass_success_rate`: das PRIMEIRAS tentativas, quantas
+                # viraram READY (1 READY + 10 bloqueados => 9,1%, e não 100%).
+                "first_pass_success_rate": (
+                    round(numeros["first_pass_ready"] / numeros["first_pass_attempts"], 4)
+                    if numeros["first_pass_attempts"] else None
                 ),
                 "media_block_rate": (
                     round(
@@ -527,6 +646,18 @@ def _timestamp(valor: Any) -> datetime | None:
     return quando
 
 
-def _is_sensitive(key: str) -> bool:
+def _is_sensitive(key: str, value: Any = None) -> bool:
+    """Campo sensível: nome com termo de credencial E valor TEXTUAL.
+
+    O filtro existe para não gravar segredos em claro. Mas ele descartava
+    silenciosamente CONTADORES cujo nome contém "token" (``input_tokens``,
+    ``cached_tokens``, ``output_tokens``): a telemetria de visão saía sem os
+    tokens e a conta nunca fechava. Número/bool/None não são credencial; texto
+    com nome de credencial continua bloqueado.
+    """
     lowered = key.lower()
-    return any(part in lowered for part in _SENSITIVE_PARTS)
+    if not any(part in lowered for part in _SENSITIVE_PARTS):
+        return False
+    if value is None or isinstance(value, (int, float, bool)):
+        return False
+    return True

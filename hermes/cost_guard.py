@@ -129,14 +129,32 @@ def usage_measurement_in_last_24h(
             f"AND started_at > strftime('%s','now') - ? AND {predicate}",
             (int(hours) * 3600, *params),
         ).fetchone()
+        # Uso AUXILIAR do Hermes (vision/compressao/titulo/aprovacao): gravado em
+        # session_model_usage com task != '' e FORA dos contadores de `sessions`.
+        # O teto em USD precisa somar os dois, senao o dashboard do provedor
+        # sempre aparece mais caro que a medicao interna.
+        custo_aux = 0.0
+        try:
+            aux_row = db.execute(
+                "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM session_model_usage "
+                "WHERE session_id IN (SELECT id FROM sessions WHERE source='cron' "
+                f"AND started_at > strftime('%s','now') - ? AND {predicate})",
+                (int(hours) * 3600, *params),
+            ).fetchone()
+            custo_aux = float((aux_row or [0])[0] or 0)
+        except sqlite3.Error:
+            custo_aux = 0.0
         db.close()
     except sqlite3.Error:
         return None
     entrada = int(row[3] or 0)
     cache_read = int(row[5] or 0)
     cache_write = int(row[6] or 0)
+    custo_main = float(row[0] or 0)
     return {
-        "cost_usd": float(row[0] or 0),
+        "cost_usd": round(custo_main + custo_aux, 6),
+        "cost_main_usd": round(custo_main, 6),
+        "cost_aux_usd": round(custo_aux, 6),
         "runs": int(row[1] or 0),
         "requests": int(row[2] or 0),
         "input_tokens": entrada,
@@ -157,13 +175,23 @@ def cost_in_last_24h(
 
 
 def context_bytes_in_last_24h(
-    telemetry_path: Path, *, hours: int = 24
+    telemetry_path: Path,
+    *,
+    hours: int = 24,
+    job_id: str = "",
+    run_source: str = "cron",
 ) -> tuple[int, int] | None:
-    """Bytes de stdout que o pipeline devolveu ao modelo na janela.
+    """Bytes de stdout que o pipeline devolveu ao modelo na janela do CRON.
 
     Le ``work/telemetry.jsonl`` e soma ``cmd_output.bytes`` dos comandos
     recentes; devolve ``(bytes, comandos)`` ou ``None`` quando o arquivo nao
     existe (sem medicao = sem bloqueio).
+
+    O filtro por origem/job é obrigatório: sem ele uma sessão MANUAL pesada
+    (verificação, investigação do operador) bloquearia o cron — exatamente o
+    mesmo defeito que a telemetria já não tem. Eventos antigos, sem
+    ``run_source`` gravado, NÃO entram no teto (o limite existe para frear o
+    cron; consumir orçamento com evento não atribuível seria pior).
     """
     if not telemetry_path.is_file():
         return None
@@ -177,6 +205,10 @@ def context_bytes_in_last_24h(
             except ValueError:
                 continue
             if record.get("event") != "cmd_output":
+                continue
+            if run_source and record.get("run_source") != run_source:
+                continue
+            if job_id and str(record.get("cron_job_id") or "") != str(job_id):
                 continue
             ts = record.get("ts")
             if isinstance(ts, str) and ts:
@@ -253,7 +285,9 @@ def main() -> int:
         if args.telemetry is None:
             print(json.dumps({"decision": "allow", "reason": "context_unmeasurable"}))
             return 0
-        medicao = context_bytes_in_last_24h(args.telemetry, hours=args.hours)
+        medicao = context_bytes_in_last_24h(
+            args.telemetry, hours=args.hours, job_id=args.job_id, run_source="cron"
+        )
         if medicao is None:
             print(json.dumps({"decision": "allow", "reason": "context_unmeasurable"}))
             return 0

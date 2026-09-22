@@ -49,13 +49,24 @@ unicornio-editor media-search-web "TERMO" --post-id POST_ID --needed 2
   que houver N candidatos **fortes** (`deterministic_match`) **distintos** e só
   expande entre engines enquanto faltar capacidade. `--limit` é apenas o teto de
   candidatos por engine (default 10; o alvo interno é `needed + 1`).
-- Saída (compacta): `capacity{needed,reuse,strong,accepted,missing}`,
-  `reuse[...]`, `decision` (`auto`/`choose`/`reuse`/`none`), `select`, `options`,
-  `rejected_summary` (contagem por motivo), `audit` (arquivo completo).
+- A capacidade do SourceResolver usa o MESMO critério: **forte + frame distinto**
+  (`verified_page` isolado não conta — provar que a imagem está na página não diz
+  nada sobre relevância nem sobre diversidade). O funil roda POR CANDIDATO
+  (resolver → evidência → pHash) e os candidatos dispensados aparecem separados
+  em `capacity.deferred`/`deferred` (dispensado ≠ rejeitado).
+- Saída (compacta): `capacity{needed,reuse,strong,accepted,missing,deferred}`,
+  `coverage` (`local`/`mixed`/`web`), `decision` (`auto`/`choose`/`reuse`/`none`),
+  `decision_id` (ledger), `select`, `options`, `rejected_summary` (contagem por
+  motivo), `audit` (arquivo completo).
   `decision: auto` = um candidato inequívoco passou todos os hard gates: use
   `select` direto (não há julgamento a fazer). `choose` = empate/ambiguidade
-  real: escolha entre 2-3 `options`. `reuse` = o acervo local cobriu o déficit
-  (nenhuma busca web foi feita). `none` = nada utilizável: registre `uncertain`.
+  real: escolha entre 2-3 `options`. `reuse` = o acervo local cobriu a
+  necessidade INTEIRA (nenhuma busca web foi feita). `none` = nada utilizável:
+  registre `uncertain`.
+- **`coverage` responde DE ONDE vieram as imagens** (`local`/`mixed`/`web`) e
+  `decision` responde se o material da web exigiu julgamento. O caso misto
+  (1 do acervo + 1 da web com `needed=2`) é `coverage: mixed` com decisão sobre o
+  candidato da web — NUNCA `reuse`.
 - Media Library/índice local vêm ANTES da web: `reuse` traz imagens já
   validadas (URL original + página de origem + pHash + media_id) que o apply
   aceita. Só o déficit restante vai aos buscadores — quando `missing` é 0,
@@ -140,26 +151,56 @@ stdout pequeno orientado à próxima ação:
   (que ficam em disco e não entram na conversa).
 - Mídia (mesma janela, mesma unidade): `local_reuse_rate` (reuso/necessidade),
   `web_searches_per_ready`, `vision_calls_per_ready`,
-  `candidates_examined_per_ready`. `vision_calls` conta CHAMADAS REAIS de visão
-  (cache e bypass determinístico não contam).
+  `candidates_examined_per_ready`. `vision_calls` conta REQUISIÇÕES HTTP de visão
+  (`vision_api_request`, uma por chamada: low e high contam separado) e a
+  telemetria guarda `vision_input_tokens`/`vision_cached_tokens`/
+  `vision_output_tokens` do `usage` do provedor — é o que reconcilia com o
+  dashboard externo. `vision_low_requests`/`vision_high_requests` mostram quanto
+  da escalada está sendo usada.
+- **Numerador e denominador das MESMAS sessões**: cada evento carrega
+  `root_session_id` e o KPI faz JOIN (`attribution: join_sessions`) — antes o
+  numerador somava TODAS as sessões das últimas 24h enquanto o denominador
+  (READY) era só dos eventos novos, inflando `prompt_tokens_per_ready`. Sem
+  evento instrumentado o resultado cai para `attribution: window_job` e isso
+  vem MARCADO.
+- **main-loop x auxiliar**: `prompt_tokens_per_ready` é o MAIN-LOOP (tabela
+  `sessions`); `aux_prompt_tokens_per_ready`/`aux_cost_per_ready_usd` vêm de
+  `session_model_usage` (vision, compressão, título, aprovação — que NÃO entram
+  nos contadores de `sessions`); `grand_total_*` soma tudo, no custo também.
 - **Qualidade por decisão** (`decision_quality`): a decisão de mídia fica no
-  ledger `work/media_decisions.json` e os gates seguintes carregam essa decisão
-  nos eventos, então dá para comparar `auto` x `choose` x `reuse` em
+  ledger append-only `work/media_decisions.jsonl` — uma entrada por busca/ITEM,
+  com `decision_id` (o mesmo id vai no `media_plan`, no `media_search_result` e no
+  `media_validate_result`) — e os gates seguintes carregam essa decisão nos
+  eventos. Assim dá para comparar `auto` x `choose` x `reuse` em
   `validate_rejected_items_per_event`, `validate_posts_with_rejection_rate`,
-  `media_block_rate` e `first_pass_ready_rate`. É a prova de que a economia de
-  julgamento não piorou a imagem escolhida.
+  `media_block_rate`, `ready_first_pass_share` (dos READY, quantos foram de
+  primeira) e `first_pass_success_rate` (das PRIMEIRAS tentativas, quantas deram
+  READY: 1 READY + 10 bloqueados = 9,1%, não 100%).
 - `EDITOR_AUTO_SCORE_MARGIN` (default 2) é a margem de `evidence_score` para o
   `auto`: **hipótese de calibração**, não fato. Se os casos `auto` passarem a ser
   rejeitados depois, suba a margem (ou exija `len(fortes) == 1`).
 - Cada busca grava `media_search_result` (needed, reuse, strong, ambiguous,
   accepted, rejected, deferred, examined, engines_queried, decision,
-  decision_reason) e o artefato `work/search/*.json` guarda a decisão com RAZÃO
-  e scores — é o que permite auditar a qualidade das imagens escolhidas.
-- Freios do monitor (`hermes/cost_guard.py`): além de USD, também
-  `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,
-  `HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT` e
-  `HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT` (0 = desligado). Estourado
-  qualquer um, o monitor não acorda o LLM e a próxima janela começa limpa.
+  decision_reason, decision_id, coverage) e o artefato `work/search/*.json`
+  guarda a decisão com RAZÃO e scores — é o que permite auditar a qualidade das
+  imagens escolhidas.
+- **Armadilha de instrumentação**: `log_event` descarta campo cujo NOME contenha
+  `password`/`token`/`secret`/`authorization`/`cookie`/`api_key` QUANDO o valor é
+  texto (proteção de credencial). Contadores numéricos (`input_tokens` etc.)
+  passam normalmente; se um campo novo não aparecer no telemetry.jsonl, suspeite
+  desse filtro antes de investigar o pipeline.
+- Freios do monitor (`hermes/cost_guard.py`): além de USD (main + auxiliar),
+  também `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,
+  `HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT` (input + cache_read +
+  cache_write) e `HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT` (0 = desligado).
+  Todos filtram por `run_source=cron` + id do job: sessão MANUAL pesada não pode
+  bloquear o cron. Estourado qualquer um, o monitor não acorda o LLM e a próxima
+  janela começa limpa.
+  `HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT` continua aceito como alias
+  deprecated de PROMPT tokens.
+- Edge case conhecido do Hermes (não é bug do monitor): num job NOVO/RECRIADO, a
+  primeira observação (`last_hash is None`) executa o agente mesmo com a saída
+  congelada; do segundo tick em diante o bloqueio não acorda o LLM.
 
 ## 7. `content POST_ID` só para reescrita real
 

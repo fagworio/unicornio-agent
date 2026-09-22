@@ -414,6 +414,7 @@ def dedupe_by_phash(
     rejeitados: list[dict[str, Any]],
     *,
     threshold: int | None = None,
+    hashes: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """GATE C antecipado: pHash ANTES da seleção/upload (Fase 12).
 
@@ -423,6 +424,10 @@ def dedupe_by_phash(
     por similaridade visual e só o MELHOR de cada grupo sobrevive (a lista chega
     ordenada: origem oficial primeiro, depois score de evidência).
 
+    ``hashes`` permite reusar fingerprints JÁ calculados pelo chamador (o funil
+    por candidato calcula o pHash dos fortes para a contagem de capacidade): sem
+    isso, a mesma imagem seria baixada e hasheada duas vezes.
+
     Fail-soft: se não houver hashes suficientes (imagem inacessível), nada é
     descartado — a política cheia continua valendo no checklist.
     """
@@ -431,7 +436,15 @@ def dedupe_by_phash(
     from .visual_hash import image_hashes, similar_image_pairs
 
     urls = [str(c.get("direct_image_url") or "") for c in aprovados]
-    hashes = image_hashes([u for u in urls if u])
+    conhecidos = dict(hashes or {})
+    faltantes = [u for u in urls if u and u not in conhecidos]
+    if faltantes:
+        try:
+            conhecidos.update(image_hashes(faltantes))
+        except Exception:  # noqa: BLE001 - pHash é melhor-esforço
+            pass
+    hashes = {u: h for u, h in conhecidos.items() if h}
+    urls = [u for u in urls if u]
     # O fingerprint é anexado SEMPRE (mesmo quando não há duplicata): a contagem
     # de capacidade usa pHash global entre engines, e antes o early-return
     # deixava o candidato único sem hash — a parada caía para URL e duas

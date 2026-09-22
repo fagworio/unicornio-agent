@@ -296,6 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximo de candidatos por titulo (default: 3; mantem a resposta compacta)",
     )
     media_search_listicle_parser.add_argument("--engine", default="auto")
+    media_search_listicle_parser.add_argument(
+        "--post-id",
+        dest="post_id",
+        type=int,
+        default=0,
+        help="id do post da lista: permite registrar no ledger a decisão de CADA "
+        "item (antes as listas ficavam fora do cruzamento de qualidade)",
+    )
     media_search_listicle_parser.add_argument("--root", type=Path, default=Path("."))
 
     content_parser = subparsers.add_parser(
@@ -743,64 +751,40 @@ def _enriquecer_candidatos(
         pendentes.append(cand)
     pendentes_ids = {id(cand) for cand in pendentes}
 
-    # SourceResolver: o candidato sem origem (Yandex) NÃO é descartado de saída —
-    # ele tenta localizar a página de publicação (domínio oficial -> filename ->
-    # busca textual). O que o resolver acha é apenas LOCALIZADOR: a prova
-    # continua sendo a validação determinística logo abaixo.
-    if any(not str(c.get("source_page_url") or "").strip() for c in pendentes):
-        try:
-            from .media.source_resolver import resolve_candidate_source
+    # CAPACIDADE REAL do resolver (P0 da revisao 4). `capacity` é "quantas
+    # imagens FORTES e DISTINTAS o post precisa". Contar apenas
+    # `source_resolution == "verified_page"` ainda parava cedo demais: verified_page
+    # prova que a imagem ESTA naquela pagina, nao que ela é relevante para o
+    # subject (o evidence_score vem depois) nem que o frame é distinto (o pHash
+    # vem depois). Com capacity=1, um candidato A que resolvia a origem e DEPOIS
+    # era rejeitado por relevância dispensava B e C — que podiam ser a imagem
+    # certa. O pipeline agora roda POR CANDIDATO (resolver -> evidencia -> pHash)
+    # e a capacidade só conta forte + frame distinto.
+    from .media.visual_hash import image_hashes
 
-            teto_resolver = int(capacity) if capacity and capacity > 0 else 0
-            validos = 0
-            for cand in pendentes:
-                if str(cand.get("source_page_url") or "").strip():
-                    continue
-                if teto_resolver and validos >= teto_resolver:
-                    # Capacidade já atendida: não investiga candidato que não é
-                    # necessário (economia de rede/latência, não de gate).
-                    cand["capacity_deferred"] = True
-                    cand["rejected_reason"] = "capacity_met"
-                    continue
-                chave_original = _memo_key(cand)
-                # O verifier é a MESMA validação determinística: o resolver
-                # testa as páginas em ordem e fica com a primeira que realmente
-                # contém a imagem (antes ele devolvia a primeira e o candidato
-                # era rejeitado mesmo havendo uma segunda página válida).
-                resolvido = resolve_candidate_source(
-                    cand,
-                    subject,
-                    verifier=lambda c: validate_discovered_candidate(
-                        c, cache=cache_paginas, cache_html=cache_html
-                    ),
-                )
-                if str(resolvido.get("source_page_url") or "").strip():
-                    resolvido["usable"] = True
-                    resolvido["discovery_only"] = False
-                    resolvido.pop("rejected_reason", None)
-                    cand.clear()
-                    cand.update(resolvido)
-                    # CONTRATO REAL do resolver: quando ele encontra e VERIFICA
-                    # uma pagina, o sucesso aparece em
-                    # ``source_resolution == "verified_page"`` — ele NAO devolve
-                    # ``valid=True`` (o veredito do verifier fica registrado na
-                    # resolucao). Contar apenas ``valid`` deixava ``validos`` em 0
-                    # no caminho real e o teto de capacidade NUNCA disparava: o
-                    # resolver seguia investigando candidato que ja nao era
-                    # necessario. ``valid`` continua contando quando um verifier
-                    # externo o define (contrato antigo/testes).
-                    if (
-                        cand.get("valid")
-                        or cand.get("source_resolution") == "verified_page"
-                    ):
-                        validos += 1
-                    # O memo fica sob a chave ORIGINAL (sem origem): é a chave
-                    # que o próximo enriquecimento do MESMO candidato vai usar.
-                    _guardar_memo(cand, chave_original)
-        except Exception:  # noqa: BLE001 - resolver é best-effort
-            pass
+    hashes_locais: dict[str, str] = {}
 
-    for cand in pendentes:
+    def _phash_de(url: str) -> str:
+        chave = str(url or "")
+        if chave and chave not in hashes_locais:
+            try:
+                hashes_locais.update(image_hashes([chave]))
+            except Exception:  # noqa: BLE001 - pHash é melhor-esforço
+                pass
+        return str(hashes_locais.get(chave) or "")
+
+    def _fortes_distintos() -> int:
+        vistos: set[str] = set()
+        for forte in aprovados:
+            if (forte.get("evidence") or {}).get("verdict") != "deterministic_match":
+                continue
+            chave = str(forte.get("phash") or "") or str(forte.get("direct_image_url") or "")
+            if chave:
+                vistos.add(chave)
+        return len(vistos)
+
+    def _classificar(cand: dict) -> None:
+        """Evidência + proveniência + pHash de UM candidato (fase por candidato)."""
         cand["subject"] = subject
         if cand.get("capacity_deferred"):
             # NÃO é rejeição: nada foi verificado contra este candidato, ele
@@ -816,7 +800,7 @@ def _enriquecer_candidatos(
             cand["needs_vision"] = False
             deferidos.append(cand)
             _guardar_memo(cand)
-            continue
+            return
         if not cand.get("usable"):
             # Gate A: sem origem nao existe ACCEPT possivel.
             cand["evidence"] = {
@@ -828,7 +812,7 @@ def _enriquecer_candidatos(
             cand["needs_vision"] = False
             rejeitados.append(cand)
             _guardar_memo(cand)
-            continue
+            return
         if verify:
             veredito = validate_discovered_candidate(
                 cand, cache=cache_paginas, cache_html=cache_html
@@ -867,8 +851,60 @@ def _enriquecer_candidatos(
         cand["official_source"] = official_source(
             str(cand.get("direct_image_url") or ""), subject
         )
+        if pontos["verdict"] == "deterministic_match":
+            # pHash imediato: a capacidade do resolver exige frame DISTINTO e,
+            # sem o hash aqui, a contagem cairia para URL — o mesmo frame servido
+            # por duas engines (URLs diferentes) contaria como dois fortes.
+            bruto = _phash_de(str(cand.get("direct_image_url") or ""))
+            if bruto:
+                cand["phash"] = bruto
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
         _guardar_memo(cand)
+
+    teto_resolver = int(capacity) if capacity and capacity > 0 else 0
+    resolver = None
+    if any(not str(c.get("source_page_url") or "").strip() for c in pendentes):
+        try:
+            from .media.source_resolver import resolve_candidate_source as resolver  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - resolver é best-effort
+            resolver = None
+
+    for cand in pendentes:
+        sem_origem = not str(cand.get("source_page_url") or "").strip()
+        if sem_origem and resolver is not None:
+            if teto_resolver and _fortes_distintos() >= teto_resolver:
+                # Capacidade JÁ atendida por fortes distintos: não investiga
+                # candidato que não é necessário (economia de rede/latência —
+                # o gate não é afrouxado, o candidato só não vira rejeição).
+                cand["capacity_deferred"] = True
+                cand["rejected_reason"] = "capacity_met"
+                _classificar(cand)
+                continue
+            chave_original = _memo_key(cand)
+            # O verifier é a MESMA validação determinística: o resolver testa as
+            # páginas em ordem e fica com a primeira que realmente contém a
+            # imagem (antes ele devolvia a primeira e o candidato era rejeitado
+            # mesmo havendo uma segunda página válida).
+            try:
+                resolvido = resolver(
+                    cand,
+                    subject,
+                    verifier=lambda c: validate_discovered_candidate(
+                        c, cache=cache_paginas, cache_html=cache_html
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - resolver é best-effort
+                resolvido = cand
+            if str(resolvido.get("source_page_url") or "").strip():
+                resolvido["usable"] = True
+                resolvido["discovery_only"] = False
+                resolvido.pop("rejected_reason", None)
+                cand.clear()
+                cand.update(resolvido)
+            # O memo fica sob a chave ORIGINAL (sem origem): é a chave que o
+            # próximo enriquecimento do MESMO candidato vai usar.
+            _guardar_memo(cand, chave_original)
+        _classificar(cand)
 
     # Candidatos que vieram do memo (não reprocessados) entram no resultado pela
     # MESMA decisão registrada — o memo é o resultado, não um atalho.
@@ -917,7 +953,7 @@ def _enriquecer_candidatos(
     # diferentes) contaria como 2 frames distintos.
     from .media.evidence import dedupe_by_phash
 
-    aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados)
+    aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados, hashes=hashes_locais)
 
     # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
     # é "quantas imagens o Bing devolveu", e sim quantas atravessaram
@@ -1246,21 +1282,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             decisao_auditoria = _final_decision(
                 aprovados, reuso, needed, margin=int(config.auto_score_margin)
             )
+            decision_id = ""
             if post_id_ref:
-                # Ledger da decisão: os gates seguintes (media-validate, apply,
-                # first-pass) carregam esta decisão nos eventos, o que permite
-                # medir se `auto`/`reuse` pioraram a qualidade das imagens.
+                # Ledger (append-only) da decisão: os gates seguintes
+                # (media-validate, apply) carregam esta decisão nos eventos, o que
+                # permite medir se `auto`/`reuse` pioraram a qualidade. O id viaja
+                # no stdout/plano para rastrear a decisão de CADA imagem.
                 try:
                     from .observability import record_media_decision
 
-                    record_media_decision(
+                    selecionado = decisao_auditoria.get("select") or {}
+                    decision_id = record_media_decision(
                         args.root, post_id_ref,
                         decision=str(decisao_auditoria["decision"]),
                         score_gap=decisao_auditoria.get("score_gap"),
                         query=args.termo,
+                        subject=subject_alvo,
+                        selected_url=str(selecionado.get("url") or ""),
+                        coverage=str(decisao_auditoria.get("coverage") or ""),
                     )
                 except Exception:  # noqa: BLE001 - ledger é instrumentação
-                    pass
+                    decision_id = ""
             # Economia de mídia medível (P0/P1): quanto veio do acervo local,
             # quantas buscas web de fato aconteceram, quantos candidatos foram
             # examinados e quantos foram apenas DISPENSADOS por capacidade
@@ -1284,6 +1326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 engines_queried=len(engines_queried),
                 decision=decisao_auditoria["decision"],
                 decision_reason=str(decisao_auditoria.get("reason") or "")[:200],
+                decision_id=decision_id,
+                coverage=str(decisao_auditoria.get("coverage") or ""),
             )
             audit = _write_audit(
                 args.root / "work" / "search" / f"{_audit_key(args.termo, post_id_ref)}.json",
@@ -1421,9 +1465,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                     candidates, rejeitados_item, deferidos_item = _enriquecer_candidatos(
                         candidates, subject=subject_item, termo=query, root=args.root,
                         enriched_cache=_memo_listicle,
+                        # Cada ITEM precisa de UMA imagem: capacidade 1 pelo mesmo
+                        # critério do artigo (forte + frame distinto), evitando
+                        # investigar candidato que já não é necessário.
+                        capacity=1,
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item
+                    # Decisão POR ITEM (append-only): a lista passa a ter
+                    # decisão_id por item, então o media-validate consegue dizer
+                    # qual imagem do item 3 foi rejeitada e qual decisão a
+                    # escolheu (`auto` com gap X, `choose`, ...).
+                    decisao_item = _final_decision(
+                        candidates, [], 1, margin=int(config.auto_score_margin)
+                    )
+                    decision_id_item = ""
+                    try:
+                        from .observability import record_media_decision
+
+                        selecionado_item = decisao_item.get("select") or {}
+                        decision_id_item = record_media_decision(
+                            args.root,
+                            int(getattr(args, "post_id", 0) or 0),
+                            decision=str(decisao_item["decision"]),
+                            score_gap=decisao_item.get("score_gap"),
+                            query=query,
+                            subject=subject_item,
+                            item_index=len(audit_items),
+                            selected_url=str(selecionado_item.get("url") or ""),
+                            coverage=str(decisao_item.get("coverage") or ""),
+                        )
+                    except Exception:  # noqa: BLE001 - ledger é instrumentação
+                        decision_id_item = ""
                     for candidate in candidates:
                         direct_url = str(candidate.get("direct_image_url") or "")
                         append_telemetry(
@@ -1438,7 +1511,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # exata por item não existe no batch.
                     append_telemetry(
                         args.root, "media_search_result",
-                        query=query, post_id=0, batch=True,
+                        query=query, post_id=int(getattr(args, "post_id", 0) or 0),
+                        item_index=len(audit_items), batch=True,
                         needed=1, needed_web=1, reuse=0,
                         strong=sum(
                             1 for c in candidates
@@ -1453,8 +1527,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         deferred=len(deferidos_item),
                         examined=len(candidates),
                         engines_queried=1 if candidates else 0,
-                        decision="",
-                        decision_reason="",
+                        decision=str(decisao_item["decision"]),
+                        decision_reason=str(decisao_item.get("reason") or "")[:200],
+                        decision_id=decision_id_item,
+                        coverage=str(decisao_item.get("coverage") or ""),
                     )
                     if not candidates:
                         missing.append(query)
@@ -1585,6 +1661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     decision=str(decisao_midia.get("decision") or ""),
                     score_gap=decisao_midia.get("score_gap"),
+                    decision_id=str(decisao_midia.get("decision_id") or ""),
                 )
             except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
                 pass
@@ -1856,30 +1933,50 @@ def _media_decision(aprovados: list[dict], *, options: int = 3, margin: int = 2)
 def _final_decision(
     aprovados: list[dict], reuso: list[dict], needed: int, *, margin: int = 2
 ) -> dict:
-    """Decisão FINAL de mídia (auto/choose/reuse/none) para este post.
+    """Decisão FINAL de mídia (auto/choose/reuse/none) + COBERTURA do déficit.
 
-    Única fonte da verdade: usada pelo stdout/artefato E pelo ledger
-    (``work/media_decisions.json``) que os gates seguintes consultam para cruzar
-    economia com qualidade. Se o acervo local já cobre o déficit, `reuse` vence:
-    reusar é mais barato e a imagem já passou pelos controles (a proveniência
-    registrada continua valendo no apply).
+    Duas perguntas diferentes, dois campos diferentes:
+
+    * ``coverage`` — DE ONDE vieram as imagens: ``local`` (o acervo cobre tudo),
+      ``mixed`` (parte do acervo + parte da web) ou ``web`` (só web);
+    * ``decision`` — se o material da WEB exige julgamento (``auto``/``choose``)
+      ou se nada é necessário (``reuse``/``none``).
+
+    ``reuse`` só vale quando o acervo local cobre a necessidade INTEIRA
+    (``len(reuso) >= needed``). Antes a conta era
+    ``faltam = needed - len(reuso) - fortes`` e o caso misto (1 local + 1 web com
+    needed=2) virava ``decision=reuse`` — dizendo ao agente que não havia busca
+    a fazer quando metade do material vinha da web, e contradizendo o próprio
+    SKILL (`reuse` = acervo cobre o déficit e não houve busca web).
     """
     fortes = sum(
         1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
     )
-    faltam = max(0, int(needed) - len(reuso) - fortes)
+    cobertura = "local" if len(reuso) >= int(needed) else ("mixed" if reuso else "web")
     decisao = _media_decision(aprovados, margin=int(margin))
-    if reuso and faltam == 0:
+    decisao["coverage"] = cobertura
+    decisao["local_reuse"] = len(reuso)
+    if cobertura == "local":
         decisao = {
             "decision": "reuse",
             "reason": (
                 f"acervo local cobre o deficit ({len(reuso)} reuso(s) para "
-                f"{len(reuso)} de {int(needed)} necessarias); nenhuma busca web necessaria"
+                f"{int(needed)} necessarias); nenhuma busca web necessaria"
             ),
+            "coverage": "local",
+            "local_reuse": len(reuso),
             "score_gap": None,
             "select": None,
             "options": decisao.get("options") or [],
         }
+    elif cobertura == "mixed" and decisao.get("decision") in ("auto", "choose"):
+        # Material local PARCIAL: a decisão continua sendo sobre o candidato da
+        # web (é ele que vai para o media-validate), mas a cobertura diz a
+        # verdade sobre a origem das imagens.
+        decisao["reason"] = (
+            f"cobertura mista ({len(reuso)} do acervo local + candidato da web); "
+            + str(decisao.get("reason") or "")
+        )
     return decisao
 
 
@@ -1896,6 +1993,7 @@ def _compact_media_search(
     ambiguous: int = 0,
     deferred: int = 0,
     margin: int = 2,
+    decision_id: str = "",
 ) -> dict:
     """Contrato compacto do ``media-search-web`` (o que o agente pode USAR).
 
@@ -1928,6 +2026,11 @@ def _compact_media_search(
         "audit": audit,
         "decision_reason": decisao.get("reason"),
         "decision_score_gap": decisao.get("score_gap"),
+        # Cobertura diz DE ONDE vieram as imagens (local/mixed/web); decision diz
+        # se o material da web exige julgamento. Também vai o decision_id do
+        # ledger: é ele que o media-validate/apply referenciam.
+        "coverage": decisao.get("coverage") or ("local" if reuso and not aprovados else "web"),
+        "decision_id": decision_id,
     }
     if reuso:
         resultado["reuse"] = reuso

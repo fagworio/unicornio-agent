@@ -54,11 +54,12 @@ def _config(**overrides):
 
 
 class SourceResolverContractTests(unittest.TestCase):
-    """O resolver REAL devolve `source_resolution="verified_page"`, não `valid`.
+    """Capacidade = forte + frame DISTINTO (não `verified_page` só).
 
-    Contar apenas `valid` deixava o teto de capacidade inerte em produção: o
-    resolver seguia investigando candidato que já não era necessário. Estes
-    testes usam o resolver de verdade e mockam só a BUSCA (HTTP) e o verificador.
+    `verified_page` prova que a imagem está naquela página, não que ela é
+    relevante para o subject (evidence_score vem depois) nem que o frame é
+    distinto (pHash vem depois). Estes testes usam o resolver REAL e mockam só a
+    busca HTTP, o verificador e os hashes.
     """
 
     @staticmethod
@@ -72,32 +73,36 @@ class SourceResolverContractTests(unittest.TestCase):
             "engine": "yandex",
         }
 
-    def test_capacity_defers_after_a_verified_page_from_the_real_resolver(self):
+    def _rodar(self, candidatos, *, capacity, hashes=None, fortes=()):
         from unicornio_editor import cli
 
-        paginas = {
-            "https://site/1": True,   # contém a imagem (verifier aprova)
-            "https://site/2": True,
-            "https://site/3": True,
-        }
-        resolvidas: list[str] = []
+        contador = {"n": 0}
+        fortes = tuple(fortes)
 
-        def busca_falsa(query):
-            # Uma página por query, na ordem das queries geradas pelo resolver.
-            paginas_disponiveis = list(paginas)
-            indice = min(len(resolvidas), len(paginas_disponiveis) - 1)
-            return [{"source_page_url": paginas_disponiveis[indice]}]
+        def busca_falsa(_query):
+            contador["n"] += 1
+            indice = min(contador["n"] - 1, len(candidatos) - 1)
+            return [{"source_page_url": f"https://site/pagina{indice + 1}"}]
 
         def verifier_falso(cand, **kwargs):
-            pagina = cand.get("source_page_url")
-            resolvidas.append(str(pagina))
-            return {"valid": bool(paginas.get(pagina)), "reason": "ok", "images_in_page": 1}
+            return {"valid": True, "reason": "ok", "images_in_page": 1}
 
-        candidatos = [
-            self._candidato("https://cdn/1.jpg"),
-            self._candidato("https://cdn/2.jpg"),
-            self._candidato("https://cdn/3.jpg"),
-        ]
+        def hashes_falsos(urls):
+            return {u: (hashes or {}).get(u, f"hash-{u}") for u in urls if u}
+
+        def evidence_dirigida(subject, *, filename="", **kwargs):
+            # Marca como FORTE só os candidatos pedidos: o teste isola a lógica de
+            # CAPACIDADE (forte + frame distinto), sem depender da heurística de
+            # score. `filename` identifica o candidato (basename da URL).
+            forte = any(marcador in filename for marcador in fortes)
+            return {
+                "subject": subject, "matched": ["filename"] if forte else [],
+                "evidence": {}, "local_score": 9 if forte else 0,
+                "score": 9 if forte else 0, "gate": "relevance", "penalties": [],
+                "needs_vision": False,
+                "verdict": "deterministic_match" if forte else "reject",
+            }
+
         with mock.patch(
             "unicornio_editor.media.source_resolver._buscador_padrao",
             side_effect=busca_falsa,
@@ -105,21 +110,76 @@ class SourceResolverContractTests(unittest.TestCase):
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
             side_effect=verifier_falso,
         ), mock.patch(
+            "unicornio_editor.media.visual_hash.image_hashes",
+            side_effect=hashes_falsos,
+        ), mock.patch(
+            "unicornio_editor.media.evidence.evidence_score",
+            side_effect=evidence_dirigida,
+        ), mock.patch(
             "unicornio_editor.media.evidence.dedupe_by_phash",
-            side_effect=lambda aprovados, rejeitados: (aprovados, rejeitados),
+            side_effect=lambda aprovados, rejeitados, **kw: (aprovados, rejeitados),
         ):
-            _aprovados, _rejeitados, deferidos = cli._enriquecer_candidatos(
-                candidatos, subject="Metroid Prime 4", termo="metroid prime 4", capacity=1
+            return cli._enriquecer_candidatos(
+                candidatos, subject="Metroid Prime 4", termo="metroid prime 4",
+                capacity=capacity,
             )
-        # A capacidade era 1: assim que uma página foi VERIFICADA (contrato real
-        # do resolver), os outros candidatos passaram a ser dispensados.
-        self.assertEqual(len(deferidos), 2, [c.get("source_resolution") for c in candidatos])
-        self.assertEqual(candidatos[0].get("source_resolution"), "verified_page")
+
+    def test_candidato_fraco_nao_consome_capacidade(self):
+        """Página verificada + evidência FRACA não pode parar a investigação.
+
+        Antes da rodada 4, o candidato 1 (origem resolvida) consumia a capacidade
+        e os candidatos 2 e 3 eram dispensados — mesmo sendo rejeitados por
+        relevância logo em seguida.
+        """
+        candidatos = [
+            self._candidato("https://cdn/aaa.jpg"),
+            self._candidato("https://cdn/bbb.jpg"),
+            self._candidato("https://cdn/ccc.jpg"),
+        ]
+        aprovados, rejeitados, deferidos = self._rodar(candidatos, capacity=1)
+        self.assertEqual(deferidos, [], "não pode dispensar sem ter forte distinto")
+        self.assertEqual(aprovados, [])
+        # Todos foram INVESTIGADOS (têm páginas de origem resolvidas).
+        self.assertTrue(all(c.get("candidate_pages") for c in candidatos))
+
+    def test_forte_e_distinto_atende_a_capacidade(self):
+        candidatos = [
+            self._candidato("https://cdn/metroid-prime-4-keyart.jpg"),
+            self._candidato("https://cdn/bbb.jpg"),
+            self._candidato("https://cdn/ccc.jpg"),
+        ]
+        aprovados, _rejeitados, deferidos = self._rodar(
+            candidatos, capacity=1, fortes=["metroid-prime-4-keyart"]
+        )
+        fortes = [
+            c for c in aprovados
+            if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+        ]
+        self.assertEqual(len(fortes), 1)
+        self.assertEqual(len(deferidos), 2)
         self.assertTrue(all(c.get("capacity_deferred") for c in deferidos))
-        # Prova direta de que os dispensados NÃO foram investigados: o resolver
-        # só roda nos candidatos sem página e deixa `candidate_pages` quando roda.
-        self.assertNotIn("candidate_pages", candidatos[1])
-        self.assertNotIn("candidate_pages", candidatos[2])
+        # Os dispensados não foram investigados.
+        self.assertFalse(candidatos[1].get("candidate_pages"))
+        self.assertFalse(candidatos[2].get("candidate_pages"))
+
+    def test_mesmo_frame_nao_conta_como_dois_fortes(self):
+        """Capacidade 2 com 2 copias do MESMO frame: a 3ª ainda é investigada."""
+        candidatos = [
+            self._candidato("https://cdn/metroid-prime-4-keyart.jpg"),
+            self._candidato("https://espelho/metroid-prime-4-keyart.jpg"),
+            self._candidato("https://cdn/metroid-prime-4-outra.jpg"),
+        ]
+        hashes = {
+            "https://cdn/metroid-prime-4-keyart.jpg": "MESMO-FRAME",
+            "https://espelho/metroid-prime-4-keyart.jpg": "MESMO-FRAME",
+            "https://cdn/metroid-prime-4-outra.jpg": "FRAME-DIFERENTE",
+        }
+        _aprovados, _rejeitados, deferidos = self._rodar(
+            candidatos, capacity=2, hashes=hashes,
+            fortes=["metroid-prime-4-keyart", "metroid-prime-4-outra"],
+        )
+        self.assertEqual(deferidos, [])
+        self.assertTrue(candidatos[2].get("candidate_pages"), "3ª não pode ser dispensada")
 
 
 class HardSessionStopTests(unittest.TestCase):
@@ -427,13 +487,17 @@ class DecisionQualityTests(unittest.TestCase):
         qualidade = resumo["decision_quality"]
         self.assertEqual(qualidade["auto"]["searches"], 1)
         self.assertEqual(qualidade["auto"]["validate_rejected_items"], 0)
-        self.assertEqual(qualidade["auto"]["first_pass_ready_rate"], 1.0)
+        self.assertEqual(qualidade["auto"]["first_pass_success_rate"], 1.0)
         self.assertEqual(qualidade["auto"]["media_block_rate"], 0.0)
         self.assertEqual(qualidade["choose"]["validate_rejected_items"], 1)
         self.assertEqual(qualidade["choose"]["media_block_rate"], 1.0)
-        # `choose` não teve READY nesta amostra: a taxa fica None (não existe
-        # "primeira passada" sem um READY para medir) em vez de um 0.0 enganoso.
-        self.assertIsNone(qualidade["choose"]["first_pass_ready_rate"])
+        # `choose` não teve READY: 0 de 1 primeira tentativa = 0.0 (é a taxa de
+        # SUCESSO de primeira tentativa; antes a métrica ficava None e escondia o
+        # fracasso).
+        self.assertEqual(qualidade["choose"]["first_pass_success_rate"], 0.0)
+        self.assertEqual(qualidade["choose"]["first_pass_attempts"], 1)
+        self.assertEqual(qualidade["choose"]["first_pass_blocked"], 1)
+        self.assertIsNone(qualidade["choose"]["ready_first_pass_share"])
         self.assertEqual(qualidade["choose"]["apply_ready"], 0)
         self.assertEqual(qualidade["choose"]["apply_media_blocks"], 1)
 
