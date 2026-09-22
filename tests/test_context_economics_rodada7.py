@@ -82,8 +82,11 @@ class JoinSessionsAuxRequestsTests(unittest.TestCase):
         hermes = metricas["hermes_sessions"]
         self.assertEqual(hermes["main_requests"], 10)
         self.assertEqual(hermes["aux_requests"], 2)
+        # `requests` é MAIN-ONLY nos DOIS caminhos (simetria com prompt_tokens);
+        # o total vive em `requests_total` / `grand_total.requests`.
+        self.assertEqual(hermes["requests"], 10)
+        self.assertEqual(hermes["requests_total"], 12)
         self.assertEqual(hermes["grand_total"]["requests"], 12)
-        self.assertEqual(hermes["requests"], 12)
         self.assertEqual(metricas["direct_vision"]["requests"], 1)
         # 10 (main) + 2 (aux) + 1 (visão direta) = 13.
         self.assertEqual(metricas["observed_grand_total"]["requests"], 13)

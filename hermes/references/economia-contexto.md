@@ -200,9 +200,20 @@ stdout pequeno orientado à próxima ação:
   reuse) quando **todos** os itens do plano têm `decision_id`, **todos** resolvem
   no ledger e a decisão é **única**. Plano parcialmente rastreado → `missing` sem
   rótulo; id inexistente → `invalid` sem rótulo; tudo resolvido mas com decisões
-  diferentes → `resolved` + `decision_scope: mixed` sem rótulo. É o que impede um
-  `apply_ready`/`apply_blocked` mal rastreado de contaminar as estatísticas de
-  `auto`.
+  diferentes → `resolved` + `decision_scope: mixed` sem rótulo. **Plano vazio com
+  histórico no ledger** também não rotula (a decisão de uma busca anterior não
+  escolheu a imagem final): o rótulo antigo vai em `decision_unattributed`, que
+  nada agrega. E o agregador de `decision_quality` recusa por conta própria
+  qualquer evento cuja `decision_attribution` seja `missing`/`invalid` (defesa em
+  duas camadas) — é o que impede um `media_plan: []` de inflar `auto`. Os
+  contadores GLOBAIS (`production`) seguem contando esses posts.
+- `decision_scope` do `media-validate` usa os **rótulos resolvidos** no ledger,
+  não os ids: `auto + auto` (dois ids) é plano `uniform`; `auto + choose` é
+  `mixed`. Com qualquer item `missing`/`invalid` NÃO se declara scope (a decisão
+  de todos não é conhecida) — e o `media-validate` concorda com o apply.
+- **`requests_per_ready` é MAIN-ONLY** nos dois caminhos de atribuição (simetria
+  com `prompt_tokens_per_ready`); o total está em `requests_total` /
+  `grand_total.requests` e o KPI a usar é `grand_total_requests_per_ready`.
 - O arquivo legado `work/media_decisions.json` (mapa post → última decisão) só é
   usado para posts SEM registro no JSONL — o log novo é autoritativo.
 - Tokens de visão com **lower bound**: requisição sem `usage` (ex.: HTTP 500)

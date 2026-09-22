@@ -1687,6 +1687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 ids_plano: list[str] = []
                 estados: list[str] = []
+                rotulos: list[str] = []
                 for indice, item in enumerate(plano):
                     if not isinstance(item, dict):
                         continue
@@ -1699,6 +1700,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         read_media_decision_by_id(args.root, args.post_id or 0, identificador)
                         if estado == "resolved" else {}
                     )
+                    if estado == "resolved" and str(do_ledger.get("decision") or ""):
+                        rotulos.append(str(do_ledger["decision"]))
                     if identificador:
                         ids_plano.append(identificador)
                     append_telemetry(
@@ -1724,6 +1727,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     agregado_estado = "missing"
                 else:
                     agregado_estado = "resolved"
+                # `decision_scope` usa os RÓTULOS RESOLVIDOS no ledger (não os
+                # ids): `auto + auto` é plano UNIFORME, mesmo com dois ids
+                # diferentes — a versão por ids dizia "mixed" e divergia do apply.
+                # Com qualquer item missing/invalid a decisão de todos não é
+                # conhecida: sem scope (não se declara uniform nem mixed).
+                if agregado_estado != "resolved":
+                    escopo = ""
+                elif len({r for r in rotulos if r}) > 1:
+                    escopo = "mixed"
+                else:
+                    escopo = "uniform"
                 append_telemetry(
                     args.root, "media_validate_result",
                     post_id=args.post_id or 0,
@@ -1733,10 +1747,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ((result.get("featured_vision") or [{}])[0] or {}).get("status") or ""
                     ),
                     attribution=agregado_estado,
-                    decision_scope="mixed" if len(set(ids_plano)) > 1 else "uniform",
+                    decision_scope=escopo,
                     decision="",
                     score_gap=None,
                     decision_id="",
+                    decision_ids=ids_plano,
                 )
             except Exception:  # noqa: BLE001 - telemetria nunca derruba o CLI
                 pass

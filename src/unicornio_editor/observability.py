@@ -561,7 +561,15 @@ def read_telemetry_summary(
             # com o que os gates fizeram depois. É a prova que falta de que a
             # economia de julgamento NÃO piorou a imagem escolhida.
             decisao = record.get("decision")
-            if isinstance(decisao, str) and decisao:
+            # DEFESA EM DUAS CAMADAS: um evento de apply cuja atribuição é
+            # explicitamente missing/invalid NÃO entra em `decision_quality` —
+            # sem isso, um `media_plan: []` com histórico "auto" contava como
+            # `decision_quality.auto.apply_ready`, contaminando justamente a
+            # comparação auto x choose.
+            atribuicao_evento = str(record.get("decision_attribution") or "")
+            if isinstance(decisao, str) and decisao and atribuicao_evento not in (
+                "missing", "invalid"
+            ):
                 bucket_decisao = decisao_qualidade.setdefault(
                     decisao,
                     {

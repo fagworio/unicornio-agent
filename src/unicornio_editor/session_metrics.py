@@ -140,6 +140,7 @@ def _hermes_totals(
     return {
         "sessions": int(row[0] or 0),
         "requests": int(row[1] or 0),
+        "requests_total": int(row[1] or 0) + int(aux.get("requests") or 0),
         "input_tokens": entrada,
         "output_tokens": saida,
         "cache_read_tokens": cache_read,
@@ -243,6 +244,11 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
             db.close()
     except sqlite3.Error:
         return None
+    if int(linha[0] or 0) == 0:
+        # Nenhuma das sessões da telemetria existe no banco (ex.: sessão ainda não
+        # consolidada, banco rotacionado): NÃO se reporta zero como verdade do
+        # join — o chamador cai no fallback por janela e isso vem marcado.
+        return None
     entrada = int(linha[2] or 0)
     cache_read = int(linha[4] or 0)
     cache_write = int(linha[5] or 0)
@@ -256,7 +262,12 @@ def _usage_sessoes(state_db: Path, session_ids: list[str]) -> dict[str, Any] | N
         "scope": f"mesmas sessoes da telemetria ({len(session_ids)} sessao(oes))",
         "session_ids": list(session_ids),
         "sessions": int(linha[0] or 0),
-        "requests": int(linha[1] or 0) + int(aux.get("requests") or 0),
+        # MAIN-ONLY, em simetria com o caminho `window_job` e com
+        # `prompt_tokens` (main-loop): `requests_per_ready` não pode mudar de
+        # significado conforme o método de atribuição. O total fica em
+        # `requests_total` / `grand_total.requests`.
+        "requests": int(linha[1] or 0),
+        "requests_total": int(linha[1] or 0) + int(aux.get("requests") or 0),
         # Mesmas chaves do caminho `window_job`: os dois métodos de atribuição não
         # podem divergir (era aqui que o auxiliar sumia).
         "main_requests": int(linha[1] or 0),
@@ -404,6 +415,7 @@ def session_metrics(
                 **hermes["main"],
                 "sessions": hermes["sessions"],
                 "requests": hermes["requests"],
+                "requests_total": hermes["requests_total"],
                 # As chaves de camada precisam existir nos DOIS caminhos de
                 # atribuição (join e window_job): sem isso o join perdia os
                 # auxiliares e o primeiro ciclo medido parecia mais barato só por

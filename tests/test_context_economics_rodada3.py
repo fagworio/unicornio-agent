@@ -507,9 +507,18 @@ class DecisionQualityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             decision_id = record_media_decision(root, 7, decision="reuse", score_gap=None)
+            # Plano AUSENTE com histórico "reuse": a atribuição FALTA e `decision`
+            # NÃO é emitido (a decisão da busca anterior não escolheu imagem
+            # nenhuma do plano final — não pode entrar em decision_quality).
             campos = _decision_fields(root, 7)
+            self.assertEqual(campos["decision_attribution"], "missing")
+            self.assertNotIn("decision", campos)
+            self.assertEqual(campos["decision_unattributed"], "reuse")
+            # Com o plano TOTALMENTE rastreado, o rótulo volta a sair do ledger.
+            campos = _decision_fields(root, 7, [{"decision_id": decision_id}])
             self.assertEqual(campos["decision"], "reuse")
-            self.assertEqual(campos["decision_id"], decision_id)
+            self.assertEqual(campos["decision_attribution"], "resolved")
+            self.assertEqual(campos["decision_id"] if "decision_id" in campos else "", "")
             self.assertEqual(_decision_fields(root, 8), {})
             self.assertEqual(_decision_fields(root, None), {})
 

@@ -3041,15 +3041,16 @@ def _decision_fields(
         # Nem plano nem histórico: o post não teve decisão de mídia — nada a
         # atribuir (não é "missing", é ausência legítima).
         return {}
-    # Plano (ou apply) sem `decision_id`: a atribuição FALTA — e a medição sabe
-    # disso; o rótulo da última decisão entra só como contexto.
+    # Plano vazio (ou sem `decision_id`): a atribuição FALTA. E `decision` NÃO é
+    # emitido: uma decisão de uma busca anterior não pode entrar em
+    # `decision_quality` como se tivesse escolhido a imagem final — era assim que
+    # um `media_plan: []` com histórico "auto" inflava `decision_quality.auto`.
+    # O rótulo antigo fica só como contexto de diagnóstico (nada agrega nele).
     campos["decision_attribution"] = "missing"
     if decisao.get("decision"):
-        campos["decision"] = str(decisao["decision"])
+        campos["decision_unattributed"] = str(decisao["decision"])
     if decisao.get("score_gap") is not None:
-        campos["score_gap"] = decisao["score_gap"]
-    if decisao.get("decision_id"):
-        campos["decision_id"] = str(decisao["decision_id"])
+        campos["score_gap_unattributed"] = decisao["score_gap"]
     return campos
 
 
