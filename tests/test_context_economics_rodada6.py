@@ -10,6 +10,7 @@
 5. requests/tokens em camadas: main, auxiliar, visão direta e total.
 """
 
+import datetime
 import json
 import os
 import sqlite3
@@ -21,6 +22,15 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+def _ts(segundos_atras: int = 0) -> str:
+    # Timestamp RELATIVO: o guard filtra por janela de 24h e um `ts` fixo faz o
+    # teste expirar quando o dia vira (foi o CI vermelho de 23/09).
+    momento = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=segundos_atras
+    )
+    return momento.isoformat(timespec="seconds")
 
 from unicornio_editor.observability import (
     append_telemetry,
@@ -87,17 +97,17 @@ class VisionDirectGrandTotalTests(unittest.TestCase):
         linhas = [
             {"event": "vision_api_request", "detail": "low", "run_source": "cron",
              "cron_job_id": "9e39343dc6f5", "input_tokens": 1000, "cached_tokens": 400,
-             "output_tokens": 20, "ts": "2026-09-22T10:00:00+00:00"},
+             "output_tokens": 20, "ts": _ts(3)},
             {"event": "vision_api_request", "detail": "high", "run_source": "cron",
              "cron_job_id": "9e39343dc6f5", "input_tokens": 13_000, "cached_tokens": 0,
-             "output_tokens": 25, "ts": "2026-09-22T10:00:01+00:00"},
+             "output_tokens": 25, "ts": _ts(2)},
             # Erro conta como requisição (gastou a chamada).
             {"event": "vision_api_request", "detail": "low", "run_source": "cron",
              "cron_job_id": "9e39343dc6f5", "error": "HTTP 500",
-             "ts": "2026-09-22T10:00:02+00:00"},
+             "ts": _ts(1)},
             # Execução MANUAL não entra.
             {"event": "vision_api_request", "detail": "low", "run_source": "manual",
-             "input_tokens": 999_999, "ts": "2026-09-22T10:00:03+00:00"},
+             "input_tokens": 999_999, "ts": _ts(0)},
         ]
         caminho.write_text("\n".join(json.dumps(linha) for linha in linhas), encoding="utf-8")
         return caminho

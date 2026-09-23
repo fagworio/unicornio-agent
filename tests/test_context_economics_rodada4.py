@@ -14,6 +14,7 @@ Cobrem os itens novos:
 * guard de bytes de contexto filtrado por cron/job.
 """
 
+import datetime
 import json
 import os
 import sqlite3
@@ -23,6 +24,13 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+def _ts(segundos_atras: int = 0) -> str:
+    momento = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=segundos_atras
+    )
+    return momento.isoformat(timespec="seconds")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -257,16 +265,16 @@ class ContextBytesGuardFilterTests(unittest.TestCase):
             linhas = [
                 {"event": "cmd_output", "bytes": 10, "command": "cards",
                  "run_source": "cron", "cron_job_id": "editorial",
-                 "ts": "2026-09-22T10:00:00+00:00"},
+                 "ts": _ts(3)},
                 {"event": "cmd_output", "bytes": 500_000, "command": "cards",
                  "run_source": "manual", "cron_job_id": "",
-                 "ts": "2026-09-22T10:00:01+00:00"},
+                 "ts": _ts(2)},
                 {"event": "cmd_output", "bytes": 20, "command": "content",
                  "run_source": "cron", "cron_job_id": "editorial",
-                 "ts": "2026-09-22T10:00:02+00:00"},
+                 "ts": _ts(1)},
                 # Evento antigo, sem origem: não entra no teto.
                 {"event": "cmd_output", "bytes": 90_000, "command": "cards",
-                 "ts": "2026-09-22T10:00:03+00:00"},
+                 "ts": _ts(0)},
             ]
             caminho.write_text(
                 "\n".join(json.dumps(linha) for linha in linhas), encoding="utf-8"
