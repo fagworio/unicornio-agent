@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -145,7 +146,46 @@ def _choice(name: str, default: str, choices: set[str]) -> str:
     return value
 
 
+def _carregar_env_do_projeto() -> None:
+    """Carrega o .env do repositório, sem sobrescrever o ambiente existente.
+
+    Sem isso, qualquer execução FORA dos scripts de cron (que fazem
+    `set -a; . .env`) caía no default hardcoded do ambiente de
+    desenvolvimento (`wordpress.dvl.to:8080`) — e o pipeline estourava com
+    timeout enquanto o curl no prod respondia em 0,2s. Variáveis já definidas
+    no ambiente têm precedência (o cron manda).
+    """
+    for base in (Path(__file__).resolve().parents[2], Path.cwd()):
+        caminho = base / ".env"
+        if not caminho.is_file():
+            continue
+        # NUNCA carregar em teste: os testes definem o próprio ambiente e o .env
+        # de produção tem EDITOR_DRY_RUN=false (write mode) — um teste poderia
+        # escrever no site real.
+        import sys
+
+        if (
+            os.environ.get("UNICORNIO_TESTING")
+            or os.environ.get("PYTEST_CURRENT_TEST")
+            or "unittest" in " ".join(sys.argv).lower()
+        ):
+            return
+        try:
+            for linha in caminho.read_text(encoding="utf-8").splitlines():
+                linha = linha.strip()
+                if not linha or linha.startswith("#") or "=" not in linha:
+                    continue
+                chave, _, valor = linha.partition("=")
+                chave = chave.strip()
+                if chave and chave not in os.environ:
+                    os.environ[chave] = valor.strip().strip('"').strip("'")
+        except OSError:
+            pass
+        return
+
+
 def load_config() -> Config:
+    _carregar_env_do_projeto()
     content_source = _env("CONTENT_SOURCE", "mock").lower()
     if content_source not in {"mock", "wordpress"}:
         raise ConfigError("CONTENT_SOURCE must be mock or wordpress")
