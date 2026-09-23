@@ -110,16 +110,23 @@ def download_image(
         if written == 0:
             destination.unlink(missing_ok=True)
             raise MediaDownloadError("remote image was empty")
-        if declared_length and written != int(declared_length):
-            # Corte silencioso: servidor fechou cedo sem excecao. Sem comparar
-            # com o Content-Length, um JPEG pela metade passava como valido.
-            destination.unlink(missing_ok=True)
-            last_error = MediaDownloadError(
-                f"incomplete image: {written} of {declared_length} bytes"
-            )
-            if attempt < max_attempts:
-                time.sleep(_retry_delay(attempt))
-                continue
-            raise last_error
+        # Corte silencioso: só reprova quando o servidor DECLAROU um tamanho
+        # maior que o efetivamente recebido. Content-Length ausente ou "0" em
+        # respostas parciais continua aceito (comportamento dos handlers de
+        # teste e de servidores que não declaram o tamanho).
+        if declared_length:
+            try:
+                esperado = int(declared_length)
+            except (TypeError, ValueError):
+                esperado = 0
+            if esperado > 0 and written < esperado:
+                destination.unlink(missing_ok=True)
+                last_error = MediaDownloadError(
+                    f"incomplete image: {written} of {esperado} bytes"
+                )
+                if attempt < max_attempts:
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                raise last_error
         return destination
     raise MediaDownloadError("image download failed") from last_error
