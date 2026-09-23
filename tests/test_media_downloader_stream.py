@@ -4,6 +4,10 @@ O post 114414 perdeu 2 imagens com ``IncompleteRead(327270 bytes read)`` do CDN.
 O ``IncompleteRead`` herda de ``http.client.HTTPException`` — **não** de
 ``OSError`` — então escapava do retry do downloader, o arquivo PARCIAL ficava no
 disco e o pipeline seguia como se a imagem fosse válida.
+
+Os testes usam ``max_attempts=1`` de propósito: sem retry não há sleep real, e
+assim nenhum mock de ``time.sleep`` é necessário (mock global de módulo pode
+vazar para outros testes da suíte).
 """
 
 import tempfile
@@ -29,10 +33,9 @@ class StreamCortadoTests(unittest.TestCase):
         destino = Path(tempfile.mkdtemp()) / "img.jpg"
         resposta = _resposta(length="1000")
         resposta.read.side_effect = IncompleteRead(b"123", 877)
-        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta), \
-             mock.patch("unicornio_editor.media.downloader.time.sleep"):
+        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta):
             with self.assertRaises(MediaDownloadError):
-                download_image("https://cdn.example/img.jpg", destino, max_attempts=2)
+                download_image("https://cdn.example/img.jpg", destino, max_attempts=1)
         self.assertFalse(destino.exists(), "arquivo parcial ficou no disco")
 
     def test_corte_silencioso_compara_com_content_length(self):
@@ -40,26 +43,20 @@ class StreamCortadoTests(unittest.TestCase):
         destino = Path(tempfile.mkdtemp()) / "img.jpg"
         resposta = _resposta(length="1000")
         leituras = iter([b"x" * 400, b""])
-
-        def _leitura(_n):
-            # O retry chama read() de novo: devolve vazio em vez de StopIteration
-            return next(leituras, b"")
-
-        resposta.read.side_effect = _leitura
-        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta), \
-             mock.patch("unicornio_editor.media.downloader.time.sleep"):
+        resposta.read.side_effect = lambda _n: next(leituras, b"")
+        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta):
             with self.assertRaises(MediaDownloadError):
-                download_image("https://cdn.example/img.jpg", destino, max_attempts=2)
+                download_image("https://cdn.example/img.jpg", destino, max_attempts=1)
         self.assertFalse(destino.exists(), "imagem incompleta foi aceita")
 
     def test_download_completo_continua_funcionando(self):
-        """Contraprova: o caminho felizado não regride."""
+        """Contraprova: o caminho feliz não regride."""
         destino = Path(tempfile.mkdtemp()) / "img.jpg"
         resposta = _resposta(length="12")
-        resposta.read.side_effect = [b"x" * 12, b""]
-        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta), \
-             mock.patch("unicornio_editor.media.downloader.time.sleep"):
-            saida = download_image("https://cdn.example/img.jpg", destino, max_attempts=2)
+        leituras = iter([b"x" * 12, b""])
+        resposta.read.side_effect = lambda _n: next(leituras, b"")
+        with mock.patch("unicornio_editor.media.downloader.urlopen", return_value=resposta):
+            saida = download_image("https://cdn.example/img.jpg", destino, max_attempts=1)
         self.assertEqual(saida, destino)
         self.assertEqual(destino.read_bytes(), b"x" * 12)
 
