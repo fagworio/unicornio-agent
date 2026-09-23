@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -95,7 +96,9 @@ def download_image(
                 time.sleep(_retry_delay(attempt, exc.headers))
                 continue
             raise MediaDownloadError(f"image download failed (HTTP {exc.code})") from exc
-        except (URLError, OSError, ValueError, URLSafetyError) as exc:
+        except (URLError, OSError, ValueError, URLSafetyError, HTTPException) as exc:
+            # HTTPException cobre IncompleteRead (stream cortado). Nao herda de
+            # OSError: escapava do retry e deixava o arquivo PARCIAL no disco.
             destination.unlink(missing_ok=True)
             if isinstance(exc, MediaDownloadError):
                 raise
@@ -107,5 +110,16 @@ def download_image(
         if written == 0:
             destination.unlink(missing_ok=True)
             raise MediaDownloadError("remote image was empty")
+        if declared_length and written != int(declared_length):
+            # Corte silencioso: servidor fechou cedo sem excecao. Sem comparar
+            # com o Content-Length, um JPEG pela metade passava como valido.
+            destination.unlink(missing_ok=True)
+            last_error = MediaDownloadError(
+                f"incomplete image: {written} of {declared_length} bytes"
+            )
+            if attempt < max_attempts:
+                time.sleep(_retry_delay(attempt))
+                continue
+            raise last_error
         return destination
     raise MediaDownloadError("image download failed") from last_error
