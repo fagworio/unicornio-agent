@@ -81,6 +81,24 @@ class BatchContextTests(unittest.TestCase):
                 self.assertEqual(context["status"], "pending")
                 self.assertIn("cleaned_html", context)
                 self.assertIn("requirements", context)
+                # O envelope de AUDITORIA carrega os fatos de midia, mas o
+                # envelope enviado ao modelo nao — sem isso o modelo sem
+                # ferramentas responde needs_retry por "faltam imagens".
+                media_stage = context["requirements"]["media_stage"]
+                self.assertEqual(media_stage["stage"], "media-resolve-batch")
+                self.assertEqual(media_stage["editorial_media_plan"], [])
+                model_context = json.loads(
+                    (root / "work" / "batches" / "batch-test-001" / "editorial.input.json")
+                    .read_text(encoding="utf-8")
+                )["posts"][0]
+                self.assertNotIn("images", model_context)
+                self.assertNotIn("featured", model_context)
+                self.assertNotIn(
+                    "required_inline_images", model_context["requirements"]["media_stage"]
+                )
+                self.assertEqual(
+                    model_context["requirements"]["media_stage"]["editorial_media_plan"], []
+                )
                 self.assertTrue((root / "backups" / str(post_id) / "prepared.json").exists())
 
     def test_prepare_batch_isolates_missing_post_and_keeps_success(self):

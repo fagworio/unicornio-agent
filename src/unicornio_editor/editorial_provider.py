@@ -22,6 +22,87 @@ class EditorialProviderError(RuntimeError):
     """Raised when the direct editorial provider call cannot be trusted."""
 
 
+_RELEVANCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["process", "skip"]},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+        "matched_topics": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["decision", "confidence", "reason", "matched_topics"],
+    "additionalProperties": False,
+}
+
+_MEDIA_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "paragraph_index": {"type": "integer"},
+        "source_page_url": {"type": "string"},
+        "direct_image_url": {"type": "string"},
+        "author": {"type": "string"},
+        "license": {"type": "string"},
+        "license_url": {"type": "string"},
+        "captured_at": {"type": "string"},
+        "credit_text": {"type": "string"},
+        "alt_text": {"type": "string"},
+        "is_featured": {"type": "boolean"},
+    },
+    "required": [
+        "paragraph_index",
+        "source_page_url",
+        "direct_image_url",
+        "author",
+        "license",
+        "license_url",
+        "captured_at",
+        "credit_text",
+        "alt_text",
+        "is_featured",
+    ],
+    "additionalProperties": False,
+}
+
+_SEO_SCHEMA = {
+    "type": ["object", "null"],
+    "properties": {
+        "title": {"type": "string"},
+        "meta_description": {"type": "string"},
+        "focus_keyword": {"type": "string"},
+    },
+    "required": ["title", "meta_description", "focus_keyword"],
+    "additionalProperties": False,
+}
+
+# Contrato editorial como schema ESTRITO. Structured Outputs (strict=true) exige
+# additionalProperties:false em todo objeto e que `required` liste TODAS as
+# propriedades declaradas — por isso os campos opcionais do contrato
+# (cleaned_html/seo) sao declarados como nullable e devem vir como null quando
+# nao houver mudanca real. Sem isso a OpenAI rejeita a requisicao inteira com
+# HTTP 400 ("additionalProperties is required to be supplied and to be false").
+_EDITORIAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "site_relevance": _RELEVANCE_SCHEMA,
+        "media_plan": {"type": "array", "items": _MEDIA_ITEM_SCHEMA},
+        "needs_trailer": {"type": "boolean"},
+        "trailer_url": {"type": ["string", "null"]},
+        "game_name": {"type": ["string", "null"]},
+        "cleaned_html": {"type": ["string", "null"]},
+        "seo": _SEO_SCHEMA,
+    },
+    "required": [
+        "site_relevance",
+        "media_plan",
+        "needs_trailer",
+        "trailer_url",
+        "game_name",
+        "cleaned_html",
+        "seo",
+    ],
+    "additionalProperties": False,
+}
+
 _OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -34,7 +115,7 @@ _OUTPUT_SCHEMA = {
                     "post_id": {"type": "integer"},
                     "status": {"type": "string", "enum": ["ok", "needs_retry"]},
                     "reason": {"type": "string"},
-                    "editorial": {"type": "object"},
+                    "editorial": _EDITORIAL_SCHEMA,
                 },
                 "required": ["post_id", "status", "reason", "editorial"],
                 "additionalProperties": False,
@@ -53,8 +134,17 @@ correlation key. If one post cannot be safely completed, return
 status=needs_retry and a concise reason for that post; still return the other
 post when it is valid. For status=ok, editorial must follow the existing
 editorial contract: site_relevance, media_plan, needs_trailer, trailer_url and
-game_name are required fields; preserve source facts and existing SEO when no
-change is needed."""
+game_name are required fields. cleaned_html and seo must be null unless a real
+change is required — never re-emit text or SEO the post already carries.
+
+Neither images nor the trailer are resolved in this call: both are handled
+deterministically afterwards by the code. So: always return "media_plan": [];
+never invent image URLs, licenses, credits or provenance; never answer
+needs_retry because of missing inline images, a missing featured image or any
+image count; and return needs_trailer=false with trailer_url=null unless the
+envelope already carries a verified trailer URL. Do fill game_name when the
+subject is a game. Use needs_retry only when the text/SEO facts themselves
+cannot be handled safely."""
 
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
@@ -136,8 +226,30 @@ def _normalize_output(
             normalized.append({"post_id": post_id, "status": status, "reason": reason or "retry solicitado"})
         else:
             editorial = item.get("editorial")
+            if isinstance(editorial, str):
+                # Structured Outputs (strict=true) nao aceita objeto livre: o
+                # contrato editorial chega serializado numa string. String
+                # invalida isola o post como needs_retry sem derrubar o batch.
+                try:
+                    editorial = json.loads(editorial)
+                except json.JSONDecodeError as exc:
+                    normalized.append({
+                        "post_id": post_id,
+                        "status": "needs_retry",
+                        "reason": f"editorial invalido: string nao e JSON ({exc})",
+                    })
+                    seen.add(post_id)
+                    continue
             if not isinstance(editorial, dict):
                 raise EditorialProviderError(f"editorial ausente para {post_id}")
+            # O trailer e descoberto de forma DETERMINISTICA pelo codigo (por
+            # `game_name`, em compose_final_content): nao existe busca de
+            # trailer nesta chamada sem ferramentas. Se o modelo sinalizou
+            # needs_trailer sem uma URL verificada, o contrato rejeitaria o item
+            # inteiro; normalizamos para false preservando game_name, e a
+            # descoberta continua acontecendo no apply.
+            if editorial.get("needs_trailer") and not editorial.get("trailer_url"):
+                editorial = {**editorial, "needs_trailer": False, "trailer_url": None}
             try:
                 checked = validate_editorial(editorial, min_confidence=min_confidence)
             except EditorialValidationError as exc:
@@ -188,8 +300,14 @@ def generate_editorial_batch(
             {"role": "system", "content": _SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "Transforme este envelope sem ferramentas:\n" + json.dumps(
-                    {"batch_id": batch_id, "posts": posts}, ensure_ascii=False
+                "content": (
+                    "Transforme este envelope sem ferramentas. Devolva "
+                    '"media_plan": [] — a resolucao de imagens e feita DEPOIS por '
+                    "media-resolve-batch: nao invente URLs, licencas ou creditos e "
+                    "nao responda needs_retry por falta de imagem ou de featured.\n"
+                    + json.dumps(
+                        {"batch_id": batch_id, "posts": posts}, ensure_ascii=False
+                    )
                 ),
             },
         ],

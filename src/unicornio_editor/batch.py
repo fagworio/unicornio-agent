@@ -280,13 +280,30 @@ def _context_for_post(
     state = read_state(post)
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
     requirements = {
-        "required_inline_images": required_image_count(
-            words, title=title, content=cleaned_html
-        ),
         "internal_links_enabled": bool(config.internal_links_enabled),
-        "featured_required": True,
-        "credit_required": True,
-        "source_page_required_for_new_media": True,
+        # Tudo que depende de IMAGEM pertence a etapa deterministica seguinte
+        # (`media-resolve-batch`), que busca, prova a origem e preenche
+        # autor/licenca/credito. O que o modelo desta chamada ve sao apenas as
+        # obrigacoes de TEXTO/SEO (`requirements`), sem contagem de imagem:
+        # ver `_model_facing_context`.
+        "media_stage": {
+            "stage": "media-resolve-batch",
+            "runs_after": "editorial-generate-batch",
+            "required_inline_images": required_image_count(
+                words, title=title, content=cleaned_html
+            ),
+            "featured_required": True,
+            "credit_required": True,
+            "source_page_required_for_new_media": True,
+            "editorial_media_plan": [],
+            "not_a_reason_for_needs_retry": [
+                "imagens",
+                "featured",
+                "credito",
+                "licenca",
+                "origem",
+            ],
+        },
     }
     return {
         "schema_version": BATCH_SCHEMA_VERSION,
@@ -312,6 +329,52 @@ def _context_for_post(
             "prepared": str(root / "backups" / str(post.get("id")) / "prepared.json"),
         },
     }
+
+
+_MODEL_FACING_KEYS = (
+    "post_id",
+    "status",
+    "state",
+    "title",
+    "date",
+    "link",
+    "original_link",
+    "source_content",
+    "cleaned_html",
+    "seo_existing",
+    "entities",
+    "word_count",
+    "requirements",
+)
+
+
+def _model_facing_context(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Project the audit envelope into the subset sent to the editorial model.
+
+    The image facts (``images``, ``featured``) and the image counts inside
+    ``requirements.media_stage`` are the business of the deterministic media
+    stage, not of a tool-less editorial call. Sending them made the model answer
+    ``needs_retry`` ("faltam imagens") for every post, so the batch never
+    produced an editorial — observed in the production canary. The full envelope
+    (with the image facts) remains in ``post-<id>.json`` for audit and for the
+    media stage.
+    """
+    context = {key: envelope[key] for key in _MODEL_FACING_KEYS if key in envelope}
+    requirements = envelope.get("requirements") or {}
+    media_stage = requirements.get("media_stage") or {}
+    context["requirements"] = {
+        "internal_links_enabled": bool(requirements.get("internal_links_enabled")),
+        # Deliberadamente SEM required_inline_images/featured_required: a
+        # contagem de imagem e da etapa de midia e era o gatilho do needs_retry.
+        "media_stage": {
+            "runs_after": "editorial-generate-batch",
+            "editorial_media_plan": [],
+            "not_a_reason_for_needs_retry": list(
+                media_stage.get("not_a_reason_for_needs_retry") or []
+            ),
+        },
+    }
+    return context
 
 
 def prepare_batch(
@@ -357,14 +420,14 @@ def prepare_batch(
             # Keep the legacy single-post artifact useful when a batch item is
             # later processed by the existing apply/rework flow.
             _write_json(root / "backups" / str(post_id) / "prepared.json", prepared)
-            contexts.append(envelope)
+            contexts.append(_model_facing_context(envelope))
             items.append(
                 {
                     "post_id": post_id,
                     "status": "prepared",
                     "title": envelope["title"],
                     "word_count": envelope["word_count"],
-                    "required_inline_images": envelope["requirements"][
+                    "required_inline_images": envelope["requirements"]["media_stage"][
                         "required_inline_images"
                     ],
                     "images": {

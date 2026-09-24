@@ -137,6 +137,15 @@ por `EDITORIAL_API_KEY`, `EDITORIAL_BASE_URL` e `EDITORIAL_MODEL`. O resultado
 vira `needs_retry` sem descartar o item válido do mesmo batch. O Hermes não
 deve substituir essa chamada por um loop de tools.
 
+O envelope enviado ao modelo é uma PROJEÇÃO de `post-<id>.json`: sai sem os
+fatos de imagem (`images`, `featured`, `required_inline_images`). Eles são
+entrada da etapa determinística de mídia, não desta inferência — enviá-los faz
+o modelo sem ferramentas responder `needs_retry` por "faltam imagens" e o batch
+nunca produz editorial. O arquivo de auditoria mantém os fatos completos. Pelo
+mesmo motivo o editorial devolve `media_plan: []` e `needs_trailer: false`
+(trailer é descoberto pelo código via `game_name`), e `cleaned_html`/`seo`
+ficam `null` quando não há mudança real (economia de tokens).
+
 ## 3. Rework: `draft --for-fix` + `apply --merge-draft`
 
 ```bash
