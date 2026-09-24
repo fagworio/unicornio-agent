@@ -151,6 +151,40 @@ def _choice(name: str, default: str, choices: set[str]) -> str:
     return value
 
 
+def _preco(name: str) -> float:
+    """Preco em USD por 1M tokens; ``0.0`` quando nao configurado ou invalido.
+
+    Diferente do resto da config, um valor invalido AQUI nao derruba a execucao:
+    precificacao e contabilidade, nao pre-requisito do pipeline. O consumidor
+    (``cost_guard``) trata ``0.0`` como "sem preco" e marca o total como parcial
+    em vez de inventar um numero.
+    """
+    try:
+        return max(0.0, _float(name, 0.0, 0.0, 10_000.0))
+    except ConfigError:
+        return 0.0
+
+
+def editorial_price_per_1m() -> tuple[float, float]:
+    """``(input, output)`` em USD por 1M tokens do provider EDITORIAL direto.
+
+    Preco por provider/modelo no ``.env`` — nunca escondido no codigo, porque
+    trocar de modelo (ou o provedor mudar a tabela) invalidaria a constante.
+    """
+    return (
+        _preco("EDITORIAL_INPUT_COST_PER_1M_USD"),
+        _preco("EDITORIAL_OUTPUT_COST_PER_1M_USD"),
+    )
+
+
+def editorial_vision_price_per_1m() -> tuple[float, float]:
+    """``(input, output)`` em USD por 1M tokens da VISAO direta."""
+    return (
+        _preco("EDITOR_VISION_INPUT_COST_PER_1M_USD"),
+        _preco("EDITOR_VISION_OUTPUT_COST_PER_1M_USD"),
+    )
+
+
 def _carregar_env_do_projeto() -> None:
     """Carrega o .env do repositório, sem sobrescrever o ambiente existente.
 

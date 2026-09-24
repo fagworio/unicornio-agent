@@ -345,19 +345,31 @@ def generate_editorial_batch(
     output = _write_json(destination, normalized)
     usage = body.get("usage") or {}
     if root is not None:
-        from .observability import append_telemetry
+        from .config import editorial_price_per_1m
+        from .observability import append_telemetry, usage_cost_usd
 
-        append_telemetry(
-            root,
-            "editorial_model_request",
-            batch_id=batch_id,
-            batch_size=len(posts),
-            posts_generated=sum(1 for item in normalized["results"] if item["status"] == "ok"),
-            input_tokens=int(usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("completion_tokens") or 0),
-            model=model,
-            provider=base_url[:120],
+        entrada = int(usage.get("prompt_tokens") or 0)
+        saida = int(usage.get("completion_tokens") or 0)
+        detalhes = usage.get("prompt_tokens_details") or {}
+        preco_in, preco_out = editorial_price_per_1m()
+        custo = usage_cost_usd(
+            entrada, saida, price_in_per_1m=preco_in, price_out_per_1m=preco_out
         )
+        evento: dict[str, Any] = {
+            "batch_id": batch_id,
+            "batch_size": len(posts),
+            "posts_generated": sum(1 for item in normalized["results"] if item["status"] == "ok"),
+            "input_tokens": entrada,
+            "output_tokens": saida,
+            "cached_tokens": int(detalhes.get("cached_tokens") or 0),
+            "model": model,
+            "provider": base_url[:120],
+        }
+        # Custo da chamada DIRETA: o gate (`cost_guard`) prefere este numero ao
+        # preco do ambiente, porque registra o preco vigente na hora da chamada.
+        if custo is not None:
+            evento["model_cost_usd"] = custo
+        append_telemetry(root, "editorial_model_request", **evento)
     return {
         "schema_version": BATCH_SCHEMA_VERSION,
         "batch_id": batch_id,

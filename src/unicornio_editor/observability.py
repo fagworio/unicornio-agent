@@ -337,6 +337,30 @@ def attribution_of(root: str | Path, post_id: int, decision_id: str) -> str:
     return "resolved" if read_media_decision_by_id(root, post_id, decision_id) else "invalid"
 
 
+def usage_cost_usd(
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    price_in_per_1m: float,
+    price_out_per_1m: float,
+) -> float | None:
+    """Custo em USD de UMA chamada direta, do preco por 1M tokens.
+
+    Devolve ``None`` quando nenhum preco esta configurado: o evento direto NAO
+    inventa custo — quem consome (``cost_guard``) marca o total como parcial.
+    Gravado no proprio evento (``model_cost_usd``) para que a medicao use o preco
+    vigente no momento da chamada, e nao o de hoje.
+    """
+    if price_in_per_1m <= 0 and price_out_per_1m <= 0:
+        return None
+    entrada = int(input_tokens or 0)
+    saida = int(output_tokens or 0)
+    return round(
+        (entrada * float(price_in_per_1m) + saida * float(price_out_per_1m)) / 1_000_000,
+        8,
+    )
+
+
 def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
     """Registra um evento do pipeline no telemetry.jsonl central (fail-soft).
 

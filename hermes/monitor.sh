@@ -81,6 +81,10 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
     --limit-prompt-tokens "${HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT:-0}" \
     --limit-input-tokens "${HERMES_EDITORIAL_WINDOW_INPUT_TOKEN_LIMIT:-0}" \
     --limit-context-bytes "${HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT:-0}" \
+    --price-editorial-in "${EDITORIAL_INPUT_COST_PER_1M_USD:-0}" \
+    --price-editorial-out "${EDITORIAL_OUTPUT_COST_PER_1M_USD:-0}" \
+    --price-vision-in "${EDITOR_VISION_INPUT_COST_PER_1M_USD:-0}" \
+    --price-vision-out "${EDITOR_VISION_OUTPUT_COST_PER_1M_USD:-0}" \
     --telemetry "$ROOT/work/telemetry.jsonl" 2>/dev/null)" || guard_status=$?
   if [ "${guard_status:-0}" -eq 10 ]; then
     # Detalhe vai para LOG (nao para stdout: stdout e assinatura, nao relatorio).

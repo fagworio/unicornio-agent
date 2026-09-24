@@ -240,13 +240,20 @@ stdout pequeno orientado à próxima ação:
   (vision/compressão/título/aprovação do Hermes, que NÃO entram em `sessions`); e
   a visão do NOSSO Vision Gate é medida em `direct_vision` (evento
   `vision_api_request`), porque ela fala com o provedor por conta própria e não
-  passa pelo accounting do Hermes. O `observed_grand_total` soma as três camadas
-  (tokens e requests) — sem isso "total" não é total. **`cached_tokens` NÃO é
-  somado a `prompt_tokens`** (no formato OpenAI ele já está incluído); somar
-  duplicaria. O custo em USD cobre só as camadas do Hermes (a visão direta não tem
-  preço no state.db — `grand_total_cost_partial` sinaliza isso).
+  passa pelo accounting do Hermes. O `observed_grand_total` soma as QUATRO
+  camadas (tokens e requests) — sem isso "total" não é total. **`cached_tokens`
+  NÃO é somado a `prompt_tokens`** (no formato OpenAI ele já está incluído); somar
+  duplicaria. O custo em USD também cobre as quatro camadas:
+  `cost_main_hermes_usd` + `cost_aux_hermes_usd` + `cost_editorial_direct_usd` +
+  `cost_vision_direct_usd` = `grand_total_cost_usd`, e é ESTE o número que o teto
+  compara. O preço do direto vem do `model_cost_usd` gravado no próprio evento
+  (preço vigente na chamada) ou, na falta dele, de
+  `EDITORIAL_INPUT/OUTPUT_COST_PER_1M_USD` e
+  `EDITOR_VISION_INPUT/OUTPUT_COST_PER_1M_USD`; requisição direta sem preço
+  conhecido NÃO vira zero — `cost_partial`/`unpriced_requests` sinalizam.
 - **Requests em camadas**: `main_requests` + `aux_requests` +
-  `direct_vision_requests` = `grand_total_requests`; os limites do guard
+  `direct_vision_requests` + `direct_editorial_requests` =
+  `grand_total_requests`; os limites do guard
   (`REQUEST_LIMIT`, `PROMPT_TOKEN_LIMIT`) comparam os TOTAIS, com as camadas
   expostas no JSON para diagnóstico.
 - **Qualidade por decisão** (`decision_quality`): a decisão de mídia fica no
@@ -305,8 +312,9 @@ stdout pequeno orientado à próxima ação:
   texto (proteção de credencial). Contadores numéricos (`input_tokens` etc.)
   passam normalmente; se um campo novo não aparecer no telemetry.jsonl, suspeite
   desse filtro antes de investigar o pipeline.
-- Freios do monitor (`hermes/cost_guard.py`): além de USD (main + auxiliar),
-  também `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,
+- Freios do monitor (`hermes/cost_guard.py`): além de USD — que agora é o
+  `grand_total_cost_usd` (main + auxiliar + editorial direto + visão direta), não
+  só o que o Hermes registrou —, também `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,
   `HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT` (input + cache_read +
   cache_write) e `HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT` (0 = desligado).
   Todos filtram por `run_source=cron` + id do job: sessão MANUAL pesada não pode

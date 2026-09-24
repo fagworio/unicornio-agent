@@ -356,23 +356,33 @@ def _registrar_chamada(
     if root is None:
         return
     try:
-        from ..observability import append_telemetry
+        from ..config import editorial_vision_price_per_1m
+        from ..observability import append_telemetry, usage_cost_usd
 
         dados = usage or {}
         detalhes = dados.get("prompt_tokens_details") or {}
-        append_telemetry(
-            root,
-            "vision_api_request",
-            scope="vision",
-            detail=str(detail),
-            model=str(model),
-            provider=str(base_url)[:120],
-            input_tokens=int(dados.get("prompt_tokens") or 0),
-            cached_tokens=int(detalhes.get("cached_tokens") or 0),
-            output_tokens=int(dados.get("completion_tokens") or 0),
-            error=str(erro or "")[:160],
-            batch_size=max(1, int(batch_size or 1)),
+        entrada = int(dados.get("prompt_tokens") or 0)
+        saida = int(dados.get("completion_tokens") or 0)
+        preco_in, preco_out = editorial_vision_price_per_1m()
+        custo = usage_cost_usd(
+            entrada, saida, price_in_per_1m=preco_in, price_out_per_1m=preco_out
         )
+        evento: dict[str, Any] = {
+            "scope": "vision",
+            "detail": str(detail),
+            "model": str(model),
+            "provider": str(base_url)[:120],
+            "input_tokens": entrada,
+            "cached_tokens": int(detalhes.get("cached_tokens") or 0),
+            "output_tokens": saida,
+            "error": str(erro or "")[:160],
+            "batch_size": max(1, int(batch_size or 1)),
+        }
+        # Custo da chamada DIRETA (a visao nao passa pelo Hermes): sem isto o teto
+        # de USD do cron mede menos do que gastou.
+        if custo is not None:
+            evento["model_cost_usd"] = custo
+        append_telemetry(root, "vision_api_request", **evento)
     except Exception:  # noqa: BLE001 - telemetria nunca quebra o gate
         pass
 
