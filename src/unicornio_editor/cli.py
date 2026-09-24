@@ -847,6 +847,43 @@ def _apply_editorial_batch(
     return summary
 
 
+def _emit_engine_health(
+    root: str | Path,
+    reports: dict[str, dict[str, Any]] | None,
+    *,
+    query: str = "",
+) -> None:
+    """Telemetria POR ENGINE tentada: status, bytes, objetos parseados e motivo.
+
+    Antes só existia evento para a engine que ENTREGAVA candidato: uma engine que
+    parou de funcionar (Google devolvendo a página "ative o JavaScript") sumia da
+    telemetria sem deixar rastro — foi assim que o Google ficou meses fora do ar
+    contado como "rate-limit". O evento é separado do funil
+    (``media_engine_yield``) para não inflar ``discovered`` do agregador.
+    """
+    if not reports:
+        return
+    from .observability import append_telemetry
+
+    try:
+        for engine, relatorio in reports.items():
+            if not isinstance(relatorio, dict):
+                continue
+            append_telemetry(
+                root, "media_engine_health",
+                engine=str(engine),
+                query=str(query or "")[:200],
+                http_status=int(relatorio.get("http_status") or 0),
+                html_bytes=int(relatorio.get("html_bytes") or 0),
+                objects_parsed=int(relatorio.get("objects_parsed") or 0),
+                candidates=int(relatorio.get("candidates") or 0),
+                failure_kind=str(relatorio.get("failure_kind") or ""),
+                parser_version=int(relatorio.get("parser_version") or 0),
+            )
+    except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
+        pass
+
+
 def _resolve_media_batch(
     client: WordPressClient,
     config: Any,
@@ -920,6 +957,10 @@ def _resolve_media_batch(
         accept=accept if searchable else None,
     )
     by_query = {str(row.get("query")): row.get("candidates") or [] for row in found}
+    for row in found:
+        _emit_engine_health(
+            root, row.get("engine_reports") or {}, query=str(row.get("query") or "")
+        )
     output: list[dict[str, Any]] = []
     vision_items: list[dict[str, Any]] = []
     total_candidates = 0
@@ -1746,6 +1787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return len(_frames_fortes)
 
             candidates: list[dict] = []
+            relatorios_engine: dict[str, dict[str, Any]] = {}
             if needed_web > 0:
                 candidates = search_web_images(
                     args.termo,
@@ -1756,7 +1798,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     limit=needed_web + 1,
                     engine=getattr(args, "engine", "auto"),
                     accept=_avaliar_capacidade,
+                    reports=relatorios_engine,
                 )
+                _emit_engine_health(args.root, relatorios_engine, query=args.termo)
             engines_queried = sorted(
                 {str(c.get("engine") or "") for c in candidates if c.get("engine")}
             )
@@ -1971,6 +2015,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for row in rows:
                 query = str(row["query"])
                 candidates = list(row.get("candidates") or [])
+                _emit_engine_health(
+                    args.root, row.get("engine_reports") or {}, query=query
+                )
                 decisao_item: dict = {}
                 decision_id_item = ""
                 if not candidates:

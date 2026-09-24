@@ -312,6 +312,15 @@ stdout pequeno orientado à próxima ação:
   texto (proteção de credencial). Contadores numéricos (`input_tokens` etc.)
   passam normalmente; se um campo novo não aparecer no telemetry.jsonl, suspeite
   desse filtro antes de investigar o pipeline.
+- **Saúde por engine** (`media_engine_health`): cada tentativa de busca grava
+  engine, http_status, html_bytes, objects_parsed, candidates, failure_kind e
+  parser_version. `failure_kind` separa o TRANSITÓRIO (network_error,
+  rate_limited, http_error) do PERMANENTE (captcha, js_required,
+  parser_schema_drift, no_results_legitimate); só o transitório alimenta o
+  cooldown do breaker — `engine_degradada` registra o motivo, zera o contador e
+  mantém a engine na ordem. Sem essa distinção, "HTTP 200 + 0 objetos" virava
+  "falha" e o Google ficou fora do ar meses renovando cooldown como se fosse
+  rate-limit (18 falhas seguidas).
 - Freios do monitor (`hermes/cost_guard.py`): além de USD — que agora é o
   `grand_total_cost_usd` (main + auxiliar + editorial direto + visão direta), não
   só o que o Hermes registrou —, também `HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT`,

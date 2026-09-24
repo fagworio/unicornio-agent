@@ -4,10 +4,20 @@ Deterministic and read-only: builds the search URL for each engine and returns
 image candidates so the LLM does not have to reason about search URLs or parse
 results - that cost is moved to code (token economy).
 
-Google Images blocks datacenter/cloud IPs (CAPTCHA/Cloudflare), so in production
-it frequently returns an empty/unparseable page. To stay robust and diversify
-sources, ``search_web_images`` alternates the PRIMARY engine by query hash
-(~50/50 Bing / Yandex) and rotates to the other, then Google, on failure:
+Google Images não entrega mais resultados no HTML servido (2026-09-24): qualquer
+endpoint (`udm=2`, `tbm=isch`, `images.google.com`, UA mobile) devolve ~92 KB de
+bootstrap com `<noscript>` + redirect para `/httpservice/retry/enablejs` — zero
+`<img>`, zero chaves de resultado. Ou seja: NÃO é rate-limit nem captcha, é a
+página "ative o JavaScript". O parser (chaves `tu`/`ou`/`ru`/`pt`) continua
+correto para páginas de resultado; o que mudou é o que o servidor manda. Por isso
+a falha é CLASSIFICADA (``failure_kind``) antes de alimentar o circuit breaker:
+``parser_schema_drift``/``js_required``/``captcha`` NÃO são indisponibilidade
+transitória e não podem renovar cooldown (era o que deixava o Google fora do ar
+para sempre, contado como 18 "falhas" seguidas). O Google permanece na ordem
+(último), é sempre tentado e sempre deixa telemetria do motivo.
+
+``search_web_images`` alterna a engine PRIMÁRIA por hash da query (~50/50
+Bing/Yandex) e usa a outra, depois o Google, quando a capacidade não é atendida:
 
   1. Bing Images  or  Yandex Images  (primary, alternates by query)
   2. the other of the two (fallback)
@@ -82,16 +92,147 @@ _BING_TURL_RE = re.compile(r'"turl":"([^"]+)"')
 
 
 
-def _fetch(url: str, timeout: float) -> str:
+# ---------------------------------------------------------------------------
+# Saúde por engine: classificação da falha + relatório por tentativa
+# ---------------------------------------------------------------------------
+PARSER_VERSION = 2
+
+# Motivos possíveis de uma tentativa de engine. A distinção existe porque só
+# indisponibilidade TRANSITÓRIA justifica cooldown: misturar "o HTML mudou" com
+# "estou com rate-limit" tirou o Google da arquitetura para sempre (18 "falhas"
+# seguidas renovando cooldown de 12 min sem que nada estivesse fora do ar).
+FAILURE_KINDS = (
+    "ok",
+    "cooldown_skip",          # engine pulada por cooldown transitório ativo
+    "network_error",          # DNS/timeout/conexão — transitório
+    "rate_limited",           # 429/503 — transitório
+    "http_error",             # 4xx/5xx inesperado — transitório
+    "captcha",                # interstitial de captcha/consent — NÃO transitório
+    "js_required",            # página exige JavaScript: sem resultados no HTML
+    "parser_schema_drift",    # página de resultados com schema novo (nossas chaves sumiram)
+    "no_results_legitimate",  # página de resultados, realmente sem resultado para a query
+)
+FAILURE_KINDS_TRANSITORIOS = frozenset({"network_error", "rate_limited", "http_error"})
+
+_MARKERS_CAPTCHA = ("unusual traffic", "/sorry/", "sorry/index", "recaptcha", "captcha")
+_MARKERS_JS = ("/httpservice/retry/enablejs", "enablejs")
+# Marcadores de que a página É de resultados (thumbnails/blobs de imagem no HTML):
+# é o que separa "o schema mudou" de "não havia resultado para esta query".
+_MARKERS_RESULTADOS = (
+    "googleusercontent", "encrypted-tbn", "gstatic.com/images",
+    "<img", "af_initdatacallback",
+)
+
+# Último relatório por engine (conveniência para o caminho de busca única; o
+# caminho em lote recebe o relatório explícito por query).
+_ULTIMO_RELATORIO: dict[str, dict[str, Any]] = {}
+
+
+def classify_failure(
+    html: str,
+    *,
+    http_status: int = 200,
+    objects_parsed: int = 0,
+    error: str = "",
+) -> str:
+    """Classifica UMA tentativa de engine, na ordem erro -> bloqueio -> schema.
+
+    ``HTTP 200 + HTML grande + 0 objetos`` NÃO é rate-limit: ou o servidor mandou
+    um interstitial (captcha / "ative o JavaScript"), ou o schema dos resultados
+    mudou. Só a primeira família (transitória) pode alimentar o cooldown.
+    """
+    if error:
+        return "network_error"
+    if http_status in (429, 503):
+        return "rate_limited"
+    if http_status >= 400 or http_status == 0:
+        return "http_error"
+    if objects_parsed > 0:
+        return "ok"
+    corpo = (html or "").lower()
+    if any(marcador in corpo for marcador in _MARKERS_CAPTCHA):
+        return "captcha"
+    if any(marcador in corpo for marcador in _MARKERS_JS):
+        return "js_required"
+    if any(marcador in corpo for marcador in _MARKERS_RESULTADOS):
+        return "parser_schema_drift"
+    return "no_results_legitimate"
+
+
+def _finalizar_relatorio(
+    relatorio: dict[str, Any],
+    saida: dict[str, Any] | None,
+    *,
+    engine: str,
+    objects: int,
+    candidates: int,
+    html: str = "",
+) -> dict[str, Any]:
+    """Completa o relatório da tentativa, publica em ``saida``/registry e o devolve."""
+    relatorio["objects_parsed"] = int(objects)
+    relatorio["candidates"] = int(candidates)
+    if not relatorio.get("error") and relatorio.get("failure_kind") not in ("rate_limited", "http_error"):
+        relatorio["failure_kind"] = classify_failure(
+            html,
+            http_status=int(relatorio.get("http_status") or 0),
+            objects_parsed=int(objects),
+        )
+    relatorio["parser_version"] = PARSER_VERSION
+    _ULTIMO_RELATORIO[engine] = dict(relatorio)
+    if saida is not None:
+        saida.clear()
+        saida.update(relatorio)
+    return relatorio
+
+
+def engine_last_report(engine: str) -> dict[str, Any]:
+    """Relatório da última tentativa da engine (vazio quando nunca foi tentada)."""
+    return dict(_ULTIMO_RELATORIO.get(engine) or {})
+
+
+def _fetch_report(url: str, timeout: float) -> tuple[str | None, dict[str, Any]]:
+    """Baixa a página e devolve ``(html, relatório)`` — nunca levanta.
+
+    O relatório carrega status/bytes/motivo da falha para que a camada de
+    telemetria registre POR QUE uma engine não entregou nada (antes isso era
+    silencioso: a engine simplesmente não aparecia no JSON).
+    """
     global _HTTP_REQUESTS
+    relatorio: dict[str, Any] = {
+        "http_status": 0, "html_bytes": 0, "error": "",
+        "failure_kind": "network_error", "parser_version": PARSER_VERSION,
+    }
     with _HTTP_REQUESTS_LOCK:
         _HTTP_REQUESTS += 1
     request = Request(url, headers={"User-Agent": _UA, "Accept": "text/html"})
-    with urlopen(request, timeout=timeout) as response:
-        data = response.read(_MAX_BYTES + 1)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            data = response.read(_MAX_BYTES + 1)
+    except HTTPError as exc:
+        codigo = int(getattr(exc, "code", 0) or 0)
+        relatorio["http_status"] = codigo
+        relatorio["error"] = f"HTTPError {codigo}"
+        relatorio["failure_kind"] = "rate_limited" if codigo in (429, 503) else "http_error"
+        return None, relatorio
+    except (URLError, OSError, ValueError) as exc:
+        relatorio["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        relatorio["failure_kind"] = "network_error"
+        return None, relatorio
     if len(data) > _MAX_BYTES:
         data = data[:_MAX_BYTES]
-    return data.decode("utf-8", "ignore")
+    html = data.decode("utf-8", "ignore")
+    relatorio["http_status"] = status
+    relatorio["html_bytes"] = len(data)
+    return html, relatorio
+
+
+def _fetch(url: str, timeout: float) -> str:
+    """Compatibilidade: HTML da página ou exceção (``_fetch_report`` faz o resto)."""
+    html, relatorio = _fetch_report(url, timeout)
+    if html is None:
+        raise URLError(str(relatorio.get("error") or "fetch failed"))
+    return html
 
 
 def _real_image_url(url: str) -> bool:
@@ -230,6 +371,7 @@ def search_bing_images(
     ratio: str = "w",
     limit: int = 10,
     timeout: float = 30.0,
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Bing Images candidates (primary). Returns purl(page)+murl(img)."""
     query = (query or "").strip()
@@ -237,19 +379,20 @@ def search_bing_images(
         return []
     size = size if size in _SIZES else "xga"
     url = build_bing_url(query, size=size)
-    try:
-        page = _fetch(url, timeout)
-    except (HTTPError, URLError, OSError, ValueError):
+    page, relatorio = _fetch_report(url, timeout)
+    if page is None:
+        _finalizar_relatorio(relatorio, report, engine="bing", objects=0, candidates=0)
         return []
     html = page.replace("&quot;", '"')
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
+    objetos = _bing_result_objects(html)
     # Fase 14: cada resultado do Bing carrega o proprio JSON no atributo `m`
     # (murl+purl+turl do MESMO resultado). O parser antigo coletava as tres
     # listas separadamente e associava por INDICE: quando um resultado nao
     # tinha purl (ou a ordem divergia), a imagem era ligada a pagina de OUTRO
     # resultado — origem errada, verificacao de origem inutil.
-    for obj in _bing_result_objects(html):
+    for obj in objetos:
         direct = str(obj.get("murl") or "")
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
@@ -265,6 +408,10 @@ def search_bing_images(
         )
         if len(results) >= limit:
             break
+    _finalizar_relatorio(
+        relatorio, report, engine="bing",
+        objects=len(objetos), candidates=len(results), html=html,
+    )
     return results
 
 
@@ -319,6 +466,7 @@ def search_google_images(
     ratio: str = "w",
     limit: int = 10,
     timeout: float = 30.0,
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     query = (query or "").strip()
     if not query:
@@ -326,16 +474,17 @@ def search_google_images(
     size = size if size in _SIZES else "xga"
     ratio = ratio if ratio in _RATIOS else "w"
     url = build_search_url(query, size=size, ratio=ratio)
-    try:
-        page = _fetch(url, timeout)
-    except (HTTPError, URLError, OSError, ValueError):
+    page, relatorio = _fetch_report(url, timeout)
+    if page is None:
+        _finalizar_relatorio(relatorio, report, engine="google", objects=0, candidates=0)
         return []
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
+    objetos = _google_result_objects(page)
     # Fase 14: as chaves tu/ou/ru/pt pertencem ao MESMO resultado. O parser
     # antigo montava quatro listas paralelas e associava por indice — qualquer
     # resultado sem uma das chaves deslocava todas as associacoes seguintes.
-    for obj in _google_result_objects(page):
+    for obj in objetos:
         direct = str(obj.get("murl") or "")
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
@@ -349,6 +498,10 @@ def search_google_images(
         )
         if len(results) >= limit:
             break
+    _finalizar_relatorio(
+        relatorio, report, engine="google",
+        objects=len(objetos), candidates=len(results), html=page,
+    )
     return results
 
 
@@ -367,14 +520,15 @@ def search_yandex_images(
     ratio: str = "w",
     limit: int = 10,
     timeout: float = 30.0,
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     query = (query or "").strip()
     if not query:
         return []
     url = build_yandex_url(query)
-    try:
-        page = _fetch(url, timeout)
-    except (HTTPError, URLError, OSError, ValueError):
+    page, relatorio = _fetch_report(url, timeout)
+    if page is None:
+        _finalizar_relatorio(relatorio, report, engine="yandex", objects=0, candidates=0)
         return []
     html = page.replace("&quot;", '"')
     # O Yandex embute a URL real da imagem no parametro img_url= (URL-encoded)
@@ -399,6 +553,10 @@ def search_yandex_images(
         results.append(_candidate(query, "1024x768|w", direct, "", "", "", engine="yandex"))
         if len(results) >= limit:
             break
+    _finalizar_relatorio(
+        relatorio, report, engine="yandex",
+        objects=len(img_urls), candidates=len(results), html=page,
+    )
     return results
 
 
@@ -512,6 +670,29 @@ def engine_falhou(nome: str) -> float:
     return espera
 
 
+def engine_degradada(nome: str, kind: str) -> None:
+    """Registra problema NÃO transitório (schema/JS/captcha) SEM cooldown.
+
+    Cooldown existe para indisponibilidade temporária. Quando o motivo é
+    permanente — o HTML mudou, a página exige JavaScript — entrar em cooldown só
+    ESCONDE a engine: ela sai da ordem, o motivo não aparece em lugar nenhum e o
+    time perde a fonte sem saber. Aqui o contador transitório é ZERADO (as "18
+    falhas" do Google eram todas schema drift, não rate-limit) e o motivo fica no
+    estado, visível em ``engines_status()`` e na telemetria.
+    """
+    if not _breaker_ativo():
+        return
+    dados = _ler_estado_engines()
+    dados[nome] = {
+        "failures": 0,
+        "blocked_until": 0,
+        "last_failure": time.time(),
+        "failure_kind": kind,
+        "non_transient": True,
+    }
+    _gravar_estado_engines(dados)
+
+
 def engine_ok(nome: str) -> None:
     """Sucesso zera o contador (circuit breaker fechado)."""
     if not _breaker_ativo():
@@ -536,6 +717,7 @@ def search_web_images(
     timeout: float = 30.0,
     engine: str = "auto",
     accept: Any = None,
+    reports: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Busca AGREGADA entre as engines (Fase 3), com parada por capacidade.
 
@@ -569,17 +751,34 @@ def search_web_images(
     acumulado: list[dict[str, Any]] = []
     vistos: set[str] = set()
     for name in order:
+        relatorio: dict[str, Any] = {}
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
         if not engine_disponivel(name):
+            relatorio = {
+                "http_status": 0, "html_bytes": 0, "objects_parsed": 0, "candidates": 0,
+                "failure_kind": "cooldown_skip", "parser_version": PARSER_VERSION,
+            }
+            if reports is not None:
+                reports[name] = dict(relatorio)
             continue
         try:
-            lote = _fns[name](query, size=size, ratio=ratio, limit=alvo, timeout=timeout)
+            lote = _fns[name](query, size=size, ratio=ratio, limit=alvo, timeout=timeout, report=relatorio)
         except Exception:  # noqa: BLE001 - rotate on any failure
             lote = []
+            relatorio.setdefault("failure_kind", "network_error")
+        if reports is not None:
+            reports[name] = dict(relatorio)
         if not lote:
-            # Vazio/erro conta como falha: backoff curto e, na 3ª, cooldown da
-            # engine (Bing degradado não deve segurar o ciclo).
+            kind = str(relatorio.get("failure_kind") or "network_error")
+            if kind not in FAILURE_KINDS_TRANSITORIOS:
+                # Motivo PERMANENTE (schema mudou, página exige JS, captcha):
+                # cooldown de 12 min aqui só esconderia a engine para sempre.
+                # Registra o motivo e segue — ela continua na arquitetura.
+                engine_degradada(name, kind)
+                continue
+            # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
+            # cooldown da engine (Bing degradado não deve segurar o ciclo).
             espera = engine_falhou(name)
             if espera:
                 try:
@@ -645,30 +844,45 @@ def search_web_images_batch(
     if not unique:
         return []
 
-    def _search(query: str) -> list[dict[str, Any]]:
+    def _search(query: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         # O callback do batch recebe TAMBÉM a query: cada item do listicle tem o
         # seu próprio subject e o aceite precisa ser medido por item (antes o
         # batch caía no critério antigo "usable" e encerrava a busca do item).
         def _accept_do_item(novos: list[dict[str, Any]]) -> int:
             return int(accept(novos, query) or 0) if accept is not None else 0
 
-        return search_web_images(
+        relatorios: dict[str, dict[str, Any]] = {}
+        candidatos = search_web_images(
             query, size=size, ratio=ratio, limit=limit, timeout=timeout,
             engine=engine,
             accept=_accept_do_item if accept is not None else None,
+            reports=relatorios,
         )
+        return candidatos, relatorios
 
     found: dict[str, list[dict[str, Any]]] = {}
+    relatorios_por_query: dict[str, dict[str, dict[str, Any]]] = {}
     workers = min(_BATCH_WORKERS, len(unique))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_search, query): query for query in unique}
         for future in as_completed(futures):
             query = futures[future]
             try:
-                found[query] = future.result()
+                candidatos, relatorios = future.result()
             except Exception:  # noqa: BLE001 - one failed engine must not lose the batch
-                found[query] = []
-    return [{"query": query, "candidates": found.get(query, [])} for query in unique]
+                candidatos, relatorios = [], {}
+            found[query] = candidatos
+            relatorios_por_query[query] = relatorios
+    return [
+        {
+            "query": query,
+            "candidates": found.get(query, []),
+            # Por que cada engine entregou (ou não entregou): sem isso uma engine
+            # podia sumir do resultado sem deixar rastro na telemetria.
+            "engine_reports": relatorios_por_query.get(query, {}),
+        }
+        for query in unique
+    ]
 
 
 __all__ = [
@@ -676,4 +890,7 @@ __all__ = [
     "search_web_images", "search_web_images_batch", "search_bing_images", "search_google_images",
     "search_yandex_images",
     "reset_http_request_count", "http_request_count",
+    # Saúde por engine (classificação da falha + relatório da tentativa)
+    "PARSER_VERSION", "FAILURE_KINDS", "FAILURE_KINDS_TRANSITORIOS",
+    "classify_failure", "engine_degradada", "engine_last_report", "engines_status",
 ]
