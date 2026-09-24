@@ -22,6 +22,8 @@ Nunca aceitamos uma origem por "parecer provável".
 
 from __future__ import annotations
 
+import base64
+import html
 import re
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
@@ -29,6 +31,43 @@ from urllib.parse import unquote, urlparse
 from .official_sources import dominios_oficiais
 
 _Busca = Callable[[str], list[dict[str, Any]]]
+
+
+def url_real_do_bing(url: str) -> str:
+    """Desembrulha o redirect ``/ck/a`` do Bing para a URL real do resultado.
+
+    O Bing passou a servir TODOS os links de resultado como
+    ``https://www.bing.com/ck/a?!&&p=<hash>&u=a1<base64url>&ntb=1``. O parser de
+    páginas descartava qualquer link que contivesse "bing.com" — ou seja,
+    descartava 100% dos resultados e o resolver nunca encontrava página nenhuma
+    (foi por isso que TODO candidato do Yandex ficou ``unresolved``). O alvo real
+    vem no parâmetro ``u``, prefixado com ``a1`` e em base64-url.
+
+    ATENÇÃO: o href vem do HTML, então os separadores chegam como ``&amp;`` —
+    sem desescapar antes, o parâmetro se chama ``amp;u`` e o link nunca é
+    desembrulhado (foi o segundo motivo do resolver achar zero páginas).
+
+    URL que não é redirect do Bing volta como veio; link indesembrulhável volta
+    vazio (melhor descartar do que tentar validar uma página errada).
+    """
+    if "bing.com/ck/a" not in url:
+        return url
+    consulta = urlparse(html.unescape(url)).query
+    bruto = ""
+    for par in consulta.split("&"):
+        chave, _, valor = par.partition("=")
+        if chave == "u":
+            bruto = unquote(valor)
+            break
+    if not bruto:
+        return ""
+    if bruto.startswith("a1"):
+        bruto = bruto[2:]
+    preenchimento = "=" * (-len(bruto) % 4)
+    try:
+        return base64.urlsafe_b64decode(bruto + preenchimento).decode("utf-8", "ignore")
+    except (ValueError, TypeError):
+        return ""
 
 
 def _slug_do_filename(image_url: str) -> str:
@@ -68,12 +107,17 @@ def _buscador_padrao(query: str) -> list[dict[str, Any]]:
         return []
     paginas: list[dict[str, Any]] = []
     vistos: set[str] = set()
-    # Links de resultado do Bing: <h2><a href="https://pagina">
+    # Links de resultado do Bing: <h2><a href="https://pagina"> — desde 2026 o
+    # href é um redirect /ck/a (o alvo real vem em base64 no parâmetro `u`);
+    # sem desembrulhar, TODO resultado era descartado pelo filtro "bing.com".
     for trecho in re.findall(r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"', html):
-        if trecho in vistos or "bing.com" in trecho:
+        alvo = url_real_do_bing(trecho)
+        if not alvo or "bing.com" in alvo:
             continue
-        vistos.add(trecho)
-        paginas.append({"source_page_url": trecho})
+        if alvo in vistos:
+            continue
+        vistos.add(alvo)
+        paginas.append({"source_page_url": alvo})
     return paginas
 
 
