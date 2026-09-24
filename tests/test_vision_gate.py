@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unicornio_editor.media.vision_gate import (
     VisionGateError,
     verify_image_subject,
+    verify_image_subject_batch,
     vision_config_ready,
 )
 
@@ -166,6 +167,135 @@ class VisionGateTests(unittest.TestCase):
         self.assertFalse(ok, reason)
         details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
         self.assertEqual(details, ["low"])  # rejeição clara: não gasta high
+
+    def test_batch_julga_varias_imagens_em_uma_requisicao(self):
+        VisionHandler.answer = json.dumps(
+            {
+                "items": [
+                    {
+                        "candidate_id": "A1",
+                        "status": "MATCH",
+                        "confidence": 0.97,
+                        "visual_type": "key_art",
+                    },
+                    {
+                        "candidate_id": "B1",
+                        "status": "UNRELATED",
+                        "confidence": 0.96,
+                        "visual_type": "animal",
+                    },
+                ]
+            }
+        )
+        result = verify_image_subject_batch(
+            items=[
+                {
+                    "candidate_id": "A1",
+                    "image_url": "https://media.example/a.webp",
+                    "subject": "Obra A",
+                    "require_key_art": True,
+                },
+                {
+                    "candidate_id": "B1",
+                    "image_url": "https://media.example/b.webp",
+                    "subject": "Obra B",
+                },
+            ],
+            api_key="test-key",
+            base_url=self.base,
+            model="vision-test",
+        )
+        self.assertTrue(result["A1"]["ok"])
+        self.assertFalse(result["B1"]["ok"])
+        self.assertEqual(len(VisionHandler.calls), 1)
+        content = self.server.last_payload["messages"][1]["content"]
+        self.assertEqual(sum(1 for item in content if item["type"] == "image_url"), 2)
+
+    def test_batch_exige_um_resultado_por_candidato(self):
+        VisionHandler.answer = json.dumps(
+            {
+                "items": [
+                    {
+                        "candidate_id": "A1",
+                        "status": "MATCH",
+                        "confidence": 0.97,
+                        "visual_type": "key_art",
+                    }
+                ]
+            }
+        )
+        with self.assertRaises(VisionGateError):
+            verify_image_subject_batch(
+                items=[
+                    {"candidate_id": "A1", "image_url": "https://a.test/a.webp", "subject": "A"},
+                    {"candidate_id": "B1", "image_url": "https://b.test/b.webp", "subject": "B"},
+                ],
+                api_key="test-key",
+                base_url=self.base,
+                model="vision-test",
+            )
+
+    def test_batch_escalates_only_ambiguous_subset(self):
+        original = VisionHandler.do_POST
+
+        def do_POST_por_detalhe(self):  # noqa: N802
+            tamanho = int(self.headers.get("Content-Length", "0"))
+            corpo = json.loads(self.rfile.read(tamanho) or b"{}")
+            imagens = [
+                item["image_url"]["url"] for item in corpo["messages"][1]["content"]
+                if item.get("type") == "image_url"
+            ]
+            detalhe = next(
+                item["image_url"].get("detail")
+                for item in corpo["messages"][1]["content"]
+                if item.get("type") == "image_url"
+            )
+            linhas = []
+            for imagem in imagens:
+                candidate_id = "A1" if imagem.endswith("/a.webp") else "B1"
+                if detalhe == "low" and candidate_id == "B1":
+                    status, confidence, visual_type = "AMBIGUOUS", 0.55, "other"
+                else:
+                    status, confidence, visual_type = "MATCH", 0.97, "key_art"
+                linhas.append({
+                    "candidate_id": candidate_id,
+                    "status": status,
+                    "confidence": confidence,
+                    "visual_type": visual_type,
+                })
+            VisionHandler.calls.append(corpo)
+            dados = json.dumps({"choices": [{"message": {"content": json.dumps({"items": linhas})}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(dados)))
+            self.end_headers()
+            self.wfile.write(dados)
+
+        VisionHandler.do_POST = do_POST_por_detalhe
+        try:
+            result = verify_image_subject_batch(
+                items=[
+                    {"candidate_id": "A1", "image_url": "https://media.example/a.webp", "subject": "A"},
+                    {"candidate_id": "B1", "image_url": "https://media.example/b.webp", "subject": "B"},
+                ],
+                api_key="test-key",
+                base_url=self.base,
+                model="vision-test",
+                allow_high=True,
+            )
+        finally:
+            VisionHandler.do_POST = original
+        self.assertTrue(result["A1"]["ok"])
+        self.assertTrue(result["B1"]["ok"])
+        self.assertEqual(len(VisionHandler.calls), 2)
+        self.assertEqual(
+            sum(1 for item in VisionHandler.calls[0]["messages"][1]["content"] if item.get("type") == "image_url"),
+            2,
+        )
+        self.assertEqual(
+            sum(1 for item in VisionHandler.calls[1]["messages"][1]["content"] if item.get("type") == "image_url"),
+            1,
+        )
 
     def test_inline_ambiguous_passes(self):
         # Inline AMBIGUOUS tambem passa (nao bloqueia por confianca baixa) — sem

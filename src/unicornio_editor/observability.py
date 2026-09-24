@@ -347,6 +347,15 @@ def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
     contexto = run_context()
     for chave, valor in contexto.items():
         fields.setdefault(chave, valor)
+    # Batch metadata is deliberately opt-in through the process environment:
+    # single-post runs keep their historical shape, while batch orchestration
+    # can correlate every internal event without changing domain APIs.
+    batch_id = str(os.environ.get("UNICORNIO_BATCH_ID") or "").strip()
+    batch_stage = str(os.environ.get("UNICORNIO_BATCH_STAGE") or "").strip()
+    if batch_id:
+        fields.setdefault("batch_id", batch_id)
+    if batch_stage:
+        fields.setdefault("batch_stage", batch_stage)
     append_event(
         telemetry_path(root),
         event,
@@ -361,6 +370,7 @@ def read_telemetry_summary(
     hours: int | None = None,
     run_source: str | None = None,
     cron_job_id: str | None = None,
+    batch_id: str | None = None,
 ) -> dict[str, Any]:
     """Resumo agregado do telemetry.jsonl (contadores por evento e motivo).
 
@@ -427,6 +437,19 @@ def read_telemetry_summary(
     }
             # Balanço por ORIGEM (cron x manual x teste) e qualidade POR DECISÃO.
     por_origem: dict[str, dict[str, int]] = {}
+    batches: dict[str, dict[str, Any]] = {}
+    economics = {
+        "hermes_model_requests": 0,
+        "editorial_model_requests": 0,
+        "editorial_posts_generated": 0,
+        "vision_provider_requests": 0,
+        "vision_images_examined": 0,
+        "tool_calls": 0,
+        "external_http_requests": 0,
+        "model_cost_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
     decisao_qualidade: dict[str, dict[str, Any]] = {}
     # Sessões RAIZ que produziram os eventos da fatia filtrada: é por elas que o
     # numerador (tokens/custo do state.db) é cruzado com o denominador (READY) —
@@ -457,10 +480,56 @@ def read_telemetry_summary(
                 continue
             if cron_job_id is not None and str(record.get("cron_job_id") or "") != cron_job_id:
                 continue
+            record_batch_id = str(record.get("batch_id") or "").strip()
+            if batch_id is not None and batch_id != record_batch_id:
+                continue
+            if record_batch_id:
+                batch = batches.setdefault(
+                    record_batch_id,
+                    {"events": 0, "stages": {}, "posts": set(), "max_size": 0},
+                )
+                batch["events"] += 1
+                stage = str(record.get("batch_stage") or record.get("command") or "unknown")
+                stages = batch["stages"]
+                stages[stage] = int(stages.get(stage, 0)) + 1
+                batch_size = record.get("batch_size")
+                if isinstance(batch_size, int):
+                    batch["max_size"] = max(int(batch["max_size"]), batch_size)
+                batch_post = record.get("post_id")
+                if isinstance(batch_post, int):
+                    batch["posts"].add(batch_post)
             raiz_evento = str(record.get("root_session_id") or record.get("session_id") or "")
             if raiz_evento:
                 sessoes_filtradas.add(raiz_evento)
             counts[event] = counts.get(event, 0) + 1
+            if event in {"cmd_output", "tool_call"}:
+                economics["tool_calls"] += 1
+            if event in {"hermes_model_request", "model_request", "editorial_model_request"}:
+                requests = int(record.get("requests") or record.get("count") or 1)
+                is_editorial = event == "editorial_model_request" or str(record.get("stage") or "") == "editorial"
+                if not is_editorial:
+                    economics["hermes_model_requests"] += max(1, requests)
+                if is_editorial:
+                    economics["editorial_model_requests"] += max(1, requests)
+                    generated = record.get("posts_generated", record.get("batch_size", record.get("posts", 0)))
+                    if isinstance(generated, int):
+                        economics["editorial_posts_generated"] += max(0, generated)
+            if event == "vision_api_request":
+                economics["vision_provider_requests"] += 1
+                batch_size = record.get("batch_size")
+                if isinstance(batch_size, int):
+                    economics["vision_images_examined"] += max(0, batch_size)
+            for field, target in (
+                ("external_http_requests", "external_http_requests"),
+                ("input_tokens", "input_tokens"),
+                ("output_tokens", "output_tokens"),
+            ):
+                value = record.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    economics[target] += int(value)
+            cost = record.get("model_cost_usd", record.get("cost_usd"))
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                economics["model_cost_usd"] += float(cost)
             reason = record.get("reason")
             if isinstance(reason, str) and reason.strip():
                 bucket = reasons.setdefault(event, {})
@@ -632,6 +701,13 @@ def read_telemetry_summary(
             ts = record.get("ts")
             if isinstance(ts, str):
                 last_ts = ts
+    batch_summary = {
+        batch_id: {
+            **{key: value for key, value in bucket.items() if key != "posts"},
+            "posts": sorted(bucket["posts"]),
+        }
+        for batch_id, bucket in batches.items()
+    }
     return {
         "file": str(path),
         "total_events": sum(counts.values()),
@@ -685,6 +761,23 @@ def read_telemetry_summary(
             ),
         },
         "run_sources": por_origem,
+        "batches": batch_summary,
+        "economics": {
+            **economics,
+            "model_cost_usd": round(float(economics["model_cost_usd"]), 8),
+            "posts_per_editorial_request": (
+                round(economics["editorial_posts_generated"] / economics["editorial_model_requests"], 4)
+                if economics["editorial_model_requests"] else None
+            ),
+            "images_per_vision_request": (
+                round(economics["vision_images_examined"] / economics["vision_provider_requests"], 4)
+                if economics["vision_provider_requests"] else None
+            ),
+            "vision_candidates_per_ready": (
+                round(economics["vision_images_examined"] / len(ready_posts), 4)
+                if ready_posts else None
+            ),
+        },
         "root_sessions": sorted(sessoes_filtradas),
         # COBERTURA da atribuição (POR ITEM): quantos itens tiveram a decisão
         # resolvida pelo ledger, quantos não trouxeram id e quantos trouxeram id

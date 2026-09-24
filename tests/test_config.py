@@ -125,6 +125,20 @@ class ConfigTests(unittest.TestCase):
             config = load_config()
         self.assertEqual(config.vision_api_key, "sk-test-editor")
 
+    def test_editorial_provider_configuration_is_independent(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "OPENAI_API_KEY": "sk-openai",
+            "EDITORIAL_API_KEY": "sk-editorial",
+            "EDITORIAL_BASE_URL": "https://editorial.test/v1",
+            "EDITORIAL_MODEL": "editorial-model",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.editorial_api_key, "sk-editorial")
+        self.assertEqual(config.editorial_base_url, "https://editorial.test/v1")
+        self.assertEqual(config.editorial_model, "editorial-model")
+
     def test_vision_can_be_disabled(self):
         values = {
             "WORDPRESS_URL": "http://wp.test",

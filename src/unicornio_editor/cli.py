@@ -14,9 +14,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .backup import SnapshotStore
+from .batch import (
+    load_editorial_batch,
+    load_media_resolve_batch,
+    load_vision_batch,
+    prepare_batch,
+)
 from .checklist import required_image_count, run_pre_publish_checklist
 from .config import ConfigError, load_config
 from .editorial_schema import validate_editorial
+from .editorial_provider import EditorialProviderError
 from .maintenance import generate_report
 from .workflow import (
     WorkflowError,
@@ -37,7 +44,7 @@ from .workflow import (
     retry_post,
     validate_media_plan,
 )
-from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED
+from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state
 from .media.text import sanitize_title
 from .wordpress import WordPressClient, WordPressError
 
@@ -100,9 +107,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="id do cron editorial (default: HERMES_EDITORIAL_CRON_JOB_ID)",
     )
     telemetry_parser.add_argument(
+        "--batch-id", dest="batch_id", type=str, default="",
+        help="filtra a telemetria de um batch específico",
+    )
+    telemetry_parser.add_argument(
         "--project-root", dest="project_root", type=str, default="",
         help="atribuicao por diretorio quando o banco nao expoe a coluna de job",
     )
+
+    canary_parser = subparsers.add_parser(
+        "canary-preflight",
+        help="preflight somente leitura para dois posts antes do canary real",
+    )
+    canary_parser.add_argument("post_ids", nargs=2, type=int, help="exatamente dois posts pending")
+    canary_parser.add_argument("--root", type=Path, default=Path("."))
 
     cards_parser = subparsers.add_parser(
         "cards",
@@ -124,6 +142,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="grava o JSON completo em backups/<id>/prepared.json e imprime apenas "
         "o resumo (economia de tokens); leia o arquivo para obter o cleaned_html",
+    )
+
+    prepare_batch_parser = subparsers.add_parser(
+        "prepare-batch",
+        help="prepara varios posts pending em envelopes independentes para uma run stateless",
+    )
+    prepare_batch_parser.add_argument(
+        "post_ids", nargs="+", type=int,
+        help="ids dos posts pending; cada post recebe snapshot e arquivo de contexto proprio",
+    )
+    prepare_batch_parser.add_argument("--root", type=Path, default=Path("."))
+    prepare_batch_parser.add_argument(
+        "--batch-id",
+        default="",
+        help="id auditavel opcional (se omitido, o comando gera um novo)",
     )
 
     apply_parser = subparsers.add_parser("apply", help="valida e aplica JSON editorial")
@@ -148,6 +181,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="trata o arquivo como PATCH PARCIAL do rework: mescla deterministicamente "
         "com backups/<id>/editorial.draft.json (listas substituem, dicionarios mesclam "
         "chave a chave) — o agente envia so o componente corrigido, nunca o artigo inteiro",
+    )
+
+    apply_batch_parser = subparsers.add_parser(
+        "apply-batch",
+        help="aplica um envelope editorial em microbatch, mantendo apply/estado isolados por post",
+    )
+    apply_batch_parser.add_argument("batch_file", type=Path)
+    apply_batch_parser.add_argument("--root", type=Path, default=Path("."))
+    apply_batch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="executa o preflight de cada item sem escrever no WordPress",
+    )
+    apply_batch_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="grava auditorias individuais e imprime apenas o resumo do batch",
     )
 
     checklist_parser = subparsers.add_parser(
@@ -345,6 +395,40 @@ def build_parser() -> argparse.ArgumentParser:
         dest="compact",
         action="store_false",
         help="devolve o relatorio completo (listicle/featured_vision) no stdout",
+    )
+
+    vision_batch_parser = subparsers.add_parser(
+        "vision-batch",
+        help="valida thumbnails independentes em uma chamada multimodal e atualiza o cache seguro",
+    )
+    vision_batch_parser.add_argument("batch_file", type=Path)
+    vision_batch_parser.add_argument("--root", type=Path, default=Path("."))
+    vision_batch_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="inclui detalhes completos no stdout (por padrao grava a auditoria em work/)",
+    )
+
+    editorial_generate_parser = subparsers.add_parser(
+        "editorial-generate-batch",
+        help="gera editorial de 1-2 posts com uma única chamada estruturada ao provider",
+    )
+    editorial_generate_parser.add_argument("input_file", type=Path)
+    editorial_generate_parser.add_argument("--root", type=Path, default=Path("."))
+    editorial_generate_parser.add_argument("--output", type=Path, default=None)
+
+    media_resolve_batch_parser = subparsers.add_parser(
+        "media-resolve-batch",
+        help="resolve candidatos de mídia para até 2 posts em uma etapa determinística",
+    )
+    media_resolve_batch_parser.add_argument("batch_file", type=Path)
+    media_resolve_batch_parser.add_argument("--root", type=Path, default=Path("."))
+    media_resolve_batch_parser.add_argument(
+        "--compact", action="store_true", help="mantém somente o plano acionável no stdout (padrão)"
+    )
+    media_resolve_batch_parser.add_argument(
+        "--full", action="store_true",
+        help="inclui candidatos e rejeições completos no stdout; por padrão retorna plano compacto",
     )
 
     draft_parser = subparsers.add_parser(
@@ -632,6 +716,376 @@ def _compact_apply(result: dict) -> dict:
     if failed:
         compact["failed"] = failed
     return compact
+
+
+def _apply_editorial_batch(
+    client: WordPressClient,
+    config: Any,
+    root: Path,
+    batch: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    compact: bool = True,
+) -> dict[str, Any]:
+    """Apply a validated batch one post at a time.
+
+    This is intentionally not a multi-post transaction.  Each item keeps the
+    existing snapshot, lock, checklist, state and manifest guarantees.  A
+    session budget stops the batch before the next untouched post; an already
+    touched post remains eligible for rework, matching the single-post apply.
+    """
+    from . import session_budget
+
+    batch_id = str(batch["batch_id"])
+    outcomes: list[dict[str, Any]] = []
+    stopped = ""
+    remaining: list[int] = []
+    previous_batch = os.environ.get("UNICORNIO_BATCH_ID")
+    previous_stage = os.environ.get("UNICORNIO_BATCH_STAGE")
+    os.environ["UNICORNIO_BATCH_ID"] = batch_id
+    os.environ["UNICORNIO_BATCH_STAGE"] = "apply"
+    try:
+        for index, item in enumerate(batch["items"]):
+            post_id = int(item["post_id"])
+            if str(item.get("status") or "ok") == "needs_retry":
+                outcomes.append({
+                    "post_id": post_id,
+                    "status": "needs_retry",
+                    "wordpress_changed": False,
+                    "reason": str(item.get("reason") or "editorial batch marcou retry")[:240],
+                    "action": "gere novamente somente este post",
+                })
+                continue
+            # Retry do mesmo batch é idempotente: um item que já terminou READY
+            # não deve ser reaplicado só porque o parceiro do batch falhou.
+            if not dry_run:
+                prior_path = root / "backups" / str(post_id) / "apply.latest.json"
+                try:
+                    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    prior = {}
+                if (
+                    isinstance(prior, dict)
+                    and prior.get("batch_id") == batch_id
+                    and prior.get("status") == "ready"
+                ):
+                    outcomes.append({
+                        "post_id": post_id,
+                        "status": "noop",
+                        "state": "ready",
+                        "wordpress_changed": False,
+                        "idempotent": True,
+                    })
+                    continue
+            projection = session_budget.status(root, config)
+            already_touched = post_id in projection["posts_touched"]
+            reason = session_budget.stop_reason(root, config)
+            if dry_run:
+                allowed, projection = session_budget.touch_allowed(root, post_id, config)
+                no_slot = not allowed
+            elif reason and not already_touched:
+                no_slot = True
+            else:
+                allowed, projection = session_budget.claim_touch(root, post_id, config)
+                no_slot = not allowed
+            if not dry_run and no_slot:
+                stopped = reason or (
+                    "teto de posts tocados por sessao atingido "
+                    f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
+                )
+                remaining = [int(row["post_id"]) for row in batch["items"][index:]]
+                break
+
+            try:
+                result = apply_editorial(
+                    client, config, root, post_id, item["editorial"]
+                )
+                audit = root / "backups" / str(post_id) / "apply.latest.json"
+                _write_audit(audit, {**result, "batch_id": batch_id})
+                if not result.get("dry_run") and result.get("status") == "ready":
+                    session_budget.record_ready(root, config)
+                outcomes.append(_compact_apply(result) if compact else result)
+            except Exception as exc:  # noqa: BLE001 - isolate one post
+                outcomes.append(
+                    {
+                        "post_id": post_id,
+                        "status": "error",
+                        "wordpress_changed": False,
+                        "error": str(exc)[:240],
+                    }
+                )
+    finally:
+        if previous_batch is None:
+            os.environ.pop("UNICORNIO_BATCH_ID", None)
+        else:
+            os.environ["UNICORNIO_BATCH_ID"] = previous_batch
+        if previous_stage is None:
+            os.environ.pop("UNICORNIO_BATCH_STAGE", None)
+        else:
+            os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
+
+    summary = {
+        "schema_version": batch["schema_version"],
+        "batch_id": batch_id,
+        "count": len(batch["items"]),
+        "processed": len(outcomes),
+        "ready": sum(1 for item in outcomes if item.get("status") == "ready"),
+        "noop": sum(1 for item in outcomes if item.get("status") == "noop"),
+        "needs_retry": sum(1 for item in outcomes if item.get("status") == "needs_retry"),
+        "needs_rework": sum(
+            1 for item in outcomes if item.get("status") == "needs_rework"
+        ),
+        "errors": sum(1 for item in outcomes if item.get("status") == "error"),
+        "stopped": stopped,
+        "remaining_post_ids": remaining,
+        "posts": outcomes,
+        "session": session_budget.status(root, config),
+    }
+    _write_audit(
+        root / "work" / "batches" / batch_id / "apply.manifest.json", summary
+    )
+    return summary
+
+
+def _resolve_media_batch(
+    client: WordPressClient,
+    config: Any,
+    root: Path,
+    batch: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    """Resolve media for all posts without another Hermes/LLM turn.
+
+    Search discovery is parallelized by ``search_web_images_batch``. The
+    expensive/safety-sensitive enrichment remains deterministic and isolated
+    per post: source-page proof, relevance, pHash and local-library reuse.
+    The result is a media plan input for the editorial batch; it never uploads
+    or mutates WordPress.
+    """
+    from .media.search import (
+        http_request_count,
+        reset_http_request_count,
+        search_web_images_batch,
+    )
+    from .observability import append_telemetry
+
+    posts = batch["posts"]
+    reuse_by_post: dict[int, list[dict]] = {}
+    needed_web_by_post: dict[int, int] = {}
+    searchable = []
+    for item in posts:
+        post_id = int(item["post_id"])
+        reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"]))
+        reuse_by_post[post_id] = reuse
+        needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
+        if needed_web_by_post[post_id] > 0:
+            searchable.append(item)
+    queries = [str(item["query"] or item["subject"]) for item in searchable]
+    limit = max((int(item["limit"]) for item in searchable), default=1)
+    first = searchable[0] if searchable else posts[0]
+    spec_by_query = {str(item["query"] or item["subject"]): item for item in searchable}
+    memo_by_query = {query: {} for query in queries}
+    accepted_urls_by_query: dict[str, set[str]] = {query: set() for query in queries}
+
+    def accept(novos: list[dict], query: str) -> int:
+        spec = spec_by_query.get(str(query))
+        if not spec:
+            return 0
+        post_id = int(spec["post_id"])
+        aprovados, _rejeitados, _deferidos = _enriquecer_candidatos(
+            novos,
+            subject=str(spec["subject"]),
+            termo=str(spec["query"]),
+            verify=True,
+            root=root,
+            capacity=needed_web_by_post[post_id],
+            enriched_cache=memo_by_query[str(query)],
+        )
+        accepted_urls_by_query[str(query)].update(
+            str(candidate.get("direct_image_url") or "")
+            for candidate in aprovados
+            if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+        )
+        return len(accepted_urls_by_query[str(query)])
+
+    reset_http_request_count()
+    found = search_web_images_batch(
+        queries,
+        size=str(first.get("size") or "xga"),
+        ratio=str(first.get("ratio") or "w"),
+        limit=limit,
+        timeout=config.http_timeout,
+        engine=str(first.get("engine") or "auto"),
+        accept=accept if searchable else None,
+    )
+    by_query = {str(row.get("query")): row.get("candidates") or [] for row in found}
+    output: list[dict[str, Any]] = []
+    vision_items: list[dict[str, Any]] = []
+    total_candidates = 0
+    total_rejected = 0
+    for item in posts:
+        post_id = int(item["post_id"])
+        subject = str(item["subject"])
+        needed = int(item["needed"])
+        reuso = reuse_by_post[post_id]
+        needed_web = needed_web_by_post[post_id]
+        candidates = list(by_query.get(str(item["query"]), []))
+        aprovados, rejeitados, deferidos = _enriquecer_candidatos(
+            candidates,
+            subject=subject,
+            termo=str(item["query"]),
+            verify=True,
+            root=root,
+            capacity=needed_web,
+            enriched_cache=memo_by_query.get(str(item["query"]), {}),
+        )
+        total_candidates += len(candidates)
+        total_rejected += len(rejeitados)
+        compact_candidates = [_media_candidate(candidate) for candidate in aprovados]
+        for index, candidate in enumerate(aprovados):
+            if candidate.get("needs_vision") and len(vision_items) < 20:
+                vision_items.append({
+                    "candidate_id": f"{post_id}-{index}",
+                    "post_id": post_id,
+                    "image_url": str(candidate.get("direct_image_url") or ""),
+                    "subject": subject,
+                    "require_key_art": False,
+                })
+        output.append({
+            "post_id": post_id,
+            "subject": subject,
+            "needed": needed,
+            "reuse": reuso,
+            "needed_web": needed_web,
+            "candidates": compact_candidates[:needed],
+            "deferred": len(deferidos),
+            "rejected": len(rejeitados),
+            "audit_candidates": aprovados + rejeitados + deferidos,
+        })
+    result = {
+        "schema_version": batch["schema_version"],
+        "batch_id": batch["batch_id"],
+        "count": len(output),
+        "posts": output,
+        "vision_items": vision_items,
+        "economics": {
+            "posts": len(output),
+            "search_queries": len(queries),
+            "external_http_requests": http_request_count(),
+            "candidates_examined": total_candidates,
+            "candidates_rejected": total_rejected,
+            "llm_requests": 0,
+            "tool_calls": 1,
+        },
+    }
+    append_telemetry(
+        root,
+        "media_resolve_batch",
+        batch_size=len(output),
+        posts=len(output),
+        search_queries=len(queries),
+        external_http_requests=http_request_count(),
+        candidates_examined=total_candidates,
+        candidates_rejected=total_rejected,
+        llm_requests=0,
+        tool_calls=1,
+    )
+    audit_payload = {
+        **result,
+        "posts": [
+            {**post, "audit_candidates": post["audit_candidates"]}
+            for post in output
+        ],
+    }
+    audit = _write_audit(
+        root / "work" / "batches" / batch["batch_id"] / "media.manifest.json",
+        audit_payload,
+    )
+    result["audit"] = audit
+    if vision_items:
+        result["vision_batch_file"] = _write_audit(
+            root / "work" / "batches" / batch["batch_id"] / "vision.input.json",
+            {
+                "schema_version": batch["schema_version"],
+                "batch_id": batch["batch_id"],
+                "items": vision_items,
+            },
+        )
+    if not full:
+        result["posts"] = [
+            {key: value for key, value in post.items() if key != "audit_candidates"}
+            for post in output
+        ]
+    return result
+
+
+def _canary_preflight(
+    client: WordPressClient,
+    config: Any,
+    root: Path,
+    post_ids: list[int],
+) -> dict[str, Any]:
+    """Run the authenticated, read-only checks required before a canary.
+
+    No snapshot, provider call, upload or WordPress write happens here. The
+    report is deliberately explicit so a failed preflight cannot be mistaken
+    for a failed editorial batch.
+    """
+    posts: list[dict[str, Any]] = []
+    for post_id in post_ids:
+        row: dict[str, Any] = {"post_id": int(post_id), "status": "error"}
+        try:
+            post = client.get_post(int(post_id))
+            title_value = post.get("title") or {}
+            title = str(
+                title_value.get("raw") or title_value.get("rendered") or ""
+            ) if isinstance(title_value, dict) else str(title_value or "")
+            row.update({
+                "wordpress_status": post.get("status"),
+                "state": read_state(post),
+                "title": title[:160],
+                "featured_media": int(post.get("featured_media") or 0),
+            })
+            # GET /media is part of the preflight: it verifies that the
+            # authenticated application password can read the local library.
+            media = client.search_media(title or f"post-{post_id}", per_page=1)
+            row["media_library_read"] = True
+            row["media_candidates_seen"] = len(media)
+            row["status"] = "ready" if post.get("status") == "pending" else "not_pending"
+        except Exception as exc:  # noqa: BLE001 - report each post independently
+            row["error"] = str(exc)[:240]
+        posts.append(row)
+    provider = {
+        "wordpress_credentials_present": bool(config.app_user and config.app_password),
+        "editorial_provider_configured": bool(config.editorial_api_key),
+        "vision_provider_configured": bool(not config.vision_enabled or config.vision_api_key),
+        "editorial_model": config.editorial_model,
+        "vision_model": config.vision_model if config.vision_enabled else None,
+        "dry_run": bool(config.dry_run),
+    }
+    from .observability import read_telemetry_summary
+
+    posts_ok = all(row.get("status") == "ready" for row in posts)
+    checks_ok = (
+        posts_ok
+        and provider["wordpress_credentials_present"]
+        and provider["editorial_provider_configured"]
+        and provider["vision_provider_configured"]
+    )
+    return {
+        "status": "ready" if checks_ok else "blocked",
+        "read_only": True,
+        "post_ids": [int(post_id) for post_id in post_ids],
+        "provider": provider,
+        "posts": posts,
+        "baseline_24h": read_telemetry_summary(root, hours=24),
+        "next": (
+            "execute prepare-batch e editorial-generate-batch; mantenha EDITOR_DRY_RUN=true no primeiro ensaio"
+            if checks_ok else
+            "corrija autenticação/status/provider antes de executar o canary"
+        ),
+    }
 
 
 def _compact_checklist(checklist: dict) -> dict:
@@ -1043,7 +1497,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 from .observability import read_telemetry_summary
 
-                result = read_telemetry_summary(args.root)
+                result = read_telemetry_summary(
+                    args.root,
+                    batch_id=(getattr(args, "batch_id", "") or None),
+                )
+        elif args.command == "canary-preflight":
+            result = _canary_preflight(client, config, args.root, list(args.post_ids))
         elif args.command == "migrate-state":
             from .workflow import migrate_legacy_state
 
@@ -1118,6 +1577,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "original_link": result.get("original_link"),
                     "wordpress_changed": False,
                 }
+        elif args.command == "prepare-batch":
+            result = prepare_batch(
+                client,
+                config,
+                args.root,
+                args.post_ids,
+                batch_id=args.batch_id or None,
+            )
+        elif args.command == "editorial-generate-batch":
+            from .editorial_provider import generate_editorial_batch
+
+            batch_id = ""
+            try:
+                batch_id = str(json.loads(args.input_file.read_text(encoding="utf-8")).get("batch_id") or "")
+            except (OSError, ValueError):
+                pass
+            previous_batch = os.environ.get("UNICORNIO_BATCH_ID")
+            previous_stage = os.environ.get("UNICORNIO_BATCH_STAGE")
+            if batch_id:
+                os.environ["UNICORNIO_BATCH_ID"] = batch_id
+            os.environ["UNICORNIO_BATCH_STAGE"] = "editorial"
+            try:
+                result = generate_editorial_batch(
+                    args.input_file,
+                    api_key=config.editorial_api_key,
+                    base_url=config.editorial_base_url,
+                    model=config.editorial_model,
+                    timeout=max(config.http_timeout, 30.0),
+                    min_confidence=config.min_relevance_confidence,
+                    root=args.root,
+                    output_path=args.output,
+                )
+            finally:
+                if previous_batch is None:
+                    os.environ.pop("UNICORNIO_BATCH_ID", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_ID"] = previous_batch
+                if previous_stage is None:
+                    os.environ.pop("UNICORNIO_BATCH_STAGE", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
+        elif args.command == "apply-batch":
+            batch = load_editorial_batch(args.batch_file)
+            if args.dry_run:
+                config = replace(config, dry_run=True)
+            result = _apply_editorial_batch(
+                client,
+                config,
+                args.root,
+                batch,
+                dry_run=bool(args.dry_run),
+                compact=bool(args.compact),
+            )
         elif args.command == "checklist":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
@@ -1759,6 +2271,111 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = _compact_media_validate(
                     payload, result, audit=audit, post_title=post_title
                 )
+        elif args.command == "vision-batch":
+            from .media.vision_cache import set_cached_decision
+            from .media.vision_gate import verify_image_subject_batch
+
+            batch = load_vision_batch(args.batch_file)
+            previous_batch = os.environ.get("UNICORNIO_BATCH_ID")
+            previous_stage = os.environ.get("UNICORNIO_BATCH_STAGE")
+            os.environ["UNICORNIO_BATCH_ID"] = batch["batch_id"]
+            os.environ["UNICORNIO_BATCH_STAGE"] = "vision"
+            try:
+                decisions = verify_image_subject_batch(
+                    items=batch["items"],
+                    api_key=config.vision_api_key,
+                    base_url=config.vision_base_url,
+                    model=config.vision_model,
+                    timeout=config.http_timeout,
+                    detail=config.vision_detail,
+                    allow_high=True,
+                    root=args.root,
+                )
+            finally:
+                if previous_batch is None:
+                    os.environ.pop("UNICORNIO_BATCH_ID", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_ID"] = previous_batch
+                if previous_stage is None:
+                    os.environ.pop("UNICORNIO_BATCH_STAGE", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
+            items: list[dict[str, Any]] = []
+            for item in batch["items"]:
+                candidate_id = item["candidate_id"]
+                decision = decisions[candidate_id]
+                cached = False
+                # Only definitive final results enter the normal cache. The
+                # batch gate already escalated only the ambiguous subset to
+                # high detail; inconclusive-at-high remains uncached.
+                if decision.get("verdict") in {"accept", "reject"}:
+                    set_cached_decision(
+                        args.root,
+                        item["image_url"],
+                        item["subject"],
+                        {
+                            "status": "MATCH"
+                            if decision["verdict"] == "accept"
+                            else "UNRELATED",
+                            "confidence": float(decision.get("confidence") or 0),
+                            "visual_type": decision.get("visual_type") or "other",
+                        },
+                    )
+                    cached = True
+                items.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "post_id": item.get("post_id"),
+                        "status": decision.get("status"),
+                        "verdict": decision.get("verdict"),
+                        "confidence": decision.get("confidence"),
+                        "visual_type": decision.get("visual_type"),
+                        "reason": decision.get("reason"),
+                        "cached": cached,
+                    }
+                )
+            full = {
+                "schema_version": batch["schema_version"],
+                "batch_id": batch["batch_id"],
+                "items": items,
+            }
+            audit = _write_audit(
+                args.root / "work" / "batches" / batch["batch_id"] / "vision.manifest.json",
+                full,
+            )
+            result = {
+                "schema_version": batch["schema_version"],
+                "batch_id": batch["batch_id"],
+                "count": len(items),
+                "accepted": sum(1 for item in items if item.get("verdict") == "accept"),
+                "rejected": sum(1 for item in items if item.get("verdict") == "reject"),
+                "inconclusive": sum(
+                    1 for item in items if item.get("verdict") == "inconclusive"
+                ),
+                "cached": sum(1 for item in items if item.get("cached")),
+                "audit": audit,
+            }
+            if args.full:
+                result["items"] = items
+        elif args.command == "media-resolve-batch":
+            batch = load_media_resolve_batch(args.batch_file)
+            previous_batch = os.environ.get("UNICORNIO_BATCH_ID")
+            previous_stage = os.environ.get("UNICORNIO_BATCH_STAGE")
+            os.environ["UNICORNIO_BATCH_ID"] = batch["batch_id"]
+            os.environ["UNICORNIO_BATCH_STAGE"] = "media-resolve"
+            try:
+                result = _resolve_media_batch(
+                    client, config, args.root, batch, full=bool(args.full)
+                )
+            finally:
+                if previous_batch is None:
+                    os.environ.pop("UNICORNIO_BATCH_ID", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_ID"] = previous_batch
+                if previous_stage is None:
+                    os.environ.pop("UNICORNIO_BATCH_STAGE", None)
+                else:
+                    os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
         elif args.command == "draft":
             draft = load_draft(args.root, args.post_id)
             componentes = [args.component] if getattr(args, "component", "") else []
@@ -1902,7 +2519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (ConfigError, WordPressError, WorkflowError, OSError, ValueError) as exc:
+    except (ConfigError, EditorialProviderError, WordPressError, WorkflowError, OSError, ValueError) as exc:
         # WorkflowError incluido de proposito: um traceback Python no contexto do
         # agente e caro e inutil — o operador (e o LLM) precisam do motivo em
         # JSON, nao da stack inteira.
@@ -2445,20 +3062,24 @@ def _merge_patch_with_draft(root: Path, post_id: int, patch: dict) -> tuple[dict
 # plan + visao da featured) — sem ele o `context_bytes_total` ficava subestimado.
 _CONTEXT_CMDS = frozenset(
     {"list-pending", "queue", "cards", "prepare", "draft", "content",
-     "media-search", "media-search-web", "media-search-listicle", "checklist",
+     "prepare-batch", "editorial-generate-batch", "media-search", "media-search-web", "media-search-listicle", "vision-batch", "media-resolve-batch", "checklist",
      "telemetry", "media-validate"}
 )
 
 # Comandos de ESCRITA que tambem colocam contexto no LLM (o resultado do apply
 # e o que decide o proximo passo). Medidos no MESMO evento, distinguidos por
 # `kind`, para o operador conseguir somar o custo real por post.
-_WRITE_CONTEXT_CMDS = frozenset({"apply", "uncertain", "discard", "retry", "publish"})
+_WRITE_CONTEXT_CMDS = frozenset(
+    {"apply", "apply-batch", "uncertain", "discard", "retry", "publish"}
+)
 
 # O ledger da SESSAO editorial so aceita comandos do proprio agente editorial.
 # `publish`/`publish-ready` rodam em OUTRO cron (janelas de publicacao) no mesmo
 # projeto: contabilizar o contexto deles estenderia a janela do ledger e a
 # execucao seguinte de editorial herdaria o teto esgotado da anterior.
-_SESSION_LEDGER_CMDS = (_CONTEXT_CMDS | frozenset({"apply", "uncertain", "discard", "retry"}))
+_SESSION_LEDGER_CMDS = (
+    _CONTEXT_CMDS | frozenset({"apply", "apply-batch", "editorial-generate-batch", "uncertain", "discard", "retry"})
+)
 
 
 def _result_sizes(args: argparse.Namespace, result: Any) -> dict[str, Any]:
@@ -2471,6 +3092,12 @@ def _result_sizes(args: argparse.Namespace, result: Any) -> dict[str, Any]:
         if isinstance(result, list):
             detalhe["items"] = len(result)
         return detalhe
+    batch_id = result.get("batch_id")
+    if isinstance(batch_id, str) and batch_id:
+        detalhe["batch_id"] = batch_id
+        detalhe["batch_size"] = int(result.get("count") or len(result.get("items") or []))
+        detalhe["batch_prepared"] = int(result.get("prepared") or 0)
+        detalhe["batch_failed"] = int(result.get("failed") or 0)
     payload = result.get("payload")
     if isinstance(payload, dict):
         detalhe["candidates"] = len(payload.get("candidates") or [])

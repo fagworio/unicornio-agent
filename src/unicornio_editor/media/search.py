@@ -27,6 +27,7 @@ import os
 import random
 import sys
 import time
+from threading import Lock
 from pathlib import Path
 import re
 import zlib
@@ -46,6 +47,20 @@ _UA = (
 _MAX_BYTES = 3 * 1024 * 1024
 _MAX_BATCH_QUERIES = 20
 _BATCH_WORKERS = 4
+_HTTP_REQUESTS = 0
+_HTTP_REQUESTS_LOCK = Lock()
+
+
+def reset_http_request_count() -> None:
+    """Reset the process-local counter used by batch economics telemetry."""
+    global _HTTP_REQUESTS
+    with _HTTP_REQUESTS_LOCK:
+        _HTTP_REQUESTS = 0
+
+
+def http_request_count() -> int:
+    with _HTTP_REQUESTS_LOCK:
+        return int(_HTTP_REQUESTS)
 
 # Allowed Google size / aspect tokens (fail-closed on unknown values).
 _SIZES = {"ic", "xga", "vga", "qsvga", "m", "n", "l", "xxl", "qhd"}
@@ -68,6 +83,9 @@ _BING_TURL_RE = re.compile(r'"turl":"([^"]+)"')
 
 
 def _fetch(url: str, timeout: float) -> str:
+    global _HTTP_REQUESTS
+    with _HTTP_REQUESTS_LOCK:
+        _HTTP_REQUESTS += 1
     request = Request(url, headers={"User-Agent": _UA, "Accept": "text/html"})
     with urlopen(request, timeout=timeout) as response:
         data = response.read(_MAX_BYTES + 1)
@@ -657,4 +675,5 @@ __all__ = [
     "build_search_url", "build_bing_url", "build_yandex_url",
     "search_web_images", "search_web_images_batch", "search_bing_images", "search_google_images",
     "search_yandex_images",
+    "reset_http_request_count", "http_request_count",
 ]

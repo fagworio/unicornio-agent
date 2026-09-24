@@ -35,6 +35,11 @@ class Config:
     vision_detail: str = "low"  # OpenAI image detail: low | high (low = 2833 tok)
     vision_mode: str = "ambiguous"  # ambiguous = pula apenas fontes oficiais fortemente evidenciadas
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
+    # Modelo editorial direto: uma chamada estruturada por microbatch, fora do
+    # loop agentic do Hermes.
+    editorial_api_key: str = field(default="", repr=False)
+    editorial_base_url: str = "https://api.openai.com/v1"
+    editorial_model: str = "gpt-4o-mini"
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
     max_posts_per_run: int = 5  # cards por lote / posts processados por run
     # P0 (auditoria de contexto): a META de producao (READY por run) e o TETO
@@ -231,6 +236,11 @@ def load_config() -> Config:
         vision_detail=_env("EDITOR_VISION_DETAIL", "low"),
         vision_mode=_choice("EDITOR_VISION_MODE", "ambiguous", {"always", "ambiguous"}),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
+        editorial_api_key=_env("EDITORIAL_API_KEY") or _env("OPENAI_API_KEY"),
+        editorial_base_url=_validate_url(
+            "EDITORIAL_BASE_URL", _env("EDITORIAL_BASE_URL", "https://api.openai.com/v1")
+        ),
+        editorial_model=_env("EDITORIAL_MODEL", "gpt-4o-mini"),
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 5, 1, 10),
         target_ready_per_run=_int("EDITOR_TARGET_READY_PER_RUN", 5, 1, 10),
         max_posts_touched_per_run=_int("EDITOR_MAX_POSTS_TOUCHED_PER_RUN", 2, 0, 20),

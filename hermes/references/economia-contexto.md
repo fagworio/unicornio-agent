@@ -12,6 +12,28 @@ JSON que entra na conversa e todo request seguinte relê a conversa inteira. Dua
 sessões de 2 posts custam muito menos que uma de 6 — e a qualidade é a mesma,
 porque o que muda é só *quando* a sessão termina.
 
+## 0. Microbatch sem transação compartilhada
+
+O primeiro passo para reduzir turnos do modelo é preparar dois posts em uma
+mesma run e manter os dados completos fora do stdout:
+
+```bash
+unicornio-editor prepare-batch POST_A POST_B --batch-id BATCH_ID
+```
+
+O resultado é um manifesto em `work/batches/BATCH_ID/manifest.json` e um
+envelope independente por post. O modelo pode devolver um único arquivo com
+`items[{post_id, editorial}]`, validado inteiro antes da execução:
+
+```bash
+unicornio-editor apply-batch editorial-batch.json --compact
+```
+
+O comando apenas orquestra chamadas individuais ao `apply`. Não existe commit
+multi-post: backup, lock, checklist, manifest, estado e rework continuam
+separados. Se o teto da sessão acabar, os posts ainda não tocados ficam em
+`remaining_post_ids` para a próxima janela.
+
 ## 1. Orçamento de sessão (hard cap de posts tocados)
 
 Variáveis: `EDITOR_TARGET_READY_PER_RUN` (meta de READY, default 5),
@@ -20,7 +42,10 @@ Variáveis: `EDITOR_TARGET_READY_PER_RUN` (meta de READY, default 5),
 cron, senão a execução seguinte herda o teto esgotado),
 `EDITOR_SESSION_CONTEXT_BYTES_BUDGET` (default 600000 bytes; 0 desliga).
 
-- Ledger: `work/session_state.json` (`posts_touched`, `ready`, `context_bytes`).
+- Ledger: `work/sessions/<HERMES_SESSION_ID>.json` (`posts_touched`, `ready`,
+  `context_bytes`). Sem `HERMES_SESSION_ID`, o modo local compatível usa
+  `work/session_state.json`; sessões Hermes distintas nunca compartilham esse
+  orçamento.
   Expira sozinho por inatividade — a execução seguinte do cron começa limpa.
   Só comandos do agente editorial alimentam o ledger: `publish`/`publish-ready`
   rodam em outro cron no mesmo diretório e não podem estender esta janela.
@@ -79,6 +104,39 @@ unicornio-editor media-search-web "TERMO" --post-id POST_ID --needed 2
 - JSON completo (candidatos brutos, evidência, pHash, rejeitados um a um):
   `work/search/<termo>-<post_id>.json`.
 
+## 2.1 `media-resolve-batch` (zero turno LLM intermediário)
+
+Para dois posts normais, o modelo entrega uma vez os subjects e déficits. O
+comando concentra reuso da Media Library, busca paralela, prova de origem,
+relevância e pHash:
+
+```bash
+unicornio-editor media-resolve-batch media-batch.json --compact
+```
+
+Ele não faz upload nem altera WordPress. O resultado inclui um plano compacto e
+um `vision.input.json` opcional; a visão é chamada uma vez em low e, se houver
+ambiguidade, somente o subconjunto ambíguo é repetido em high.
+
+Na telemetria, `economics` separa requests do modelo Hermes/editorial,
+requests diretos de visão, chamadas de ferramenta, HTTP externo e custo. Assim,
+um batch de comandos não é contado como uma única chamada ao provider.
+
+## 2.2 Geração editorial direta
+
+`editorial-generate-batch` é a fronteira entre orquestração e inferência:
+
+```bash
+unicornio-editor editorial-generate-batch \
+  work/batches/BATCH_ID/editorial.input.json --root .
+```
+
+O comando faz exatamente uma requisição HTTP estruturada ao provider configurado
+por `EDITORIAL_API_KEY`, `EDITORIAL_BASE_URL` e `EDITORIAL_MODEL`. O resultado
+é validado por `post_id` e gravado em `editorial.output.json`; um item inválido
+vira `needs_retry` sem descartar o item válido do mesmo batch. O Hermes não
+deve substituir essa chamada por um loop de tools.
+
 ## 3. Rework: `draft --for-fix` + `apply --merge-draft`
 
 ```bash
@@ -128,11 +186,16 @@ stdout pequeno orientado à próxima ação:
 | `media-search-listicle` | `work/search/listicle-<obras>.json` |
 | `media-validate` | `work/media-validate/<post>.json` |
 | `apply --compact` | `backups/<id>/apply.latest.json` |
+| `prepare-batch` | `work/batches/<batch_id>/manifest.json` + `post-<id>.json` |
+| `apply-batch` | `work/batches/<batch_id>/apply.manifest.json` + auditoria por post |
+| `vision-batch` | `work/batches/<batch_id>/vision.manifest.json` + `work/vision_cache.json` |
 
 ## 6. Telemetria: por comando, por post e por sessão
 
 - `work/telemetry.jsonl` grava `cmd_output` com `command`, `kind`
   (`read`/`write`), `bytes`, `post_id` e os tamanhos de `cleaned_html`/draft.
+  Eventos batch acrescentam `batch_id`, `batch_stage` e `batch_size`; o resumo
+  expõe a seção `batches` com estágios, posts e tamanho máximo.
 - `unicornio-editor telemetry` → `context_bytes_by_command`, `by_post`,
   `post_context_detail`, `context_bytes_per_ready`, produção (READY, tocados).
 - `unicornio-editor telemetry --sessions` cruza o ledger com o `state.db` do

@@ -7,7 +7,9 @@ acumulado cresce a cada post — cada ``cards``, ``media-search-web``, ``draft``
 ``content``, ``media-validate`` e ``apply`` empilha mais bytes na conversa, e
 todo request seguinte relê tudo.
 
-Este modulo mantem um ledger em ``work/session_state.json`` com:
+Este modulo mantem um ledger por sessão em ``work/sessions/<session_id>.json``
+quando ``HERMES_SESSION_ID`` está disponível. Sem esse id, mantém o ledger
+compatível em ``work/session_state.json``. Cada ledger contém:
 
 * ``posts_touched`` — ids de posts em que a sessao JA gastou trabalho (um
   ``apply`` com desfecho real: ready/needs_rework/uncertain/skipped). E o HARD
@@ -30,6 +32,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,10 +42,32 @@ from .config import Config
 
 _ESTADO_RELATIVO = Path("work") / "session_state.json"
 _LOCK_RELATIVO = Path("work") / "session_state.lock"
+_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _session_id() -> str:
+    """Retorna o id do Hermes sem permitir escapar de ``work/sessions``."""
+    return str(os.environ.get("HERMES_SESSION_ID") or "").strip()
+
+
+def _session_slug(session_id: str) -> str:
+    slug = _SESSION_ID_RE.sub("-", session_id).strip("-.")
+    return slug[:160] or "anonymous"
 
 
 def _caminho(root: Path | str) -> Path:
+    session_id = _session_id()
+    if session_id:
+        return Path(root) / "work" / "sessions" / f"{_session_slug(session_id)}.json"
+    # Compatibilidade para execuções locais/manuals sem um Hermes session id.
     return Path(root) / _ESTADO_RELATIVO
+
+
+def _lock_path(root: Path | str) -> Path:
+    session_id = _session_id()
+    if session_id:
+        return Path(root) / "work" / "sessions" / f"{_session_slug(session_id)}.lock"
+    return Path(root) / _LOCK_RELATIVO
 
 
 @contextlib.contextmanager
@@ -59,7 +84,7 @@ def _ledger_lock(root: Path | str) -> Iterator[None]:
     arquivo propria. Em plataforma sem ``fcntl`` o codigo segue sem lock — perder
     o lock e ruim, mas travar o pipeline por isso e pior (fail-soft).
     """
-    caminho = Path(root) / _LOCK_RELATIVO
+    caminho = _lock_path(root)
     handle = None
     try:
         caminho.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +128,15 @@ def _ts(valor: Any) -> float:
 
 
 def _vazio() -> dict[str, Any]:
-    return {"started_at": "", "last_activity": "", "posts_touched": [], "ready": 0,
-            "context_bytes": 0, "commands": 0}
+    return {
+        "session_id": _session_id(),
+        "started_at": "",
+        "last_activity": "",
+        "posts_touched": [],
+        "ready": 0,
+        "context_bytes": 0,
+        "commands": 0,
+    }
 
 
 def _normalizar(dados: Any) -> dict[str, Any]:
@@ -115,6 +147,7 @@ def _normalizar(dados: Any) -> dict[str, Any]:
         if isinstance(pid, (int, float)) or (isinstance(pid, str) and pid.isdigit())
     ]
     return {
+        "session_id": str(dados.get("session_id") or _session_id()),
         "started_at": str(dados.get("started_at") or ""),
         "last_activity": str(dados.get("last_activity") or ""),
         "posts_touched": touched,
@@ -142,6 +175,7 @@ def _salvar(root: Path | str, dados: dict[str, Any], *, now: float | None = None
     caminho = _caminho(root)
     agora = _agora(now)
     dados = dict(dados)
+    dados["session_id"] = _session_id()
     if not dados.get("started_at"):
         dados["started_at"] = datetime.fromtimestamp(agora, timezone.utc).isoformat(
             timespec="seconds"
@@ -174,6 +208,7 @@ def status(
     orcamento = int(config.session_context_bytes_budget)
     usado = int(dados["context_bytes"])
     return {
+        "session_id": str(dados.get("session_id") or _session_id()),
         "started_at": dados["started_at"],
         "target_ready": int(config.target_ready_per_run),
         "ready": int(dados["ready"]),

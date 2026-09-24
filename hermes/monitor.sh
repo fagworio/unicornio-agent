@@ -31,6 +31,25 @@ set +a
 
 EFFECTIVE_FILE="$ROOT/work/monitor_effective_output"
 BUDGET_LOG="$ROOT/work/monitor-budget.log"
+BUDGET_STATE_FILE="$ROOT/work/monitor-budget-state"
+
+# Estado separado para detectar blocked -> allowed sem imprimir o JSON mutável
+# do guard. O primeiro tick liberado muda a época e acorda o Hermes; depois a
+# assinatura volta a ficar estável.
+budget_epoch=0
+budget_blocked=0
+if [ -s "$BUDGET_STATE_FILE" ]; then
+  read -r budget_epoch budget_blocked < "$BUDGET_STATE_FILE" || true
+  budget_epoch="${budget_epoch:-0}"
+  budget_blocked="${budget_blocked:-0}"
+fi
+case "$budget_epoch" in *[!0-9]*|'') budget_epoch=0 ;; esac
+case "$budget_blocked" in 1) ;; *) budget_blocked=0 ;; esac
+
+salvar_estado_budget() {
+  mkdir -p "$ROOT/work" 2>/dev/null || true
+  printf '%s %s\n' "$budget_epoch" "$budget_blocked" > "$BUDGET_STATE_FILE" 2>/dev/null || true
+}
 
 # Repete a ultima assinatura efetiva (bloqueio NAO altera o hash). Sem arquivo
 # ainda, a saida e "0" (estavel).
@@ -67,6 +86,8 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
     # Detalhe vai para LOG (nao para stdout: stdout e assinatura, nao relatorio).
     mkdir -p "$ROOT/work" 2>/dev/null || true
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$guard_out" >> "$BUDGET_LOG" 2>/dev/null || true
+    budget_blocked=1
+    salvar_estado_budget
     emitir_assinatura_congelada
     exit 0
   fi
@@ -74,6 +95,14 @@ fi
 
 out="$("$ROOT/.venv/bin/unicornio-editor" queue --monitor --root "$ROOT" 2>/dev/null)" || out="ERROR"
 out="${out:-0}"
+if [ "$budget_blocked" = "1" ]; then
+  budget_blocked=0
+  budget_epoch=$((budget_epoch + 1))
+fi
+salvar_estado_budget
+if [ "$budget_epoch" -gt 0 ]; then
+  out="${out}|budget_epoch=${budget_epoch}"
+fi
 mkdir -p "$ROOT/work" 2>/dev/null || true
 printf '%s\n' "$out" > "$EFFECTIVE_FILE" 2>/dev/null || true
 printf '%s\n' "$out"

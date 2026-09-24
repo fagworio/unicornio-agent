@@ -95,6 +95,8 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("monitor_effective_output", content)
         self.assertIn("emitir_assinatura_congelada", content)
         self.assertIn("monitor-budget.log", content)
+        self.assertIn("budget_epoch", content)
+        self.assertIn("monitor-budget-state", content)
         self.assertNotIn("BUDGET_EXHAUSTED ", content)
 
     def test_env_example_documents_the_new_windows(self):

@@ -123,6 +123,23 @@ class SessionBudgetTests(unittest.TestCase):
             config = _config()
             self.assertEqual(session_budget.status(root, config)["posts_touched_count"], 0)
 
+    def test_hermes_session_ids_have_independent_ledgers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=1)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": "cron_one/unsafe"}, clear=False):
+                session_budget.record_touch(root, 11, config)
+                first = session_budget.status(root, config)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": "cron_two"}, clear=False):
+                second = session_budget.status(root, config)
+                session_budget.record_touch(root, 22, config)
+                second_after = session_budget.status(root, config)
+            self.assertEqual(first["posts_touched"], [11])
+            self.assertEqual(second["posts_touched"], [])
+            self.assertEqual(second_after["posts_touched"], [22])
+            self.assertTrue((root / "work" / "sessions").is_dir())
+            self.assertEqual(len(list((root / "work" / "sessions").glob("*.json"))), 2)
+
     def test_publish_commands_do_not_extend_the_editorial_ledger(self):
         """Publicação roda em OUTRO cron no mesmo diretório.
 

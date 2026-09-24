@@ -39,13 +39,111 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
   (nada foi escrito, nenhuma tentativa gasta): encerre a sessão.
 - NUNCA simplifique o checklist para caber no orçamento — encerre a sessão.
 
+## Microbatches stateless
+
+Quando houver dois posts novos elegíveis, prefira um microbatch editorial de
+dois itens. O batch reduz turnos do modelo, mas NÃO cria uma transação
+multi-post no WordPress.
+
+1. Antes de qualquer escrita, rode o preflight read-only com os dois IDs:
+
+   ```bash
+   unicornio-editor canary-preflight 114463 114465 --root .
+   ```
+
+   O comando valida as credenciais, confirma `pending`, testa a leitura da
+   Media Library e mostra a telemetria das últimas 24h. Se retornar
+   `status=blocked`, corrija a causa antes de iniciar o batch.
+
+2. Prepare os posts em envelopes independentes:
+
+   ```bash
+   unicornio-editor prepare-batch 114463 114465 --batch-id batch-YYYYMMDD-01 --root .
+   ```
+
+   O comando grava `work/batches/<batch_id>/manifest.json`, um
+   `post-<id>.json` completo por post e `editorial.input.json`, o envelope único
+   da inferência editorial. O stdout é somente o resumo.
+3. Leia `editorial.input.json` uma vez e produza o arquivo editorial sem chamar
+   ferramentas entre a entrada e a saída. Preferencialmente deixe o Python
+   fazer a chamada com `editorial-generate-batch editorial.input.json`; o Hermes
+   não deve iniciar um loop de tools para escrever o editorial:
+
+   ```bash
+   unicornio-editor editorial-generate-batch \
+     work/batches/batch-YYYYMMDD-01/editorial.input.json --root .
+   ```
+
+   ```json
+   {
+     "schema_version": 1,
+     "batch_id": "batch-YYYYMMDD-01",
+     "results": [
+       {"post_id": 114463, "status": "ok", "editorial": {"site_relevance": {}, "media_plan": []}},
+       {"post_id": 114465, "status": "ok", "editorial": {"site_relevance": {}, "media_plan": []}}
+     ]
+   }
+   ```
+
+   Todos os IDs devem ser únicos. Um artigo que não possa ser gerado deve sair
+   como `status: needs_retry` com `reason`, sem invalidar o outro resultado. O
+   código valida o envelope inteiro antes de aplicar o primeiro item.
+4. Aplique com:
+
+   ```bash
+   unicornio-editor apply-batch editorial-batch.json --compact --root .
+   ```
+
+   Cada item passa pelo `apply` normal, em sequência, com seu próprio backup,
+   lock, checklist, mídia, manifest SHA-256 e `_hermes_state`. Uma falha fica
+   isolada no post; não repita o batch inteiro. Se o orçamento da sessão acabar,
+   o comando para antes do próximo post novo e lista os IDs restantes.
+
+5. Para mídia, não peça ao modelo uma busca/validação por post. Gere um único
+   envelope determinístico e execute `media-resolve-batch`:
+
+   ```json
+   {
+     "batch_id": "batch-YYYYMMDD-01",
+     "posts": [
+       {"post_id": 114463, "subject": "Obra A", "needed": 2, "query": "Obra A"},
+       {"post_id": 114465, "subject": "Obra B", "needed": 2, "query": "Obra B"}
+     ]
+   }
+   ```
+
+   O Python faz reuso, descoberta, prova de origem, relevância e pHash sem
+   outro turno Hermes. Se `vision_batch_file` for produzido, execute
+   `vision-batch` uma vez; ele faz uma chamada low e escala somente os itens
+   ambíguos para uma segunda chamada high, nunca o lote inteiro.
+
+Quando dois ou mais posts tiverem featured candidates já escolhidos, a visão
+também pode ser amortizada antes do `media-validate`:
+
+```bash
+unicornio-editor vision-batch vision-batch.json --root .
+```
+
+O contrato usa `items[{candidate_id, post_id, image_url, subject,
+require_key_art}]`. Cada resultado é correlacionado pelo `candidate_id`; apenas
+MATCH/UNRELATED definitivos entram no cache individual. Resultados ambíguos não
+são tratados como aprovação: seguem para a escalada `high` somente dentro do
+subconjunto ambíguo.
+
+Não envie para o modelo uma resposta combinada com conteúdo de posts sem
+`post_id`. A associação por posição é proibida: o ID é a única chave de
+correlação e a telemetria carrega `batch_id`/`batch_stage` quando a execução é
+batch.
+
 ## Fluxo editorial (sucesso = mínimo, falha = só o que corrigir)
 
 1. `cards --compact` — UMA chamada com o DELTA por post (rework primeiro):
    `images{required,valid,missing,irrelevant,non_webp}`, `featured` (ação),
    `fix`, `requires_content`, `session`. Escreva os editoriais direto dos cards;
    NÃO abra blocked.json/logs/source. Fila geral: `queue --compact`.
-2. Rode até a meta de 5 READY ou até o teto de tocados / `cards count: 0`.
+2. Para posts NOVOS, agrupe no máximo dois IDs elegíveis em
+   `prepare-batch`/`apply-batch`. Rode até a meta de 5 READY ou até o teto de
+   tocados / `cards count: 0`. Rework continua preferencialmente individual.
    Falhou 1 correção num post → marque e SIGA. Máx. UMA correção por post por
    run (falhou de novo → PARE; 3ª falha → AWAITING_HUMAN).
 3. REWORK (`blocked:true`): `draft POST_ID --for-fix` devolve SÓ o componente do
@@ -139,6 +237,9 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - `unicornio-editor telemetry` resume blocagens/resultados e o contexto por
   comando e por post (`context_bytes_by_command`, `by_post`,
   `context_bytes_per_ready`) distinguindo "não há imagem" de "busca falhou".
+  Runs batch aparecem em `batches`, agrupadas por `batch_id`/`batch_stage`.
+  `economics` separa requests Hermes/modelo editorial, requests diretos de
+  visão, chamadas de ferramenta, HTTP externo e custo.
 - `unicornio-editor telemetry --sessions` cruza com o `state.db` do Hermes:
   `tokens_per_ready`, `requests_per_ready`, `tool_context_bytes_per_ready`
   (métrica PRINCIPAL: o que voltou ao modelo), `cost_per_ready_usd` e, em mídia,

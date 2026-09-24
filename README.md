@@ -161,17 +161,59 @@ Teste:
 ```bash
 unicornio-editor list-pending
 unicornio-editor prepare 12345
+unicornio-editor prepare-batch 12345 12346 --batch-id batch-local-01
+unicornio-editor editorial-generate-batch work/batches/batch-local-01/editorial.input.json --root .
 unicornio-editor maintenance-report posts.json
 # Medir gasto de contexto por run (telemetria):
 unicornio-editor telemetry --root .
+# Preflight somente leitura do canary: auth, dois pending e Media Library:
+unicornio-editor canary-preflight 12345 12346 --root .
+# Filtrar a telemetria de um microbatch específico:
+unicornio-editor telemetry --batch-id batch-local-01 --root .
 # Descoberta de imagens via Google Images com filtro do editor
 # (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2):
 unicornio-editor media-search-web "redfall xbox series" --size xga --ratio w --limit 5
 # Para listas: uma chamada compacta, com uma busca exata por obra em paralelo.
 unicornio-editor media-search-listicle "Blue Box temporada 2" "Psyren anime" --limit 3
+
+# Microbatch editorial: o apply continua isolado por post
+unicornio-editor apply-batch editorial-batch.json --compact
+unicornio-editor vision-batch vision-batch.json
+unicornio-editor media-resolve-batch media-batch.json --compact
 ```
 
+`prepare-batch` grava um envelope completo por post em
+`work/batches/<batch_id>/`, além de snapshots individuais e
+`editorial.input.json`, pronto para uma única inferência. O arquivo editorial
+de microbatch usa `{schema_version: 1, batch_id, results: [{post_id, status, editorial}]}`;
+um item pode ser `needs_retry` sem invalidar o outro.
+`editorial-generate-batch` faz diretamente uma única chamada estruturada ao
+provider configurado por `EDITORIAL_*`, sem tools ou loop Hermes, e grava
+`editorial.output.json`, que pode ser enviado ao `apply-batch`.
+O `apply-batch` valida o envelope antes de começar e chama o `apply` normal para
+cada item; uma falha, lock, rework ou estado READY nunca é compartilhado com os
+outros posts. Um retry do mesmo `batch_id` reconhece itens já READY como
+`noop`; itens `needs_retry` são reenviados individualmente, sem reaplicar os
+irmãos que já concluíram.
+
+Quando houver vários candidatos de destaque, `vision-batch` aceita
+`{schema_version: 1, batch_id, items: [{candidate_id, post_id, image_url,
+subject, require_key_art}]}`. Apenas decisões visuais definitivas entram no
+cache. O batch faz uma chamada `low`; se houver ambiguidade, faz no máximo uma
+segunda chamada `high` somente com o subconjunto ambíguo.
+
+`media-resolve-batch` recebe até dois posts no formato
+`{batch_id, posts: [{post_id, subject, needed, query}]}`. Ele executa reuso da
+Media Library, descoberta em paralelo, verificação da página de origem,
+relevância e pHash sem nova inferência do modelo. Gera um plano compacto e,
+quando necessário, `vision.input.json` para a única etapa multimodal seguinte.
+
 A manutenção é somente relatório e nunca atualiza o WordPress. Para testes locais do Devilbox, consulte `tests/wordpress/README.md`.
+
+A telemetria diferencia `hermes_model_requests`, `editorial_model_requests`,
+`vision_provider_requests`, `tool_calls`, `external_http_requests` e
+`model_cost_usd`; portanto um comando batch não é confundido com uma chamada
+ao provider.
 
 ## Hermes
 
@@ -319,4 +361,3 @@ Jobs separados e inicialmente somente `report` para:
   verificável é `query → página de origem → URL → bytes → subject → seção → hash`,
   com proveniência como **hard gate** (sem origem não existe ACCEPT) e visão/LLM
   restrita a casos ambíguos **com origem validada**.
-

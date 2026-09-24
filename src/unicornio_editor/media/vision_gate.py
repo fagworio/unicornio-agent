@@ -53,6 +53,14 @@ _SYSTEM_PROMPT = (
     "photograph, illustration, animal, other, text_banner, infographic."
 )
 
+_BATCH_SYSTEM_PROMPT = (
+    "You are an editorial image validator working on independent candidates. "
+    "For every candidate, judge only the actual pixels against that candidate's "
+    "expected subject. Return ONLY JSON with an 'items' array. Each item must "
+    "contain candidate_id, status, confidence and visual_type. Never move a "
+    "decision from one candidate to another."
+)
+
 
 def _json_output_schema() -> dict[str, Any]:
     return {
@@ -208,6 +216,132 @@ def _call_vision(
     return _parse_response(answer)
 
 
+def _call_vision_batch(
+    *,
+    items: list[dict[str, Any]],
+    api_key: str,
+    base_url: str,
+    model: str,
+    detail: str,
+    timeout: float,
+    root: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Evaluate several independent images with one HTTP request.
+
+    The response is keyed by the caller-provided candidate id after strict
+    validation. A missing, duplicated or unknown id is an error: silent
+    positional correlation would be unsafe for editorial media.
+    """
+    if not items:
+        return {}
+    if len(items) > 20:
+        raise VisionGateError("batch de visao excede o limite seguro de 20 imagens")
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "Validate each candidate independently. Metadata is context only.\n"
+                + "\n".join(
+                    f"candidate_id={item['candidate_id']} | expected_subject={str(item['subject']).strip()}"
+                    for item in items
+                )
+            ),
+        }
+    ]
+    for item in items:
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"Candidate {item['candidate_id']}. Subject: {str(item['subject']).strip()}. "
+                    "Judge this image only; do not transfer evidence from other candidates."
+                    + (
+                        " It is featured key art: reject a text-only news banner or infographic."
+                        if item.get("require_key_art") else ""
+                    )
+                ),
+            }
+        )
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": str(item["image_url"]),
+                    "detail": detail,
+                },
+            }
+        )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "max_tokens": max(60, 60 * len(items)),
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    request = Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        _registrar_chamada(
+            root, detail=detail, model=model, base_url=base_url,
+            erro=f"HTTP {exc.code}", batch_size=len(items),
+        )
+        raise VisionGateError(f"API de visao respondeu HTTP {exc.code}") from exc
+    except (URLError, OSError, ValueError) as exc:
+        _registrar_chamada(
+            root, detail=detail, model=model, base_url=base_url,
+            erro=str(exc), batch_size=len(items),
+        )
+        raise VisionGateError(f"falha ao chamar a API de visao: {exc}") from exc
+    try:
+        answer = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        _registrar_chamada(
+            root, detail=detail, model=model, base_url=base_url,
+            erro="resposta invalida", batch_size=len(items),
+        )
+        raise VisionGateError("resposta invalida da API de visao em batch") from exc
+    _registrar_chamada(
+        root, detail=detail, model=model, base_url=base_url,
+        usage=body.get("usage") or {}, batch_size=len(items),
+    )
+    try:
+        parsed = json.loads(str(answer or "").strip())
+    except ValueError as exc:
+        raise VisionGateError("resposta batch de visao nao e JSON") from exc
+    rows = parsed.get("items") if isinstance(parsed, dict) else None
+    if not isinstance(rows, list):
+        raise VisionGateError("resposta batch de visao nao possui items[]")
+    expected = {str(item["candidate_id"]) for item in items}
+    output: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise VisionGateError("item invalido na resposta batch de visao")
+        candidate_id = str(row.get("candidate_id") or "")
+        if candidate_id not in expected or candidate_id in output:
+            raise VisionGateError(f"candidate_id invalido ou duplicado: {candidate_id!r}")
+        output[candidate_id] = _parse_response(json.dumps(row, ensure_ascii=False))
+    missing = expected.difference(output)
+    if missing:
+        raise VisionGateError(
+            "resposta batch de visao sem candidatos: " + ", ".join(sorted(missing))
+        )
+    return output
+
+
 def _registrar_chamada(
     root: Any,
     *,
@@ -216,6 +350,7 @@ def _registrar_chamada(
     base_url: str,
     usage: dict[str, Any] | None = None,
     erro: str = "",
+    batch_size: int = 1,
 ) -> None:
     """Evento de UMA chamada HTTP à API de visão (com tokens quando houver)."""
     if root is None:
@@ -236,6 +371,7 @@ def _registrar_chamada(
             cached_tokens=int(detalhes.get("cached_tokens") or 0),
             output_tokens=int(dados.get("completion_tokens") or 0),
             error=str(erro or "")[:160],
+            batch_size=max(1, int(batch_size or 1)),
         )
     except Exception:  # noqa: BLE001 - telemetria nunca quebra o gate
         pass
@@ -338,6 +474,109 @@ def verify_image_subject(
     return False, razao
 
 
+def verify_image_subject_batch(
+    *,
+    items: list[dict[str, Any]],
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: float = 30.0,
+    detail: str = "low",
+    allow_high: bool = False,
+    root: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Validate independent image candidates in one request.
+
+    The low-detail pass is always one HTTP request. When ``allow_high`` is
+    enabled, only the inconclusive subset is sent in a second batch at high
+    detail; definitive results are never repeated.
+    """
+    if not api_key:
+        raise VisionGateError("chave de visao ausente (batch habilitado sem chave)")
+    if not isinstance(items, list) or not items:
+        raise VisionGateError("batch de visao vazio")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise VisionGateError("candidato invalido no batch de visao")
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        image_url = str(item.get("image_url") or "").strip()
+        subject = str(item.get("subject") or "").strip()
+        if not candidate_id or candidate_id in seen:
+            raise VisionGateError(f"candidate_id ausente ou duplicado: {candidate_id!r}")
+        if not image_url.startswith(("http://", "https://")):
+            raise VisionGateError(f"imagem sem URL valida: {candidate_id}")
+        if not subject:
+            raise VisionGateError(f"assunto vazio: {candidate_id}")
+        seen.add(candidate_id)
+        normalized.append(
+            {
+                "candidate_id": candidate_id,
+                "image_url": image_url,
+                "subject": subject,
+                "require_key_art": bool(item.get("require_key_art")),
+            }
+        )
+    detail = detail if detail in {"low", "high"} else "low"
+    raw = _call_vision_batch(
+        items=normalized,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        detail=detail,
+        timeout=timeout,
+        root=root,
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for item in normalized:
+        candidate_id = item["candidate_id"]
+        result = raw[candidate_id]
+        verdict, reason = _decide_tri(
+            result, require_key_art=bool(item.get("require_key_art"))
+        )
+        output[candidate_id] = {
+            **result,
+            "status": result["status"],
+            "verdict": verdict,
+            "ok": verdict == "accept",
+            "reason": reason,
+        }
+    if allow_high:
+        ambiguous = [
+            item for item in normalized
+            if output[item["candidate_id"]]["verdict"] == "inconclusive"
+        ]
+        if ambiguous:
+            high_raw = _call_vision_batch(
+                items=ambiguous,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                detail="high",
+                timeout=timeout,
+                root=root,
+            )
+            for item in ambiguous:
+                candidate_id = item["candidate_id"]
+                high_result = high_raw[candidate_id]
+                verdict, reason = _decide_tri(
+                    high_result,
+                    require_key_art=bool(item.get("require_key_art")),
+                )
+                low = output[candidate_id]
+                output[candidate_id] = {
+                    **high_result,
+                    "status": high_result["status"],
+                    "verdict": verdict,
+                    "ok": verdict == "accept",
+                    "reason": low["reason"] + " | high: " + reason,
+                    "low_status": low["status"],
+                    "low_confidence": low["confidence"],
+                }
+    return output
+
+
 def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
     """Report whether the vision gate is configured to run."""
     if not enabled:
@@ -347,4 +586,9 @@ def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
     return True, "gate de visao ativo"
 
 
-__all__ = ["verify_image_subject", "vision_config_ready", "VisionGateError"]
+__all__ = [
+    "verify_image_subject",
+    "verify_image_subject_batch",
+    "vision_config_ready",
+    "VisionGateError",
+]
