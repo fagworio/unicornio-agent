@@ -15,6 +15,7 @@ from unicornio_editor.batch import (
 from unicornio_editor.config import Config
 from unicornio_editor.batch import load_editorial_batch
 from unicornio_editor.cli import _apply_editorial_batch
+from unicornio_editor.wordpress import WordPressError
 
 
 class BatchClient:
@@ -198,6 +199,46 @@ class BatchContextTests(unittest.TestCase):
             result = _apply_editorial_batch(BatchClient({1: _post(1, "Post pendente")}), config, root, batch, dry_run=False, compact=True)
             self.assertEqual(result["posts"][0]["status"], "preflight_blocked")
             self.assertEqual(result["session"]["posts_touched"], [])
+
+    def test_apply_batch_isolates_wordpress_error_during_preflight(self):
+        class FlakyClient(BatchClient):
+            def get_post(self, post_id):
+                if post_id == 2:
+                    raise WordPressError("transient REST failure")
+                return _post(post_id, f"Post {post_id}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-preflight-error",
+                "items": [
+                    {"post_id": 1, "editorial": {}},
+                    {"post_id": 2, "editorial": {}},
+                    {"post_id": 3, "editorial": {}},
+                ],
+            }
+            fake_result = lambda client, config, root, post_id, payload: {
+                "post_id": post_id,
+                "status": "ready",
+                "dry_run": False,
+                "wordpress_changed": True,
+                "checklist": {"items": []},
+                "media_plan_results": [],
+            }
+            with mock.patch("unicornio_editor.cli.validate_editorial", return_value={}), mock.patch(
+                "unicornio_editor.cli.apply_editorial", side_effect=fake_result
+            ) as applied:
+                result = _apply_editorial_batch(
+                    FlakyClient({}), config, root, batch, dry_run=False, compact=True
+                )
+            self.assertEqual([item["status"] for item in result["posts"]], ["ready", "preflight_error", "ready"])
+            self.assertEqual(result["preflight_errors"], 1)
+            self.assertEqual(result["preflight_blocked"], 0)
+            self.assertEqual(applied.call_args_list[0].args[3], 1)
+            self.assertEqual(applied.call_args_list[1].args[3], 3)
+            self.assertEqual(result["session"]["posts_touched"], [1, 3])
 
     def test_apply_editorial_batch_isolates_results_per_post(self):
         with tempfile.TemporaryDirectory() as directory:

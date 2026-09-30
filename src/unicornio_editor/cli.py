@@ -802,9 +802,18 @@ def _apply_editorial_batch(
                         "idempotent": True,
                     })
                     continue
-            admissible, preflight_reason = preflight_apply_candidate(
-                client, config, post_id, item["editorial"]
-            )
+            try:
+                admissible, preflight_reason = preflight_apply_candidate(
+                    client, config, post_id, item["editorial"]
+                )
+            except WordPressError as exc:
+                outcomes.append({
+                    "post_id": post_id,
+                    "status": "preflight_error",
+                    "wordpress_changed": False,
+                    "error": str(exc)[:240],
+                })
+                continue
             if not admissible:
                 outcomes.append({
                     "post_id": post_id,
@@ -868,6 +877,8 @@ def _apply_editorial_batch(
         "processed": len(outcomes),
         "ready": sum(1 for item in outcomes if item.get("status") == "ready"),
         "noop": sum(1 for item in outcomes if item.get("status") == "noop"),
+        "preflight_blocked": sum(1 for item in outcomes if item.get("status") == "preflight_blocked"),
+        "preflight_errors": sum(1 for item in outcomes if item.get("status") == "preflight_error"),
         "needs_retry": sum(1 for item in outcomes if item.get("status") == "needs_retry"),
         "needs_rework": sum(
             1 for item in outcomes if item.get("status") == "needs_rework"
