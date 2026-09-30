@@ -7,10 +7,9 @@
 #
 # Plano de publicacao (America/Sao_Paulo): janelas efetivas de publicacao.
 #   00:00 | 08:00 | 12:00 | 18:00 | 21:00
-# A janela publica TODOS os posts READY disponiveis (o publish-ready itera
-# em ciclos ate esgotar a fila; PUBLISH_LIMIT=0 = sem teto por janela).
-# O numero 5 (EDITOR_BATCH_LIMIT) e apenas o tamanho do LOTE de processamento
-# do editorial, nao o teto de publicacao da janela.
+# A janela publica ate 5 posts READY disponiveis. Se houver menos de 5,
+# publica todos imediatamente; nao existe espera para completar o limite.
+# Os posts READY restantes permanecem para a proxima janela.
 #
 # Robustez (janelas nao falham): falha transitória de API/Cloudflare nao
 # derruba a janela — o comando e re-executado com backoff (3 tentativas) e o
@@ -24,10 +23,10 @@ set +a
 export EDITOR_DRY_RUN=false
 export PUBLISH_ENABLED=true
 
-# PUBLISH_LIMIT=0 = sem teto por janela: o publish-ready publica TODOS os
-# posts READY disponiveis (pagina a fila completa). O cron so dispara nos
-# horarios de janela (00|08|12|18|21) — fora deles o script nao roda.
-export PUBLISH_LIMIT=0
+# PUBLISH_LIMIT=5 = teto de cinco publicacoes efetivas por janela.
+# Menos de cinco READY sao publicados sem aguardar completar o lote; os
+# excedentes permanecem READY para a proxima janela.
+export PUBLISH_LIMIT=5
 
 LOG="work/publish-window.log"
 ATTEMPT=1

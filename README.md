@@ -105,9 +105,9 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
         (SHA-256) — SOMENTE ready significa apto a publicar
   -> estados no WordPress (_hermes_state/_hermes_attempts/_hermes_next_retry_at/
      _hermes_last_error/_hermes_ready_hash/_hermes_policy_version)
-  -> publicacao (cron, janelas 00/08/12/18/21): cada janela publica TODOS os
-     posts READY disponiveis (PUBLISH_LIMIT=0 = sem teto; um numero e LOTE, nao
-     cota diaria); publish-ready consulta SOMENTE READY; hash do manifest intacto
+  -> publicacao (cron, janelas 00/08/12/18/21): cada janela publica ate 5
+     posts READY disponiveis (`PUBLISH_LIMIT=5`; menos de 5 sao publicados
+     imediatamente, sem esperar completar o lote); publish-ready consulta
      -> publica sem revalidar; mudou (STALE) -> revalida com o checklist; falhou
      -> blocked (volta para rework do agente)
   -> qualidade garantida por codigo, nao por diligencia do LLM: o apply nunca
@@ -352,11 +352,11 @@ Jobs separados e inicialmente somente `report` para:
 
 ### Decisões de política (fonte da verdade)
 
-- **Publicação**: as janelas publicam **todos os posts READY** disponíveis — não há
-  cota por janela. `PUBLISH_LIMIT=0` significa **sem teto**; um valor positivo é
-  tratado como **lote** (processar em blocos), nunca como limite diário. A tabela
-  antiga (00h=5/08h=7/12h=8/18h=10/21h=10 ≈ 40/dia) está revogada: o gargalo real
-  é o pipeline editorial, não a janela de publicação.
+- **Publicação**: cada janela publica `min(READY disponíveis, 5)`. Se houver
+  menos de 5, publica todos imediatamente; não espera completar o limite.
+  Os READY excedentes permanecem para a próxima janela. `PUBLISH_LIMIT=5` é
+  contado por publicação efetiva (`wordpress_changed`), não por candidato
+  examinado.
 - **Mídia**: nenhuma imagem entra porque o agente disse que está correta. A cadeia
   verificável é `query → página de origem → URL → bytes → subject → seção → hash`,
   com proveniência como **hard gate** (sem origem não existe ACCEPT) e visão/LLM

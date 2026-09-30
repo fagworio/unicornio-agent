@@ -1387,6 +1387,101 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.updated[0][1]["status"], "publish")
         self.assertIn("_ai_editor_published_at", client.updated[0][1]["meta"])
 
+    def test_publish_ready_contract_is_up_to_five_effective_publications(self):
+        base_post = self.post()
+
+        class QueueClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0] if posts else base_post)
+                self.posts = posts
+
+            def get_post(self, post_id):
+                return next(p for p in self.posts if p["id"] == post_id)
+
+            def list_pending(self, per_page=50, page=1):
+                return self.posts if page == 1 else []
+
+        for ready_count, expected_published, expected_remaining in (
+            (0, 0, 0), (1, 1, 0), (2, 2, 0), (3, 3, 0),
+            (4, 4, 0), (5, 5, 0), (6, 5, 1), (12, 5, 7),
+        ):
+            with self.subTest(ready_count=ready_count), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                posts = []
+                for post_id in range(1, ready_count + 1):
+                    post = self.checklist_pass_post()
+                    post["id"] = post_id
+                    post["meta"] = {"_hermes_state": "ready"}
+                    posts.append(post)
+                client = QueueClient(posts)
+                config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=True, publish_limit=5)
+                with mock.patch("unicornio_editor.workflow.publish_post", return_value={"wordpress_changed": True}):
+                    outcomes = publish_ready_posts(client, config, root, limit=5)
+                self.assertEqual(sum(bool(o.get("wordpress_changed")) for o in outcomes), expected_published)
+                self.assertEqual(ready_count - len(outcomes), expected_remaining)
+
+    def test_publish_limit_counts_effective_publications_not_examined_posts(self):
+        class QueueClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def get_post(self, post_id):
+                return next(p for p in self.posts if p["id"] == post_id)
+
+            def list_pending(self, per_page=50, page=1):
+                return self.posts if page == 1 else []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            posts = []
+            for post_id in range(1, 8):
+                post = self.checklist_pass_post()
+                post["id"] = post_id
+                post["meta"] = {"_hermes_state": "ready"}
+                posts.append(post)
+            client = QueueClient(posts)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=True, publish_limit=5)
+            failed_ids = {1, 2}
+
+            def publish_side_effect(_client, _config, _root, post_id):
+                return {"post_id": post_id, "wordpress_changed": post_id not in failed_ids}
+
+            with mock.patch("unicornio_editor.workflow.publish_post", side_effect=publish_side_effect):
+                outcomes = publish_ready_posts(client, config, root, limit=5)
+            self.assertEqual(len(outcomes), 7)
+            self.assertEqual(sum(bool(o.get("wordpress_changed")) for o in outcomes), 5)
+
+    def test_four_ready_and_three_blocked_publish_four_without_waiting(self):
+        class QueueClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+
+            def get_post(self, post_id):
+                return next(p for p in self.posts if p["id"] == post_id)
+
+            def list_pending(self, per_page=50, page=1):
+                return self.posts if page == 1 else []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            posts = []
+            for post_id in range(1, 8):
+                post = self.checklist_pass_post()
+                post["id"] = post_id
+                post["meta"] = {"_hermes_state": "ready"}
+                posts.append(post)
+            client = QueueClient(posts)
+
+            def publish_side_effect(_client, _config, _root, post_id):
+                return {"post_id": post_id, "wordpress_changed": post_id <= 4}
+
+            with mock.patch("unicornio_editor.workflow.publish_post", side_effect=publish_side_effect):
+                outcomes = publish_ready_posts(client, self.config(True), root, limit=5)
+            self.assertEqual(len(outcomes), 7)
+            self.assertEqual(sum(bool(o.get("wordpress_changed")) for o in outcomes), 4)
+
     def test_publish_ready_respects_window_limit(self):
         class QueueClient(FakeClient):
             def __init__(self, posts):

@@ -258,7 +258,7 @@ def load_config() -> Config:
         min_skip_confidence=_float("EDITOR_MIN_SKIP_CONFIDENCE", 0.90, 0.0, 1.0),
         site_topics=_topics("SITE_TOPICS"),
         publish_enabled=_bool("PUBLISH_ENABLED", False),
-        publish_limit=_int("PUBLISH_LIMIT", 0, 0, 100),
+        publish_limit=_int("PUBLISH_LIMIT", 5, 0, 100),
         vision_enabled=_bool("EDITOR_VISION_ENABLED", True),
         # Producao usa OPENAI_API_KEY; EDITOR_VISION_API_KEY e fallback.
         vision_api_key=_env("EDITOR_VISION_API_KEY") or _env("OPENAI_API_KEY"),
