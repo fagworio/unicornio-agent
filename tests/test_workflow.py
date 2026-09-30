@@ -1858,17 +1858,50 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(meta["_hermes_attempts"], "0")
             self.assertEqual(meta["_hermes_next_retry_at"], "")
 
-    def test_discard_post_marks_uncertain_and_leaves_queue(self):
+    def test_discard_post_marks_skipped_and_leaves_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             client = FakeClient(self.post())
             result = discard_post(client, self.config(False), root, 42, reason="sem imagens reais")
             self.assertEqual(result["status"], "discarded")
-            self.assertEqual(client.post["meta"]["_hermes_state"], "uncertain")
+            self.assertEqual(result["state"], "skipped")
+            self.assertEqual(client.post["meta"]["_hermes_state"], "skipped")
             self.assertTrue((root / "backups/42/uncertain.json").is_file())
             queue = build_queue_report(client, root)
-            self.assertEqual(queue["uncertain"], 1)
-            self.assertIn(42, queue["uncertain_ids"])
+            self.assertEqual(queue["uncertain"], 0)
+            self.assertEqual(queue["awaiting_human"], 0)
+            self.assertNotIn(42, queue["eligible_rework_ids"])
+            self.assertIn(42, queue["skipped_ids"])
+
+    def test_discard_from_uncertain_is_skipped_not_awaiting_human(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+            client = FakeClient(post)
+            result = discard_post(client, self.config(False), root, 42, reason="fora do escopo")
+            self.assertEqual(result["state"], "skipped")
+            self.assertEqual(client.post["meta"]["_hermes_state"], "skipped")
+            queue = build_queue_report(client, root)
+            self.assertNotIn(42, queue["uncertain_ids"])
+            self.assertNotIn(42, queue["awaiting_human_ids"])
+            self.assertNotIn(42, queue["eligible_rework_ids"])
+
+    def test_discard_from_awaiting_human_returns_to_pending_and_skips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            post["status"] = "awaiting_human"
+            post["meta"] = {"_hermes_state": "awaiting_human", "_hermes_attempts": "2"}
+            client = FakeClient(post)
+            result = discard_post(client, self.config(False), root, 42, reason="decisao humana definitiva")
+            self.assertEqual(result["state"], "skipped")
+            self.assertEqual(client.post["meta"]["_hermes_state"], "skipped")
+            self.assertIn((42, {"status": "pending"}), client.updated)
+            queue = build_queue_report(client, root)
+            self.assertNotIn(42, queue["awaiting_human_ids"])
+            self.assertNotIn(42, queue["uncertain_ids"])
+            self.assertNotIn(42, queue["eligible_rework_ids"])
 
     def test_validate_media_plan_rejects_duplicate_source(self):
         # Politica anti-repeticao: a MESMA fonte nao pode entrar duas vezes
@@ -1975,7 +2008,7 @@ class WorkflowTests(unittest.TestCase):
                 client, self.config(False), Path(directory), 42, reason="fora da pauta"
             )
             self.assertEqual(report["status"], "discarded")
-            self.assertEqual(report["state"], "uncertain")
+            self.assertEqual(report["state"], "skipped")
             # P1.2: discard NAO altera conteudo — so a meta de estado e gravada
             self.assertFalse(report["baseline_enriched"])
             self.assertTrue(all("content" not in payload for _pid, payload in client.updated))

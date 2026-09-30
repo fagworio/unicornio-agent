@@ -3204,8 +3204,8 @@ def discard_post(
 ) -> dict[str, Any]:
     """Descarta um post da fila editorial (decisão humana ou do agente).
 
-    Grava ``uncertain.json`` (escape já existente do pipeline) e o estado
-    UNCERTAIN — o post sai da agenda do monitor e nunca publica.
+    Grava a decisão definitiva como ``SKIPPED`` — o post sai da agenda,
+    nunca publica e não continua em UNCERTAIN/AWAITING_HUMAN.
     """
     post = client.get_post(post_id)
     # O discard humano precisa funcionar exatamente onde o pipeline PARA:
@@ -3244,13 +3244,9 @@ def discard_post(
     _save_uncertain(root, post_id, editorial)
     _state_before = read_state(post)
     _attempts_after = int(_state_before.get("attempts") or 0) + 1
-    _target_state = (
-        STATE_AWAITING_HUMAN
-        if _state_before.get("state") == STATE_UNCERTAIN
-        and _attempts_after >= 2
-        else STATE_UNCERTAIN
-    )
-    _next_retry = "" if _target_state == STATE_AWAITING_HUMAN else ""
+    # discard é decisão definitiva: não é uma nova rodada de incerteza.
+    _target_state = STATE_SKIPPED
+    _next_retry = ""
     _write_state_markers(
         client,
         config,
