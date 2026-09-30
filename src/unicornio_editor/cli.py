@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from .batch import (
     prepare_batch,
 )
 from .checklist import required_image_count, run_pre_publish_checklist
-from .config import ConfigError, load_config
+from .config import ConfigError, _carregar_env_do_projeto, load_config
 from .editorial_schema import validate_editorial
 from .editorial_provider import EditorialProviderError
 from .maintenance import generate_report
@@ -938,6 +939,8 @@ def _resolve_media_batch(
             root=root,
             capacity=needed_web_by_post[post_id],
             enriched_cache=memo_by_query[str(query)],
+            post_id=post_id,
+            emit_terminal=False,
         )
         accepted_urls_by_query[str(query)].update(
             str(candidate.get("direct_image_url") or "")
@@ -1166,6 +1169,7 @@ def _enriquecer_candidatos(
     capacity: int | None = None,
     enriched_cache: dict | None = None,
     post_id: int | None = None,
+    emit_terminal: bool = True,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -1205,6 +1209,12 @@ def _enriquecer_candidatos(
     from .media.source_verify import validate_discovered_candidate
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
+    for candidate in candidates:
+        if not candidate.get("candidate_id"):
+            candidate["candidate_id"] = hashlib.sha256(
+                f"{candidate.get('engine','')}|{candidate.get('query', termo)}|{candidate.get('direct_image_url','')}".encode()
+            ).hexdigest()[:20]
+        candidate.setdefault("discovery_image_url", candidate.get("direct_image_url", ""))
     aprovados: list[dict] = []
     rejeitados: list[dict] = []
     deferidos: list[dict] = []
@@ -1223,6 +1233,9 @@ def _enriquecer_candidatos(
     # Campos que o enriquecimento produz (é o que o memo guarda/replica).
     _CAMPOS = (
         "source_page_url", "usable", "discovery_only", "rejected_reason",
+        "candidate_id", "discovery_image_url", "matched_image_url",
+        "verification_level", "verification_reason", "canonical_source_asset",
+        "source_resolution", "source_resolution_query",
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "already_in_library", "library_media_id", "phash", "capacity_deferred",
@@ -1316,6 +1329,14 @@ def _enriquecer_candidatos(
             cand["valid"] = bool(veredito["valid"])
             cand["valid_reason"] = str(veredito.get("reason") or "")
             cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
+            cand["verification_level"] = str(veredito.get("verification_level") or "")
+            cand["verification_reason"] = str(veredito.get("reason") or "")
+            matched = str(veredito.get("matched_image_url") or "").strip()
+            if matched:
+                cand["discovery_image_url"] = cand.get("discovery_image_url") or cand.get("direct_image_url")
+                cand["matched_image_url"] = matched
+                cand["direct_image_url"] = matched
+                cand["canonical_source_asset"] = True
         pagina = str(cand.get("source_page_url") or "")
         nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
         ctx = (
@@ -1498,7 +1519,7 @@ def _enriquecer_candidatos(
                 append_telemetry(root, "media_engine_yield", engine=eng, **linha)
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
             pass
-    if root is not None:
+    if root is not None and emit_terminal:
         try:
             from .observability import append_telemetry
             for status, grupo in (("ACCEPTED", aprovados), ("REJECTED", rejeitados), ("DEFERRED", deferidos)):
@@ -1523,6 +1544,23 @@ def _enriquecer_candidatos(
                         reason_code=reason_code,
                         verification_level=str(cand.get("verification_level") or ""),
                     )
+            discovered_ids = [str(c["candidate_id"]) for c in candidates]
+            terminal_ids = [str(c["candidate_id"]) for group in (aprovados, rejeitados, deferidos) for c in group]
+            if (
+                len(discovered_ids) != len(set(discovered_ids))
+                or len(terminal_ids) != len(set(terminal_ids))
+                or set(discovered_ids) != set(terminal_ids)
+            ):
+                append_telemetry(
+                    root, "media_funnel_invariant_violation",
+                    post_id=int(post_id) if post_id else None,
+                    discovered=len(discovered_ids), terminal=len(terminal_ids),
+                    missing=sorted(set(discovered_ids) - set(terminal_ids)),
+                    duplicate_terminals=len(terminal_ids) - len(set(terminal_ids)),
+                )
+                raise WorkflowError("media candidate conservation violated")
+        except WorkflowError:
+            raise
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
             pass
     return aprovados, rejeitados, deferidos
@@ -1544,6 +1582,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):
             config = replace(config, dry_run=True)
@@ -1807,6 +1846,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         capacity=needed_web,
                         enriched_cache=memo,
                         post_id=post_id_ref,
+                        emit_terminal=False,
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return len(_frames_fortes)
@@ -2075,6 +2115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # investigar candidato que já não é necessário.
                         capacity=1,
                         post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
+                        emit_terminal=False,
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item

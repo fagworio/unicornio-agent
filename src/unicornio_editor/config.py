@@ -224,7 +224,6 @@ def _carregar_env_do_projeto() -> None:
 
 
 def load_config() -> Config:
-    _carregar_env_do_projeto()
     content_source = _env("CONTENT_SOURCE", "mock").lower()
     if content_source not in {"mock", "wordpress"}:
         raise ConfigError("CONTENT_SOURCE must be mock or wordpress")

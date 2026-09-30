@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from .url_safety import inspect_remote_url
+from .page_assets import extract_page_assets
 
 _PAGE_MAX_BYTES = 2 * 1024 * 1024
 _IMG_MAX_BYTES = 8 * 1024 * 1024
@@ -72,32 +73,8 @@ def _slug(url: str) -> str:
 
 
 def _image_urls_in_page(html: str, base_url: str) -> list[str]:
-    """URLs de imagem listadas na pagina (img/src, srcset, og:image)."""
-    urls: list[str] = []
-    for match in _SRC_RE.finditer(html):
-        urls.append(match.group(1))
-    for match in _SRCSET_RE.finditer(html):
-        for candidate in match.group(1).split(","):
-            token = candidate.strip().split(" ")[0]
-            if token:
-                urls.append(token)
-    for match in _OG_IMAGE_RE.finditer(html):
-        urls.append(match.group(1))
-    resolved: list[str] = []
-    seen: set[str] = set()
-    for url in urls:
-        full = urljoin(base_url, url.strip())
-        if not _IMG_EXT.search(full):
-            continue
-        if full in seen:
-            continue
-        seen.add(full)
-        resolved.append(full)
-    # Preserve the complete set found inside the bounded 2 MiB page. The old
-    # first-12 truncation rejected a valid direct_image_url merely because a
-    # theme placed it later in the markup. Download limits are enforced when
-    # comparing candidates, not while discovering the exact URL.
-    return resolved
+    """URLs de assets declarados pela página, inclusive CDNs sem extensão."""
+    return [asset.url for asset in extract_page_assets(html, base_url)]
 
 
 def _normalized_url(url: str) -> str:

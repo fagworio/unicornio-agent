@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from .page_assets import extract_page_assets
 from urllib.parse import unquote, urlparse
 
 from .relevance import extract_entities, normalize
@@ -282,6 +283,12 @@ def source_context(
         contexto["og_title"] = og.group(1).strip()
 
     alvo = normalize(unquote(str(image_url or "").split("?")[0].rsplit("/", 1)[-1]))
+    for asset in extract_page_assets(html, base_url):
+        asset_name = normalize(unquote(asset.url.split("?")[0].rsplit("/", 1)[-1]))
+        if alvo and (asset.url == image_url or asset_name == alvo):
+            if asset.alt:
+                contexto["alt_original"] = asset.alt
+            break
     for tag in _IMG_TAG_RE.findall(html):
         attrs = dict(_ATTR_RE.findall(tag))
         fonte = attrs.get("src") or attrs.get("data-src") or ""
