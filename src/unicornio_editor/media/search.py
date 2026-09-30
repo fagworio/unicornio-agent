@@ -254,7 +254,9 @@ def _real_image_url(url: str) -> bool:
 
 
 def _clean_page_url(url: str) -> str:
-    return _unescape(url).split("&")[0]
+    # Preserva a URL literal e seus parâmetros; alguns CDNs usam a variante
+    # exata (inclusive query string) para selecionar os bytes da página.
+    return _unescape(url).strip()
 
 
 def _unescape(value: str) -> str:
