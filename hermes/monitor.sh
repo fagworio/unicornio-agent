@@ -32,6 +32,16 @@ set +a
 EFFECTIVE_FILE="$ROOT/work/monitor_effective_output"
 BUDGET_LOG="$ROOT/work/monitor-budget.log"
 BUDGET_STATE_FILE="$ROOT/work/monitor-budget-state"
+LOOP_STATE_FILE="$ROOT/work/monitor-loop-state"
+
+# O ciclo editorial deve acordar novamente enquanto houver trabalho elegível,
+# mesmo que a lista de IDs não tenha mudado desde a última janela.
+loop_epoch=0
+if [ -s "$LOOP_STATE_FILE" ]; then
+  read -r loop_epoch < "$LOOP_STATE_FILE" || true
+  loop_epoch="${loop_epoch:-0}"
+fi
+case "$loop_epoch" in *[!0-9]*|'') loop_epoch=0 ;; esac
 
 # Estado separado para detectar blocked -> allowed sem imprimir o JSON mutável
 # do guard. O primeiro tick liberado muda a época e acorda o Hermes; depois a
@@ -108,5 +118,10 @@ if [ "$budget_epoch" -gt 0 ]; then
   out="${out}|budget_epoch=${budget_epoch}"
 fi
 mkdir -p "$ROOT/work" 2>/dev/null || true
+if [ "$out" != "0" ] && [ "$out" != "ERROR" ]; then
+  loop_epoch=$((loop_epoch + 1))
+  printf '%s\n' "$loop_epoch" > "$LOOP_STATE_FILE" 2>/dev/null || true
+  out="${out}|loop_epoch=${loop_epoch}"
+fi
 printf '%s\n' "$out" > "$EFFECTIVE_FILE" 2>/dev/null || true
 printf '%s\n' "$out"
