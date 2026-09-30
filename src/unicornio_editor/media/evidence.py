@@ -120,6 +120,11 @@ def post_subjects(
 _NOME_PROPRIO_RE = re.compile(
     r"[A-Z\u00c0-\u00dd][\w'\u2019.\-]*(?:\s+(?:[A-Z\u00c0-\u00dd][\w'\u2019.\-]*|\d+))*"
 )
+_GENERIC_PLATFORM_SUBJECTS = frozenset({
+    "nintendo switch", "nintendo switch 2", "switch", "switch 2",
+    "playstation", "playstation 5", "ps5", "xbox", "xbox series",
+    "xbox series x", "xbox series s", "pc", "steam", "ios", "android",
+})
 
 
 def _entidade_principal(title: str) -> str:
@@ -138,7 +143,8 @@ def _entidade_principal(title: str) -> str:
     grupos = [g for g in grupos if len(g) >= 4]
     if not grupos:
         return normalize(texto)
-    return normalize(max(grupos, key=len))
+    nao_genericos = [g for g in grupos if normalize(g) not in _GENERIC_PLATFORM_SUBJECTS]
+    return normalize(max(nao_genericos or grupos, key=len))
 
 
 

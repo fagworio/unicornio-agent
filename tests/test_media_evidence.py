@@ -27,6 +27,13 @@ class SubjectTests(unittest.TestCase):
         self.assertEqual(len(subs), 1)
         self.assertEqual(subs[0]["subject"], "metroid prime 4")
 
+    def test_nao_escolhe_plataforma_generica_em_vez_da_obra(self):
+        subs = post_subjects(
+            title="Star Fox no Nintendo Switch 2: atualização 1.2.0",
+            content_html="<p>x</p>",
+        )
+        self.assertEqual(subs[0]["subject"], "star fox")
+
     def test_listicle_um_subject_por_h2_com_o_nome_completo(self):
         subs = post_subjects(
             title="10 melhores animes",
