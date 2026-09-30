@@ -719,6 +719,30 @@ def _compact_apply(result: dict) -> dict:
     return compact
 
 
+def preflight_apply_candidate(
+    client: WordPressClient,
+    config: Any,
+    post_id: int,
+    editorial: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate admission before reserving a session-touch slot.
+
+    This is deliberately shared by single-post and batch apply paths: a stale
+    post or malformed editorial is not effective work and must not consume the
+    session cap.
+    """
+    current_post = client.get_post(post_id)
+    if not isinstance(current_post, dict):
+        return True, ""  # lightweight test doubles/legacy clients
+    if current_post.get("status") != "pending":
+        return False, f"post status is {current_post.get('status')}, expected pending"
+    try:
+        validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
+    except (ValueError, TypeError, KeyError) as exc:
+        return False, f"editorial invalido: {exc}"
+    return True, ""
+
+
 def _apply_editorial_batch(
     client: WordPressClient,
     config: Any,
@@ -778,6 +802,18 @@ def _apply_editorial_batch(
                         "idempotent": True,
                     })
                     continue
+            admissible, preflight_reason = preflight_apply_candidate(
+                client, config, post_id, item["editorial"]
+            )
+            if not admissible:
+                outcomes.append({
+                    "post_id": post_id,
+                    "status": "preflight_blocked",
+                    "wordpress_changed": False,
+                    "reason": preflight_reason,
+                    "action": "corrija o payload/status; nenhuma vaga da sessao foi consumida",
+                })
+                continue
             projection = session_budget.status(root, config)
             already_touched = post_id in projection["posts_touched"]
             reason = session_budget.stop_reason(root, config)
@@ -2591,24 +2627,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload, merged_note = _merge_patch_with_draft(
                     args.root, args.post_id, payload
                 )
-            # Preflight barato antes de reservar a vaga: payload inválido ou post
-            # que já saiu de pending não é trabalho efetivo e não consome
-            # `posts_touched` da sessão.
-            preflight_error = ""
-            try:
-                current_post = client.get_post(args.post_id)
-                if isinstance(current_post, dict) and current_post.get("status") != "pending":
-                    preflight_error = f"post status is {current_post.get('status')}, expected pending"
-                elif isinstance(current_post, dict):
-                    validate_editorial(payload, min_confidence=config.min_relevance_confidence)
-            except (ValueError, TypeError, KeyError) as exc:
-                preflight_error = f"editorial invalido: {exc}"
-            if preflight_error:
+            admissible, preflight_reason = preflight_apply_candidate(
+                client, config, args.post_id, payload
+            )
+            if not admissible:
                 result = {
                     "post_id": args.post_id,
                     "status": "preflight_blocked",
                     "wordpress_changed": False,
-                    "reason": preflight_error,
+                    "reason": preflight_reason,
                     "action": "corrija o payload/status; nenhuma vaga da sessao foi consumida",
                 }
                 _record_cmd_output(args, result)

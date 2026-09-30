@@ -571,6 +571,30 @@ class WorkflowTests(unittest.TestCase):
             # cooldown continua protegido.
             self.assertEqual(ids, [42])
 
+    def test_build_cards_does_not_reintroduce_blocked_cooldown_from_general_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            future = (
+                datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=2)
+            ).isoformat(timespec="seconds")
+            blocked = self.post()
+            blocked["meta"] = {
+                "_hermes_state": "blocked",
+                "_hermes_attempts": "1",
+                "_hermes_next_retry_at": future,
+            }
+            (root / "backups" / "42").mkdir(parents=True)
+            (root / "backups" / "42" / "editorial.blocked.json").write_text(
+                json.dumps({"status": "blocked"}), encoding="utf-8"
+            )
+
+            class BlockedClient(FakeClient):
+                def list_pending(self, **kwargs):
+                    return [blocked]
+
+            report = build_cards(BlockedClient(blocked), self.config(True), root)
+            self.assertEqual(report["cards"], [])
+
     def test_get_cleaned_content_returns_cleaned_html(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())

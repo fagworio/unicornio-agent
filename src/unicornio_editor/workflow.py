@@ -2780,7 +2780,13 @@ def build_cards(
         return STATE_NEW
 
     uncertain_retry_mode = not any(
-        _state_for_card(post) in (STATE_NEW, STATE_BLOCKED)
+        (
+            _state_for_card(post) == STATE_NEW
+            or (
+                _state_for_card(post) == STATE_BLOCKED
+                and retry_eligible({**read_state(post), "state": STATE_BLOCKED})
+            )
+        )
         for post in ordered
     )
     for post in ordered:
@@ -2812,6 +2818,8 @@ def build_cards(
             if not uncertain_retry_eligible:
                 continue  # fora da fila, salvo fallback sequencial de uncertain
         blocked = state == STATE_BLOCKED
+        if blocked and not retry_eligible({**state_info, "state": state}):
+            continue
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
         rendered = (post.get("content") or {}).get("rendered") or ""

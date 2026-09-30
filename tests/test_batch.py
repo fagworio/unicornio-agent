@@ -179,6 +179,26 @@ class BatchContextTests(unittest.TestCase):
             with self.assertRaises(BatchError):
                 load_media_resolve_batch(path)
 
+    def test_apply_batch_preflight_blocks_non_pending_without_consuming_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            post = _post(1, "Post publicado")
+            post["status"] = "publish"
+            batch = {"schema_version": 1, "batch_id": "batch-preflight-status", "items": [{"post_id": 1, "editorial": {}}]}
+            result = _apply_editorial_batch(BatchClient({1: post}), config, root, batch, dry_run=False, compact=True)
+            self.assertEqual(result["posts"][0]["status"], "preflight_blocked")
+            self.assertEqual(result["session"]["posts_touched"], [])
+
+    def test_apply_batch_preflight_blocks_invalid_editorial_without_consuming_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            batch = {"schema_version": 1, "batch_id": "batch-preflight-editorial", "items": [{"post_id": 1, "editorial": {}}]}
+            result = _apply_editorial_batch(BatchClient({1: _post(1, "Post pendente")}), config, root, batch, dry_run=False, compact=True)
+            self.assertEqual(result["posts"][0]["status"], "preflight_blocked")
+            self.assertEqual(result["session"]["posts_touched"], [])
+
     def test_apply_editorial_batch_isolates_results_per_post(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
