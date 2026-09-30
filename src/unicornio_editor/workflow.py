@@ -157,41 +157,53 @@ def _apply_editorial_unlocked(
         # nao ao portal, entao mexer no WordPress seria prematuro.
         baseline_changed = False
         _save_uncertain(root, post_id, editorial)
+        attempts_after = attempts_before + 1
+        # Um UNCERTAIN volta ao ciclo somente UMA vez. Se a segunda passagem
+        # também não consegue decidir com segurança, a automação encerra a
+        # tentativa e entrega o post explicitamente ao humano.
+        uncertain_state = (
+            STATE_AWAITING_HUMAN if attempts_before >= 1 else STATE_UNCERTAIN
+        )
         _backoff_u = rework_backoff(
-            read_state(post)["attempts"] + 1,
+            attempts_after,
             cooldown_minutes=config.rework_cooldown_minutes,
             max_attempts=config.max_rework_attempts,
         )
-        # Fase 17 (fail-closed): UNCERTAIN e estado terminal para a automacao.
-        # Sem persistir, o post volta a ser trilhado na proxima janela e o
-        # trabalho editorial e refeito (custo de LLM) sem ninguem saber.
+        uncertain_retry = (
+            _backoff_u["next_retry_at"] if uncertain_state == STATE_UNCERTAIN else ""
+        )
         if not _write_state_markers(
             client,
             config,
             post_id,
-            STATE_UNCERTAIN,
+            uncertain_state,
             root=root,
-            attempts=_backoff_u["attempts"],
-            next_retry_at=_backoff_u["next_retry_at"],
+            attempts=attempts_after,
+            next_retry_at=uncertain_retry,
             last_error=editorial["site_relevance"]["reason"],
         ):
             raise WorkflowError(
-                f"estado UNCERTAIN nao persistiu no WordPress (post {post_id}); "
-                "sem estado o post reaparece na fila — verifique a conexao e reaplique"
+                f"estado {uncertain_state.upper()} nao persistiu no WordPress "
+                f"(post {post_id}); sem estado o post reaparece na fila"
             )
+        if uncertain_state == STATE_AWAITING_HUMAN and not config.dry_run:
+            client.move_to_status(post_id, "awaiting_human")
         append_telemetry(
-            root, "apply_uncertain",
+            root, "apply_uncertain" if uncertain_state == STATE_UNCERTAIN
+            else "apply_uncertain_escalated",
             post_id=post_id, reason=editorial["site_relevance"]["reason"],
+            attempts=attempts_after, state=uncertain_state,
         )
         return {
             "post_id": post_id,
             "wordpress_changed": baseline_changed,
             "dry_run": config.dry_run,
-            "status": "uncertain",
-            "state": STATE_UNCERTAIN,
+            "status": "uncertain" if uncertain_state == STATE_UNCERTAIN else "awaiting_human",
+            "state": uncertain_state,
             "baseline_enriched": baseline_changed,
             "skip_reason": editorial["site_relevance"]["reason"],
             "confidence": confidence,
+            "attempts": attempts_after,
             "backup": str(backup),
         }
     if decision == "process":
@@ -2583,6 +2595,18 @@ def build_queue_report(
     blocked_ids.sort()
     recent_blocked.sort()
     eligible_rework.sort()
+    # Loop sequencial: quando nao ha NEW nem BLOCKED elegivel, acorda o
+    # proximo UNCERTAIN com cooldown vencido para uma segunda tentativa. O
+    # terceiro estado nao volta ao hash: o apply promove a segunda incerteza a
+    # AWAITING_HUMAN, evitando ciclo infinito e mantendo a fila viva.
+    if not unprocessed and not eligible_rework:
+        uncertain_retry_ids = [
+            row["id"] for row in rows
+            if row.get("state") == STATE_UNCERTAIN
+            and int(row.get("attempts") or 0) < 2
+            and cooldown_expired(row.get("next_retry_at") or "")
+        ]
+        eligible_rework.extend(sorted(uncertain_retry_ids))
     ready_ids.sort()
     awaiting_human_ids.sort()
     uncertain_ids.sort()
@@ -2725,6 +2749,27 @@ def build_cards(
         seen.add(post_id)
         ordered.append(post)
     cards: list[dict[str, Any]] = []
+    # Se nao ha nenhum NEW/BLOCKED elegivel, o proximo lote e' o retry dos
+    # UNCERTAIN. Isso evita que `pending` pareca fila viva enquanto o monitor
+    # simplesmente os exclui para sempre. O retry e' FIFO e limitado ao mesmo
+    # lote; uma segunda incerteza escala para AWAITING_HUMAN no apply.
+    def _state_for_card(post: dict[str, Any]) -> str | None:
+        state_value = read_state(post)["state"]
+        if state_value is not None:
+            return state_value
+        marker_dir = root / "backups" / str(post.get("id"))
+        if (marker_dir / "uncertain.json").is_file():
+            return STATE_UNCERTAIN
+        if (marker_dir / "editorial.blocked.json").is_file():
+            return STATE_BLOCKED
+        if (marker_dir / "editorial.latest.json").is_file():
+            return STATE_READY
+        return STATE_NEW
+
+    uncertain_retry_mode = not any(
+        _state_for_card(post) in (STATE_NEW, STATE_BLOCKED)
+        for post in ordered
+    )
     for post in ordered:
         post_id = post.get("id")
         if not isinstance(post_id, int):
@@ -2746,7 +2791,13 @@ def build_cards(
             else:
                 state = STATE_NEW
         if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
-            continue  # fora da fila de trabalho do agente
+            uncertain_retry_eligible = (
+                state == STATE_UNCERTAIN
+                and uncertain_retry_mode
+                and cooldown_expired(state_info.get("next_retry_at") or "")
+            )
+            if not uncertain_retry_eligible:
+                continue  # fora da fila, salvo fallback sequencial de uncertain
         blocked = state == STATE_BLOCKED
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
@@ -3170,19 +3221,32 @@ def discard_post(
         "discarded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }
     _save_uncertain(root, post_id, editorial)
+    _state_before = read_state(post)
+    _attempts_after = int(_state_before.get("attempts") or 0) + 1
+    _target_state = (
+        STATE_AWAITING_HUMAN
+        if _state_before.get("state") == STATE_UNCERTAIN
+        and _attempts_after >= 2
+        else STATE_UNCERTAIN
+    )
+    _next_retry = "" if _target_state == STATE_AWAITING_HUMAN else ""
     _write_state_markers(
         client,
         config,
         post_id,
-        STATE_UNCERTAIN,
+        _target_state,
         root=root,
+        attempts=_attempts_after,
+        next_retry_at=_next_retry,
         last_error=motivo,
     )
+    if _target_state == STATE_AWAITING_HUMAN and not config.dry_run:
+        client.move_to_status(post_id, "awaiting_human")
     # Fase 16: o post descartado precisa SAIR da fila humana. Com o status WP em
     # `awaiting_human` ele continuaria aparecendo no filtro "Awaiting Human" como
     # se ainda esperasse decisao — quem o retira da automacao e o estado
     # UNCERTAIN; o status volta para pending e a confirmacao e verificada.
-    if str(post.get("status") or "") == "awaiting_human":
+    if _target_state != STATE_AWAITING_HUMAN and str(post.get("status") or "") == "awaiting_human":
         try:
             client.move_to_status(post_id, "pending")
             _confirmado = client.get_post(post_id)
@@ -3200,8 +3264,8 @@ def discard_post(
                 pass
     return {
         "post_id": post_id,
-        "status": "discarded",
-        "state": STATE_UNCERTAIN,
+        "status": "awaiting_human" if _target_state == STATE_AWAITING_HUMAN else "discarded",
+        "state": _target_state,
         "wordpress_changed": True,
         "baseline_enriched": baseline_changed,
     }

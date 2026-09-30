@@ -254,8 +254,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 1)
             self.assertEqual(report["unprocessed_ids"], [])
             self.assertEqual(report["recent_blocked_ids"], [42])
-            # uncertain vence para blocked e exige retry humano; nunca volta
-            # sozinho para evitar rework infinito.
+            # Quando o bloqueio vira uncertain e nao ha outro trabalho,
+            # monitoramos a segunda passagem automaticamente.
             (root / "backups" / "42" / "uncertain.json").write_text(
                 json.dumps({"status": "uncertain"}), encoding="utf-8"
             )
@@ -263,7 +263,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["blocked"], 0)
             self.assertEqual(report["uncertain"], 1)
             self.assertEqual(report["blocked_ids"], [])
-            self.assertEqual(report["eligible_rework_ids"], [])
+            self.assertEqual(report["eligible_rework_ids"], [42])
 
     def test_queue_monitor_excludes_old_backlog(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -368,6 +368,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn("Confira mais novidades", client.post["content"]["raw"])
             self.assertTrue(Path(directory, "backups/42/uncertain.json").is_file())
             self.assertFalse(Path(directory, "backups/42/editorial.latest.json").exists())
+
+    def test_uncertain_second_cycle_escalates_to_awaiting_human(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = editorial_payload("skip")
+            payload["site_relevance"]["confidence"] = 0.70
+            client = FakeClient(self.post())
+            first = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+            second = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+        self.assertEqual(first["state"], "uncertain")
+        self.assertEqual(first["attempts"], 1)
+        self.assertEqual(second["state"], "awaiting_human")
+        self.assertEqual(second["attempts"], 2)
 
     def test_apply_confident_skip_is_final(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -555,7 +567,9 @@ class WorkflowTests(unittest.TestCase):
 
             report = build_cards(FakeTwo(eligible), self.config(True), root)
             ids = [c["id"] for c in report["cards"]]
-            self.assertEqual(ids, [])
+            # Sem NEW/BLOCKED elegivel, o proximo lote e' o UNCERTAIN elegivel;
+            # cooldown continua protegido.
+            self.assertEqual(ids, [42])
 
     def test_get_cleaned_content_returns_cleaned_html(self):
         with tempfile.TemporaryDirectory() as directory:
