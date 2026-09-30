@@ -2597,13 +2597,11 @@ def build_queue_report(
     eligible_rework.sort()
     # Loop sequencial: quando nao ha NEW nem BLOCKED elegivel, acorda o
     # proximo UNCERTAIN com cooldown vencido para uma segunda tentativa. O
-    # terceiro estado nao volta ao hash: o apply promove a segunda incerteza a
-    # AWAITING_HUMAN, evitando ciclo infinito e mantendo a fila viva.
+    # segundo UNCERTAIN promove a AWAITING_HUMAN no apply, evitando ciclo infinito
     if not unprocessed and not eligible_rework:
         uncertain_retry_ids = [
             row["id"] for row in rows
             if row.get("state") == STATE_UNCERTAIN
-            and int(row.get("attempts") or 0) < 2
             and cooldown_expired(row.get("next_retry_at") or "")
         ]
         eligible_rework.extend(sorted(uncertain_retry_ids))
