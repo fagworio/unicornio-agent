@@ -14,14 +14,14 @@ from unicornio_editor.workflow import (
     discard_post,
     get_cleaned_content,
     load_draft,
+    mark_uncertain,
     prepare_post,
     publish_post,
     publish_ready_posts,
     retry_post,
     validate_media_plan,
 )
-
-
+from unicornio_editor.wordpress import WordPressError
 def editorial_payload(decision="process"):
     # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
     # editorial valido — 2 imagens reais com credito + keyword no corpo.
@@ -1902,6 +1902,33 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn(42, queue["awaiting_human_ids"])
             self.assertNotIn(42, queue["uncertain_ids"])
             self.assertNotIn(42, queue["eligible_rework_ids"])
+
+    def test_mark_uncertain_keeps_uncertain_state_and_retry_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            result = mark_uncertain(client, self.config(False), root, 42, reason="sem evidencia suficiente")
+            self.assertEqual(result["status"], "uncertain")
+            self.assertEqual(result["state"], "uncertain")
+            self.assertEqual(client.post["meta"]["_hermes_state"], "uncertain")
+            queue = build_queue_report(client, root)
+            self.assertIn(42, queue["uncertain_ids"])
+            self.assertNotIn(42, queue["skipped_ids"])
+
+    def test_discard_fails_closed_when_skipped_state_does_not_persist(self):
+        class FailingClient(FakeClient):
+            def update_post(self, post_id, payload):
+                raise WordPressError("HTTP 500 ao persistir estado")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(WorkflowError):
+                discard_post(
+                    FailingClient(self.post()), self.config(False), root, 42,
+                    reason="fora do escopo",
+                )
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+            self.assertIn("state_persist_failed", telemetry)
 
     def test_validate_media_plan_rejects_duplicate_source(self):
         # Politica anti-repeticao: a MESMA fonte nao pode entrar duas vezes

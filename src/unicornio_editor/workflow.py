@@ -3247,7 +3247,7 @@ def discard_post(
     # discard é decisão definitiva: não é uma nova rodada de incerteza.
     _target_state = STATE_SKIPPED
     _next_retry = ""
-    _write_state_markers(
+    persisted = _write_state_markers(
         client,
         config,
         post_id,
@@ -3257,12 +3257,15 @@ def discard_post(
         next_retry_at=_next_retry,
         last_error=motivo,
     )
+    if not persisted:
+        raise WorkflowError(
+            f"estado SKIPPED nao persistiu no WordPress (post {post_id})"
+        )
     if _target_state == STATE_AWAITING_HUMAN and not config.dry_run:
         client.move_to_status(post_id, "awaiting_human")
-    # Fase 16: o post descartado precisa SAIR da fila humana. Com o status WP em
-    # `awaiting_human` ele continuaria aparecendo no filtro "Awaiting Human" como
-    # se ainda esperasse decisao — quem o retira da automacao e o estado
-    # UNCERTAIN; o status volta para pending e a confirmacao e verificada.
+    # `awaiting_human` ele continuaria aparecendo no filtro como se ainda
+    # esperasse decisão — quem o retira da automação é o estado SKIPPED; o
+    # status volta para pending e a confirmação é verificada.
     if _target_state != STATE_AWAITING_HUMAN and str(post.get("status") or "") == "awaiting_human":
         try:
             client.move_to_status(post_id, "pending")
@@ -3302,4 +3305,55 @@ def mark_uncertain(
     """
     if not reason or not reason.strip():
         raise WorkflowError("motivo obrigatorio para marcar uncertain")
-    return discard_post(client, config, root, post_id, reason=reason.strip())
+    post = client.get_post(post_id)
+    if post.get("status") not in ("pending", "awaiting_human"):
+        raise WorkflowError(
+            f"post {post_id} nao esta pending nem awaiting_human ({post.get('status')})"
+        )
+    if config.dry_run:
+        raise WorkflowError("uncertain e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    motivo = reason.strip()
+    state_before = read_state(post)
+    attempts_before = int(state_before.get("attempts") or 0)
+    attempts_after = attempts_before + 1
+    target_state = (
+        STATE_AWAITING_HUMAN
+        if state_before.get("state") == STATE_UNCERTAIN and attempts_before >= 1
+        else STATE_UNCERTAIN
+    )
+    backoff = rework_backoff(
+        attempts_after,
+        cooldown_minutes=config.rework_cooldown_minutes,
+        max_attempts=config.max_rework_attempts,
+    )
+    next_retry_at = backoff["next_retry_at"] if target_state == STATE_UNCERTAIN else ""
+    editorial = {
+        "site_relevance": {"decision": "skip", "confidence": 0.0, "reason": motivo},
+        "uncertain": True,
+        "uncertain_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }
+    _save_uncertain(root, post_id, editorial)
+    persisted = _write_state_markers(
+        client,
+        config,
+        post_id,
+        target_state,
+        root=root,
+        attempts=attempts_after,
+        next_retry_at=next_retry_at,
+        last_error=motivo,
+    )
+    if not persisted:
+        raise WorkflowError(
+            f"estado {target_state.upper()} nao persistiu no WordPress (post {post_id})"
+        )
+    if target_state == STATE_AWAITING_HUMAN:
+        client.move_to_status(post_id, "awaiting_human")
+    return {
+        "post_id": post_id,
+        "status": "uncertain" if target_state == STATE_UNCERTAIN else "awaiting_human",
+        "state": target_state,
+        "wordpress_changed": False,
+        "attempts": attempts_after,
+        "next_retry_at": next_retry_at,
+    }
