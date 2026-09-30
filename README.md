@@ -107,7 +107,8 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
      _hermes_last_error/_hermes_ready_hash/_hermes_policy_version)
   -> publicacao (cron, janelas 00/08/12/18/21): cada janela publica ate 5
      posts READY disponiveis (`PUBLISH_LIMIT=5`; menos de 5 sao publicados
-     imediatamente, sem esperar completar o lote); publish-ready consulta
+     imediatamente, sem esperar completar o lote); publish-ready consulta SOMENTE
+     READY; hash do manifest intacto
      -> publica sem revalidar; mudou (STALE) -> revalida com o checklist; falhou
      -> blocked (volta para rework do agente)
   -> qualidade garantida por codigo, nao por diligencia do LLM: o apply nunca

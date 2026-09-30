@@ -341,11 +341,22 @@ def _apply_editorial_unlocked(
             baseline_changed = _persist_baseline_enrichment(client, config, post_id, post)
             state_info = read_state(post)
             attempts = state_info["attempts"] + 1
-            # Listicle com busca de imagens esgotada -> AWAITING_HUMAN direto
-            # (revisao manual), sem loop de rework que so queimaria token.
-            media_exhausted = bool(editorial.get("media_exhausted"))
-            deterministic_exhausted = attempts >= config.max_media_search_attempts
-            if (media_exhausted or deterministic_exhausted) and detect_list_format(
+            media_failure = any(
+                "imagem" in str(item.get("name") or "").lower()
+                or "media" in str(item.get("name") or "").lower()
+                or "destaque" in str(item.get("name") or "").lower()
+                for item in failed_items
+            )
+            media_search_attempts = state_info.get("media_search_attempts", 0)
+            if media_failure:
+                media_search_attempts += 1
+            # Falhas de SEO, texto ou trailer não contam como tentativas de
+            # mídia. O contador de apply é independente do contador de buscas.
+            deterministic_exhausted = (
+                media_failure
+                and media_search_attempts >= config.max_media_search_attempts
+            )
+            if deterministic_exhausted and detect_list_format(
                 _post_title(post) or editorial["seo"]["title"], content
             ) is not None:
                 backoff = {
@@ -376,6 +387,7 @@ def _apply_editorial_unlocked(
                 attempts=backoff["attempts"],
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
+                media_search_attempts=media_search_attempts,
             )
             if not _state_ok and backoff["state"] in (STATE_AWAITING_HUMAN, STATE_UNCERTAIN):
                 raise WorkflowError(
@@ -515,6 +527,7 @@ def _apply_editorial_unlocked(
                 STATE_READY,
                 ready_hash=manifest_hash(manifest),
                 policy_version=config.policy_version,
+                media_search_attempts=0,
             ),
             META_READY_MANIFEST: serialize_manifest(manifest),
         },
@@ -627,6 +640,7 @@ def _write_state_markers(
     next_retry_at: str = "",
     last_error: str = "",
     ready_hash: str = "",
+    media_search_attempts: int | None = None,
 ) -> bool:
     """Persiste o estado operacional ``_hermes_*`` no WordPress (write mode).
 
@@ -651,6 +665,7 @@ def _write_state_markers(
                     next_retry_at=next_retry_at,
                     last_error=last_error,
                     ready_hash=ready_hash,
+                    media_search_attempts=media_search_attempts,
                     policy_version=config.policy_version,
                 )
             },

@@ -50,7 +50,7 @@ class Config:
     # (nenhum gate muda), apenas encerra a sessao e deixa o proximo post para a
     # proxima. 0 desliga o teto (papel do antigo comportamento).
     target_ready_per_run: int = 5  # EDITOR_TARGET_READY_PER_RUN
-    max_posts_touched_per_run: int = 2  # EDITOR_MAX_POSTS_TOUCHED_PER_RUN
+    max_posts_touched_per_run: int = 5  # EDITOR_MAX_POSTS_TOUCHED_PER_RUN
     # Janela de sessao (minutos de inatividade que separam duas sessoes/duas
     # execucoes do cron). O ledger de sessao (work/session_state.json) expira
     # sozinho: sem isso um teto de tocados bloquearia o cron seguinte. PRECISA

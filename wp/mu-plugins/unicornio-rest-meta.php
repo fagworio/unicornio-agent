@@ -24,6 +24,7 @@ add_action( 'init', function () {
 		// Estado operacional (fonte de verdade do queue/monitor/publish).
 		'_hermes_state'              => 'sanitize_text_field',
 		'_hermes_attempts'           => 'sanitize_text_field',
+		'_hermes_media_search_attempts' => 'sanitize_text_field',
 		'_hermes_next_retry_at'      => 'sanitize_text_field',
 		'_hermes_last_error'         => 'sanitize_text_field',
 		'_hermes_ready_hash'         => 'sanitize_text_field',

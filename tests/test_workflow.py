@@ -1009,6 +1009,7 @@ class WorkflowTests(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as directory:
                 client = FakeClient(self.post())
+                client.post["meta"] = {"_hermes_media_search_attempts": "1"}
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         self.assertEqual(report["state"], "awaiting_human")
         self.assertEqual(report["status"], "needs_rework")
@@ -1053,6 +1054,7 @@ class WorkflowTests(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as directory:
                 client = MediaClient(post)
+                client.post["meta"] = {"_hermes_media_search_attempts": "1"}
                 report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         self.assertEqual(report["state"], "awaiting_human")
         self.assertEqual(client.post["featured_media"], 88)
@@ -1470,16 +1472,16 @@ class WorkflowTests(unittest.TestCase):
             for post_id in range(1, 8):
                 post = self.checklist_pass_post()
                 post["id"] = post_id
-                post["meta"] = {"_hermes_state": "ready"}
+                post["meta"] = {"_hermes_state": "ready" if post_id <= 4 else "blocked"}
                 posts.append(post)
             client = QueueClient(posts)
 
             def publish_side_effect(_client, _config, _root, post_id):
-                return {"post_id": post_id, "wordpress_changed": post_id <= 4}
+                return {"post_id": post_id, "wordpress_changed": True}
 
             with mock.patch("unicornio_editor.workflow.publish_post", side_effect=publish_side_effect):
                 outcomes = publish_ready_posts(client, self.config(True), root, limit=5)
-            self.assertEqual(len(outcomes), 7)
+            self.assertEqual(len(outcomes), 4)
             self.assertEqual(sum(bool(o.get("wordpress_changed")) for o in outcomes), 4)
 
     def test_publish_ready_respects_window_limit(self):

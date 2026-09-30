@@ -57,6 +57,7 @@ ALL_STATES = frozenset(
 
 META_STATE = "_hermes_state"
 META_ATTEMPTS = "_hermes_attempts"
+META_MEDIA_SEARCH_ATTEMPTS = "_hermes_media_search_attempts"
 META_NEXT_RETRY = "_hermes_next_retry_at"
 META_LAST_ERROR = "_hermes_last_error"
 META_READY_HASH = "_hermes_ready_hash"
@@ -77,6 +78,7 @@ def build_state_markers(
     ready_hash: str = "",
     policy_version: int = 0,
     processed_at: str | None = None,
+    media_search_attempts: int | None = None,
 ) -> dict[str, Any]:
     """Meta payload ``_hermes_*`` para um update no WordPress."""
     if state not in ALL_STATES:
@@ -99,6 +101,10 @@ def build_state_markers(
             raise ValueError("ready state requires a ready hash")
         if not policy_version:
             raise ValueError("ready state requires a policy version")
+    if media_search_attempts is not None:
+        if isinstance(media_search_attempts, bool) or not isinstance(media_search_attempts, int) or media_search_attempts < 0:
+            raise ValueError("media_search_attempts must be a non-negative integer")
+        markers[META_MEDIA_SEARCH_ATTEMPTS] = str(media_search_attempts)
     if state in (STATE_READY, STATE_PUBLISHED, STATE_SKIPPED, STATE_UNCERTAIN):
         markers[META_NEXT_RETRY] = ""
     return markers
@@ -120,6 +126,7 @@ def read_state(post: dict[str, Any]) -> dict[str, Any]:
     return {
         "state": state,
         "attempts": _int_or(meta.get(META_ATTEMPTS), 0),
+        "media_search_attempts": _int_or(meta.get(META_MEDIA_SEARCH_ATTEMPTS), 0),
         "next_retry_at": _str_or(meta.get(META_NEXT_RETRY)),
         "last_error": _str_or(meta.get(META_LAST_ERROR)),
         "ready_hash": _str_or(meta.get(META_READY_HASH)),

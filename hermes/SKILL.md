@@ -30,7 +30,7 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 
 - Meta de produção = `EDITOR_TARGET_READY_PER_RUN` (5 posts READY, distribuída
   entre sessões curtas). TETO de posts tocados = `EDITOR_MAX_POSTS_TOUCHED_PER_RUN`
-  (default 2) — hard cap: `skipped`, `uncertain` e `blocked` liberam a vaga de
+  (default 5) — hard cap: `skipped`, `uncertain` e `blocked` liberam a vaga de
   READY, mas NÃO o teto de tocados.
 - `cards --compact` traz `session{remaining_posts, context_bytes_used}` e corta o
   lote ao que ainda cabe. `count: 0` ou `stop` preenchido => **ENCERRE a sessão**:

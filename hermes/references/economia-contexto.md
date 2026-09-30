@@ -37,7 +37,7 @@ separados. Se o teto da sessão acabar, os posts ainda não tocados ficam em
 ## 1. Orçamento de sessão (hard cap de posts tocados)
 
 Variáveis: `EDITOR_TARGET_READY_PER_RUN` (meta de READY, default 5),
-`EDITOR_MAX_POSTS_TOUCHED_PER_RUN` (TETO de posts tocados, default 2; 0 desliga),
+`EDITOR_MAX_POSTS_TOUCHED_PER_RUN` (TETO de posts tocados, default 5; 0 desliga),
 `EDITOR_SESSION_WINDOW_MINUTES` (default 90; PRECISA ser menor que o intervalo do
 cron, senão a execução seguinte herda o teto esgotado),
 `EDITOR_SESSION_CONTEXT_BYTES_BUDGET` (default 600000 bytes; 0 desliga).
