@@ -3276,12 +3276,16 @@ def discard_post(
                     post_id=post_id,
                     status_wp=str(_confirmado.get("status") or ""),
                 )
-        except Exception as exc:  # noqa: BLE001 - best-effort com telemetria
+        except Exception as exc:  # noqa: BLE001 - falha operacional deve ser explícita
             try:
                 append_telemetry(root, "discard_status_move_failed",
                                  post_id=post_id, error=str(exc)[:200])
             except Exception:  # noqa: BLE001
                 pass
+            raise WorkflowError(
+                f"estado SKIPPED persistiu, mas status WordPress nao voltou para pending "
+                f"(post {post_id}): {exc}"
+            ) from exc
     return {
         "post_id": post_id,
         "status": "awaiting_human" if _target_state == STATE_AWAITING_HUMAN else "discarded",
@@ -3306,9 +3310,10 @@ def mark_uncertain(
     if not reason or not reason.strip():
         raise WorkflowError("motivo obrigatorio para marcar uncertain")
     post = client.get_post(post_id)
-    if post.get("status") not in ("pending", "awaiting_human"):
+    if post.get("status") != "pending":
         raise WorkflowError(
-            f"post {post_id} nao esta pending nem awaiting_human ({post.get('status')})"
+            f"post {post_id} nao esta pending ({post.get('status')}); "
+            "use retry ou discard para uma decisao humana definitiva"
         )
     if config.dry_run:
         raise WorkflowError("uncertain e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
@@ -3353,7 +3358,7 @@ def mark_uncertain(
         "post_id": post_id,
         "status": "uncertain" if target_state == STATE_UNCERTAIN else "awaiting_human",
         "state": target_state,
-        "wordpress_changed": False,
+        "wordpress_changed": True,
         "attempts": attempts_after,
         "next_retry_at": next_retry_at,
     }

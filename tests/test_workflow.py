@@ -1915,6 +1915,29 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(42, queue["uncertain_ids"])
             self.assertNotIn(42, queue["skipped_ids"])
 
+    def test_mark_uncertain_rejects_awaiting_human_without_state_split(self):
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["status"] = "awaiting_human"
+            post["meta"] = {"_hermes_state": "awaiting_human", "_hermes_attempts": "2"}
+            with self.assertRaises(WorkflowError):
+                mark_uncertain(FakeClient(post), self.config(False), Path(directory), 42, reason="duvida")
+
+    def test_discard_reports_failure_when_awaiting_status_cannot_return_pending(self):
+        class FailingMoveClient(FakeClient):
+            def move_to_status(self, post_id, status):
+                raise WordPressError("HTTP 503 ao mover status")
+
+        with tempfile.TemporaryDirectory() as directory:
+            post = self.post()
+            post["status"] = "awaiting_human"
+            post["meta"] = {"_hermes_state": "awaiting_human", "_hermes_attempts": "2"}
+            root = Path(directory)
+            with self.assertRaises(WorkflowError):
+                discard_post(FailingMoveClient(post), self.config(False), root, 42, reason="definitivo")
+            self.assertIn("discard_status_move_failed", (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8"))
+
+
     def test_discard_fails_closed_when_skipped_state_does_not_persist(self):
         class FailingClient(FakeClient):
             def update_post(self, post_id, payload):
