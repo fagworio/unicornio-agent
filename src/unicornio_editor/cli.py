@@ -2591,6 +2591,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload, merged_note = _merge_patch_with_draft(
                     args.root, args.post_id, payload
                 )
+            # Preflight barato antes de reservar a vaga: payload inválido ou post
+            # que já saiu de pending não é trabalho efetivo e não consome
+            # `posts_touched` da sessão.
+            preflight_error = ""
+            try:
+                current_post = client.get_post(args.post_id)
+                if isinstance(current_post, dict) and current_post.get("status") != "pending":
+                    preflight_error = f"post status is {current_post.get('status')}, expected pending"
+                elif isinstance(current_post, dict):
+                    validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+            except (ValueError, TypeError, KeyError) as exc:
+                preflight_error = f"editorial invalido: {exc}"
+            if preflight_error:
+                result = {
+                    "post_id": args.post_id,
+                    "status": "preflight_blocked",
+                    "wordpress_changed": False,
+                    "reason": preflight_error,
+                    "action": "corrija o payload/status; nenhuma vaga da sessao foi consumida",
+                }
+                _record_cmd_output(args, result)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 0
             # Reserva ATOMICA da vaga: checar e registrar nao pode ter janela
             # entre dois processos (cron + manual) — senao os dois passariam pelo
             # teto. Em dry-run nada e reservado; com o budget de CONTEXTO
