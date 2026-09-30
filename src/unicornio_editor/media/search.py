@@ -32,6 +32,7 @@ must still open source_page_url and confirm the image is listed there
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -287,6 +288,9 @@ def _candidate(query, size_filter, direct, page, title, thumb, *, engine=""):
     """
     page_clean = _clean_page_url(page)
     usable = _valid_http(direct) and _valid_http(page_clean)
+    candidate_id = hashlib.sha256(
+        f"{engine}|{query}|{direct}".encode("utf-8", "ignore")
+    ).hexdigest()[:20]
     motivo = ""
     if not usable:
         if not _valid_http(page_clean):
@@ -294,7 +298,9 @@ def _candidate(query, size_filter, direct, page, title, thumb, *, engine=""):
         else:
             motivo = "invalid_direct_image_url"
     return {
+        "candidate_id": candidate_id,
         "query": query,
+        "discovery_image_url": direct,
         "size_filter": size_filter,
         "title": (title or "")[:200],
         "direct_image_url": direct,

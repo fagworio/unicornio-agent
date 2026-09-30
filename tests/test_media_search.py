@@ -85,6 +85,8 @@ class SearchWebImagesTests(unittest.TestCase):
         self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/redfall-header.jpg")
         self.assertEqual(results[0]["source_page_url"], "https://news.example/redfall/")
         self.assertEqual(results[0]["query"], "redfall xbox")
+        self.assertTrue(results[0]["candidate_id"])
+        self.assertEqual(results[0]["discovery_image_url"], results[0]["direct_image_url"])
         self.assertEqual(results[0]["size_filter"], "1024x768|w")
 
 

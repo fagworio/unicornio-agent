@@ -78,6 +78,23 @@ class ResolverTests(unittest.TestCase):
         # a URL crua da imagem é descartada; a matéria permanece
         self.assertEqual(out["source_page_url"], "https://outro.com/materia")
 
+    def test_verifier_promove_asset_canonico_da_pagina(self):
+        def verifier(cand):
+            return {
+                "valid": True,
+                "matched_image_url": "https://assets.nintendo.com/metroid-prime-4-keyart.webp",
+                "verification_level": "visual_variant",
+            }
+
+        out = resolve_candidate_source(
+            self._cand(), "metroid prime 4",
+            busca=lambda q: [{"source_page_url": "https://www.nintendo.com/games/metroid-prime-4/"}],
+            verifier=verifier,
+        )
+        self.assertEqual(out["source_page_url"], "https://www.nintendo.com/games/metroid-prime-4/")
+        self.assertEqual(out["matched_image_url"], "https://assets.nintendo.com/metroid-prime-4-keyart.webp")
+        self.assertEqual(out["verification_level"], "visual_variant")
+
     def test_verifier_escolhe_a_pagina_que_realmente_contem_a_imagem(self):
         """Acceptance 5: a 1ª página não tem a imagem, a 2ª tem -> usa a 2ª."""
         chamadas: list[str] = []

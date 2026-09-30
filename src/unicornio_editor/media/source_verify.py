@@ -12,6 +12,7 @@ rejeitado ("nenhuma imagem > imagem errada").
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,45 @@ def _md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
+def verify_image_identity(
+    downloaded: bytes,
+    source: bytes,
+    *,
+    phash_threshold: int = 2,
+) -> tuple[bool, str]:
+    """Classifica bytes diferentes que ainda representam o mesmo frame.
+
+    Proveniência continua exigindo que ``source`` seja um asset listado na
+    página. Depois dessa prova, recompressão/resize legítimos são aceitos por
+    identidade visual conservadora; imagem diferente continua rejeitada.
+    """
+    try:
+        from PIL import Image, ImageChops, ImageStat
+        import imagehash
+
+        with Image.open(io.BytesIO(downloaded)) as d_img, Image.open(io.BytesIO(source)) as s_img:
+            d = d_img.convert("RGB")
+            s = s_img.convert("RGB")
+            if not d.width or not d.height or not s.width or not s.height:
+                return False, "MISMATCH"
+            d_ratio = d.width / d.height
+            s_ratio = s.width / s.height
+            if abs(d_ratio - s_ratio) > 0.02:
+                return False, "MISMATCH"
+            d_mean = ImageStat.Stat(d.resize((32, 32))).mean
+            s_mean = ImageStat.Stat(s.resize((32, 32))).mean
+            if sum(abs(a - b) for a, b in zip(d_mean, s_mean)) > 30:
+                return False, "MISMATCH"
+            if d.size == s.size and ImageChops.difference(d, s).getbbox() is None:
+                return True, "PIXEL_IDENTICAL"
+            dh = imagehash.phash(d)
+            sh = imagehash.phash(s)
+            if int(dh - sh) <= phash_threshold:
+                return True, "VISUAL_VARIANT"
+    except Exception:  # noqa: BLE001 - imagem inválida é fail-closed
+        return False, "UNVERIFIED"
+    return False, "MISMATCH"
+
 
 def _valid_http(url: str) -> bool:
     """URL http(s) absoluta com host (Fase 5)."""
@@ -175,17 +215,48 @@ def validate_discovered_candidate(
     resultado["images_in_page"] = len(listadas)
 
     alvo = _normalized_url(image_url)
-    if any(_normalized_url(url) == alvo for url in listadas):
+    exact_match = next((url for url in listadas if _normalized_url(url) == alvo), "")
+    if exact_match:
         resultado["valid"] = True
         resultado["source_verified"] = True
+        resultado["matched_image_url"] = exact_match
+        resultado["verification_level"] = "EXACT_URL"
         resultado["reason"] = "URL exata encontrada no HTML da pagina de origem"
         return resultado
     slug = _slug(image_url)
-    if slug and any(_slug(url) == slug for url in listadas):
+    if slug:
+        slug_match = next((url for url in listadas if _slug(url) == slug), "")
+    else:
+        slug_match = ""
+    if slug_match:
         resultado["valid"] = True
         resultado["source_verified"] = True
+        resultado["matched_image_url"] = slug_match
+        resultado["verification_level"] = "SLUG_MATCH"
         resultado["reason"] = "mesma imagem (slug) listada na pagina de origem"
         return resultado
+
+    # Candidatos de engines como Yandex podem apontar para um CDN diferente do
+    # asset listado pela página. A origem continua sendo obrigatória: baixamos o
+    # candidato e os assets listados e promovemos somente o correspondente
+    # visual conservador para a URL canônica da página.
+    try:
+        candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        if candidate_bytes is not None:
+            for listed_url in listadas[:_MAX_DOWNLOADS]:
+                asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit)
+                if asset_bytes is None:
+                    continue
+                same_frame, level = verify_image_identity(candidate_bytes, asset_bytes)
+                if same_frame:
+                    resultado["valid"] = True
+                    resultado["source_verified"] = True
+                    resultado["matched_image_url"] = listed_url
+                    resultado["verification_level"] = level
+                    resultado["reason"] = "asset visualmente correspondente encontrado na pagina de origem"
+                    return resultado
+    except Exception:  # noqa: BLE001 - falha de rede/formato permanece fail-closed
+        pass
     resultado["reason"] = "imagem nao listada na pagina de origem"
     return resultado
 
@@ -232,7 +303,8 @@ def verify_downloaded_against_source(
             "nao e possivel confirmar a origem da imagem (fonte instavel)"
         )
     try:
-        downloaded_hash = _md5(downloaded.read_bytes())
+        downloaded_bytes = downloaded.read_bytes()
+        downloaded_hash = _md5(downloaded_bytes)
     except OSError as exc:
         return False, f"falha ao ler o arquivo baixado: {exc}"
 
@@ -240,8 +312,12 @@ def verify_downloaded_against_source(
     exact = [url for url in listed if _normalized_url(url) == direct_normalized]
     for url in exact:
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
-        if data is not None and _md5(data) == downloaded_hash:
-            return True, "URL exata confirmada na pagina de origem (bytes iguais)"
+        if data is not None:
+            if _md5(data) == downloaded_hash:
+                return True, "URL exata confirmada na pagina de origem (bytes iguais)"
+            same_frame, level = verify_image_identity(downloaded_bytes, data)
+            if same_frame:
+                return True, f"URL exata confirmada na pagina de origem ({level.lower()})"
     if exact:
         return (
             False,
@@ -257,8 +333,12 @@ def verify_downloaded_against_source(
             break
         downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
-        if data is not None and _md5(data) == downloaded_hash:
-            return True, "imagem confirmada na pagina de origem por slug e bytes"
+        if data is not None:
+            if _md5(data) == downloaded_hash:
+                return True, "imagem confirmada na pagina de origem por slug e bytes"
+            same_frame, level = verify_image_identity(downloaded_bytes, data)
+            if same_frame:
+                return True, f"imagem confirmada na pagina de origem por slug ({level.lower()})"
     if same_slug:
         return (
             False,
@@ -270,8 +350,12 @@ def verify_downloaded_against_source(
             break
         downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
-        if data is not None and _md5(data) == downloaded_hash:
-            return True, "imagem confirmada na pagina de origem (bytes iguais)"
+        if data is not None:
+            if _md5(data) == downloaded_hash:
+                return True, "imagem confirmada na pagina de origem (bytes iguais)"
+            same_frame, level = verify_image_identity(downloaded_bytes, data)
+            if same_frame:
+                return True, f"imagem confirmada na pagina de origem ({level.lower()})"
     return (
         False,
         "imagem baixada nao consta na pagina de origem (slug ausente e bytes nao "

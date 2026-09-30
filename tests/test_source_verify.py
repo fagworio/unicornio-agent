@@ -8,7 +8,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from unicornio_editor.media.source_verify import verify_downloaded_against_source
+from unicornio_editor.media.source_verify import (
+    validate_discovered_candidate,
+    verify_downloaded_against_source,
+)
 
 
 def _png_bytes(color=(200, 30, 30), size=(780, 438)) -> bytes:
@@ -118,6 +121,38 @@ class SourceVerifyTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("divergente", reason)
+
+    def test_accepts_recompressed_same_frame_as_visual_variant(self):
+        # CDN can return JPEG/WebP bytes different from the listed PNG while
+        # preserving the same pixels/frame. Provenance must not reject this.
+        original = Image.new("RGB", (780, 438), (10, 10, 200))
+        listed = io.BytesIO()
+        original.save(listed, format="JPEG", quality=92)
+        SourcePageHandler.images["/img/gallery/green-lantern-rings-1786934482.jpg"] = listed.getvalue()
+        downloaded = Path(self._tmp_dir) / "recompressed.webp"
+        original.save(downloaded, format="WEBP", quality=72)
+        ok, reason = verify_downloaded_against_source(
+            source_page_url=f"{self.base}/page.html",
+            downloaded=downloaded,
+            direct_image_url=f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg",
+        )
+        self.assertTrue(ok, reason)
+        self.assertIn("visual", reason)
+
+    def test_resolve_visual_yandex_promove_url_canonica_da_pagina(self):
+        SourcePageHandler.images["/discovery/yandex-copy.jpg"] = _png_bytes((10, 10, 200))
+        out = validate_discovered_candidate(
+            {
+                "direct_image_url": f"{self.base}/discovery/yandex-copy.jpg",
+                "source_page_url": f"{self.base}/page.html",
+            }
+        )
+        self.assertTrue(out["valid"], out["reason"])
+        self.assertEqual(
+            out["matched_image_url"],
+            f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg",
+        )
+        self.assertEqual(out["verification_level"], "PIXEL_IDENTICAL")
 
     def test_accepts_image_without_slug_match_when_bytes_are_listed(self):
         # Same bytes as a listed image even though the URL slug differs.

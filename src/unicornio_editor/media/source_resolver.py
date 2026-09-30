@@ -220,6 +220,9 @@ def resolve_candidate_source(
                 continue
             if veredito.get("valid"):
                 resultado["source_page_url"] = pagina
+                for key in ("matched_image_url", "verification_level", "verification_reason"):
+                    if veredito.get(key):
+                        resultado[key] = veredito[key]
                 resultado["source_resolution"] = "verified_page"
                 resultado["source_resolution_query"] = query_origem
                 return resultado

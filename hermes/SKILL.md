@@ -158,7 +158,7 @@ batch.
    (contagem 2/4/6, listicle, fonte/licença/crédito, dimensões, posição no texto,
    reuso, fallback). Busca: `media-search-web "TERMO" --post-id POST_ID --needed N`
    (N = `images.missing`); listicle: UMA chamada
-   `media-search-listicle "OBRA 1" "OBRA 2" ... --limit 3`.
+   `media-search-listicle "OBRA 1" "OBRA 2" ... --post-id POST_ID --limit 3`.
 6. Escolha a imagem: `decision: auto` → use `select` direto. `choose` →
    escolha entre 2-3 `options`. `reuse` → o acervo local já cobre a necessidade
    INTEIRA (não houve busca web); cobertura PARCIAL vem como `coverage: mixed` e a

@@ -298,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--post-id",
         dest="post_id",
         type=int,
-        default=0,
+        default=None,
         help="post de referencia: o subject da busca vem de post_subjects() "
         "(entidade principal do titulo / H2), nao do termo digitado",
     )
@@ -350,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--post-id",
         dest="post_id",
         type=int,
-        default=0,
+        default=None,
         help="id do post da lista: permite registrar no ledger a decisão de CADA "
         "item (antes as listas ficavam fora do cruzamento de qualidade)",
     )
@@ -1165,6 +1165,7 @@ def _enriquecer_candidatos(
     root=None,
     capacity: int | None = None,
     enriched_cache: dict | None = None,
+    post_id: int | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -1397,6 +1398,11 @@ def _enriquecer_candidatos(
                 resolvido.pop("rejected_reason", None)
                 cand.clear()
                 cand.update(resolvido)
+                matched = str(cand.get("matched_image_url") or "").strip()
+                if matched:
+                    cand["discovery_image_url"] = cand.get("discovery_image_url") or cand.get("direct_image_url")
+                    cand["direct_image_url"] = matched
+                    cand["canonical_source_asset"] = True
             # O memo fica sob a chave ORIGINAL (sem origem): é a chave que o
             # próximo enriquecimento do MESMO candidato vai usar.
             _guardar_memo(cand, chave_original)
@@ -1490,6 +1496,33 @@ def _enriquecer_candidatos(
                 funil[str(cand.get("engine") or "unknown")]["selected"] += 1
             for eng, linha in funil.items():
                 append_telemetry(root, "media_engine_yield", engine=eng, **linha)
+        except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
+            pass
+    if root is not None:
+        try:
+            from .observability import append_telemetry
+            for status, grupo in (("ACCEPTED", aprovados), ("REJECTED", rejeitados), ("DEFERRED", deferidos)):
+                for cand in grupo:
+                    evidence = cand.get("evidence") or {}
+                    reason_code = str(
+                        cand.get("rejected_reason")
+                        or evidence.get("verdict")
+                        or ("capacity_met" if status == "DEFERRED" else "")
+                    )
+                    append_telemetry(
+                        root, "media_candidate_terminal",
+                        candidate_id=str(cand.get("candidate_id") or ""),
+                        post_id=int(post_id) if post_id else None,
+                        query=str(cand.get("query") or termo or ""),
+                        subject=str(subject or ""),
+                        engine=str(cand.get("engine") or "unknown"),
+                        discovery_image_url=str(cand.get("discovery_image_url") or cand.get("direct_image_url") or ""),
+                        direct_image_url=str(cand.get("direct_image_url") or ""),
+                        source_page_url=str(cand.get("source_page_url") or ""),
+                        status=status,
+                        reason_code=reason_code,
+                        verification_level=str(cand.get("verification_level") or ""),
+                    )
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
             pass
     return aprovados, rejeitados, deferidos
@@ -1773,6 +1806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         verify=bool(getattr(args, "verify", True)),
                         capacity=needed_web,
                         enriched_cache=memo,
+                        post_id=post_id_ref,
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return len(_frames_fortes)
@@ -1837,6 +1871,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     root=args.root,
                     capacity=needed_web,
                     enriched_cache=memo,
+                    post_id=post_id_ref,
                 )
             if rejeitados:
                 append_telemetry(
@@ -1875,7 +1910,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             append_telemetry(
                 args.root, "media_search_result",
                 query=args.termo,
-                post_id=post_id_ref or 0,
+                post_id=post_id_ref if post_id_ref else None,
                 needed=needed,
                 needed_web=needed_web,
                 reuse=len(reuso),
@@ -2039,6 +2074,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # critério do artigo (forte + frame distinto), evitando
                         # investigar candidato que já não é necessário.
                         capacity=1,
+                        post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item
@@ -2081,7 +2117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # exata por item não existe no batch.
                     append_telemetry(
                         args.root, "media_search_result",
-                        query=query, post_id=int(getattr(args, "post_id", 0) or 0),
+                        query=query, post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
                         item_index=len(audit_items), batch=True,
                         needed=1, needed_web=1, reuse=0,
                         strong=sum(

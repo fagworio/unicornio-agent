@@ -261,15 +261,17 @@ class DecisionLedgerByIDTests(unittest.TestCase):
             # Id de OUTRO post não é "resolvido" (evita atribuição cruzada).
             self.assertEqual(attribution_of(root, 99, "AAA"), "invalid")
 
-    def test_id_nao_atribuido_de_listicle_e_resolvido(self):
-        """Listicle sem --post-id grava post_id=0: o id ainda é do pipeline."""
-        from unicornio_editor.observability import attribution_of
+    def test_id_sem_post_nao_cria_decisao_atribuida(self):
+        """Busca manual sem --post-id não inventa um ID de post."""
+        from unicornio_editor.observability import read_media_decisions
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            record_media_decision(root, 0, decision="auto", item_index=0,
-                                  decision_id="ITEM1")
-            self.assertEqual(attribution_of(root, 5, "ITEM1"), "resolved")
+            self.assertEqual(
+                record_media_decision(root, 0, decision="auto", item_index=0),
+                "",
+            )
+            self.assertEqual(read_media_decisions(root, 5), [])
 
 
 if __name__ == "__main__":

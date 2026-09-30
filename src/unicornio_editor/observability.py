@@ -256,7 +256,7 @@ def record_media_decision(
     (listicle) registram uma decisão POR ITEM — antes gravavam ``post_id=0`` e
     ficavam fora de qualquer cruzamento de qualidade.
     """
-    if not post_id and item_index is None:
+    if not post_id:
         return ""
     identificador = decision_id or uuid.uuid4().hex[:12]
     registro = {
