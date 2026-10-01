@@ -9,6 +9,7 @@ from unicornio_editor.config import Config
 from unicornio_editor.workflow import (
     WorkflowError,
     _load_partial_manifest,
+    _partial_retry,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -127,7 +128,17 @@ class WorkflowTests(unittest.TestCase):
             "featured_media": 7,
         }
 
-    def test_partial_manifest_invalid_is_fail_closed(self):
+    def test_partial_retry_uses_stagnation_not_processing_passes(self):
+        now = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+        first = _partial_retry(0, cooldown_minutes=30, max_no_progress_attempts=2, now=now)
+        second = _partial_retry(1, cooldown_minutes=30, max_no_progress_attempts=2, now=now)
+        terminal = _partial_retry(2, cooldown_minutes=30, max_no_progress_attempts=2, now=now)
+        self.assertEqual(first["state"], "partial")
+        self.assertEqual(second["state"], "partial")
+        self.assertEqual(first["next_retry_at"], "2026-10-01T00:30:00+00:00")
+        self.assertEqual(second["next_retry_at"], "2026-10-01T02:00:00+00:00")
+        self.assertEqual(terminal, {"state": "awaiting_human", "next_retry_at": ""})
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "backups" / "42" / "editorial.partial.json"
@@ -1688,13 +1699,12 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(post)
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
-            self.assertEqual(report["status"], "needs_rework")
-            self.assertIn("imagem_destaque", report["blocked_reasons"])
-            self.assertNotIn("imagens_no_corpo", report["blocked_reasons"])
-            self.assertEqual(client.updated[1][1]["meta"]["_hermes_state"], "blocked")
-            # Baseline de conteudo (CTA/Fonte/links) e gravado; o editorial
-            # incompleto (texto/midia) fica apenas no draft.
-            self.assertIn("content", client.updated[0][1])
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["state"], "partial")
+            self.assertEqual(report["partial"]["missing"], 2)
+            self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "partial")
+            # O conteúdo incompleto não é gravado no WordPress.
+            self.assertNotIn("content", client.updated[0][1])
 
     def test_rework_backoff_escalates_to_awaiting_human(self):
         # Fase 8: 1a falha +30m (blocked), 2a +2h (blocked), 3a AWAITING_HUMAN.

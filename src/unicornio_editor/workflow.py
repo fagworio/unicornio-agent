@@ -156,6 +156,24 @@ def _save_partial_manifest(root: Path, post_id: int, manifest: dict[str, Any]) -
 def _partial_media_records(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in (manifest.get("accepted_media") or [])
             if isinstance(item, dict) and item.get("media_url") and not item.get("featured")]
+
+
+def _partial_retry(
+    no_progress_attempts: int,
+    *,
+    cooldown_minutes: int,
+    max_no_progress_attempts: int,
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    """Cooldown exclusivo de PARTIAL; progresso nunca consome passes."""
+    if no_progress_attempts >= max_no_progress_attempts:
+        return {"state": STATE_AWAITING_HUMAN, "next_retry_at": ""}
+    multiplier = 4 ** max(0, no_progress_attempts)
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    retry_at = moment + datetime.timedelta(minutes=cooldown_minutes * multiplier)
+    return {"state": STATE_PARTIAL, "next_retry_at": retry_at.isoformat(timespec="seconds")}
+
+
 def apply_editorial(
     client: WordPressClient,
     config: Config,
@@ -189,9 +207,13 @@ def _apply_editorial_unlocked(
     post = client.get_post(post_id)
     _require_pending(post)
     state_before = read_state(post)
-    partial_manifest = _load_partial_manifest(
-        root, post_id, required=state_before.get("state") == STATE_PARTIAL
-    )
+    partial_path = _partial_manifest_path(root, post_id)
+    if state_before.get("state") == STATE_PARTIAL:
+        partial_manifest = _load_partial_manifest(root, post_id, required=True)
+    else:
+        partial_manifest = {}
+        if partial_path.is_file():
+            append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
     prior_media = _partial_media_records(partial_manifest)
     attempts_before = state_before["attempts"]
     append_telemetry(
@@ -421,7 +443,7 @@ def _apply_editorial_unlocked(
                 (item for item in media_results if item.get("featured") and item.get("media_id")),
                 None,
             )
-            if media_only and (prior_media or current_accepted or partial_manifest):
+            if media_only:
                 accepted: list[dict[str, Any]] = []
                 seen_media: set[int] = set()
                 for item in prior_media + current_accepted:
@@ -447,10 +469,15 @@ def _apply_editorial_unlocked(
                 state_info = read_state(post)
                 passes = state_info.get("processing_passes", 0) + 1
                 no_progress = 0 if progress else state_info.get("no_progress_attempts", 0) + 1
-                partial_state = (
-                    STATE_AWAITING_HUMAN
-                    if no_progress >= config.max_partial_no_progress_attempts
-                    else STATE_PARTIAL
+                partial_state = _partial_retry(
+                    no_progress,
+                    cooldown_minutes=config.rework_cooldown_minutes,
+                    max_no_progress_attempts=config.max_partial_no_progress_attempts,
+                )["state"]
+                partial_retry = _partial_retry(
+                    no_progress,
+                    cooldown_minutes=config.rework_cooldown_minutes,
+                    max_no_progress_attempts=config.max_partial_no_progress_attempts,
                 )
                 manifest = {
                     "state": "partial",
@@ -464,12 +491,7 @@ def _apply_editorial_unlocked(
                     "no_progress_attempts": no_progress,
                 }
                 _save_partial_manifest(root, post_id, manifest)
-                backoff = rework_backoff(
-                    passes,
-                    cooldown_minutes=config.rework_cooldown_minutes,
-                    max_attempts=max(1, config.max_rework_attempts),
-                )
-                next_retry = "" if partial_state == STATE_AWAITING_HUMAN else backoff["next_retry_at"]
+                next_retry = partial_retry["next_retry_at"]
                 if not _write_state_markers(
                     client, config, post_id, partial_state, root=root,
                     attempts=state_info["attempts"], next_retry_at=next_retry,
