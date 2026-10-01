@@ -133,6 +133,7 @@ def _vazio() -> dict[str, Any]:
         "started_at": "",
         "last_activity": "",
         "posts_touched": [],
+        "posts_reserved": [],
         "ready": 0,
         "context_bytes": 0,
         "commands": 0,
@@ -146,11 +147,17 @@ def _normalizar(dados: Any) -> dict[str, Any]:
         int(pid) for pid in (dados.get("posts_touched") or [])
         if isinstance(pid, (int, float)) or (isinstance(pid, str) and pid.isdigit())
     ]
+    reserved = [
+        int(pid) for pid in (dados.get("posts_reserved") or [])
+        if isinstance(pid, (int, float)) or (isinstance(pid, str) and pid.isdigit())
+    ]
+    reserved = [pid for pid in reserved if pid not in touched]
     return {
         "session_id": str(dados.get("session_id") or _session_id()),
         "started_at": str(dados.get("started_at") or ""),
         "last_activity": str(dados.get("last_activity") or ""),
         "posts_touched": touched,
+        "posts_reserved": reserved,
         "ready": int(dados.get("ready") or 0),
         "context_bytes": int(dados.get("context_bytes") or 0),
         "commands": int(dados.get("commands") or 0),
@@ -203,8 +210,9 @@ def status(
     """Projecao do orcamento da sessao (o que o agente precisa saber para parar)."""
     dados = load_session(root, config, now=now)
     tocados = dados["posts_touched"]
+    reservados = dados["posts_reserved"]
     teto = int(config.max_posts_touched_per_run)
-    restantes = max(0, teto - len(tocados)) if cap_ativo(config) else None
+    restantes = max(0, teto - len(tocados) - len(reservados)) if cap_ativo(config) else None
     orcamento = int(config.session_context_bytes_budget)
     usado = int(dados["context_bytes"])
     return {
@@ -215,6 +223,8 @@ def status(
         "max_posts_touched": teto,
         "posts_touched": tocados,
         "posts_touched_count": len(tocados),
+        "posts_reserved": reservados,
+        "posts_reserved_count": len(reservados),
         "remaining_posts": restantes,
         "context_bytes_used": usado,
         "context_bytes_budget": orcamento,
@@ -233,7 +243,7 @@ def touch_allowed(
     projecao = status(root, config, now=now)
     if not cap_ativo(config):
         return True, projecao
-    if int(post_id) in projecao["posts_touched"]:
+    if int(post_id) in projecao["posts_touched"] or int(post_id) in projecao["posts_reserved"]:
         return True, projecao
     if projecao["remaining_posts"] and projecao["remaining_posts"] > 0:
         return True, projecao
@@ -250,16 +260,53 @@ def claim_touch(
     apply chama isto ANTES de escrever, a reserva e o proprio consumo da vaga —
     "post tocado" e o trabalho gasto nele, tenha o resultado sido READY ou nao.
     """
+    allowed, _ = reserve_touch(root, post_id, config, now=now)
+    if not allowed:
+        return False, status(root, config, now=now)
+    return commit_touch(root, post_id, config, now=now)
+
+
+def reserve_touch(
+    root: Path | str, post_id: int, config: Config, *, now: float | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Reserve future work without consuming ``posts_touched``."""
     with _ledger_lock(root):
-        projecao = status(root, config, now=now)
-        ja_tocado = int(post_id) in projecao["posts_touched"]
-        if cap_ativo(config) and not ja_tocado and not projecao["remaining_posts"]:
-            return False, projecao
-        dados = load_session(root, config, now=now)
-        if not ja_tocado:
-            dados["posts_touched"].append(int(post_id))
-            _salvar(root, dados, now=now)
-        return True, status(root, config, now=now)
+        projection = status(root, config, now=now)
+        post_id = int(post_id)
+        if post_id in projection["posts_touched"] or post_id in projection["posts_reserved"]:
+            return True, projection
+        if cap_ativo(config) and projection["remaining_posts"] == 0:
+            return False, projection
+        data = load_session(root, config, now=now)
+        data["posts_reserved"].append(post_id)
+        _salvar(root, data, now=now)
+    return True, status(root, config, now=now)
+
+
+def commit_touch(
+    root: Path | str, post_id: int, config: Config, *, now: float | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Commit a reservation when real work starts."""
+    with _ledger_lock(root):
+        data = load_session(root, config, now=now)
+        post_id = int(post_id)
+        if post_id not in data["posts_touched"]:
+            data["posts_touched"].append(post_id)
+        data["posts_reserved"] = [pid for pid in data["posts_reserved"] if pid != post_id]
+        _salvar(root, data, now=now)
+    return True, status(root, config, now=now)
+
+
+def release_reservation(
+    root: Path | str, post_id: int, config: Config, *, now: float | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Release work that was reserved but never started."""
+    with _ledger_lock(root):
+        data = load_session(root, config, now=now)
+        post_id = int(post_id)
+        data["posts_reserved"] = [pid for pid in data["posts_reserved"] if pid != post_id]
+        _salvar(root, data, now=now)
+    return True, status(root, config, now=now)
 
 
 def record_ready(root: Path | str, config: Config, *, now: float | None = None) -> dict[str, Any]:
@@ -311,7 +358,7 @@ def stop_reason(root: Path | str, config: Config, *, now: float | None = None) -
             f"({projecao['context_bytes_used']} de {projecao['context_bytes_budget']} bytes); "
             "encerre a sessao sem novos comandos — o proximo post fica para a proxima janela"
         )
-    if cap_ativo(config) and projecao["remaining_posts"] == 0:
+    if cap_ativo(config) and projecao["remaining_posts"] == 0 and not projecao["posts_reserved"]:
         return (
             f"teto de posts tocados por sessao atingido "
             f"({projecao['posts_touched_count']}/{projecao['max_posts_touched']}); "
@@ -327,6 +374,9 @@ __all__ = [
     "record_context_bytes",
     "record_ready",
     "record_touch",
+    "reserve_touch",
+    "commit_touch",
+    "release_reservation",
     "status",
     "stop_reason",
     "touch_allowed",

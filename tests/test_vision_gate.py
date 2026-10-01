@@ -297,6 +297,22 @@ class VisionGateTests(unittest.TestCase):
             1,
         )
 
+    def test_batch_normalizes_provider_valid_and_keeps_unknown_candidate_inconclusive(self):
+        VisionHandler.answer = json.dumps({"items": [
+            {"candidate_id": "A1", "status": "valid", "confidence": 0.97, "visual_type": "key_art"},
+            {"candidate_id": "B1", "status": "provider_future_status", "confidence": 0.97, "visual_type": "key_art"},
+        ]})
+        result = verify_image_subject_batch(
+            items=[
+                {"candidate_id": "A1", "image_url": "https://a.test/a.webp", "subject": "A"},
+                {"candidate_id": "B1", "image_url": "https://b.test/b.webp", "subject": "B"},
+            ], api_key="test-key", base_url=self.base, model="vision-test",
+        )
+        self.assertTrue(result["A1"]["ok"])
+        self.assertEqual(result["A1"]["vision_status_normalized"], "MATCH")
+        self.assertEqual(result["B1"]["verdict"], "inconclusive")
+        self.assertFalse(result["B1"]["ok"])
+
     def test_inline_ambiguous_passes(self):
         # Inline AMBIGUOUS tambem passa (nao bloqueia por confianca baixa) — sem
         # escalada, porque inline não tem `allow_high`.

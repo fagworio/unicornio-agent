@@ -146,6 +146,34 @@ class SessionCapConcurrencyTests(unittest.TestCase):
             tocados = session_budget.status(root, config)["posts_touched"]
             self.assertEqual(sorted(tocados), [400, 401, 402, 403, 404, 405])
 
+    def test_reservations_do_not_touch_cap_and_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=5)
+            self.assertTrue(session_budget.reserve_touch(root, 501, config)[0])
+            self.assertTrue(session_budget.reserve_touch(root, 501, config)[0])
+            projection = session_budget.status(root, config)
+            self.assertEqual(projection["posts_touched"], [])
+            self.assertEqual(projection["posts_reserved"], [501])
+            self.assertEqual(projection["posts_reserved_count"], 1)
+            self.assertTrue(session_budget.commit_touch(root, 501, config)[0])
+            projection = session_budget.status(root, config)
+            self.assertEqual(projection["posts_touched"], [501])
+            self.assertEqual(projection["posts_reserved"], [])
+
+    def test_reserve_five_process_two_then_continue_three(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=5)
+            for post_id in range(510, 515):
+                self.assertTrue(session_budget.reserve_touch(root, post_id, config)[0])
+            self.assertEqual(session_budget.status(root, config)["posts_touched"], [])
+            for post_id in (510, 511):
+                session_budget.commit_touch(root, post_id, config)
+            self.assertEqual(session_budget.status(root, config)["posts_touched"], [510, 511])
+            self.assertEqual(session_budget.status(root, config)["posts_reserved"], [512, 513, 514])
+            self.assertEqual(session_budget.stop_reason(root, config), "")
+
 
 class MediaFlowRegressionTests(OrigemCronMixin, unittest.TestCase):
     """reuse/auto/choose e a separação entre deferido e rejeitado."""

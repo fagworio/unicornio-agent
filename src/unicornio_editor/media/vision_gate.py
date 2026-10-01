@@ -81,7 +81,20 @@ def _json_output_schema() -> dict[str, Any]:
     }
 
 
-def _parse_response(text: str) -> dict[str, Any]:
+def _batch_json_output_schema() -> dict[str, Any]:
+    """Strict envelope used by providers that implement JSON Schema output."""
+    item = _json_output_schema()
+    item["properties"]["candidate_id"] = {"type": "string"}
+    item["required"] = ["candidate_id", *item["required"]]
+    return {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": item}},
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+
+
+def _parse_response(text: str, *, allow_unknown_status: bool = False) -> dict[str, Any]:
     """Parse the model answer (Structured Outputs returns pure JSON)."""
     raw = (text or "").strip()
     try:
@@ -98,7 +111,12 @@ def _parse_response(text: str) -> dict[str, Any]:
     status = data.get("status")
     confidence = data.get("confidence")
     visual_type = data.get("visual_type")
-    if status not in _STATUS:
+    raw_status = status
+    normalized_status = {
+        "VALID": "MATCH",
+        "INVALID": "UNRELATED",
+    }.get(str(status).strip().upper(), status)
+    if normalized_status not in _STATUS and not allow_unknown_status:
         raise VisionGateError(f"status de visao desconhecido: {status!r}")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VisionGateError(f"confidence de visao invalida: {confidence!r}")
@@ -107,7 +125,15 @@ def _parse_response(text: str) -> dict[str, Any]:
         raise VisionGateError(f"confidence fora de [0,1]: {confidence!r}")
     if visual_type not in _VISUAL_TYPES:
         visual_type = "other"
-    return {"status": status, "confidence": confidence, "visual_type": visual_type}
+    if normalized_status not in _STATUS:
+        normalized_status = "UNKNOWN"
+    return {
+        "status": normalized_status,
+        "confidence": confidence,
+        "visual_type": visual_type,
+        "vision_status_normalized": normalized_status if normalized_status != "UNKNOWN" else "INCONCLUSIVE",
+        **({"vision_status_raw": raw_status} if raw_status != normalized_status else {}),
+    }
 
 
 def _build_user_prompt(
@@ -279,7 +305,14 @@ def _call_vision_batch(
         ],
         "max_tokens": max(60, 60 * len(items)),
         "temperature": 0,
-        "response_format": {"type": "json_object"},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "vision_batch_result",
+                "strict": True,
+                "schema": _batch_json_output_schema(),
+            },
+        },
     }
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
     request = Request(
@@ -333,7 +366,9 @@ def _call_vision_batch(
         candidate_id = str(row.get("candidate_id") or "")
         if candidate_id not in expected or candidate_id in output:
             raise VisionGateError(f"candidate_id invalido ou duplicado: {candidate_id!r}")
-        output[candidate_id] = _parse_response(json.dumps(row, ensure_ascii=False))
+        output[candidate_id] = _parse_response(
+            json.dumps(row, ensure_ascii=False), allow_unknown_status=True
+        )
     missing = expected.difference(output)
     if missing:
         raise VisionGateError(

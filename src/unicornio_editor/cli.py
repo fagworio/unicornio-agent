@@ -687,6 +687,25 @@ def _compact_apply(result: dict) -> dict:
         if result.get("baseline_enriched"):
             compact["baseline_enriched"] = True
         return compact
+    if result.get("status") == "partial":
+        progress = result.get("partial") or {}
+        return {
+            "post_id": post_id,
+            "status": "partial",
+            "state": result.get("state") or "partial",
+            "state_changed": bool(result.get("state_changed", True)),
+            "content_changed": bool(result.get("content_changed", False)),
+            "wordpress_changed": bool(result.get("wordpress_changed")),
+            "partial": {
+                "required": progress.get("required", result.get("partial_required")),
+                "completed": progress.get("completed", result.get("partial_completed")),
+                "missing": progress.get("missing", result.get("partial_missing")),
+            },
+            "processing_passes": result.get("processing_passes", 0),
+            "no_progress_attempts": result.get("no_progress_attempts", 0),
+            "checklist": "pass" if not failed else "fail",
+            "failed": failed,
+        }
     if result.get("status") == "skipped":
         compact = {
             "post_id": post_id,
@@ -817,7 +836,9 @@ def _apply_editorial_batch(
                     and retry_mode in {"uncertain_second_pass", ""}
                 ):
                     projection = session_budget.status(root, config)
-                    allowed, projection = session_budget.claim_touch(root, post_id, config)
+                    allowed, projection = session_budget.reserve_touch(root, post_id, config)
+                    if allowed:
+                        session_budget.commit_touch(root, post_id, config)
                     if not allowed:
                         stopped = session_budget.stop_reason(root, config) or (
                             "teto de posts tocados por sessao atingido "
@@ -904,7 +925,9 @@ def _apply_editorial_batch(
             elif reason and not already_touched:
                 no_slot = True
             else:
-                allowed, projection = session_budget.claim_touch(root, post_id, config)
+                allowed, projection = session_budget.reserve_touch(root, post_id, config)
+                if allowed:
+                    session_budget.commit_touch(root, post_id, config)
                 no_slot = not allowed
             if not dry_run and no_slot:
                 stopped = reason or (
@@ -948,6 +971,7 @@ def _apply_editorial_batch(
         "count": len(batch["items"]),
         "processed": len(outcomes),
         "ready": sum(1 for item in outcomes if item.get("status") == "ready"),
+        "partial": sum(1 for item in outcomes if item.get("status") == "partial"),
         "noop": sum(1 for item in outcomes if item.get("status") == "noop"),
         "preflight_blocked": sum(1 for item in outcomes if item.get("status") == "preflight_blocked"),
         "preflight_errors": sum(1 for item in outcomes if item.get("status") == "preflight_error"),
@@ -1796,7 +1820,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not card.get("uncertain_second_pass_eligible"):
                         reserved_cards.append(card)
                         continue
-                    allowed, _projection = session_budget.claim_touch(args.root, int(card["id"]), config)
+                    allowed, _projection = session_budget.reserve_touch(args.root, int(card["id"]), config)
                     if allowed:
                         reserved += 1
                         reserved_cards.append(card)

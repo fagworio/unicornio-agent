@@ -129,6 +129,36 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(result["status"], "uncertain")
         self.assertEqual(result["skip_reason"], "conteudo irrelevante")
 
+    def test_compact_apply_preserves_partial_media_progress_for_zero_of_two(self):
+        result = _compact_apply({
+            "post_id": 114829, "status": "partial", "state": "partial",
+            "wordpress_changed": False, "processing_passes": 2,
+            "no_progress_attempts": 1,
+            "partial": {"required": 2, "completed": 0, "missing": 2},
+            "checklist": {"items": [{"name": "imagens_no_corpo", "status": "fail", "detail": "0/2"}]},
+        })
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["state"], "partial")
+        self.assertTrue(result["state_changed"])
+        self.assertFalse(result["content_changed"])
+        self.assertEqual(result["partial"], {"required": 2, "completed": 0, "missing": 2})
+        self.assertEqual(result["processing_passes"], 2)
+        self.assertEqual(result["no_progress_attempts"], 1)
+        self.assertEqual(result["checklist"], "fail")
+        self.assertTrue(result["failed"])
+
+    def test_compact_apply_preserves_partial_media_progress_for_zero_of_four(self):
+        result = _compact_apply({
+            "post_id": 114849, "status": "partial", "state": "partial",
+            "wordpress_changed": False,
+            "partial": {"required": 4, "completed": 0, "missing": 4},
+            "processing_passes": 1, "no_progress_attempts": 0,
+            "checklist": {"items": [{"name": "imagens_no_corpo", "status": "fail", "detail": "0/4"}]},
+        })
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["partial"]["missing"], 4)
+        self.assertFalse(result["content_changed"])
+
     def test_compact_apply_reports_persisted_baseline_for_skipped_post(self):
         result = _compact_apply(
             {
