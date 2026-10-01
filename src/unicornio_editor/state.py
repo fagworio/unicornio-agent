@@ -10,6 +10,7 @@ Estados:
 - NEW            post pending sem processamento (ou sem meta de estado)
 - PROCESSING     reservado (apply é single-shot; não é gravado hoje)
 - BLOCKED        preflight/apply recusou — precisa rework (re-edição)
+- PARTIAL        relevância aprovada; enriquecimento incompleto com progresso
 - READY          preflight completo passou — apto à publicação
 - SKIPPED        relevância decidiu skip com confiança (decisão final)
 - UNCERTAIN      primeira dúvida; retry automático controlado após cooldown
@@ -36,6 +37,7 @@ from typing import Any
 STATE_NEW = "new"
 STATE_PROCESSING = "processing"
 STATE_BLOCKED = "blocked"
+STATE_PARTIAL = "partial"
 STATE_READY = "ready"
 STATE_SKIPPED = "skipped"
 STATE_UNCERTAIN = "uncertain"
@@ -47,6 +49,7 @@ ALL_STATES = frozenset(
         STATE_NEW,
         STATE_PROCESSING,
         STATE_BLOCKED,
+        STATE_PARTIAL,
         STATE_READY,
         STATE_SKIPPED,
         STATE_UNCERTAIN,
@@ -63,6 +66,12 @@ META_LAST_ERROR = "_hermes_last_error"
 META_READY_HASH = "_hermes_ready_hash"
 META_POLICY_VERSION = "_hermes_policy_version"
 META_PROCESSED_AT = "_hermes_processed_at"
+META_PARTIAL_KIND = "_hermes_partial_kind"
+META_PARTIAL_REQUIRED = "_hermes_media_required"
+META_PARTIAL_COMPLETED = "_hermes_media_completed"
+META_PARTIAL_MISSING = "_hermes_media_missing"
+META_PARTIAL_PROCESSING_PASSES = "_hermes_processing_passes"
+META_PARTIAL_NO_PROGRESS = "_hermes_no_progress_attempts"
 
 def now_iso() -> str:
     """ISO-8601 UTC com segundos (formato usado nas meta keys)."""
@@ -79,6 +88,12 @@ def build_state_markers(
     policy_version: int = 0,
     processed_at: str | None = None,
     media_search_attempts: int | None = None,
+    partial_kind: str = "",
+    partial_required: int | None = None,
+    partial_completed: int | None = None,
+    partial_missing: int | None = None,
+    processing_passes: int | None = None,
+    no_progress_attempts: int | None = None,
 ) -> dict[str, Any]:
     """Meta payload ``_hermes_*`` para um update no WordPress."""
     if state not in ALL_STATES:
@@ -105,6 +120,20 @@ def build_state_markers(
         if isinstance(media_search_attempts, bool) or not isinstance(media_search_attempts, int) or media_search_attempts < 0:
             raise ValueError("media_search_attempts must be a non-negative integer")
         markers[META_MEDIA_SEARCH_ATTEMPTS] = str(media_search_attempts)
+    if no_progress_attempts is not None:
+        markers[META_PARTIAL_NO_PROGRESS] = str(max(0, no_progress_attempts))
+    if partial_kind:
+        markers[META_PARTIAL_KIND] = partial_kind
+    for key, value in (
+        (META_PARTIAL_REQUIRED, partial_required),
+        (META_PARTIAL_COMPLETED, partial_completed),
+        (META_PARTIAL_MISSING, partial_missing),
+        (META_PARTIAL_PROCESSING_PASSES, processing_passes),
+    ):
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{key} must be a non-negative integer")
+            markers[key] = str(value)
     # UNCERTAIN is retryable after its controlled cooldown. Clearing
     # next_retry_at here would make every uncertain post immediately eligible
     # and defeat the backoff policy.
@@ -117,8 +146,8 @@ def read_state(post: dict[str, Any]) -> dict[str, Any]:
     """Estado do post a partir da meta; tolerante a qualquer formato inválido.
 
     Retorna ``{state, attempts, next_retry_at, last_error, ready_hash,
-    policy_version, processed_at}``. ``state`` é ``None`` quando o post não
-    tem meta de estado (legado — o pipeline decide pelo filesystem).
+    policy_version, processed_at, partial_*}``. ``state`` é ``None`` quando o
+    post não tem meta de estado (legado — o pipeline decide pelo filesystem).
     """
     meta = post.get("meta")
     if not isinstance(meta, dict):
@@ -135,6 +164,12 @@ def read_state(post: dict[str, Any]) -> dict[str, Any]:
         "ready_hash": _str_or(meta.get(META_READY_HASH)),
         "policy_version": _int_or(meta.get(META_POLICY_VERSION), 0),
         "processed_at": _str_or(meta.get(META_PROCESSED_AT)),
+        "partial_kind": _str_or(meta.get(META_PARTIAL_KIND)),
+        "partial_required": _int_or(meta.get(META_PARTIAL_REQUIRED), 0),
+        "partial_completed": _int_or(meta.get(META_PARTIAL_COMPLETED), 0),
+        "partial_missing": _int_or(meta.get(META_PARTIAL_MISSING), 0),
+        "processing_passes": _int_or(meta.get(META_PARTIAL_PROCESSING_PASSES), 0),
+        "no_progress_attempts": _int_or(meta.get(META_PARTIAL_NO_PROGRESS), 0),
     }
 
 
@@ -191,7 +226,7 @@ def retry_eligible(state_info: dict[str, Any], now: datetime.datetime | None = N
     BLOCKED com ``next_retry_at`` vazio (legado/bloqueio por publish) ou já
     vencido é elegível; BLOCKED ainda em cooldown não é.
     """
-    if state_info.get("state") != STATE_BLOCKED:
+    if state_info.get("state") not in (STATE_BLOCKED, STATE_PARTIAL):
         return False
     return cooldown_expired(state_info.get("next_retry_at") or "", now)
 

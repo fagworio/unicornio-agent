@@ -189,13 +189,17 @@ visíveis e rastreáveis à licença.
 ## Estados (fonte de verdade: meta `_hermes_state` no WordPress)
 
 ```text
-NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBLISHED
+NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBLISHED
 ```
 
 - READY = preflight 100%. SÓ `ready` publica.
-- BLOCKED = rework; card vem primeiro com `fix`. Backoff: 1ª +30m, 2ª +2h, 3ª →
-  AWAITING_HUMAN (`retry`/`discard` humano).
-- UNCERTAIN = primeira dúvida: fica fora da fila até `next_retry_at` vencer; depois
+- PARTIAL = relevância aprovada, mas mídia/featured incompleta; reutilize o
+  manifesto `editorial.partial.json` e busque somente o déficit. PARTIAL nunca
+  publica e não altera o HTML do WordPress até checklist 100%.
+- BLOCKED = falha de texto, SEO, trailer ou outro gate corrigível; não use
+  UNCERTAIN para falta de mídia.
+- UNCERTAIN = exclusivamente dúvida editorial sobre relevância. Segunda dúvida
+  promove para AWAITING_HUMAN.
   aparece exatamente uma vez como `retry_mode=uncertain_second_pass`. Se a segunda
   passagem continuar incerta, escala para `AWAITING_HUMAN`. Nunca publica enquanto
   estiver `UNCERTAIN`.

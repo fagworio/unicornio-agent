@@ -51,6 +51,7 @@ from .seo.rank_math import build_meta
 from .state import (
     STATE_AWAITING_HUMAN,
     STATE_BLOCKED,
+    STATE_PARTIAL,
     STATE_NEW,
     STATE_PUBLISHED,
     STATE_READY,
@@ -107,6 +108,28 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
     }
 
 
+def _partial_manifest_path(root: Path, post_id: int) -> Path:
+    return root / "backups" / str(post_id) / "editorial.partial.json"
+
+
+def _load_partial_manifest(root: Path, post_id: int) -> dict[str, Any]:
+    path = _partial_manifest_path(root, post_id)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_partial_manifest(root: Path, post_id: int, manifest: dict[str, Any]) -> None:
+    path = _partial_manifest_path(root, post_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+
+
+def _partial_media_records(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in (manifest.get("accepted_media") or [])
+            if isinstance(item, dict) and item.get("media_url") and not item.get("featured")]
 def apply_editorial(
     client: WordPressClient,
     config: Config,
@@ -139,6 +162,8 @@ def _apply_editorial_unlocked(
     started_at = time.monotonic()
     post = client.get_post(post_id)
     _require_pending(post)
+    partial_manifest = _load_partial_manifest(root, post_id)
+    prior_media = _partial_media_records(partial_manifest)
     attempts_before = read_state(post)["attempts"]
     append_telemetry(
         root, "apply_started", post_id=post_id,
@@ -258,12 +283,18 @@ def _apply_editorial_unlocked(
         existing_featured_id=int(post.get("featured_media") or 0) or None,
     )
     media_results, featured_id, featured_credit = _execute_media_plan(
-        editorial, config, client, root, preflight=media_preflight
+        editorial, config, client, root, preflight=media_preflight, post_id=post_id
     )
+    combined_media_results = prior_media + [
+        item for item in media_results
+        if item.get("media_url") and not item.get("featured")
+    ]
+    if featured_id is None:
+        featured_id = next((item.get("media_id") for item in (partial_manifest.get("accepted_media") or []) if item.get("featured")), None)
     if featured_id is None and not config.dry_run:
         featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
     html = editorial["cleaned_html"]
-    if media_results and not config.dry_run:
+    if combined_media_results and not config.dry_run:
         plan = [
             {
                 "paragraph_index": result["paragraph_index"],
@@ -273,7 +304,7 @@ def _apply_editorial_unlocked(
                 "width": result.get("width"),
                 "height": result.get("height"),
             }
-            for result in media_results
+            for result in combined_media_results
             if result.get("media_url") and not result.get("featured")
         ]
         if plan:
@@ -332,7 +363,89 @@ def _apply_editorial_unlocked(
             if item.get("status") in ("fail", "error") and item.get("name")
         ]
         if failed_items:
-            # O gate continua impedindo READY/publicacao, mas nao descartamos
+            media_only = all(
+                "imagem" in str(item.get("name") or "").lower()
+                or "media" in str(item.get("name") or "").lower()
+                or "destaque" in str(item.get("name") or "").lower()
+                for item in failed_items
+            )
+            current_accepted = [item for item in media_results if item.get("media_url") and item.get("media_id")]
+            if media_only and (prior_media or current_accepted or partial_manifest):
+                accepted: list[dict[str, Any]] = []
+                seen_media: set[int] = set()
+                for item in prior_media + current_accepted:
+                    media_id = int(item.get("media_id") or 0)
+                    if media_id and media_id not in seen_media:
+                        accepted.append(item)
+                        seen_media.add(media_id)
+                if featured_id:
+                    accepted.append({
+                        "media_id": featured_id, "featured": True,
+                        "status": "accepted", "credit_text": featured_credit or "",
+                    })
+                required = _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities).get("required", 0)
+                completed = len([item for item in accepted if not item.get("featured")])
+                missing = max(0, required - completed)
+                previous_completed = len(prior_media)
+                progress = completed > previous_completed or bool(featured_id and not partial_manifest.get("featured"))
+                state_info = read_state(post)
+                passes = state_info.get("processing_passes", 0) + 1
+                no_progress = 0 if progress else state_info.get("no_progress_attempts", 0) + 1
+                partial_state = (
+                    STATE_AWAITING_HUMAN
+                    if no_progress >= config.max_partial_no_progress_attempts
+                    else STATE_PARTIAL
+                )
+                manifest = {
+                    "state": "partial",
+                    "kind": "media",
+                    "required": required,
+                    "completed": completed,
+                    "missing": missing,
+                    "accepted_media": accepted,
+                    "featured": {"status": "valid", "media_id": featured_id} if featured_id else {"status": "missing"},
+                    "processing_passes": passes,
+                    "no_progress_attempts": no_progress,
+                }
+                _save_partial_manifest(root, post_id, manifest)
+                backoff = rework_backoff(
+                    passes,
+                    cooldown_minutes=config.rework_cooldown_minutes,
+                    max_attempts=max(1, config.max_rework_attempts),
+                )
+                next_retry = "" if partial_state == STATE_AWAITING_HUMAN else backoff["next_retry_at"]
+                if not _write_state_markers(
+                    client, config, post_id, partial_state, root=root,
+                    attempts=state_info["attempts"], next_retry_at=next_retry,
+                    last_error="; ".join(str(item.get("detail") or "")[:160] for item in failed_items[:5]),
+                    partial_kind="media", partial_required=required,
+                    partial_completed=completed, partial_missing=missing,
+                    processing_passes=passes, no_progress_attempts=no_progress,
+                ):
+                    raise WorkflowError(f"estado {partial_state} nao persistiu no WordPress (post {post_id})")
+                if partial_state == STATE_AWAITING_HUMAN and not config.dry_run:
+                    client.move_to_status(post_id, "awaiting_human")
+                append_telemetry(
+                    root, "partial_started" if not partial_manifest else "partial_resumed",
+                    post_id=post_id, required=required, completed=completed, missing=missing,
+                )
+                if partial_state == STATE_AWAITING_HUMAN:
+                    append_telemetry(root, "partial_escalated", post_id=post_id, no_progress_attempts=no_progress)
+                append_telemetry(
+                    root, "partial_progress" if progress else "partial_no_progress",
+                    post_id=post_id, required=required, completed=completed,
+                    missing=missing, processing_passes=passes,
+                    no_progress_attempts=no_progress,
+                )
+                return {
+                    "post_id": post_id, "wordpress_changed": False, "dry_run": False,
+                    "status": "partial" if partial_state == STATE_PARTIAL else "awaiting_human",
+                    "state": partial_state, "attempts": state_info["attempts"],
+                    "processing_passes": passes, "no_progress_attempts": no_progress,
+                    "partial": manifest, "checklist": checklist,
+                    "media_plan_results": media_results,
+                }
+            # O gate continua impedindo READY/publicacao; falhas não relacionadas
             # aprimoramentos mecanicos e seguros do post: CTA, Fonte e links
             # internos persistem no conteudo original antes de ele entrar em
             # rework ou AWAITING_HUMAN. O editorial incompleto (texto/midia)
@@ -539,6 +652,8 @@ def _apply_editorial_unlocked(
     # continuar listando blocked/uncertain (senao o monitor acordaria o agente
     # em loop para "corrigir" um post ja corrigido).
     _clear_processing_markers(root, post_id)
+    if partial_manifest:
+        append_telemetry(root, "partial_completed", post_id=post_id)
     append_telemetry(
         root,
         "apply_ready",
@@ -575,7 +690,7 @@ def _clear_processing_markers(root: Path, post_id: int) -> None:
     """
     try:
         directory = root / "backups" / str(post_id)
-        for name in ("editorial.blocked.json", "uncertain.json"):
+        for name in ("editorial.blocked.json", "uncertain.json", "editorial.partial.json"):
             marker = directory / name
             if marker.is_file():
                 marker.unlink()
@@ -625,7 +740,7 @@ def _persist_baseline_enrichment(
 # Estados em que perder a persistência é operacionalmente crítico: o post fica
 # fora de sincronia com a fila (reaparece, gera retry e custo de LLM de novo).
 _STATE_MARKER_CRITICAL = frozenset({
-    STATE_READY, STATE_SKIPPED, STATE_UNCERTAIN, STATE_BLOCKED, STATE_AWAITING_HUMAN,
+    STATE_READY, STATE_SKIPPED, STATE_UNCERTAIN, STATE_BLOCKED, STATE_PARTIAL, STATE_AWAITING_HUMAN,
 })
 
 
@@ -641,6 +756,12 @@ def _write_state_markers(
     last_error: str = "",
     ready_hash: str = "",
     media_search_attempts: int | None = None,
+    partial_kind: str = "",
+    partial_required: int | None = None,
+    partial_completed: int | None = None,
+    partial_missing: int | None = None,
+    processing_passes: int | None = None,
+    no_progress_attempts: int | None = None,
 ) -> bool:
     """Persiste o estado operacional ``_hermes_*`` no WordPress (write mode).
 
@@ -666,6 +787,12 @@ def _write_state_markers(
                     last_error=last_error,
                     ready_hash=ready_hash,
                     media_search_attempts=media_search_attempts,
+                    partial_kind=partial_kind,
+                    partial_required=partial_required,
+                    partial_completed=partial_completed,
+                    partial_missing=partial_missing,
+                    processing_passes=processing_passes,
+                    no_progress_attempts=no_progress_attempts,
                     policy_version=config.policy_version,
                 )
             },
@@ -2536,6 +2663,7 @@ def build_queue_report(
     unprocessed: list[int] = []
     recent_unprocessed: list[int] = []
     blocked_ids: list[int] = []
+    partial_ids: list[int] = []
     recent_blocked: list[int] = []
     eligible_rework: list[int] = []
     ready_ids: list[int] = []
@@ -2581,6 +2709,10 @@ def build_queue_report(
                 eligible_rework.append(post_id)
             if _is_recent(post, cutoff):
                 recent_blocked.append(post_id)
+        elif state == STATE_PARTIAL:
+            partial_ids.append(post_id)
+            if retry_eligible(effective_state):
+                eligible_rework.append(post_id)
         else:  # NEW / PROCESSING / desconhecido
             unprocessed.append(post_id)
             if _is_recent(post, cutoff):
@@ -2599,6 +2731,7 @@ def build_queue_report(
                 "prepared": (backups_dir / "prepared.json").is_file(),
                 "edited": state == STATE_READY,
                 "blocked": state == STATE_BLOCKED,
+                "partial": state == STATE_PARTIAL,
                 "uncertain": state == STATE_UNCERTAIN,
                 "awaiting_human": state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
@@ -2609,6 +2742,7 @@ def build_queue_report(
     unprocessed.sort()
     recent_unprocessed.sort()
     blocked_ids.sort()
+    partial_ids.sort()
     recent_blocked.sort()
     eligible_rework.sort()
     # Loop sequencial: quando nao ha NEW nem BLOCKED elegivel, acorda o
@@ -2630,12 +2764,14 @@ def build_queue_report(
         "pending": len(rows),
         "edited": len(ready_ids),
         "blocked": len(blocked_ids),
+        "partial": len(partial_ids),
         "uncertain": len(uncertain_ids),
         "awaiting_human": len(awaiting_human_ids),
         "skipped": len(skipped_ids),
         "unprocessed_ids": unprocessed,
         "recent_unprocessed_ids": recent_unprocessed,
         "blocked_ids": blocked_ids,
+        "partial_ids": partial_ids,
         "recent_blocked_ids": recent_blocked,
         "eligible_rework_ids": eligible_rework,
         "ready_ids": ready_ids,
@@ -2680,13 +2816,12 @@ def _rework_ids(root: Path) -> list[int]:
     for entry in backups.iterdir():
         if not entry.is_dir():
             continue
-        if (entry / "editorial.blocked.json").is_file() and not (
-            entry / "uncertain.json"
-        ).is_file():
-            try:
-                ids.append(int(entry.name))
-            except ValueError:
-                continue
+        if (entry / "editorial.blocked.json").is_file() or (entry / "editorial.partial.json").is_file():
+            if not (entry / "uncertain.json").is_file():
+                try:
+                    ids.append(int(entry.name))
+                except ValueError:
+                    continue
     return sorted(ids)
 
 
@@ -2742,7 +2877,7 @@ def build_cards(
                     state = STATE_READY
                 else:
                     state = STATE_NEW
-            if state == STATE_BLOCKED and retry_eligible({**state_info, "state": state}):
+            if state in (STATE_BLOCKED, STATE_PARTIAL) and retry_eligible({**state_info, "state": state}):
                 posts.append(cand)
     remaining = per_page - len(posts)
     if remaining > 0:
@@ -2785,8 +2920,8 @@ def build_cards(
         (
             _state_for_card(post) == STATE_NEW
             or (
-                _state_for_card(post) == STATE_BLOCKED
-                and retry_eligible({**read_state(post), "state": STATE_BLOCKED})
+                _state_for_card(post) in (STATE_BLOCKED, STATE_PARTIAL)
+                and retry_eligible({**read_state(post), "state": _state_for_card(post)})
             )
         )
         for post in ordered
@@ -2822,7 +2957,7 @@ def build_cards(
             if not uncertain_retry_eligible:
                 continue  # fora da fila, salvo fallback sequencial de uncertain
         blocked = state == STATE_BLOCKED
-        if blocked and not retry_eligible({**state_info, "state": state}):
+        if state in (STATE_BLOCKED, STATE_PARTIAL) and not retry_eligible({**state_info, "state": state}):
             continue
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
@@ -2837,6 +2972,13 @@ def build_cards(
         cleaned = clean_html(raw)
         images = _images_summary(cleaned, title, entities)
         featured = _featured_diagnosis(client, post, entities)
+        if state == STATE_PARTIAL:
+            images = {
+                **images,
+                "required": state_info.get("partial_required", images.get("required", 0)),
+                "valid": state_info.get("partial_completed", images.get("valid", 0)),
+                "missing": state_info.get("partial_missing", images.get("missing", 0)),
+            }
         fix = _fix_plan(backups_dir, images, featured, blocked) if blocked else None
         cards.append(
             {
@@ -2860,6 +3002,14 @@ def build_cards(
                 "next_retry_at": state_info["next_retry_at"],
                 "last_error": state_info["last_error"][:160],
                 "blocked": blocked,
+                "partial": state == STATE_PARTIAL,
+                "partial_progress": {
+                    "required": state_info.get("partial_required", 0),
+                    "completed": state_info.get("partial_completed", 0),
+                    "missing": state_info.get("partial_missing", 0),
+                    "processing_passes": state_info.get("processing_passes", 0),
+                    "no_progress_attempts": state_info.get("no_progress_attempts", 0),
+                } if state == STATE_PARTIAL else None,
                 "blocked_reason": _blocked_reason(backups_dir) if blocked else None,
                 "fix": fix,
                 # P2 da auditoria de contexto: o card ja diz se o rework precisa
