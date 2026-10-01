@@ -198,11 +198,10 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
   publica e não altera o HTML do WordPress até checklist 100%.
 - BLOCKED = falha de texto, SEO, trailer ou outro gate corrigível; não use
   UNCERTAIN para falta de mídia.
-- UNCERTAIN = exclusivamente dúvida editorial sobre relevância. Segunda dúvida
-  promove para AWAITING_HUMAN.
-  aparece exatamente uma vez como `retry_mode=uncertain_second_pass`. Se a segunda
-  passagem continuar incerta, escala para `AWAITING_HUMAN`. Nunca publica enquanto
-  estiver `UNCERTAIN`.
+- UNCERTAIN = exclusivamente dúvida editorial sobre relevância. Fica fora da fila
+  até `next_retry_at` vencer, aparece uma vez como
+  `retry_mode=uncertain_second_pass` e, se continuar incerto, escala para
+  `AWAITING_HUMAN`. Nunca publica enquanto estiver `UNCERTAIN`.
 - SKIPPED / AWAITING_HUMAN = fora da fila automática e não publica.
 - Monitor (`queue --monitor`) só acorda com trabalho elegível; a assinatura é
   estável e muda apenas quando há mudança real na fila ou quando um cooldown expira.
