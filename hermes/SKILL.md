@@ -161,11 +161,11 @@ batch.
    `media-search-listicle "OBRA 1" "OBRA 2" ... --post-id POST_ID --limit 3`.
 6. Escolha a imagem: `decision: auto` → use `select` direto. `choose` →
    escolha entre 2-3 `options`. `reuse` → o acervo local já cobre a necessidade
-   INTEIRA (não houve busca web); cobertura PARCIAL vem como `coverage: mixed` e a
-   `decision: none`/`coverage: none` significa que nenhuma mídia foi validada: não
-   crie estado editorial e não chame `uncertain`. Deixe o `media_plan` vazio e
-   continue até `apply`; após `site_relevance=process`, falhas de mídia pertencem
-   ao `PARTIAL`.
+   INTEIRA (não houve busca web); `coverage: mixed` indica cobertura parcial.
+   Se `decision: none`/`coverage: none`, nenhuma mídia foi validada: não crie
+   estado editorial, não chame `uncertain`, mantenha o item ausente do
+   `media_plan` e siga obrigatoriamente até `apply`; após
+   `site_relevance=process`, falhas de mídia pertencem ao `PARTIAL`.
    (Media Library/índice local) vem ANTES da web: use-o primeiro. Google Images é
    só índice; a página original é a fonte. Não faça pré-verificação manual.
    **Copie `decision_id` (e `decision`) de cada busca/item para o item
