@@ -3635,7 +3635,34 @@ def mark_uncertain(
     except (OSError, ValueError, TypeError):
         latest = {}
     relevance = latest.get("site_relevance") if isinstance(latest, dict) else None
-    if isinstance(relevance, dict) and str(relevance.get("decision") or "").strip().lower() == "process":
+    relevance_process = (
+        isinstance(relevance, dict)
+        and str(relevance.get("decision") or "").strip().lower() == "process"
+    )
+    if not relevance_process:
+        for output in sorted(
+            (root / "work" / "batches").glob("*/editorial.output.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        ):
+            try:
+                batch_output = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            results = batch_output.get("results") if isinstance(batch_output, dict) else None
+            for result in results if isinstance(results, list) else []:
+                if int(result.get("post_id") or 0) != int(post_id):
+                    continue
+                editorial = result.get("editorial") if isinstance(result, dict) else None
+                relevance = editorial.get("site_relevance") if isinstance(editorial, dict) else None
+                relevance_process = (
+                    isinstance(relevance, dict)
+                    and str(relevance.get("decision") or "").strip().lower() == "process"
+                )
+                break
+            if relevance_process:
+                break
+    if relevance_process:
         raise WorkflowError(
             "uncertain_not_allowed_after_relevance_process: continue media processing "
             "and execute apply; media-only failures belong to PARTIAL"

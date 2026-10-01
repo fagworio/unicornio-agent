@@ -2024,6 +2024,25 @@ class WorkflowTests(unittest.TestCase):
                     reason="sem imagem encontrada",
                 )
 
+    def test_mark_uncertain_rejects_after_relevance_process_in_batch_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "work/batches/batch-1/editorial.output.json"
+            output.parent.mkdir(parents=True)
+            output.write_text(json.dumps({
+                "results": [{
+                    "post_id": 42,
+                    "status": "ok",
+                    "editorial": {"site_relevance": {"decision": "process"}},
+                }],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(WorkflowError, "uncertain_not_allowed_after_relevance_process"):
+                mark_uncertain(
+                    FakeClient(self.post()), self.config(False), root, 42,
+                    reason="sem imagem encontrada",
+                )
+
+    def test_mark_uncertain_rejects_awaiting_human_without_state_split(self):
         with tempfile.TemporaryDirectory() as directory:
             post = self.post()
             post["status"] = "awaiting_human"
