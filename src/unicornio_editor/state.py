@@ -231,6 +231,20 @@ def retry_eligible(state_info: dict[str, Any], now: datetime.datetime | None = N
     return cooldown_expired(state_info.get("next_retry_at") or "", now)
 
 
+def uncertain_second_pass_eligible(
+    post: dict[str, Any], now: datetime.datetime | None = None
+) -> bool:
+    """Return true only for the bounded UNCERTAIN second-pass contract."""
+    if post.get("status") != "pending":
+        return False
+    info = read_state(post)
+    return (
+        info.get("state") == STATE_UNCERTAIN
+        and int(info.get("attempts") or 0) == 1
+        and cooldown_expired(info.get("next_retry_at") or "", now)
+    )
+
+
 
 def canonical_json(value: Any) -> str:
     """Serialização canônica (chaves ordenadas, sem espaços) para hashing."""

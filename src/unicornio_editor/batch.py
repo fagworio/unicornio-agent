@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from .checklist import required_image_count
 from .content_quality import word_count
 from .media.relevance import extract_entities
-from .state import read_state
+from .state import read_state, uncertain_second_pass_eligible
 from .workflow import (
     _featured_diagnosis,
     _images_summary,
@@ -280,11 +280,7 @@ def _context_for_post(
     featured = _featured_diagnosis(client, post, entities)
     state = read_state(post)
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
-    retry_mode = (
-        "uncertain_second_pass"
-        if state.get("state") == "uncertain" and int(state.get("attempts") or 0) <= 1
-        else None
-    )
+    retry_mode = "uncertain_second_pass" if uncertain_second_pass_eligible(post) else None
     relevance_policy = {
         "allowed_topics": [str(topic) for topic in (config.site_topics or ())],
     }

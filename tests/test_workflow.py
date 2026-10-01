@@ -2,6 +2,7 @@ import datetime
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -580,13 +581,18 @@ class WorkflowTests(unittest.TestCase):
             future = (
                 datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=2)
             ).isoformat(timespec="seconds")
-            eligible = self.post()  # id 42, legado: sem meta de estado
-            eligible["title"] = {"raw": "Uncertain legado volta ao trabalho"}
+            eligible = self.post()
+            eligible["title"] = {"raw": "Uncertain volta ao trabalho"}
+            eligible["meta"] = {
+                "_hermes_state": "uncertain",
+                "_hermes_attempts": "1",
+            }
             in_cooldown = dict(eligible)
             in_cooldown["id"] = 43
             in_cooldown["title"] = {"raw": "Uncertain em cooldown fica fora"}
             in_cooldown["meta"] = {
                 "_hermes_state": "uncertain",
+                "_hermes_attempts": "1",
                 "_hermes_next_retry_at": future,
             }
             (root / "backups" / "42").mkdir(parents=True)
@@ -612,6 +618,58 @@ class WorkflowTests(unittest.TestCase):
             # cooldown continua protegido.
             self.assertEqual(ids, [42])
             self.assertEqual(report["cards"][0]["retry_mode"], "uncertain_second_pass")
+
+    def test_queue_marks_only_explicit_uncertain_second_pass_eligibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+            report = build_queue_report(FakeClient(post), root)
+            self.assertTrue(report["uncertain_second_pass_eligible"])
+            self.assertEqual(report["uncertain_second_pass_ids"], [42])
+            self.assertTrue(report["posts"][0]["uncertain_second_pass_eligible"])
+
+    def test_cards_reserve_uncertain_capacity_before_new_and_preserve_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            uncertain = self.post()
+            uncertain["meta"] = {
+                "_hermes_state": "uncertain",
+                "_hermes_attempts": "1",
+                "_hermes_last_error": "motivo anterior",
+            }
+            new = dict(self.post())
+            new["id"] = 43
+
+            class Two(FakeClient):
+                def list_pending(self, **kwargs):
+                    return [uncertain, new]
+
+            config = replace(self.config(True), uncertain_second_pass_limit=1)
+            report = build_cards(Two(uncertain), config, root, per_page=1)
+            self.assertEqual([card["id"] for card in report["cards"]], [42])
+            card = report["cards"][0]
+            self.assertEqual(card["previous_relevance_reason"], "motivo anterior")
+            self.assertEqual(card["next_retry_at"], "")
+            self.assertEqual(report["uncertain_second_pass_reserved"], 1)
+
+    def test_uncertain_second_pass_requires_pending_and_attempt_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bad_attempt = self.post()
+            bad_attempt["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "2"}
+            wrong_status = dict(self.post())
+            wrong_status["id"] = 43
+            wrong_status["status"] = "publish"
+            wrong_status["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+
+            class Two(FakeClient):
+                def list_pending(self, **kwargs):
+                    return [bad_attempt, wrong_status]
+
+            report = build_queue_report(Two(bad_attempt), root)
+            self.assertFalse(report["uncertain_second_pass_eligible"])
+            self.assertEqual(report["uncertain_second_pass_ids"], [])
 
     def test_build_cards_does_not_reintroduce_blocked_cooldown_from_general_scan(self):
         with tempfile.TemporaryDirectory() as directory:

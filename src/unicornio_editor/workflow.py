@@ -62,6 +62,7 @@ from .state import (
     read_state,
     retry_eligible,
     rework_backoff,
+    uncertain_second_pass_eligible,
 )
 from .trailer import (
     TrailerError, build_trailer_html, find_cached_game_trailer_with_status,
@@ -2780,6 +2781,7 @@ def build_queue_report(
     ready_ids: list[int] = []
     awaiting_human_ids: list[int] = []
     uncertain_ids: list[int] = []
+    uncertain_second_pass_ids: list[int] = []
     skipped_ids: list[int] = []
     for post in posts:
         post_id = post.get("id")
@@ -2806,8 +2808,8 @@ def build_queue_report(
         effective_state = {**state_info, "state": state}
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
-            # Primeira dúvida fica elegível somente após o cooldown; a segunda
-            # escala para AWAITING_HUMAN em mark_uncertain().
+            if uncertain_second_pass_eligible(post):
+                uncertain_second_pass_ids.append(post_id)
         elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
@@ -2844,6 +2846,7 @@ def build_queue_report(
                 "blocked": state == STATE_BLOCKED,
                 "partial": state == STATE_PARTIAL,
                 "uncertain": state == STATE_UNCERTAIN,
+                "uncertain_second_pass_eligible": uncertain_second_pass_eligible(post),
                 "awaiting_human": state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
                 "title": title,
@@ -2870,6 +2873,7 @@ def build_queue_report(
     ready_ids.sort()
     awaiting_human_ids.sort()
     uncertain_ids.sort()
+    uncertain_second_pass_ids.sort()
     skipped_ids.sort()
     return {
         "pending": len(rows),
@@ -2888,6 +2892,8 @@ def build_queue_report(
         "ready_ids": ready_ids,
         "awaiting_human_ids": awaiting_human_ids,
         "uncertain_ids": uncertain_ids,
+        "uncertain_second_pass_ids": uncertain_second_pass_ids,
+        "uncertain_second_pass_eligible": bool(uncertain_second_pass_ids),
         "skipped_ids": skipped_ids,
         "recent_days": recent_days,
         "posts": rows,
@@ -3010,10 +3016,8 @@ def build_cards(
         seen.add(post_id)
         ordered.append(post)
     cards: list[dict[str, Any]] = []
-    # Se nao ha nenhum NEW/BLOCKED elegivel, o proximo lote e' o retry dos
-    # UNCERTAIN. Isso evita que `pending` pareca fila viva enquanto o monitor
-    # simplesmente os exclui para sempre. O retry e' FIFO e limitado ao mesmo
-    # lote; uma segunda incerteza escala para AWAITING_HUMAN no apply.
+    # Reserve deterministic capacity for UNCERTAIN second passes so NEW cannot
+    # starve them, while keeping the independent quota bounded.
     def _state_for_card(post: dict[str, Any]) -> str | None:
         state_value = read_state(post)["state"]
         if state_value is not None:
@@ -3027,16 +3031,28 @@ def build_cards(
             return STATE_READY
         return STATE_NEW
 
-    uncertain_retry_mode = not any(
-        (
-            _state_for_card(post) == STATE_NEW
-            or (
-                _state_for_card(post) in (STATE_BLOCKED, STATE_PARTIAL)
-                and retry_eligible({**read_state(post), "state": _state_for_card(post)})
-            )
-        )
-        for post in ordered
-    )
+    eligible_uncertain = [
+        post for post in ordered
+        if _state_for_card(post) == STATE_UNCERTAIN
+        and uncertain_second_pass_eligible(post)
+    ]
+    uncertain_quota = max(0, int(getattr(config, "uncertain_second_pass_limit", 5)))
+    reserved_uncertain_ids = {
+        int(post["id"])
+        for post in sorted(eligible_uncertain, key=lambda p: int(p["id"]))[:uncertain_quota]
+    }
+    def _priority(post: dict[str, Any]) -> tuple[int, int]:
+        state_value = _state_for_card(post)
+        post_id = int(post.get("id") or 0)
+        if state_value in (STATE_BLOCKED, STATE_PARTIAL):
+            return (0, post_id)
+        if post_id in reserved_uncertain_ids:
+            return (1, post_id)
+        if state_value == STATE_NEW:
+            return (2, post_id)
+        return (3, post_id)
+    ordered.sort(key=_priority)
+    uncertain_retry_mode = bool(reserved_uncertain_ids)
     for post in ordered:
         post_id = post.get("id")
         if not isinstance(post_id, int):
@@ -3062,8 +3078,8 @@ def build_cards(
             uncertain_retry_eligible = (
                 state == STATE_UNCERTAIN
                 and uncertain_retry_mode
-                and int(state_info.get("attempts") or 0) <= 1
-                and cooldown_expired(state_info.get("next_retry_at") or "")
+                and int(post_id) in reserved_uncertain_ids
+                and uncertain_second_pass_eligible(post)
             )
             if not uncertain_retry_eligible:
                 continue  # fora da fila, salvo fallback sequencial de uncertain
@@ -3117,6 +3133,10 @@ def build_cards(
                     else None
                 ),
                 "next_retry_at": state_info["next_retry_at"],
+                "uncertain_second_pass_eligible": uncertain_retry_eligible,
+                "previous_relevance_reason": (
+                    state_info["last_error"][:160] if uncertain_retry_eligible else ""
+                ),
                 "last_error": state_info["last_error"][:160],
                 "blocked": blocked,
                 "partial": state == STATE_PARTIAL,
@@ -3145,8 +3165,26 @@ def build_cards(
     # Rework first, FIFO por id (os mais antigos primeiro): posts reabertos
     # pelo publish gate sao corrigidos antes de posts novos — e o lote
     # rotaciona, em vez de os mesmos 10 blocked monopolizarem o topo.
-    cards.sort(key=lambda card: (not card.get("blocked", False), int(card.get("id") or 0)))
-    return {"count": len(cards[:per_page]), "cards": cards[:per_page]}
+    selected = cards[:per_page]
+    try:
+        append_telemetry(
+            root,
+            "uncertain_second_pass_funnel",
+            eligible=len(eligible_uncertain),
+            quota=uncertain_quota,
+            reserved=sum(1 for card in selected if card.get("uncertain_second_pass_eligible")),
+            selected=len(selected),
+        )
+    except Exception:  # noqa: BLE001 - telemetry never blocks cards
+        pass
+    return {
+        "count": len(selected),
+        "cards": selected,
+        "uncertain_second_pass_eligible": len(eligible_uncertain),
+        "uncertain_second_pass_reserved": sum(
+            1 for card in selected if card.get("uncertain_second_pass_eligible")
+        ),
+    }
 
 
 def _featured_diagnosis(

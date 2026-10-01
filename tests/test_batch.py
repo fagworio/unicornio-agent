@@ -389,6 +389,22 @@ class BatchContextTests(unittest.TestCase):
             self.assertFalse(applied.called)
             self.assertTrue(result["posts"][0]["idempotent"])
 
+    def test_stale_uncertain_batch_item_is_noop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = _post(1, "Post incerto")
+            post["meta"] = {"_hermes_state": "awaiting_human", "_hermes_attempts": "2"}
+            client = BatchClient({1: post})
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-stale-uncertain",
+                "items": [{"post_id": 1, "status": "needs_retry", "retry_mode": "uncertain_second_pass"}],
+            }
+            result = _apply_editorial_batch(client, self.config(), root, batch, dry_run=False, compact=True)
+            self.assertEqual(result["posts"][0]["status"], "noop")
+            self.assertTrue(result["posts"][0]["stale"])
+            self.assertEqual(client.posts[1]["meta"]["_hermes_attempts"], "2")
+
 
 if __name__ == "__main__":
     unittest.main()

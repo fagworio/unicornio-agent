@@ -45,7 +45,7 @@ from .workflow import (
     retry_post,
     validate_media_plan,
 )
-from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state
+from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state, uncertain_second_pass_eligible
 from .media.text import sanitize_title
 from .wordpress import WordPressClient, WordPressError
 
@@ -577,7 +577,8 @@ def _compact_cards(report: dict) -> dict:
         row = {
             key: card.get(key)
             for key in (
-                "id", "title", "state", "attempts", "retry_mode", "seo_exists", "images",
+                "id", "title", "state", "attempts", "retry_mode", "next_retry_at",
+                "previous_relevance_reason", "uncertain_second_pass_eligible", "seo_exists", "images",
                 "featured", "game_hint", "blocked", "partial", "partial_progress", "requires_content",
             )
         }
@@ -590,7 +591,12 @@ def _compact_cards(report: dict) -> dict:
         if card.get("partial"):
             row["fix"] = card.get("fix")
         cards.append(row)
-    return {"count": len(cards), "cards": cards}
+    return {
+        "count": len(cards),
+        "cards": cards,
+        "uncertain_second_pass_eligible": report.get("uncertain_second_pass_eligible", 0),
+        "uncertain_second_pass_reserved": report.get("uncertain_second_pass_reserved", 0),
+    }
 
 
 def _media_search_item(item: dict) -> dict:
@@ -795,6 +801,16 @@ def _apply_editorial_batch(
                 retry_mode = str(item.get("retry_mode") or "")
                 current = client.get_post(post_id)
                 current_state = read_state(current)
+                if retry_mode == "uncertain_second_pass" and not uncertain_second_pass_eligible(current):
+                    outcomes.append({
+                        "post_id": post_id,
+                        "status": "noop",
+                        "state": current_state.get("state"),
+                        "wordpress_changed": False,
+                        "stale": True,
+                        "idempotent": True,
+                    })
+                    continue
                 if (
                     current_state.get("state") == "uncertain"
                     and current_state.get("attempts", 0) >= 1
@@ -1776,6 +1792,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _write_audit(args.root / "work" / "cards.latest.json", result)
                     result = _compact_cards(result)
             result["session"] = session_budget.status(args.root, config)
+            result["session"]["uncertain_second_pass_eligible"] = int(
+                result.get("uncertain_second_pass_eligible", 0) or 0
+            )
+            result["session"]["uncertain_second_pass_reserved"] = int(
+                result.get("uncertain_second_pass_reserved", 0) or 0
+            )
         elif args.command == "prepare":
             result = prepare_post(client, args.root, args.post_id)
             if args.compact:

@@ -17,6 +17,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.remote_url_policy, "audit")
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
+        self.assertEqual(config.uncertain_second_pass_limit, 5)
+
+    def test_uncertain_second_pass_limit_parses_env(self):
+        with patch.dict(
+            os.environ,
+            {"WORDPRESS_URL": "http://wp.test", "EDITOR_UNCERTAIN_SECOND_PASS_LIMIT": "3"},
+            clear=True,
+        ):
+            config = load_config()
+        self.assertEqual(config.uncertain_second_pass_limit, 3)
 
     def test_session_budget_defaults_separate_goal_from_touched_cap(self):
         with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
