@@ -162,8 +162,10 @@ batch.
 6. Escolha a imagem: `decision: auto` → use `select` direto. `choose` →
    escolha entre 2-3 `options`. `reuse` → o acervo local já cobre a necessidade
    INTEIRA (não houve busca web); cobertura PARCIAL vem como `coverage: mixed` e a
-   decisão é sobre o candidato da web. `none` → nada utilizável: `uncertain`. O
-   bloco `reuse`
+   `decision: none`/`coverage: none` significa que nenhuma mídia foi validada: não
+   crie estado editorial e não chame `uncertain`. Deixe o `media_plan` vazio e
+   continue até `apply`; após `site_relevance=process`, falhas de mídia pertencem
+   ao `PARTIAL`.
    (Media Library/índice local) vem ANTES da web: use-o primeiro. Google Images é
    só índice; a página original é a fonte. Não faça pré-verificação manual.
    **Copie `decision_id` (e `decision`) de cada busca/item para o item
@@ -210,8 +212,9 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
 
 - Corrija pelo `fix` do card **e só o componente apontado** (`draft --for-fix`);
   altere o mínimo e re-aplique com `--merge-draft`. NUNCA re-aplicar sem correção.
-- Sem como corrigir (ex.: sem imagem real da obra): `uncertain POST_ID --reason`
-  — NUNCA force apply que vai falhar.
+  — nenhuma mídia válida foi encontrada: deixe `media_plan` vazio, execute
+  `apply` e permita que o checklist classifique `PARTIAL 0/N`. Nunca use
+  `uncertain` para falta de imagem, featured, origem, pHash ou visão.
 
 ## Economia de contexto (cron runs — todo token custa dinheiro)
 
@@ -225,7 +228,12 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
 - Para `retry_mode=uncertain_second_pass`, NÃO decida relevância somente pelo
   card: execute `prepare-batch`/`editorial-generate-batch` e use o contexto real
   (título, conteúdo, origem, entidades, motivo anterior e `relevance_policy`).
-  Só depois de `site_relevance=process` execute a etapa determinística de mídia.
+  Só depois de `site_relevance=process` execute a etapa determinística de mídia;
+  mesmo com `media_plan=[]`, execute `apply`.
+- Depois de `site_relevance=process`, nunca chame `uncertain` nem
+  `awaiting_human` por falta de mídia. O `apply` é a autoridade: mídia incompleta
+  vira `PARTIAL`, e somente `no_progress_attempts` do PARTIAL pode escalar para
+  `AWAITING_HUMAN`.
 - Para posts NEW/BLOCKED, decida skip/uncertain pelo card e pelo fluxo indicado;
   nunca busque mídia antes de confirmar relevância.
   caminho; nunca cole o JSON duas vezes.
@@ -237,8 +245,9 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
   diferentes); a featured não reaparece no corpo. Bloqueado por
   `imagens_similares`: remova as cópias e siga — o mínimo é dimensionado pelos
   frames distintos reais, NUNCA repita para atingir a cota.
-- IMAGENS SÃO OBRIGATÓRIAS (2/4/6 sem waiver). Sem imagem real após busca
-  honesta: `uncertain`. Jogo sem trailer oficial: nunca use fan-made.
+- IMAGENS SÃO OBRIGATÓRIAS (2/4/6 sem waiver). Se a busca honesta não encontrar
+  mídia, deixe o plano vazio e execute `apply`: falha exclusivamente de mídia é
+  `PARTIAL`, nunca `uncertain`. Jogo sem trailer oficial: nunca use fan-made.
 - NUNCA leia `src/**`, `pyproject.toml`, `.env` nem testes — o CLI é a interface.
   Não repita comandos; não re-prepare post já visto.
 

@@ -625,7 +625,8 @@ class WorkflowTests(unittest.TestCase):
             post = self.post()
             post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
             report = build_queue_report(FakeClient(post), root)
-            self.assertTrue(report["uncertain_second_pass_eligible"])
+            self.assertIs(type(report["uncertain_second_pass_eligible"]), int)
+            self.assertEqual(report["uncertain_second_pass_eligible"], 1)
             self.assertEqual(report["uncertain_second_pass_ids"], [42])
             self.assertTrue(report["posts"][0]["uncertain_second_pass_eligible"])
 
@@ -2009,7 +2010,20 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(42, queue["uncertain_ids"])
             self.assertNotIn(42, queue["skipped_ids"])
 
-    def test_mark_uncertain_rejects_awaiting_human_without_state_split(self):
+    def test_mark_uncertain_rejects_after_relevance_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backups/42").mkdir(parents=True)
+            (root / "backups/42/editorial.latest.json").write_text(
+                json.dumps({"site_relevance": {"decision": "process"}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(WorkflowError, "uncertain_not_allowed_after_relevance_process"):
+                mark_uncertain(
+                    FakeClient(self.post()), self.config(False), root, 42,
+                    reason="sem imagem encontrada",
+                )
+
         with tempfile.TemporaryDirectory() as directory:
             post = self.post()
             post["status"] = "awaiting_human"

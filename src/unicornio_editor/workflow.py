@@ -2893,7 +2893,7 @@ def build_queue_report(
         "awaiting_human_ids": awaiting_human_ids,
         "uncertain_ids": uncertain_ids,
         "uncertain_second_pass_ids": uncertain_second_pass_ids,
-        "uncertain_second_pass_eligible": bool(uncertain_second_pass_ids),
+        "uncertain_second_pass_eligible": len(uncertain_second_pass_ids),
         "skipped_ids": skipped_ids,
         "recent_days": recent_days,
         "posts": rows,
@@ -3628,6 +3628,17 @@ def mark_uncertain(
         raise WorkflowError(
             f"post {post_id} nao esta pending ({post.get('status')}); "
             "use retry ou discard para uma decisao humana definitiva"
+        )
+    latest_editorial = root / "backups" / str(post_id) / "editorial.latest.json"
+    try:
+        latest = json.loads(latest_editorial.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        latest = {}
+    relevance = latest.get("site_relevance") if isinstance(latest, dict) else None
+    if isinstance(relevance, dict) and str(relevance.get("decision") or "").strip().lower() == "process":
+        raise WorkflowError(
+            "uncertain_not_allowed_after_relevance_process: continue media processing "
+            "and execute apply; media-only failures belong to PARTIAL"
         )
     if config.dry_run:
         raise WorkflowError("uncertain e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")

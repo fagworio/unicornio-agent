@@ -85,9 +85,9 @@ unicornio-editor media-search-web "TERMO" --post-id POST_ID --needed 2
   motivo), `audit` (arquivo completo).
   `decision: auto` = um candidato inequívoco passou todos os hard gates: use
   `select` direto (não há julgamento a fazer). `choose` = empate/ambiguidade
-  real: escolha entre 2-3 `options`. `reuse` = o acervo local cobriu a
-  necessidade INTEIRA (nenhuma busca web foi feita). `none` = nada utilizável:
-  registre `uncertain`.
+  real: escolha entre 2-3 `options`. `none` = nada utilizável: mantenha o
+  `media_plan` sem esse item e execute `apply`; após relevância `process`, a
+  falha exclusivamente de mídia é `PARTIAL`, nunca `uncertain`.
 - **`coverage` responde DE ONDE vieram as imagens** (`local`/`mixed`/`web`) e
   `decision` responde se o material da web exigiu julgamento. O caso misto
   (1 do acervo + 1 da web com `needed=2`) é `coverage: mixed` com decisão sobre o

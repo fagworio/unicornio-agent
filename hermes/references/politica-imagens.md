@@ -116,9 +116,10 @@ rejeitada com "imagem baixada nao consta na pagina de origem").
 
 ## Fallbacks
 
-- Se após busca honesta não houver imagem real relevante, use
-  `unicornio-editor uncertain POST_ID --reason "..."` (decisão do agente) —
-  NUNCA aplique sem imagens nem force uma imagem errada.
+- Se após busca honesta não houver imagem real relevante, deixe o `media_plan`
+  sem esse item e execute `apply`. Depois de `site_relevance=process`, o
+  checklist classifica a falta como `PARTIAL`; não use `uncertain` nem force uma
+  imagem errada.
 - Imagem inline não-WebP relevante: o `apply` normaliza automaticamente para
   WebP (sem nova busca semântica) — não procure de novo.
 

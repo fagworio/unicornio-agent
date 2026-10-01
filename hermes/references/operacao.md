@@ -48,9 +48,9 @@
 - Corrija pelo `fix` do card usando o draft (`unicornio-editor draft POST_ID`):
   altere só o componente apontado e re-aplique. NUNCA re-aplicar sem correção
   (o apply recusa de novo e conta tentativa/cooldown).
-- Sem como corrigir (ex.: nenhuma imagem real da obra disponível):
-  `unicornio-editor uncertain POST_ID --reason "..."` para tirar o post da fila —
-  NUNCA force um apply que vai falhar nem deixe o post em loop de rework eterno.
+- Sem candidato de mídia após busca honesta: deixe `media_plan` vazio e execute
+  `apply`. Depois de `site_relevance=process`, a ausência de mídia é falha de
+  checklist e entra em `PARTIAL`, nunca em `uncertain` ou `AWAITING_HUMAN` direto.
 
 ## Pitfalls de conteúdo
 

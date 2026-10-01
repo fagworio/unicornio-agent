@@ -1787,6 +1787,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if per_page > 0
                     else {"count": 0, "cards": []}
                 )
+                # Reserve UNCERTAIN second-pass slots before prepare/provider/media.
+                # A card is only offered to the orchestrator after the atomic
+                # session ledger claim succeeds.
+                reserved = 0
+                reserved_cards = []
+                for card in result.get("cards", []):
+                    if not card.get("uncertain_second_pass_eligible"):
+                        reserved_cards.append(card)
+                        continue
+                    allowed, _projection = session_budget.claim_touch(args.root, int(card["id"]), config)
+                    if allowed:
+                        reserved += 1
+                        reserved_cards.append(card)
+                result["cards"] = reserved_cards
+                result["count"] = len(reserved_cards)
+                result["uncertain_second_pass_reserved"] = reserved
                 if args.compact:
                     # Auditoria completa em arquivo; terminal so com a acao por post.
                     _write_audit(args.root / "work" / "cards.latest.json", result)
