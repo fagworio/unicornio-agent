@@ -12,8 +12,8 @@ Estados:
 - BLOCKED        preflight/apply recusou — precisa rework (re-edição)
 - READY          preflight completo passou — apto à publicação
 - SKIPPED        relevância decidiu skip com confiança (decisão final)
-- UNCERTAIN      não-final: fora da fila, visível para revisão
-- AWAITING_HUMAN esgotou as tentativas automáticas de rework — decisão humana
+- UNCERTAIN      primeira dúvida; retry automático controlado após cooldown
+- AWAITING_HUMAN segunda dúvida ou tentativa esgotada — decisão humana
 - PUBLISHED      publicado pelo cron
 
 Meta persistida (chaves ``_hermes_*``):
@@ -105,7 +105,10 @@ def build_state_markers(
         if isinstance(media_search_attempts, bool) or not isinstance(media_search_attempts, int) or media_search_attempts < 0:
             raise ValueError("media_search_attempts must be a non-negative integer")
         markers[META_MEDIA_SEARCH_ATTEMPTS] = str(media_search_attempts)
-    if state in (STATE_READY, STATE_PUBLISHED, STATE_SKIPPED, STATE_UNCERTAIN):
+    # UNCERTAIN is retryable after its controlled cooldown. Clearing
+    # next_retry_at here would make every uncertain post immediately eligible
+    # and defeat the backoff policy.
+    if state in (STATE_READY, STATE_PUBLISHED, STATE_SKIPPED):
         markers[META_NEXT_RETRY] = ""
     return markers
 

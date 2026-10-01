@@ -195,10 +195,13 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - READY = preflight 100%. SÓ `ready` publica.
 - BLOCKED = rework; card vem primeiro com `fix`. Backoff: 1ª +30m, 2ª +2h, 3ª →
   AWAITING_HUMAN (`retry`/`discard` humano).
-- UNCERTAIN / SKIPPED / AWAITING_HUMAN = fora da fila (não gera card, não
-  re-tenta, não publica).
-- Monitor (`queue --monitor`) só acorda com trabalho ELEGÍVEL; o hash muda apenas
-  quando `next_retry_at` expira. Rework eterno = erro seu → use `uncertain`.
+- UNCERTAIN = primeira dúvida: fica fora da fila até `next_retry_at` vencer; depois
+  aparece exatamente uma vez como `retry_mode=uncertain_second_pass`. Se a segunda
+  passagem continuar incerta, escala para `AWAITING_HUMAN`. Nunca publica enquanto
+  estiver `UNCERTAIN`.
+- SKIPPED / AWAITING_HUMAN = fora da fila automática e não publica.
+- Monitor (`queue --monitor`) só acorda com trabalho elegível; a assinatura é
+  estável e muda apenas quando há mudança real na fila ou quando um cooldown expira.
 
 ## Rework (verificar → corrigir → publicar)
 

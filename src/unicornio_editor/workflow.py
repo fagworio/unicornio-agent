@@ -2567,7 +2567,8 @@ def build_queue_report(
         effective_state = {**state_info, "state": state}
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
-            # Decisão conservadora: só `retry` humano devolve este post à fila.
+            # Primeira dúvida fica elegível somente após o cooldown; a segunda
+            # escala para AWAITING_HUMAN em mark_uncertain().
         elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
@@ -2617,6 +2618,7 @@ def build_queue_report(
         uncertain_retry_ids = [
             row["id"] for row in rows
             if row.get("state") == STATE_UNCERTAIN
+            and int(row.get("attempts") or 0) <= 1
             and cooldown_expired(row.get("next_retry_at") or "")
         ]
         eligible_rework.extend(sorted(uncertain_retry_ids))
@@ -2809,10 +2811,12 @@ def build_cards(
                 state = STATE_READY
             else:
                 state = STATE_NEW
+        uncertain_retry_eligible = False
         if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
             uncertain_retry_eligible = (
                 state == STATE_UNCERTAIN
                 and uncertain_retry_mode
+                and int(state_info.get("attempts") or 0) <= 1
                 and cooldown_expired(state_info.get("next_retry_at") or "")
             )
             if not uncertain_retry_eligible:
@@ -2848,6 +2852,11 @@ def build_cards(
                 "game_hint": _game_hint(title),
                 "state": state,
                 "attempts": state_info["attempts"],
+                "retry_mode": (
+                    "uncertain_second_pass"
+                    if uncertain_retry_eligible
+                    else None
+                ),
                 "next_retry_at": state_info["next_retry_at"],
                 "last_error": state_info["last_error"][:160],
                 "blocked": blocked,

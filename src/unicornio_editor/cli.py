@@ -577,7 +577,7 @@ def _compact_cards(report: dict) -> dict:
         row = {
             key: card.get(key)
             for key in (
-                "id", "title", "state", "attempts", "seo_exists", "images",
+                "id", "title", "state", "attempts", "retry_mode", "seo_exists", "images",
                 "featured", "game_hint", "blocked", "requires_content",
             )
         }

@@ -570,6 +570,7 @@ class WorkflowTests(unittest.TestCase):
             # Sem NEW/BLOCKED elegivel, o proximo lote e' o UNCERTAIN elegivel;
             # cooldown continua protegido.
             self.assertEqual(ids, [42])
+            self.assertEqual(report["cards"][0]["retry_mode"], "uncertain_second_pass")
 
     def test_build_cards_does_not_reintroduce_blocked_cooldown_from_general_scan(self):
         with tempfile.TemporaryDirectory() as directory:

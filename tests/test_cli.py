@@ -21,13 +21,14 @@ class CompactOutputTests(unittest.TestCase):
     def test_compact_cards_keeps_only_the_next_action(self):
         result = _compact_cards({"cards": [{
             "id": 9, "title": "Post", "state": "BLOCKED", "attempts": 2,
-            "seo_exists": True, "images": {"missing": 2}, "featured": {"action": "replace"},
+            "retry_mode": "uncertain_second_pass", "seo_exists": True, "images": {"missing": 2}, "featured": {"action": "replace"},
             "game_hint": "Jogo", "blocked": True, "blocked_reason": "imagens_no_corpo",
             "fix": {"find_inline_images": 2}, "draft": "work/drafts/9.json",
             "word_count": 900, "content": "nao deve aparecer",
         }]})
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["cards"][0]["fix"], {"find_inline_images": 2})
+        self.assertEqual(result["cards"][0]["retry_mode"], "uncertain_second_pass")
         self.assertNotIn("word_count", result["cards"][0])
         self.assertNotIn("content", result["cards"][0])
 
