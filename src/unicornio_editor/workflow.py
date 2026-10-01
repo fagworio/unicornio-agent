@@ -450,9 +450,7 @@ def _apply_editorial_unlocked(
         ]
         if failed_items:
             media_only = all(
-                "imagem" in str(item.get("name") or "").lower()
-                or "media" in str(item.get("name") or "").lower()
-                or "destaque" in str(item.get("name") or "").lower()
+                any(token in str(item.get("name") or "").lower() for token in ("imagem", "imagens", "image", "media", "destaque"))
                 for item in failed_items
             )
             current_accepted = [

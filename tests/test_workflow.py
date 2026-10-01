@@ -1144,10 +1144,10 @@ class WorkflowTests(unittest.TestCase):
             first = apply_editorial(client, self.config(False), root, 42, payload)
             second = apply_editorial(client, self.config(False), root, 42, payload)
             third = apply_editorial(client, self.config(False), root, 42, payload)
-        self.assertEqual(first["state"], "blocked")
-        self.assertEqual(first["attempts"], 1)
-        self.assertEqual(second["state"], "blocked")  # antes: ready (waiver)
-        self.assertEqual(third["state"], "awaiting_human")  # teto -> humano
+        self.assertEqual(first["state"], "partial")
+        self.assertEqual(first["attempts"], 0)
+        self.assertEqual(second["state"], "partial")
+        self.assertEqual(third["state"], "awaiting_human")
 
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
@@ -1598,21 +1598,16 @@ class WorkflowTests(unittest.TestCase):
             payload["media_plan"] = []
             client = FakeClient(self.post())
             report = apply_editorial(client, self.config(False), root, 42, payload)
-            self.assertEqual(report["status"], "needs_rework")
-            self.assertIn("imagens_no_corpo", report["blocked_reasons"])
-            self.assertTrue(report["wordpress_changed"])
-            self.assertTrue(report.get("baseline_enriched"))
-            # Baseline de conteudo (CTA/Fonte/links) + telemetria de estado.
-            self.assertEqual(len(client.updated), 2)
-            state_meta = client.updated[1][1]["meta"]
-            self.assertEqual(state_meta["_hermes_state"], "blocked")
-            self.assertEqual(state_meta["_hermes_attempts"], "1")
-            self.assertNotEqual(state_meta["_hermes_next_retry_at"], "")
-            self.assertEqual(report["state"], "blocked")
-            self.assertEqual(report["attempts"], 1)
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["partial"]["missing"], 2)
+            self.assertFalse(report["wordpress_changed"])
+            self.assertEqual(len(client.updated), 1)
+            state_meta = client.updated[0][1]["meta"]
+            self.assertEqual(state_meta["_hermes_state"], "partial")
+            self.assertEqual(report["state"], "partial")
             self.assertTrue((root / "backups/42/editorial.latest.json").is_file())
-            self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
-            # Draft preservado para o rework incremental (Fase 3).
+            self.assertFalse((root / "backups/42/editorial.blocked.json").is_file())
+            self.assertTrue((root / "backups/42/editorial.partial.json").is_file())
             self.assertTrue((root / "backups/42/editorial.draft.json").is_file())
 
     def test_publish_blocked_records_rework_but_keeps_latest(self):
@@ -2078,11 +2073,10 @@ class WorkflowTests(unittest.TestCase):
             root = Path(directory)
             client = FakeClient(self.post())
             report = apply_editorial(client, self.config(False), root, 42, payload)
-            self.assertEqual(report["status"], "needs_rework")
+            self.assertEqual(report["status"], "partial")
             summary = read_telemetry_summary(root)
-            self.assertEqual(summary["by_event"].get("apply_blocked"), 1)
-            reasons = summary["by_reason"]["apply_blocked"]
-            self.assertTrue(any("imagens" in r for r in reasons))
+            self.assertEqual(summary["by_event"].get("partial_started"), 1)
+            self.assertEqual(summary["by_event"].get("partial_progress"), 1)
 
 
     def test_discard_aceita_awaiting_human(self):
