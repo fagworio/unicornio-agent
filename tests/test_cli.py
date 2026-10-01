@@ -32,6 +32,21 @@ class CompactOutputTests(unittest.TestCase):
         self.assertNotIn("word_count", result["cards"][0])
         self.assertNotIn("content", result["cards"][0])
 
+    def test_compact_cards_exposes_partial_progress_and_fix(self):
+        result = _compact_cards({"cards": [{
+            "id": 114559, "title": "Post parcial", "state": "partial", "attempts": 0,
+            "retry_mode": None, "seo_exists": True,
+            "images": {"required": 6, "valid": 4, "missing": 2},
+            "featured": {"action": "ok"}, "game_hint": True,
+            "blocked": False, "partial": True,
+            "partial_progress": {"required": 6, "completed": 4, "missing": 2},
+            "fix": {"find_inline_images": 2, "featured": "ok"},
+        }]})
+        card = result["cards"][0]
+        self.assertTrue(card["partial"])
+        self.assertEqual(card["partial_progress"]["missing"], 2)
+        self.assertEqual(card["fix"]["find_inline_images"], 2)
+
     def test_compact_apply_success_is_minimal(self):
         result = _compact_apply(
             {

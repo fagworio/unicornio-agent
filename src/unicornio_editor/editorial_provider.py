@@ -144,7 +144,10 @@ needs_retry because of missing inline images, a missing featured image or any
 image count; and return needs_trailer=false with trailer_url=null unless the
 envelope already carries a verified trailer URL. Do fill game_name when the
 subject is a game. Use needs_retry only when the text/SEO facts themselves
-cannot be handled safely."""
+cannot be handled safely. When decision=process, matched_topics MUST contain
+one or more values copied exactly from relevance_policy.allowed_topics. Do not
+return synonyms, subcategories, translations or derived labels in place of the
+allowed labels."""
 
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
@@ -364,6 +367,12 @@ def generate_editorial_batch(
             for item in posts
         },
     )
+    input_retry_modes = {
+        int(item["post_id"]): str(item.get("retry_mode") or "").strip()
+        for item in posts
+    }
+    for result in normalized["results"]:
+        result["retry_mode"] = input_retry_modes.get(int(result["post_id"]), "")
     destination = Path(output_path) if output_path else batch_directory(root or Path(input_path).parent, batch_id) / "editorial.output.json"
     output = _write_json(destination, normalized)
     usage = body.get("usage") or {}

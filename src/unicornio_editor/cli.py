@@ -578,7 +578,7 @@ def _compact_cards(report: dict) -> dict:
             key: card.get(key)
             for key in (
                 "id", "title", "state", "attempts", "retry_mode", "seo_exists", "images",
-                "featured", "game_hint", "blocked", "requires_content",
+                "featured", "game_hint", "blocked", "partial", "partial_progress", "requires_content",
             )
         }
         if card.get("blocked"):
@@ -587,6 +587,8 @@ def _compact_cards(report: dict) -> dict:
                 "fix": card.get("fix"),
                 "draft": card.get("draft"),
             })
+        if card.get("partial"):
+            row["fix"] = card.get("fix")
         cards.append(row)
     return {"count": len(cards), "cards": cards}
 
@@ -793,7 +795,11 @@ def _apply_editorial_batch(
                 retry_mode = str(item.get("retry_mode") or "")
                 current = client.get_post(post_id)
                 current_state = read_state(current)
-                if retry_mode == "uncertain_second_pass" and current_state.get("state") == "uncertain":
+                if (
+                    current_state.get("state") == "uncertain"
+                    and current_state.get("attempts", 0) >= 1
+                    and retry_mode in {"uncertain_second_pass", ""}
+                ):
                     projection = session_budget.status(root, config)
                     allowed, projection = session_budget.claim_touch(root, post_id, config)
                     if not allowed:

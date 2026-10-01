@@ -129,12 +129,12 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "needs_retry")
         self.assertIn("pauta", result["results"][0]["reason"])
 
-    def _run(self, root, **kwargs):
+    def _run(self, root, retry_mode="", **kwargs):
         source = root / "editorial.input.json"
         source.write_text(json.dumps({
             "batch_id": "editorial-test",
             "posts": [
-                {"post_id": 1, "cleaned_html": "<p>A</p>"},
+                {"post_id": 1, "cleaned_html": "<p>A</p>", "retry_mode": retry_mode},
                 {"post_id": 2, "cleaned_html": "<p>B</p>"},
             ],
         }), encoding="utf-8")
@@ -153,6 +153,13 @@ class EditorialProviderTests(unittest.TestCase):
             self.assertEqual(payload["results"][1]["status"], "needs_retry")
             telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
             self.assertIn('"event": "editorial_model_request"', telemetry)
+
+    def test_provider_joins_retry_mode_from_input_after_model_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run(Path(directory), retry_mode="uncertain_second_pass")
+            payload = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["results"][0]["retry_mode"], "uncertain_second_pass")
+            self.assertEqual(payload["results"][1]["retry_mode"], "")
 
     def test_request_requires_structured_output(self):
         with tempfile.TemporaryDirectory() as directory:

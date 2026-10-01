@@ -413,7 +413,14 @@ def _apply_editorial_unlocked(
                 or "destaque" in str(item.get("name") or "").lower()
                 for item in failed_items
             )
-            current_accepted = [item for item in media_results if item.get("media_url") and item.get("media_id")]
+            current_accepted = [
+                item for item in media_results
+                if item.get("media_url") and item.get("media_id") and not item.get("featured")
+            ]
+            current_featured = next(
+                (item for item in media_results if item.get("featured") and item.get("media_id")),
+                None,
+            )
             if media_only and (prior_media or current_accepted or partial_manifest):
                 accepted: list[dict[str, Any]] = []
                 seen_media: set[int] = set()
@@ -422,11 +429,12 @@ def _apply_editorial_unlocked(
                     if media_id and media_id not in seen_media:
                         accepted.append(item)
                         seen_media.add(media_id)
+                featured_before = partial_manifest.get("featured") or {}
+                featured_manifest = dict(featured_before) if isinstance(featured_before, dict) else {"status": "missing"}
                 if featured_id:
-                    accepted.append({
-                        "media_id": featured_id, "featured": True,
-                        "status": "accepted", "credit_text": featured_credit or "",
-                    })
+                    featured_manifest["status"] = "valid"
+                    featured_manifest["media_id"] = featured_id
+                    featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
                 required = _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities).get("required", 0)
                 completed = len([item for item in accepted if not item.get("featured")])
                 missing = max(0, required - completed)
@@ -451,7 +459,7 @@ def _apply_editorial_unlocked(
                     "completed": completed,
                     "missing": missing,
                     "accepted_media": accepted,
-                    "featured": {"status": "valid", "media_id": featured_id} if featured_id else {"status": "missing"},
+                    "featured": featured_manifest,
                     "processing_passes": passes,
                     "no_progress_attempts": no_progress,
                 }
