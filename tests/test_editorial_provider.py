@@ -7,6 +7,7 @@ from pathlib import Path
 
 from unicornio_editor.editorial_provider import (
     _OUTPUT_SCHEMA,
+    _normalize_output,
     generate_editorial_batch,
 )
 
@@ -106,6 +107,27 @@ class EditorialProviderTests(unittest.TestCase):
     def setUp(self):
         EditorialHandler.calls = []
         EditorialHandler.editorial_mode = "dict"
+
+    def test_process_without_allowed_topic_becomes_needs_retry_before_media(self):
+        editorial = dict(_EDITORIAL)
+        editorial["site_relevance"] = {
+            "decision": "process",
+            "confidence": 1.0,
+            "reason": "processar",
+            "matched_topics": ["celebridades"],
+        }
+        result = _normalize_output(
+            {
+                "batch_id": "batch-x",
+                "results": [{"post_id": 1, "status": "ok", "editorial": editorial}],
+            },
+            batch_id="batch-x",
+            post_ids={1},
+            min_confidence=0.8,
+            relevance_policies={1: {"games", "anime"}},
+        )
+        self.assertEqual(result["results"][0]["status"], "needs_retry")
+        self.assertIn("pauta", result["results"][0]["reason"])
 
     def _run(self, root, **kwargs):
         source = root / "editorial.input.json"

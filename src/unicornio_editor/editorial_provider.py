@@ -200,6 +200,7 @@ def _normalize_output(
     batch_id: str,
     post_ids: set[int],
     min_confidence: float,
+    relevance_policies: dict[int, set[str]] | None = None,
 ) -> dict[str, Any]:
     if set(payload) != {"batch_id", "results"}:
         raise EditorialProviderError("resposta editorial possui campos inesperados")
@@ -252,6 +253,20 @@ def _normalize_output(
                 editorial = {**editorial, "needs_trailer": False, "trailer_url": None}
             try:
                 checked = validate_editorial(editorial, min_confidence=min_confidence)
+                allowed_topics = set((relevance_policies or {}).get(post_id) or ())
+                matched_topics = {
+                    str(topic).strip().casefold()
+                    for topic in (checked.get("site_relevance", {}).get("matched_topics") or [])
+                    if str(topic).strip()
+                }
+                if (
+                    checked["site_relevance"]["decision"] == "process"
+                    and allowed_topics
+                    and not allowed_topics.intersection(matched_topics)
+                ):
+                    raise EditorialValidationError(
+                        "process sem matched_topics permitido pela pauta"
+                    )
             except EditorialValidationError as exc:
                 normalized.append({
                     "post_id": post_id,
@@ -340,6 +355,14 @@ def generate_editorial_batch(
         batch_id=batch_id,
         post_ids={int(item["post_id"]) for item in posts},
         min_confidence=min_confidence,
+        relevance_policies={
+            int(item["post_id"]): {
+                str(topic).strip().casefold()
+                for topic in ((item.get("relevance_policy") or {}).get("allowed_topics") or [])
+                if str(topic).strip()
+            }
+            for item in posts
+        },
     )
     destination = Path(output_path) if output_path else batch_directory(root or Path(input_path).parent, batch_id) / "editorial.output.json"
     output = _write_json(destination, normalized)
