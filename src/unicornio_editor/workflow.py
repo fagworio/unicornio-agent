@@ -174,6 +174,24 @@ def _partial_retry(
     return {"state": STATE_PARTIAL, "next_retry_at": retry_at.isoformat(timespec="seconds")}
 
 
+def _recover_partial_featured(
+    client: WordPressClient,
+    post_id: int,
+    manifest: dict[str, Any],
+) -> tuple[int | None, str | None]:
+    featured = manifest.get("featured") or {}
+    if featured.get("status") != "valid":
+        return None, None
+    media_id = featured.get("media_id")
+    if not isinstance(media_id, int) or media_id <= 0:
+        raise WorkflowError(f"partial_manifest_invalid: featured sem media_id no post {post_id}")
+    try:
+        client.get_media(media_id)
+    except Exception as exc:  # noqa: BLE001 - manifesto fail-closed
+        raise WorkflowError(
+            f"partial_manifest_invalid: featured {media_id} ausente no post {post_id}"
+        ) from exc
+    return media_id, str(featured.get("credit_text") or "") or None
 def apply_editorial(
     client: WordPressClient,
     config: Config,
@@ -355,8 +373,10 @@ def _apply_editorial_unlocked(
         item for item in media_results
         if item.get("media_url") and not item.get("featured")
     ]
-    if featured_id is None:
-        featured_id = next((item.get("media_id") for item in (partial_manifest.get("accepted_media") or []) if item.get("featured")), None)
+    if featured_id is None and partial_featured_valid:
+        featured_id, featured_credit = _recover_partial_featured(
+            client, post_id, partial_manifest
+        )
     if featured_id is None and not config.dry_run:
         featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
     html = editorial["cleaned_html"]
@@ -457,6 +477,7 @@ def _apply_editorial_unlocked(
                     featured_manifest["status"] = "valid"
                     featured_manifest["media_id"] = featured_id
                     featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
+                    featured_manifest["credit_text"] = featured_credit or featured_manifest.get("credit_text", "")
                 required = _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities).get("required", 0)
                 completed = len([item for item in accepted if not item.get("featured")])
                 missing = max(0, required - completed)

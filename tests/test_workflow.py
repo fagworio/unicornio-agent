@@ -10,6 +10,7 @@ from unicornio_editor.workflow import (
     WorkflowError,
     _load_partial_manifest,
     _partial_retry,
+    _recover_partial_featured,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -128,7 +129,26 @@ class WorkflowTests(unittest.TestCase):
             "featured_media": 7,
         }
 
-    def test_partial_retry_uses_stagnation_not_processing_passes(self):
+    def test_partial_featured_is_recovered_from_manifest_not_accepted_media(self):
+        client = FakeClient(self.post())
+        featured_id, credit = _recover_partial_featured(
+            client,
+            42,
+            {
+                "state": "partial",
+                "kind": "media",
+                "accepted_media": [{"media_id": 123, "media_url": "https://wp.test/inline.webp"}],
+                "featured": {
+                    "status": "valid",
+                    "media_id": 456,
+                    "media_url": "https://wp.test/featured.webp",
+                    "credit_text": "Crédito da featured",
+                },
+            },
+        )
+        self.assertEqual(featured_id, 456)
+        self.assertEqual(credit, "Crédito da featured")
+
         now = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
         first = _partial_retry(0, cooldown_minutes=30, max_no_progress_attempts=2, now=now)
         second = _partial_retry(1, cooldown_minutes=30, max_no_progress_attempts=2, now=now)
