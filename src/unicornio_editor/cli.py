@@ -1800,7 +1800,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             motivo = session_budget.stop_reason(args.root, config)
             per_page = config.max_posts_per_run if args.limit is None else int(args.limit)
             if orcamento["remaining_posts"] is not None:
-                per_page = min(per_page, int(orcamento["remaining_posts"]))
+                reserved_remaining = int(orcamento.get("posts_reserved_count") or 0)
+                available_posts = int(orcamento["remaining_posts"]) + reserved_remaining
+                per_page = min(per_page, available_posts)
             if motivo:
                 result = {"count": 0, "cards": [], "stop": motivo}
                 if args.compact:
