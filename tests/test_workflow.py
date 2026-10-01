@@ -8,6 +8,7 @@ from unittest import mock
 from unicornio_editor.config import Config
 from unicornio_editor.workflow import (
     WorkflowError,
+    _load_partial_manifest,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -125,6 +126,15 @@ class WorkflowTests(unittest.TestCase):
             "meta": {"original_link": "https://source.example/news"},
             "featured_media": 7,
         }
+
+    def test_partial_manifest_invalid_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "backups" / "42" / "editorial.partial.json"
+            path.parent.mkdir(parents=True)
+            path.write_text("{invalid", encoding="utf-8")
+            with self.assertRaisesRegex(WorkflowError, "partial_manifest_invalid"):
+                _load_partial_manifest(root, 42, required=True)
 
     def test_prepare_creates_snapshot_and_cleans_content(self):
         with tempfile.TemporaryDirectory() as directory:

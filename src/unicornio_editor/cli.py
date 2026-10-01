@@ -790,6 +790,39 @@ def _apply_editorial_batch(
         for index, item in enumerate(batch["items"]):
             post_id = int(item["post_id"])
             if str(item.get("status") or "ok") == "needs_retry":
+                retry_mode = str(item.get("retry_mode") or "")
+                current = client.get_post(post_id)
+                current_state = read_state(current)
+                if retry_mode == "uncertain_second_pass" and current_state.get("state") == "uncertain":
+                    projection = session_budget.status(root, config)
+                    allowed, projection = session_budget.claim_touch(root, post_id, config)
+                    if not allowed:
+                        stopped = session_budget.stop_reason(root, config) or (
+                            "teto de posts tocados por sessao atingido "
+                            f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
+                        )
+                        remaining = [int(row["post_id"]) for row in batch["items"][index:]]
+                        break
+                    try:
+                        escalated = mark_uncertain(
+                            client, config, root, post_id,
+                            str(item.get("reason") or "segunda passagem editorial sem resultado")[:240],
+                        )
+                        escalated["status"] = "awaiting_human"
+                        escalated["action"] = "decisão humana necessária após segunda passagem"
+                        if compact:
+                            escalated = {
+                                "post_id": escalated.get("post_id"),
+                                "status": "awaiting_human",
+                                "state": escalated.get("state"),
+                                "attempts": escalated.get("attempts"),
+                                "wordpress_changed": bool(escalated.get("wordpress_changed")),
+                                "action": escalated.get("action"),
+                            }
+                        outcomes.append(escalated)
+                    except Exception as exc:  # noqa: BLE001 - isolate one post
+                        outcomes.append({"post_id": post_id, "status": "error", "wordpress_changed": False, "error": str(exc)[:240]})
+                    continue
                 outcomes.append({
                     "post_id": post_id,
                     "status": "needs_retry",

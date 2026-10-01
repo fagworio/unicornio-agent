@@ -91,6 +91,7 @@ def load_editorial_batch(path: Path | str) -> dict[str, Any]:
             "post_id": post_id,
             "status": status,
             "reason": str(item.get("reason") or "").strip(),
+            "retry_mode": str(item.get("retry_mode") or "").strip(),
             "editorial": editorial if isinstance(editorial, dict) else {},
         })
     return {

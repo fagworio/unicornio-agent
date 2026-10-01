@@ -28,14 +28,15 @@ class BatchClient:
             raise ValueError(f"post {post_id} ausente")
         return self.posts[post_id]
 
-    def get_media(self, media_id):
-        return {
-            "id": media_id,
-            "source_url": "https://wp.test/uploads/obra.webp",
-            "title": {"rendered": "Obra videogame"},
-            "alt_text": "Obra videogame",
-            "media_details": {"width": 1280, "height": 720},
-        }
+    def update_post(self, post_id, payload):
+        self.posts[post_id].setdefault("meta", {}).update(payload.get("meta", {}))
+        if "status" in payload:
+            self.posts[post_id]["status"] = payload["status"]
+        return self.posts[post_id]
+
+    def move_to_status(self, post_id, status):
+        self.posts[post_id]["status"] = status
+        return self.posts[post_id]
 
 
 def _post(post_id, title):
@@ -344,6 +345,30 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(result["needs_retry"], 1)
             self.assertEqual(applied.call_count, 1)
             self.assertEqual(result["posts"][1]["status"], "needs_retry")
+
+    def test_uncertain_second_pass_needs_retry_escalates_and_consumes_touch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = _post(9, "Post incerto")
+            post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+            client = BatchClient({9: post})
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-uncertain-retry",
+                "items": [{
+                    "post_id": 9,
+                    "status": "needs_retry",
+                    "retry_mode": "uncertain_second_pass",
+                    "reason": "segunda avaliação sem decisão",
+                }],
+            }
+            result = _apply_editorial_batch(
+                client, Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False),
+                root, batch, dry_run=False, compact=True,
+            )
+            self.assertEqual(result["posts"][0]["state"], "awaiting_human")
+            self.assertEqual(client.posts[9]["meta"]["_hermes_attempts"], "2")
+            self.assertEqual(client.posts[9]["status"], "awaiting_human")
 
     def test_retry_same_batch_does_not_reapply_ready_item(self):
         with tempfile.TemporaryDirectory() as directory:

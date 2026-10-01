@@ -112,13 +112,39 @@ def _partial_manifest_path(root: Path, post_id: int) -> Path:
     return root / "backups" / str(post_id) / "editorial.partial.json"
 
 
-def _load_partial_manifest(root: Path, post_id: int) -> dict[str, Any]:
+def _load_partial_manifest(root: Path, post_id: int, *, required: bool = False) -> dict[str, Any]:
     path = _partial_manifest_path(root, post_id)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as exc:
+        if required:
+            raise WorkflowError(f"partial_manifest_invalid: post {post_id}: {exc}") from exc
         return {}
+    if not isinstance(value, dict):
+        if required:
+            raise WorkflowError(f"partial_manifest_invalid: post {post_id}: objeto invalido")
+        return {}
+    accepted = value.get("accepted_media")
+    if required and (
+        value.get("state") != "partial"
+        or value.get("kind") != "media"
+        or not isinstance(accepted, list)
+        or not isinstance(value.get("required"), int)
+        or not isinstance(value.get("completed"), int)
+        or not isinstance(value.get("missing"), int)
+    ):
+        raise WorkflowError(f"partial_manifest_invalid: post {post_id}: campos inconsistentes")
+    if required:
+        accepted_items = accepted if isinstance(accepted, list) else []
+        completed_items = [item for item in accepted_items if isinstance(item, dict) and not item.get("featured")]
+        if (
+            any(not isinstance(item, dict) or not item.get("media_id") or not item.get("media_url") for item in accepted_items)
+            or value["required"] < 0
+            or value["completed"] != len(completed_items)
+            or value["missing"] != max(0, value["required"] - value["completed"])
+        ):
+            raise WorkflowError(f"partial_manifest_invalid: post {post_id}: progresso inconsistente")
+    return value
 
 
 def _save_partial_manifest(root: Path, post_id: int, manifest: dict[str, Any]) -> None:
@@ -162,9 +188,12 @@ def _apply_editorial_unlocked(
     started_at = time.monotonic()
     post = client.get_post(post_id)
     _require_pending(post)
-    partial_manifest = _load_partial_manifest(root, post_id)
+    state_before = read_state(post)
+    partial_manifest = _load_partial_manifest(
+        root, post_id, required=state_before.get("state") == STATE_PARTIAL
+    )
     prior_media = _partial_media_records(partial_manifest)
-    attempts_before = read_state(post)["attempts"]
+    attempts_before = state_before["attempts"]
     append_telemetry(
         root, "apply_started", post_id=post_id,
         attempt=attempts_before + 1, first_pass=attempts_before == 0,
@@ -274,6 +303,21 @@ def _apply_editorial_unlocked(
     # SEO do zero).
     _save_draft(root, post_id, editorial)
 
+    partial_slots = {
+        item.get("paragraph_index")
+        for item in prior_media
+        if isinstance(item.get("paragraph_index"), int)
+    }
+    partial_featured_valid = (partial_manifest.get("featured") or {}).get("status") == "valid"
+    if partial_manifest:
+        remaining_plan = []
+        for item in (editorial.get("media_plan") or []):
+            if isinstance(item, dict) and item.get("is_featured") and partial_featured_valid:
+                continue
+            if isinstance(item, dict) and item.get("paragraph_index") in partial_slots:
+                continue
+            remaining_plan.append(item)
+        editorial = {**editorial, "media_plan": remaining_plan}
     media_preflight = validate_media_plan(
         client,
         editorial,
@@ -387,7 +431,11 @@ def _apply_editorial_unlocked(
                 completed = len([item for item in accepted if not item.get("featured")])
                 missing = max(0, required - completed)
                 previous_completed = len(prior_media)
-                progress = completed > previous_completed or bool(featured_id and not partial_manifest.get("featured"))
+                featured_before_valid = (
+                    (partial_manifest.get("featured") or {}).get("status") == "valid"
+                )
+                featured_progress = bool(featured_id) and not featured_before_valid
+                progress = completed > previous_completed or featured_progress
                 state_info = read_state(post)
                 passes = state_info.get("processing_passes", 0) + 1
                 no_progress = 0 if progress else state_info.get("no_progress_attempts", 0) + 1
@@ -797,6 +845,20 @@ def _write_state_markers(
                 )
             },
         )
+        if state == STATE_PARTIAL:
+            persisted = client.get_post(post_id)
+            meta = persisted.get("meta") if isinstance(persisted, dict) else {}
+            expected = {
+                "_hermes_partial_kind": partial_kind,
+                "_hermes_media_required": str(partial_required),
+                "_hermes_media_completed": str(partial_completed),
+                "_hermes_media_missing": str(partial_missing),
+                "_hermes_processing_passes": str(processing_passes),
+                "_hermes_no_progress_attempts": str(no_progress_attempts),
+            }
+            if not isinstance(meta, dict) or any(meta.get(key) != value for key, value in expected.items()):
+                raise WorkflowError(f"round-trip das metas PARTIAL falhou no post {post_id}")
+
     except Exception as exc:  # noqa: BLE001 - telemetria nunca bloqueia o fluxo
         critical = state in _STATE_MARKER_CRITICAL
         if root is not None:
@@ -2980,6 +3042,12 @@ def build_cards(
                 "missing": state_info.get("partial_missing", images.get("missing", 0)),
             }
         fix = _fix_plan(backups_dir, images, featured, blocked) if blocked else None
+        if state == STATE_PARTIAL:
+            fix = {
+                "find_inline_images": images.get("missing", 0),
+                "featured": "provide" if featured.get("action") in {"provide", "replace"} else featured.get("action"),
+                "requires_content": False,
+            }
         cards.append(
             {
                 "id": post_id,
