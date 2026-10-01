@@ -219,7 +219,12 @@ NEW | PROCESSING | BLOCKED | READY | SKIPPED | UNCERTAIN | AWAITING_HUMAN | PUBL
 - `apply --compact` SEMPRE. `media-search-web`/`media-validate`/`cards` já são
   compactos por padrão; o JSON grande fica em `work/**` (auditoria).
 - `list-pending --compact` e `prepare --compact` SEMPRE (~1.3 KB vs ~120 KB).
-- Decida skip/uncertain SÓ pelo card. Escreva o editorial num arquivo e passe o
+- Para `retry_mode=uncertain_second_pass`, NÃO decida relevância somente pelo
+  card: execute `prepare-batch`/`editorial-generate-batch` e use o contexto real
+  (título, conteúdo, origem, entidades, motivo anterior e `relevance_policy`).
+  Só depois de `site_relevance=process` execute a etapa determinística de mídia.
+- Para posts NEW/BLOCKED, decida skip/uncertain pelo card e pelo fluxo indicado;
+  nunca busque mídia antes de confirmar relevância.
   caminho; nunca cole o JSON duas vezes.
 - OMITA `cleaned_html` sem reescrita; com mídia nova ele é OBRIGATÓRIO. OMITA
   `seo` quando `seo_exists` e não houver mídia. NUNCA inclua CTA/Fonte no HTML.

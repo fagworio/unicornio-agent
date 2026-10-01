@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -14,7 +15,7 @@ from unicornio_editor.batch import (
 )
 from unicornio_editor.config import Config
 from unicornio_editor.batch import load_editorial_batch
-from unicornio_editor.cli import _apply_editorial_batch
+from unicornio_editor.cli import _apply_editorial_batch, preflight_apply_candidate
 from unicornio_editor.wordpress import WordPressError
 
 
@@ -82,6 +83,8 @@ class BatchContextTests(unittest.TestCase):
                 self.assertEqual(context["status"], "pending")
                 self.assertIn("cleaned_html", context)
                 self.assertIn("requirements", context)
+                self.assertIn("relevance_policy", context)
+                self.assertEqual(context["relevance_policy"]["allowed_topics"], [])
                 # O envelope de AUDITORIA carrega os fatos de midia, mas o
                 # envelope enviado ao modelo nao — sem isso o modelo sem
                 # ferramentas responde needs_retry por "faltam imagens".
@@ -94,6 +97,7 @@ class BatchContextTests(unittest.TestCase):
                 )["posts"][0]
                 self.assertNotIn("images", model_context)
                 self.assertNotIn("featured", model_context)
+                self.assertIn("relevance_policy", model_context)
                 self.assertNotIn(
                     "required_inline_images", model_context["requirements"]["media_stage"]
                 )
@@ -101,6 +105,26 @@ class BatchContextTests(unittest.TestCase):
                     model_context["requirements"]["media_stage"]["editorial_media_plan"], []
                 )
                 self.assertTrue((root / "backups" / str(post_id) / "prepared.json").exists())
+
+    def test_prepare_batch_exposes_uncertain_retry_context_and_allowed_topics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = _post(1, "Post sobre jogos")
+            post["meta"] = {
+                "_hermes_state": "uncertain",
+                "_hermes_attempts": "1",
+                "_hermes_last_error": "relevancia anterior inconclusiva",
+                "original_link": "https://source.test/jogos",
+            }
+            config = replace(self.config(), site_topics=("games", "anime"))
+            prepare_batch(BatchClient({1: post}), config, root, [1], batch_id="batch-retry-context")
+            context = json.loads(
+                (root / "work" / "batches" / "batch-retry-context" / "editorial.input.json")
+                .read_text(encoding="utf-8")
+            )["posts"][0]
+            self.assertEqual(context["retry_mode"], "uncertain_second_pass")
+            self.assertEqual(context["previous_relevance_reason"], "relevancia anterior inconclusiva")
+            self.assertEqual(context["relevance_policy"]["allowed_topics"], ["games", "anime"])
 
     def test_prepare_batch_isolates_missing_post_and_keeps_success(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -180,7 +204,29 @@ class BatchContextTests(unittest.TestCase):
             with self.assertRaises(BatchError):
                 load_media_resolve_batch(path)
 
-    def test_apply_batch_preflight_blocks_non_pending_without_consuming_slot(self):
+    def test_preflight_rejects_process_without_allowed_topic_before_media(self):
+        config = replace(
+            Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False),
+            site_topics=("games", "anime"),
+        )
+        editorial = {
+            "site_relevance": {
+                "decision": "process",
+                "confidence": 1.0,
+                "reason": "parece editorial",
+                "matched_topics": ["celebridades"],
+            },
+            "media_plan": [],
+            "needs_trailer": False,
+            "trailer_url": None,
+            "game_name": None,
+        }
+        allowed, reason = preflight_apply_candidate(
+            BatchClient({1: _post(1, "Post")}), config, 1, editorial
+        )
+        self.assertFalse(allowed)
+        self.assertIn("matched_topics permitido", reason)
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)

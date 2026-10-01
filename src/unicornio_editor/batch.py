@@ -279,6 +279,17 @@ def _context_for_post(
     featured = _featured_diagnosis(client, post, entities)
     state = read_state(post)
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    retry_mode = (
+        "uncertain_second_pass"
+        if state.get("state") == "uncertain" and int(state.get("attempts") or 0) <= 1
+        else None
+    )
+    relevance_policy = {
+        "allowed_topics": [str(topic) for topic in (config.site_topics or ())],
+    }
+    previous_relevance_reason = (
+        state.get("last_error") or "" if retry_mode else ""
+    )
     requirements = {
         "internal_links_enabled": bool(config.internal_links_enabled),
         # Tudo que depende de IMAGEM pertence a etapa deterministica seguinte
@@ -311,6 +322,9 @@ def _context_for_post(
         "post_id": post.get("id"),
         "status": post.get("status"),
         "state": state,
+        "retry_mode": retry_mode,
+        "previous_relevance_reason": previous_relevance_reason,
+        "relevance_policy": relevance_policy,
         "title": title,
         "date": post.get("date"),
         "link": post.get("link"),
@@ -335,6 +349,9 @@ _MODEL_FACING_KEYS = (
     "post_id",
     "status",
     "state",
+    "retry_mode",
+    "previous_relevance_reason",
+    "relevance_policy",
     "title",
     "date",
     "link",

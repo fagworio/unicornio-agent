@@ -740,6 +740,23 @@ def preflight_apply_candidate(
         validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
     except (ValueError, TypeError, KeyError) as exc:
         return False, f"editorial invalido: {exc}"
+    relevance = editorial.get("site_relevance") or {}
+    allowed_topics = {
+        str(topic).strip().casefold()
+        for topic in (getattr(config, "site_topics", ()) or ())
+        if str(topic).strip()
+    }
+    matched_topics = {
+        str(topic).strip().casefold()
+        for topic in (relevance.get("matched_topics") or [])
+        if str(topic).strip()
+    }
+    if (
+        relevance.get("decision") == "process"
+        and allowed_topics
+        and not allowed_topics.intersection(matched_topics)
+    ):
+        return False, "relevancia invalida: process sem matched_topics permitido pela pauta"
     return True, ""
 
 
