@@ -18,7 +18,13 @@ class PipelineRunner:
 
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
         previous = self.state_store.load(post_id)
-        editorial = self.stages["editorial"](context, previous)
+        try:
+            editorial = self.stages["editorial"](context, previous)
+        except StageError as exc:
+            editorial = {"decision": "process"}
+            outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": [{"blocker": exc.blocker.value, "phase": exc.phase.value, "detail": exc.detail}]})
+            self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
+            return outcome
         media: MediaProgress = previous.media
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
@@ -32,7 +38,6 @@ class PipelineRunner:
                 validation = self.stages["validate"](context, candidate)
                 outcome = classify(previous, editorial, media, validation)
             except StageError as exc:
-                media = previous.media
                 outcome = classify(
                     previous,
                     {"decision": "process"},

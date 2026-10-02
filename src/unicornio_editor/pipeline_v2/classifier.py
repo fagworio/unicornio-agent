@@ -1,5 +1,6 @@
 """Pure V2 outcome classifier; the only module allowed to choose an outcome."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .model import BlockerCode, Outcome, OutcomeType, Phase, WorkState
@@ -36,22 +37,35 @@ def blocker_for_gate(gate: str | None) -> BlockerCode | None:
     return GATE_TO_BLOCKER.get(str(gate or ""))
 
 
-def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str]]:
-    result: list[tuple[BlockerCode, str]] = []
+def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase | None]]:
+    result: list[tuple[BlockerCode, str, Phase | None]] = []
     for failure in validation.get("failures", []) or []:
         if not isinstance(failure, dict):
             continue
+        phase_value = None
+        if failure.get("phase"):
+            try:
+                phase_value = Phase(failure["phase"])
+            except ValueError:
+                phase_value = None
         blocker = blocker_for_gate(failure.get("gate"))
         if blocker is not None:
-            result.append((blocker, str(failure.get("gate"))))
+            result.append((blocker, str(failure.get("gate")), phase_value))
         elif failure.get("blocker"):
             try:
-                result.append((BlockerCode(failure["blocker"]), str(failure.get("gate", ""))))
+                result.append((BlockerCode(failure["blocker"]), str(failure.get("gate", "")), phase_value))
             except ValueError:
-                result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", ""))))
+                result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value))
         else:
-            result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", ""))))
+            result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value))
     return result
+
+
+def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None) -> Outcome:
+    if next_at is None:
+        delay = 30 * (4 ** min(previous.retry.attempts, 3))
+        next_at = (datetime.now(timezone.utc) + timedelta(minutes=delay)).isoformat(timespec="seconds")
+    return Outcome.retry(phase, blocker, next_at)
 
 
 def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any]) -> Outcome:
@@ -62,7 +76,7 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if decision == "uncertain":
         if previous.retry.attempts >= 1:
             return Outcome.human_required(Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
-        return Outcome.retry(Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
+        return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
     if decision != "process":
         return Outcome.human_required(Phase.RELEVANCE, BlockerCode.INTERNAL_ERROR)
 
@@ -70,14 +84,14 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if not failures and validation.get("passed", False):
         return Outcome.ready()
     if not failures:
-        return Outcome.retry(Phase.VALIDATE, BlockerCode.INTERNAL_ERROR)
+        return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR)
 
-    blockers = [blocker for blocker, _ in failures]
-    for blocker in blockers:
+    blockers = [blocker for blocker, _, _ in failures]
+    for blocker, _, phase_override in failures:
         if blocker not in MEDIA_BLOCKERS:
-            phase = Phase.MEDIA if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN} else (Phase.EDITORIAL if blocker in {
+            phase = phase_override or (Phase.MEDIA if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN} else (Phase.EDITORIAL if blocker in {
                 BlockerCode.TEXT_QUALITY, BlockerCode.SEO, BlockerCode.STRUCTURE,
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
-            } else Phase.VALIDATE)
-            return Outcome.retry(phase, blocker)
-    return Outcome.retry(Phase.MEDIA, blockers[0])
+            } else Phase.VALIDATE))
+            return _retry(previous, phase, blocker)
+    return _retry(previous, Phase.MEDIA, blockers[0])

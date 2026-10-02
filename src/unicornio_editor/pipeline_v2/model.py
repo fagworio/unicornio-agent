@@ -74,14 +74,25 @@ class RetryInfo:
         return cls(int(value.get("attempts", 0)), int(value.get("no_progress", 0)), value.get("next_at"))
 
 
+class FeaturedStatus(_ValueEnum):
+    MISSING = "missing"
+    VALID = "valid"
+    INVALID = "invalid"
+    VISION_REJECTED = "vision_rejected"
+
+
 @dataclass(frozen=True)
 class FeaturedProgress:
-    status: str = "missing"
+    status: FeaturedStatus = FeaturedStatus.MISSING
     media_id: int | None = None
     media_url: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, FeaturedStatus):
+            object.__setattr__(self, "status", FeaturedStatus(self.status))
+
     def to_dict(self) -> dict[str, Any]:
-        return {"status": self.status, "media_id": self.media_id, "media_url": self.media_url}
+        return {"status": self.status.value, "media_id": self.media_id, "media_url": self.media_url}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "FeaturedProgress":
@@ -98,8 +109,8 @@ class InlineMedia:
     credit_text: str = ""
 
     def __post_init__(self) -> None:
-        if self.media_id < 1 or self.slot < 1:
-            raise ValueError("media_id and slot must be positive")
+        if self.media_id < 1 or self.slot < 0:
+            raise ValueError("media_id must be positive and slot cannot be negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {"media_id": self.media_id, "media_url": self.media_url, "slot": self.slot, "alt_text": self.alt_text, "credit_text": self.credit_text}
