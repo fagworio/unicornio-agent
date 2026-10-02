@@ -3,6 +3,7 @@ from pathlib import Path
 
 from unicornio_editor.pipeline_v2.legacy import LegacyStateLoader, from_legacy_state
 from unicornio_editor.pipeline_v2.scheduler import next_action
+from unicornio_editor.pipeline_v2.shadow import compare_work_state
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "v2_cases.json"
@@ -36,3 +37,24 @@ def test_114849_legacy_fixture_is_featured_only_and_preserves_four_assets():
     state = load_case(case)
     assert [item.media_id for item in state.media.inline] == [101, 102, 103, 104]
     assert next_action(state) == "resolve_featured"
+
+
+def test_deterministic_shadow_compares_state_progress_ids_slots_and_next_action():
+    reports = []
+    for case in json.loads(FIXTURES.read_text()):
+        state = load_case(case)
+        v1 = case["v1"]
+        expected = {**case["expected"], "phase": "validate" if v1["state"] == "ready" else ("editorial" if v1["state"] == "blocked" else "media")}
+        report = compare_work_state(
+            case["post_id"], v1["state"], state,
+            expected=expected,
+            expected_ids=[item["media_id"] for item in case.get("assets", [])],
+            expected_slots=[item.get("slot", item.get("paragraph_index", i + 1)) for i, item in enumerate(case.get("assets", []))],
+            expected_action=expected["next_action"],
+            actual_action=next_action(state),
+            expected_featured={"rejected": "vision_rejected", "vision": "vision_rejected", "failed": "invalid"}.get(case.get("featured", {}).get("status"), case.get("featured", {}).get("status")) if case.get("featured") else None,
+        )
+        reports.append(report)
+    assert len(reports) == 10
+    assert all(report["equivalent"] for report in reports), reports
+    assert all(not report["mismatches"] for report in reports)

@@ -55,6 +55,8 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
 def next_action(state: WorkState) -> str:
     if state.state in {LifecycleState.READY, LifecycleState.PUBLISHED, LifecycleState.SKIPPED, LifecycleState.HUMAN_REQUIRED}:
         return "none"
+    if state.phase is Phase.RELEVANCE:
+        return "evaluate_relevance"
     if state.phase is Phase.EDITORIAL:
         return "regenerate_editorial"
     if state.media.missing > 0:
