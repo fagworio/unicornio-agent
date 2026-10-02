@@ -33,9 +33,22 @@ def expected_from_v1_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     required = int(meta.get("_hermes_media_required") or 0)
     completed = int(meta.get("_hermes_media_completed") or 0)
     missing = int(meta.get("_hermes_media_missing") or max(0, required - completed))
-    last_error = str(meta.get("_hermes_last_error") or "")
-    kind = str(meta.get("_hermes_partial_kind") or "")
-    if kind == "media" and missing == 0 and completed == required and "imagens_visao" in last_error:
+    last_error = str(meta.get("_hermes_last_error") or "").casefold()
+    kind = str(meta.get("_hermes_partial_kind") or "").casefold()
+    blocked_markers = (
+        (("qualidade_texto",), "text_quality"),
+        (("seo",), "seo"),
+        (("estrutura",), "structure"),
+        (("schema",), "schema"),
+        (("destaque",), "featured_invalid"),
+        (("imagens_visao", "imagens visão", "featured vision"), "featured_vision"),
+        (("imagens_no_corpo",), "inline_missing"),
+        (("imagens_webp",), "media_invalid"),
+        (("fonte",), "source"),
+        (("trailer",), "trailer"),
+    )
+    blocked_marker = next((blocker for markers, blocker in blocked_markers if any(marker in last_error for marker in markers)), None)
+    if kind == "media" and missing == 0 and completed == required and blocked_marker == "featured_vision":
         blocker = "featured_vision"
     elif kind == "featured_vision":
         blocker = "featured_vision"
@@ -43,8 +56,8 @@ def expected_from_v1_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         blocker = "featured_missing"
     elif kind == "inline_missing" or v1_state == "partial":
         blocker = "inline_missing"
-    elif v1_state == "blocked" and "qualidade_texto" in last_error:
-        blocker = "text_quality"
+    elif v1_state == "blocked" and blocked_marker:
+        blocker = blocked_marker
     else:
         blocker = None
     if v1_state == "partial":
