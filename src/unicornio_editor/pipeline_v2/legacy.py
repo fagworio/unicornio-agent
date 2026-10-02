@@ -90,11 +90,24 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
             media=MediaProgress(required, assets, featured_value),
         )
 
-    # V1 BLOCKED/NEW/PROCESSING and missing state all remain safely pending.
-    blocker = _blocked_blocker(str(value.get("last_error") or "")) if old == "blocked" else None
-    media_blockers = {BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION, BlockerCode.INLINE_MISSING, BlockerCode.MEDIA_INVALID}
+    # Preserve V1 media progress even when apply recorded multiple blockers.
+    kind = str(value.get("partial_kind") or "").casefold()
+    media_kind_blockers = {
+        "inline_missing": BlockerCode.INLINE_MISSING,
+        "featured_missing": BlockerCode.FEATURED_MISSING,
+        "featured_vision": BlockerCode.FEATURED_VISION,
+    }
+    if old == "blocked" and kind in media_kind_blockers:
+        blocker = media_kind_blockers[kind]
+    else:
+        blocker = _blocked_blocker(str(value.get("last_error") or "")) if old == "blocked" else None
+    media_blockers = {BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION, BlockerCode.FEATURED_MISSING, BlockerCode.INLINE_MISSING, BlockerCode.MEDIA_INVALID}
     phase = Phase.MEDIA if blocker in media_blockers else (Phase.EDITORIAL if old in {"blocked", "processing"} else Phase.RELEVANCE)
-    return WorkState(state=LifecycleState.PENDING, phase=phase, blocker=blocker, retry=retry)
+    required = _int(value.get("partial_required"))
+    assets = tuple(InlineMedia.from_dict(item) for item in (inline_assets or []))
+    featured_value = FeaturedProgress(str((featured or {}).get("status", "missing")), (featured or {}).get("media_id"), (featured or {}).get("media_url"))
+    media = MediaProgress(required, assets, featured_value) if required or assets else MediaProgress()
+    return WorkState(state=LifecycleState.PENDING, phase=phase, blocker=blocker, retry=retry, relevance_approved=bool(kind in media_kind_blockers), media=media)
 
 
 class LegacyStateLoader:
