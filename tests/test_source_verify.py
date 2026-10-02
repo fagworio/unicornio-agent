@@ -9,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 
 from unicornio_editor.media.source_verify import (
+    _normalized_url,
     validate_discovered_candidate,
     verify_downloaded_against_source,
 )
@@ -60,6 +61,16 @@ class SourcePageHandler(BaseHTTPRequestHandler):
 
 
 class SourceVerifyTests(unittest.TestCase):
+    def test_normalized_url_encodes_spaces_without_changing_source_identity(self):
+        self.assertEqual(
+            _normalized_url("https://cdn.test/art work.jpg"),
+            "https://cdn.test/art%20work.jpg",
+        )
+        self.assertEqual(
+            _normalized_url("https://cdn.test/art%20work.jpg"),
+            _normalized_url("https://cdn.test/art work.jpg"),
+        )
+
     @classmethod
     def setUpClass(cls):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), SourcePageHandler)

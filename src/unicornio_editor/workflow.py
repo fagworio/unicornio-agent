@@ -44,7 +44,12 @@ from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
 from .media.vision_cache import get_cached_decision, set_cached_decision
 from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
-from .media.vision_policy import trusted_featured_evidence, vision_cache_subject
+from .media.vision_policy import (
+    featured_vision_category,
+    featured_vision_subject,
+    trusted_featured_evidence,
+    vision_cache_subject,
+)
 from .media.wordpress_media import upload_image
 from .observability import append_telemetry, build_processing_markers
 from .seo.rank_math import build_meta
@@ -480,6 +485,17 @@ def _apply_editorial_unlocked(
                 required = _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities).get("required", 0)
                 completed = len([item for item in accepted if not item.get("featured")])
                 missing = max(0, required - completed)
+                featured_status = str(featured_manifest.get("status") or "missing")
+                if missing and featured_status not in {"missing", "valid"}:
+                    partial_kind = "mixed_media"
+                elif missing:
+                    partial_kind = "inline_missing"
+                elif featured_status in {"rejected", "vision", "failed"}:
+                    partial_kind = "featured_vision"
+                elif featured_status != "valid":
+                    partial_kind = "featured_missing"
+                else:
+                    partial_kind = "inline_missing"
                 previous_completed = len(prior_media)
                 featured_before_valid = (
                     (partial_manifest.get("featured") or {}).get("status") == "valid"
@@ -505,6 +521,7 @@ def _apply_editorial_unlocked(
                     "required": required,
                     "completed": completed,
                     "missing": missing,
+                    "partial_kind": partial_kind,
                     "accepted_media": accepted,
                     "featured": featured_manifest,
                     "processing_passes": passes,
@@ -516,7 +533,7 @@ def _apply_editorial_unlocked(
                     client, config, post_id, partial_state, root=root,
                     attempts=state_info["attempts"], next_retry_at=next_retry,
                     last_error="; ".join(str(item.get("detail") or "")[:160] for item in failed_items[:5]),
-                    partial_kind="media", partial_required=required,
+                    partial_kind=partial_kind, partial_required=required,
                     partial_completed=completed, partial_missing=missing,
                     processing_passes=passes, no_progress_attempts=no_progress,
                 ):
@@ -1351,7 +1368,13 @@ def validate_media_plan(
             vision = _validate_featured_candidate_vision(
                 item, editorial, client, cache, config=config, root=root
             )
-            featured_vision.append({"index": index, **vision})
+            featured_vision.append({
+                "index": index,
+                "subject": featured_vision_subject(editorial),
+                "category": featured_vision_category(editorial),
+                "cache_hit": bool(vision.get("cached")),
+                **vision,
+            })
             if root is not None:
                 append_telemetry(
                     root,
@@ -1440,8 +1463,8 @@ def _validate_featured_candidate_vision(
     """
     if config is None:
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
-    subject = str((editorial.get("seo") or {}).get("title") or "").strip()
-    cache_subject = vision_cache_subject(editorial)
+    subject = featured_vision_subject(editorial)
+    cache_subject = subject
     media_id = item.get("media_library_id")
     attachment: dict[str, Any] | None = None
     if media_id:
@@ -1494,7 +1517,7 @@ def _validate_featured_candidate_vision(
             model=config.vision_model,
             timeout=config.http_timeout,
             context="preflight da imagem de destaque do artigo",
-            category="game_artwork",
+            category=featured_vision_category(editorial),
             alt=str(item.get("alt_text") or subject),
             detail=config.vision_detail,
             allow_high=True,
@@ -1503,16 +1526,13 @@ def _validate_featured_candidate_vision(
         )
     except (VisionGateError, Exception) as exc:  # noqa: BLE001 - fail closed
         return {"status": "rejected", "reason": f"visao da featured falhou: {exc}", "cached": False}
-    set_cached_decision(
-        cache_root,
-        image_url,
-        cache_subject,
-        {
-            "status": "MATCH" if ok else "UNRELATED",
-            "confidence": 1.0,
-            "visual_type": "other",
-        },
-    )
+    if ok:
+        set_cached_decision(
+            cache_root,
+            image_url,
+            cache_subject,
+            {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
+        )
     return {"status": "passed" if ok else "rejected", "reason": reason, "cached": False}
 
 
@@ -3044,6 +3064,11 @@ def build_cards(
     def _priority(post: dict[str, Any]) -> tuple[int, int]:
         state_value = _state_for_card(post)
         post_id = int(post.get("id") or 0)
+        state_info = read_state(post)
+        if state_value == STATE_PARTIAL and state_info.get("partial_kind") in {
+            "featured_missing", "featured_vision",
+        } and state_info.get("partial_missing", 0) == 0:
+            return (-1, post_id)
         if state_value in (STATE_BLOCKED, STATE_PARTIAL):
             return (0, post_id)
         if post_id in reserved_uncertain_ids:
@@ -3113,6 +3138,8 @@ def build_cards(
                 "featured": "provide" if featured.get("action") in {"provide", "replace"} else featured.get("action"),
                 "requires_content": False,
             }
+        partial_kind = state_info.get("partial_kind") if state == STATE_PARTIAL else None
+        featured_only = partial_kind in {"featured_missing", "featured_vision"} and not images.get("missing")
         cards.append(
             {
                 "id": post_id,
@@ -3128,6 +3155,7 @@ def build_cards(
                 "state": state,
                 "attempts": state_info["attempts"],
                 "retry_mode": (
+                    "featured_only" if featured_only else
                     "uncertain_second_pass"
                     if uncertain_retry_eligible
                     else None
@@ -3147,6 +3175,7 @@ def build_cards(
                     "processing_passes": state_info.get("processing_passes", 0),
                     "no_progress_attempts": state_info.get("no_progress_attempts", 0),
                 } if state == STATE_PARTIAL else None,
+                "partial_kind": partial_kind,
                 "blocked_reason": _blocked_reason(backups_dir) if blocked else None,
                 "fix": fix,
                 # P2 da auditoria de contexto: o card ja diz se o rework precisa

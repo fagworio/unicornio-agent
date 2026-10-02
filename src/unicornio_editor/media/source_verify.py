@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from threading import Lock
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urljoin, urlparse, urlunparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from .url_safety import inspect_remote_url
 from .page_assets import extract_page_assets
@@ -80,8 +80,10 @@ def _image_urls_in_page(html: str, base_url: str) -> list[str]:
 def _normalized_url(url: str) -> str:
     """Normalize harmless URL differences for exact source-page matching."""
     parsed = urlparse(unquote(url.strip()))
+    encoded_path = quote(parsed.path, safe="/!$&'()*+,;=:@-._~")
+    encoded_query = quote(parsed.query, safe="/?=&!$&'()*+,;:@-._~")
     return urlunparse(
-        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", parsed.query, "")
+        (parsed.scheme.lower(), parsed.netloc.lower(), encoded_path, "", encoded_query, "")
     )
 
 

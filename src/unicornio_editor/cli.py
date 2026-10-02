@@ -689,6 +689,15 @@ def _compact_apply(result: dict) -> dict:
         return compact
     if result.get("status") == "partial":
         progress = result.get("partial") or {}
+        partial_compact = {
+            "required": progress.get("required", result.get("partial_required")),
+            "completed": progress.get("completed", result.get("partial_completed")),
+            "missing": progress.get("missing", result.get("partial_missing")),
+        }
+        if progress.get("partial_kind") is not None or result.get("partial_kind") is not None:
+            partial_compact["partial_kind"] = progress.get("partial_kind", result.get("partial_kind"))
+        if progress.get("featured") is not None:
+            partial_compact["featured"] = progress.get("featured")
         return {
             "post_id": post_id,
             "status": "partial",
@@ -696,11 +705,7 @@ def _compact_apply(result: dict) -> dict:
             "state_changed": bool(result.get("state_changed", True)),
             "content_changed": bool(result.get("content_changed", False)),
             "wordpress_changed": bool(result.get("wordpress_changed")),
-            "partial": {
-                "required": progress.get("required", result.get("partial_required")),
-                "completed": progress.get("completed", result.get("partial_completed")),
-                "missing": progress.get("missing", result.get("partial_missing")),
-            },
+            "partial": partial_compact,
             "processing_passes": result.get("processing_passes", 0),
             "no_progress_attempts": result.get("no_progress_attempts", 0),
             "checklist": "pass" if not failed else "fail",
@@ -2599,7 +2604,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # Only definitive final results enter the normal cache. The
                 # batch gate already escalated only the ambiguous subset to
                 # high detail; inconclusive-at-high remains uncached.
-                if decision.get("verdict") in {"accept", "reject"}:
+                # Cache only definitive pixel outcomes.  In particular,
+                # inconclusive/unknown results must leave alternate candidates
+                # eligible; a UI-level ``reject`` is not enough when the model
+                # did not return a high-confidence UNRELATED verdict.
+                definitive = (
+                    decision.get("verdict") == "accept"
+                    or (
+                        decision.get("status") == "UNRELATED"
+                        and float(decision.get("confidence") or 0) >= 0.80
+                    )
+                )
+                if definitive:
                     set_cached_decision(
                         args.root,
                         item["image_url"],

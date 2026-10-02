@@ -545,6 +545,7 @@ def run_pre_publish_checklist(
         )
     else:
         from .media.vision_cache import get_cached_decision, set_cached_decision
+        from .media.vision_policy import featured_vision_category, featured_vision_subject
 
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
         vision_root = _project_root(backup_path)
@@ -614,13 +615,13 @@ def run_pre_publish_checklist(
             try:
                 media = client.get_media(featured)
                 featured_url = str(media.get("source_url") or "").strip()
-                featured_subject = str(editorial.get("seo", {}).get("title") or "").strip()
+                featured_subject = featured_vision_subject(editorial)
                 if featured_url and featured_subject:
                     _verify(
                         featured_url, featured_subject,
                         is_featured=True,
                         context="image destaque do artigo",
-                        category="game_artwork",
+                        category=featured_vision_category(editorial),
                     )
             except (VisionGateError, Exception) as exc:  # noqa: BLE001 - report, keep gate
                 vision_failures.append(f"destaque: {exc}")

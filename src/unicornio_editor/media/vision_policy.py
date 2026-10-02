@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 
@@ -39,13 +39,61 @@ def trusted_featured_evidence(
     return f"fonte confiavel {page_host} com obra identificada na pagina e na busca"
 
 
-def vision_cache_subject(editorial: dict[str, Any]) -> str:
-    """Stable work identity for cache reuse, falling back to the SEO title."""
+_VISION_CATEGORIES = frozenset(
+    {"game", "anime", "movie", "series", "person", "general_entertainment"}
+)
+_GENERIC_FOCUS = frozenset({"game", "games", "jogo", "jogos", "videogame", "anime", "filme", "series"})
+
+
+def featured_vision_subject(editorial: Mapping[str, Any]) -> str:
+    """Return the one stable editorial identity used by every featured gate.
+
+    Explicit ``game_name`` wins for backwards compatibility.  Structured
+    subjects/main entities are preferred over SEO copy, then the focus keyword,
+    and only finally the SEO title.  This is deliberately deterministic: cache
+    keys must not change between preflight and the final checklist.
+    """
     game_name = editorial.get("game_name")
     if isinstance(game_name, str) and game_name.strip():
         return game_name.strip()
+    for key in ("post_subjects", "subjects"):
+        values = editorial.get(key)
+        if isinstance(values, str) and values.strip():
+            return values.strip()
+        if isinstance(values, list):
+            for value in values:
+                candidate = value.get("subject") if isinstance(value, dict) else value
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+    for key in ("main_entity", "entity"):
+        candidate = editorial.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
     seo = editorial.get("seo") or {}
+    for key in ("focus_keyword",):
+        candidate = editorial.get(key) or seo.get(key)
+        if isinstance(candidate, str) and candidate.strip() and candidate.strip().casefold() not in _GENERIC_FOCUS:
+            return candidate.strip()
     return str(seo.get("title") or "").strip()
+
+
+def vision_cache_subject(editorial: Mapping[str, Any]) -> str:
+    """Compatibility name for the stable featured identity function."""
+    return featured_vision_subject(editorial)
+
+
+def featured_vision_category(editorial: Mapping[str, Any]) -> str:
+    """Map editorial/post type to a safe vision category."""
+    raw = " ".join(
+        str(editorial.get(key) or "")
+        for key in ("editorial_type", "post_type", "content_type", "category")
+    ).casefold()
+    if any(token in raw for token in ("game", "jogo", "videogame")):
+        return "game"
+    for category in ("anime", "movie", "series", "person"):
+        if category in raw or (category == "series" and "tv" in raw):
+            return category
+    return "general_entertainment"
 
 
 def _has_subject_anchor(subject: str, evidence: str) -> bool:
