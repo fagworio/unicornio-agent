@@ -377,7 +377,7 @@ def _apply_editorial_unlocked(
         partial_featured = {
             **partial_featured,
             "status": "vision_rejected",
-            "reason": str(state_info.get("last_error") or "featured vision rejected"),
+            "reason": str(state_before.get("last_error") or "featured vision rejected"),
         }
         partial_manifest = {**partial_manifest, "featured": partial_featured}
     partial_featured_valid = partial_featured.get("status") == "valid"

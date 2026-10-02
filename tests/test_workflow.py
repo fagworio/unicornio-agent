@@ -1208,6 +1208,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(second["state"], "partial")
         self.assertEqual(third["state"], "awaiting_human")
 
+    def test_legacy_featured_vision_partial_resumes_without_unbound_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            post["meta"] = {
+                "_hermes_state": "partial",
+                "_hermes_attempts": "1",
+                "_hermes_partial_kind": "media",
+                "_hermes_media_required": "4",
+                "_hermes_media_completed": "4",
+                "_hermes_media_missing": "0",
+                "_hermes_last_error": "imagens_visao: featured rejeitada",
+            }
+            manifest = {
+                "state": "partial", "kind": "media", "required": 4,
+                "completed": 4, "missing": 0,
+                "accepted_media": [
+                    {"media_id": 100 + i, "media_url": f"https://wp.test/{i}.webp", "paragraph_index": i * 3,
+                     "alt_text": "inline", "credit_text": "Crédito da imagem: Teste.", "width": 800, "height": 450}
+                    for i in range(4)
+                ],
+                "featured": {"status": "valid", "media_id": 7, "media_url": "https://wp.test/featured.webp"},
+            }
+            backup = root / "backups/42"
+            backup.mkdir(parents=True)
+            (backup / "editorial.partial.json").write_text(json.dumps(manifest), encoding="utf-8")
+            checklist = {"all_passed": False, "failed": [{"name": "imagens_visao", "detail": "featured rejeitada"}], "items": [{"name": "imagens_visao", "status": "fail", "detail": "featured rejeitada"}]}
+            payload = editorial_payload()
+            payload["cleaned_html"] = "".join(f"<p>Parágrafo {i} sobre videogame.</p>" for i in range(12))
+            with mock.patch("unicornio_editor.workflow._execute_media_plan", return_value=([], None, "")), \
+                 mock.patch("unicornio_editor.workflow.validate_media_plan", return_value={"featured_vision": []}), \
+                 mock.patch("unicornio_editor.workflow.run_pre_publish_checklist", return_value=checklist):
+                report = apply_editorial(FakeClient(post), self.config(False), root, 42, payload)
+            self.assertEqual(report["status"], "partial")
+            saved = json.loads((backup / "editorial.partial.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["featured"]["status"], "vision_rejected")
+            self.assertEqual(saved["partial_kind"], "featured_vision")
+            self.assertEqual(saved["completed"], 4)
+            self.assertEqual(saved["missing"], 0)
+
     def test_apply_dry_run_blocks_media_plan(self):
         payload = editorial_payload()
         payload["media_plan"] = [self.media_item(paragraph_index=1, is_featured=True)]
