@@ -3299,10 +3299,15 @@ def build_cards(
         # deve continuar do draft persistido, não do conteúdo antigo.
         wordpress_images = _images_summary(wordpress_cleaned, title, extract_entities(title=title, content_html=wordpress_cleaned))
         images = _images_summary(working_cleaned, title, entities)
-        featured = _featured_diagnosis(client, post, entities)
+        wordpress_featured = _featured_diagnosis(client, post, entities)
         partial_media_drift = None
+        partial_manifest = _load_partial_manifest(root, post_id) if state == STATE_PARTIAL else {}
+        featured = (
+            _working_featured_diagnosis(client, post, entities, partial_manifest)
+            if state == STATE_PARTIAL
+            else wordpress_featured
+        )
         if state == STATE_PARTIAL:
-            partial_manifest = _load_partial_manifest(root, post_id)
             images, partial_media_drift = _reconcile_partial_media(
                 working_cleaned,
                 title,
@@ -3338,6 +3343,8 @@ def build_cards(
                 "working_images": images,
                 "images": images,
                 "featured": featured,
+                "wordpress_featured": wordpress_featured,
+                "working_featured": featured if state == STATE_PARTIAL else wordpress_featured,
                 "game_hint": _game_hint(title),
                 "state": state,
                 "attempts": state_info["attempts"],
@@ -3471,6 +3478,43 @@ def _featured_diagnosis(
         "valid": valid,
         "action": action,
     }
+
+
+def _working_featured_diagnosis(
+    client: WordPressClient,
+    post: dict[str, Any],
+    entities: set[str],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Use the PARTIAL featured ledger before falling back to WordPress."""
+    featured = manifest.get("featured") if isinstance(manifest, dict) else None
+    featured = featured if isinstance(featured, dict) else {}
+    status = str(featured.get("status") or "missing").casefold()
+    if status == "valid":
+        return {
+            "exists": True,
+            "relevant": True,
+            "webp": True,
+            "dimensions": None,
+            "valid": True,
+            "action": "ok",
+            "media_id": featured.get("media_id"),
+            "source": "partial_manifest",
+        }
+    if status in {"vision_rejected", "rejected", "vision"}:
+        return {
+            "exists": bool(featured.get("media_id") or featured.get("media_url")),
+            "relevant": False,
+            "webp": None,
+            "dimensions": None,
+            "valid": False,
+            "action": "replace",
+            "media_id": featured.get("media_id"),
+            "reason": featured.get("reason"),
+            "source": "partial_manifest",
+        }
+    wordpress = _featured_diagnosis(client, post, entities)
+    return {**wordpress, "source": "wordpress"}
 
 
 def _fix_plan(
