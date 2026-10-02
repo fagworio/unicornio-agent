@@ -21,6 +21,25 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _blocked_blocker(last_error: str) -> BlockerCode:
+    markers = (
+        ("qualidade_texto", BlockerCode.TEXT_QUALITY),
+        ("seo", BlockerCode.SEO),
+        ("estrutura", BlockerCode.STRUCTURE),
+        ("schema", BlockerCode.SCHEMA),
+        ("destaque", BlockerCode.FEATURED_INVALID),
+        ("imagens_visao", BlockerCode.FEATURED_VISION),
+        ("imagens_no_corpo", BlockerCode.INLINE_MISSING),
+        ("imagens_webp", BlockerCode.MEDIA_INVALID),
+        ("fonte", BlockerCode.SOURCE),
+        ("trailer", BlockerCode.TRAILER),
+    )
+    for marker, blocker in markers:
+        if marker in last_error:
+            return blocker
+    return BlockerCode.TEXT_QUALITY
+
+
 def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[str, Any]] | None = None, featured: dict[str, Any] | None = None) -> WorkState:
     """Translate V1 markers without exposing V1 concepts to V2 callers."""
     value = value or {}
@@ -73,7 +92,7 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
 
     # V1 BLOCKED/NEW/PROCESSING and missing state all remain safely pending.
     phase = Phase.EDITORIAL if old in {"blocked", "processing"} else Phase.RELEVANCE
-    blocker = BlockerCode.TEXT_QUALITY if old == "blocked" else None
+    blocker = _blocked_blocker(str(value.get("last_error") or "")) if old == "blocked" else None
     return WorkState(state=LifecycleState.PENDING, phase=phase, blocker=blocker, retry=retry)
 
 

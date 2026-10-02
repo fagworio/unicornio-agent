@@ -15,7 +15,7 @@ def capture_snapshot(post_id: int, post_reader: Callable[[int], dict[str, Any]],
     """Perform only injected reads and write a local immutable snapshot."""
     post = post_reader(post_id)
     manifest = manifest_reader(post_id)
-    payload = {"post_id": post_id, "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "wp": {"status": post.get("status"), "meta": post.get("meta", {})}, "manifest": manifest}
+    payload = {"post_id": post_id, "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "wp": {"status": post.get("status"), "meta": post.get("meta", {}), "context": {"id": post.get("id"), "type": post.get("type"), "slug": post.get("slug"), "link": post.get("link"), "title": post.get("title", {}), "content": post.get("content", {}), "excerpt": post.get("excerpt", {})}}, "manifest": manifest}
     target = Path(output_dir) / f"{post_id}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("x", encoding="utf-8") as handle:
