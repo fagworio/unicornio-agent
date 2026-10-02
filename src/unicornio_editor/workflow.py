@@ -2540,6 +2540,21 @@ def _publish_now(
         # (não fica enterrado no passado do site).
         date_gmt=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
     )
+    # Keep the V2 lifecycle synchronized with the existing publisher. This is
+    # a second, explicit state write; it never changes content or status.
+    from dataclasses import replace as _replace
+    from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase
+    from .pipeline_v2.operational import WordPressStateBackend as _V2Backend
+    from .pipeline_v2.state_store import StateStore as _V2Store
+    v2_post = client.get_post(post_id)
+    v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
+    if "_hermes_work_state" in v2_meta:
+        v2_store = _V2Store(_V2Backend(client))
+        v2_current = v2_store.load(post_id)
+        v2_store.mark_published(post_id, _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None))
+        v2_verified = v2_store.load(post_id)
+        if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
+            raise WorkflowError("V2 state read-back mismatch after publish")
     return {
         "post_id": post_id,
         "wordpress_changed": True,
