@@ -75,13 +75,15 @@ def run_write_one(client, config, root: Path, post_id: int, editorial: dict[str,
     if config.dry_run:
         raise ValueError("write mode requires EDITOR_DRY_RUN=false")
     counted_client = WriteCountingClient(client)
-    initial_state = StateStore(WordPressStateBackend(counted_client)).load(post_id)
+    reader = ProductionShadowReader(counted_client, root / "backups")
+    legacy_loader = LegacyStateLoader(reader.read_manifest)
+    initial_state = StateStore(WordPressStateBackend(counted_client), legacy_loader=legacy_loader).load(post_id)
     if initial_state.state is not LifecycleState.PENDING:
         return {"mode": "write", "post_id": post_id, "executed": False, "reason": "terminal_state", "wordpress_writes": 0, "production_writes": 0}
     result = apply_editorial(counted_client, config, root, post_id, editorial)
     final_post = counted_client.get_post(post_id)
     final_meta = final_post.get("meta", {}) if isinstance(final_post, dict) else {}
-    final_state = LegacyStateLoader(lambda _: {}).load(post_id, final_meta)
+    final_state = legacy_loader.load(post_id, final_meta)
     StateStore(WordPressStateBackend(counted_client)).commit(post_id, final_state)
     verified_post = counted_client.get_post(post_id)
     verified_state = StateStore(WordPressStateBackend(counted_client)).load(post_id)
