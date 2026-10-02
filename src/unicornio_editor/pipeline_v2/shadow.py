@@ -15,18 +15,30 @@ def compare_outcomes(post_id: int, v1_state: str, v1_blocker: str | None, v2_typ
         "v2": {"type": v2_type.value, "blocker": v2_blocker},
         "equivalent": equivalent,
     }
+V1_TO_V2_LIFECYCLE = {
+    "new": "pending",
+    "processing": "pending",
+    "blocked": "pending",
+    "partial": "pending",
+    "uncertain": "pending",
+    "ready": "ready",
+    "awaiting_human": "human_required",
+    "skipped": "skipped",
+    "published": "published",
+}
 
 
 def compare_work_state(post_id: int, v1_state: str, actual, *, expected: dict[str, Any], expected_ids: list[int], expected_slots: list[int], expected_action: str, actual_action: str, expected_featured: str | None = None) -> dict[str, Any]:
     """Compare operational equivalence, including resumable media identity."""
     mismatches: list[str] = []
-    expected_lifecycle = "ready" if v1_state == "ready" else "pending"
+    expected_lifecycle = V1_TO_V2_LIFECYCLE.get(v1_state, "pending")
     state_ok = actual.state.value == expected_lifecycle
     phase_ok = expected.get("phase") in (None, actual.phase.value)
     blocker_ok = expected.get("blocker") in (None, actual.blocker.value if actual.blocker else None)
     ids = [item.media_id for item in actual.media.inline]
     slots = [item.slot for item in actual.media.inline]
-    media_ok = actual.media.accepted == expected.get("accepted", actual.media.accepted) and actual.media.missing == expected.get("missing", actual.media.missing) and ids == expected_ids and slots == expected_slots
+    required_ok = "required" not in expected or actual.media.required == expected["required"]
+    media_ok = required_ok and actual.media.accepted == expected.get("accepted", actual.media.accepted) and actual.media.missing == expected.get("missing", actual.media.missing) and ids == expected_ids and slots == expected_slots
     featured_ok = expected_featured is None or actual.media.featured.status.value == expected_featured
     action_ok = actual_action == expected_action
     sections = {

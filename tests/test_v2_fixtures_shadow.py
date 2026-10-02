@@ -44,7 +44,7 @@ def test_deterministic_shadow_compares_state_progress_ids_slots_and_next_action(
     for case in json.loads(FIXTURES.read_text()):
         state = load_case(case)
         v1 = case["v1"]
-        expected = {**case["expected"], "phase": "validate" if v1["state"] == "ready" else ("editorial" if v1["state"] == "blocked" else "media")}
+        expected = {**case["expected"], "required": v1.get("required", v1.get("partial_required", 0)), "phase": "validate" if v1["state"] == "ready" else ("editorial" if v1["state"] == "blocked" else "media")}
         report = compare_work_state(
             case["post_id"], v1["state"], state,
             expected=expected,
