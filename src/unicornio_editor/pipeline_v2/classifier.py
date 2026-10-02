@@ -75,9 +75,9 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     blockers = [blocker for blocker, _ in failures]
     for blocker in blockers:
         if blocker not in MEDIA_BLOCKERS:
-            phase = Phase.EDITORIAL if blocker in {
+            phase = Phase.MEDIA if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN} else (Phase.EDITORIAL if blocker in {
                 BlockerCode.TEXT_QUALITY, BlockerCode.SEO, BlockerCode.STRUCTURE,
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
-            } else Phase.VALIDATE
+            } else Phase.VALIDATE)
             return Outcome.retry(phase, blocker)
     return Outcome.retry(Phase.MEDIA, blockers[0])

@@ -3,6 +3,7 @@
 from typing import Any, Callable
 
 from .classifier import classify
+from .errors import StageError
 from .model import FeaturedProgress, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
 
@@ -21,14 +22,23 @@ class PipelineRunner:
         media: MediaProgress = previous.media
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
-            outcome = classify(previous, editorial, {}, {"passed": False, "failures": []})
+            outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []})
         else:
-            media = self.stages["media"](context, previous, editorial)
-            if not isinstance(media, MediaProgress):
-                raise TypeError("MediaStage must return MediaProgress")
-            candidate = self.stages["compose"](context, editorial, media)
-            validation = self.stages["validate"](context, candidate)
-            outcome = classify(previous, editorial, media, validation)
+            try:
+                media = self.stages["media"](context, previous, editorial)
+                if not isinstance(media, MediaProgress):
+                    raise TypeError("MediaStage must return MediaProgress")
+                candidate = self.stages["compose"](context, editorial, media)
+                validation = self.stages["validate"](context, candidate)
+                outcome = classify(previous, editorial, media, validation)
+            except StageError as exc:
+                media = previous.media
+                outcome = classify(
+                    previous,
+                    {"decision": "process"},
+                    media,
+                    {"passed": False, "failures": [{"blocker": exc.blocker.value, "phase": exc.phase.value, "detail": exc.detail}]},
+                )
         self.state_store.commit(post_id, self._next_state(previous, editorial, media, outcome))
         return outcome
 
