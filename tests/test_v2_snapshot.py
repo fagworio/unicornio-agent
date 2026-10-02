@@ -1,4 +1,5 @@
 import json
+import pytest
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.snapshot import capture_snapshot, compare_snapshot
@@ -20,3 +21,9 @@ def test_compare_snapshot_runs_offline(tmp_path):
     assert report["post_id"] == 1
     assert report["state"]["v2"] == "pending"
     assert report["media"]["actual_ids"] == [7]
+
+
+def test_capture_snapshot_refuses_overwrite(tmp_path):
+    capture_snapshot(2, lambda _: {"status": "pending", "meta": {}}, lambda _: {}, tmp_path)
+    with pytest.raises(FileExistsError):
+        capture_snapshot(2, lambda _: {"status": "pending", "meta": {}}, lambda _: {}, tmp_path)

@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .legacy import LegacyStateLoader
+from .model import FeaturedStatus
 from .scheduler import next_action
-from .shadow import compare_work_state
+from .shadow import V1_TO_V2_LIFECYCLE, compare_work_state
 
 
 def capture_snapshot(post_id: int, post_reader: Callable[[int], dict[str, Any]], manifest_reader: Callable[[int], dict[str, Any]], output_dir: str | Path) -> Path:
@@ -17,8 +18,60 @@ def capture_snapshot(post_id: int, post_reader: Callable[[int], dict[str, Any]],
     payload = {"post_id": post_id, "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "wp": {"status": post.get("status"), "meta": post.get("meta", {})}, "manifest": manifest}
     target = Path(output_dir) / f"{post_id}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with target.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return target
+
+
+
+def expected_from_v1_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Build the shadow oracle from V1 fields only, never from WorkState."""
+    wp = snapshot.get("wp", {})
+    meta = wp.get("meta", {}) or {}
+    manifest = snapshot.get("manifest", {}) or {}
+    v1_state = meta.get("_hermes_state") or "new"
+    required = int(meta.get("_hermes_media_required") or 0)
+    completed = int(meta.get("_hermes_media_completed") or 0)
+    missing = int(meta.get("_hermes_media_missing") or max(0, required - completed))
+    last_error = str(meta.get("_hermes_last_error") or "")
+    kind = str(meta.get("_hermes_partial_kind") or "")
+    if kind == "media" and missing == 0 and completed == required and "imagens_visao" in last_error:
+        blocker = "featured_vision"
+    elif kind == "featured_vision":
+        blocker = "featured_vision"
+    elif kind == "featured_missing":
+        blocker = "featured_missing"
+    elif kind == "inline_missing" or v1_state == "partial":
+        blocker = "inline_missing"
+    elif v1_state == "blocked" and "qualidade_texto" in last_error:
+        blocker = "text_quality"
+    else:
+        blocker = None
+    phase = "media" if v1_state == "partial" else ("editorial" if v1_state == "blocked" else ("validate" if v1_state == "ready" else "relevance"))
+    assets = manifest.get("accepted_media", []) or [] if v1_state in {"partial", "blocked", "uncertain"} else []
+    ids = [int(item["media_id"]) for item in assets]
+    slots = [int(item.get("slot", item.get("paragraph_index", i + 1))) for i, item in enumerate(assets)]
+    featured = manifest.get("featured") if isinstance(manifest.get("featured"), dict) else {}
+    featured_status = {"rejected": "vision_rejected", "vision": "vision_rejected", "failed": "invalid"}.get(str(featured.get("status", "missing")), str(featured.get("status", "missing")))
+    lifecycle = V1_TO_V2_LIFECYCLE.get(v1_state, "pending")
+    if lifecycle != "pending":
+        phase = {"ready": "validate", "published": "publish", "skipped": "relevance"}.get(lifecycle)
+        blocker = None
+        required = completed = missing = 0
+        ids = slots = []
+        featured_status = "missing"
+        action = "none"
+    elif phase == "relevance":
+        action = "evaluate_relevance"
+    elif phase == "editorial":
+        action = "regenerate_editorial"
+    elif missing > 0:
+        action = "resolve_inline"
+    elif featured_status != "valid":
+        action = "resolve_featured"
+    else:
+        action = "validate"
+    return {"lifecycle": lifecycle, "phase": phase, "blocker": blocker, "required": required, "accepted": completed, "missing": missing, "media_ids": ids, "slots": slots, "featured": featured_status, "next_action": action}
 
 
 def compare_snapshot(path: str | Path) -> dict[str, Any]:
@@ -29,14 +82,12 @@ def compare_snapshot(path: str | Path) -> dict[str, Any]:
     manifest = snapshot.get("manifest", {})
     loader = LegacyStateLoader(lambda _: manifest)
     state = loader.load(post_id, wp.get("meta", {}))
-    action = next_action(state)
-    assets = manifest.get("accepted_media", []) or []
+    oracle = expected_from_v1_snapshot(snapshot)
     v1_state = (wp.get("meta", {}) or {}).get("_hermes_state") or "new"
-    active_manifest = v1_state in {"partial", "blocked", "uncertain"}
-    if not active_manifest:
-        assets = []
-    expected = {"required": state.media.required, "accepted": state.media.accepted, "missing": state.media.missing, "blocker": state.blocker.value if state.blocker else None, "phase": state.phase.value, "next_action": action}
-    report = compare_work_state(post_id, v1_state, state, expected=expected, expected_ids=[int(item["media_id"]) for item in assets], expected_slots=[int(item.get("slot", item.get("paragraph_index", i + 1))) for i, item in enumerate(assets)], expected_action=action, actual_action=action, expected_featured=state.media.featured.status.value)
+    action = next_action(state)
+    expected = {"required": oracle["required"], "accepted": oracle["accepted"], "missing": oracle["missing"], "blocker": oracle["blocker"], "phase": oracle["phase"], "next_action": oracle["next_action"]}
+    report = compare_work_state(post_id, v1_state, state, expected=expected, expected_ids=oracle["media_ids"], expected_slots=oracle["slots"], expected_action=oracle["next_action"], actual_action=action, expected_featured=oracle["featured"])
     report["snapshot"] = str(path)
-    report["writes"] = 0
+    report["production_writes"] = 0
+    report["wordpress_writes"] = 0
     return report
