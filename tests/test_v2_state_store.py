@@ -1,3 +1,5 @@
+import json
+
 from unicornio_editor.pipeline_v2.model import BlockerCode, LifecycleState, Phase, WorkState
 from unicornio_editor.pipeline_v2.state_store import StateStore
 
@@ -19,7 +21,7 @@ def test_state_store_round_trips_only_v2_work_state():
     state = WorkState(phase=Phase.MEDIA, blocker=BlockerCode.FEATURED_VISION, relevance_approved=True)
     store.commit(7, state)
     assert store.load(7) == state
-    assert backend.data[7]["_hermes_work_state"]["version"] == 2
+    assert json.loads(backend.data[7]["_hermes_work_state"])["version"] == 2
 
 
 def test_state_store_missing_post_is_pending_default():

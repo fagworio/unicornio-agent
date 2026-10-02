@@ -23,6 +23,9 @@ add_action( 'init', function () {
 		'rank_math_focus_keyword'    => 'sanitize_text_field',
 		// Estado operacional (fonte de verdade do queue/monitor/publish).
 		'_hermes_state'              => 'sanitize_text_field',
+		'_hermes_work_state'         => static function ( $value ) {
+			return is_string( $value ) ? $value : '';
+		}, // JSON canônico do estado V2
 		'_hermes_attempts'           => 'sanitize_text_field',
 		'_hermes_media_search_attempts' => 'sanitize_text_field',
 		'_hermes_partial_kind'        => 'sanitize_text_field',
