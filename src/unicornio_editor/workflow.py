@@ -367,8 +367,21 @@ def _apply_editorial_unlocked(
         for item in prior_media
         if isinstance(item.get("paragraph_index"), int)
     }
-    partial_featured_valid = (partial_manifest.get("featured") or {}).get("status") == "valid"
-    partial_featured_rejected = (partial_manifest.get("featured") or {}).get("status") == "vision_rejected"
+    effective_kind = _effective_partial_kind(state_before)
+    partial_featured = partial_manifest.get("featured") or {}
+    legacy_featured_vision = (
+        effective_kind == "featured_vision"
+        and partial_featured.get("status") == "valid"
+    )
+    if legacy_featured_vision:
+        partial_featured = {
+            **partial_featured,
+            "status": "vision_rejected",
+            "reason": str(state_info.get("last_error") or "featured vision rejected"),
+        }
+        partial_manifest = {**partial_manifest, "featured": partial_featured}
+    partial_featured_valid = partial_featured.get("status") == "valid"
+    partial_featured_rejected = partial_featured.get("status") == "vision_rejected"
     if partial_manifest:
         remaining_plan = []
         for item in (editorial.get("media_plan") or []):
