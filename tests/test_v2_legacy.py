@@ -16,8 +16,7 @@ def test_legacy_partial_media_maps_to_pending_media_with_progress():
         "partial_required": 4,
         "partial_completed": 4,
         "partial_missing": 0,
-        "last_error": "imagens_visao",
-    })
+    }, inline_assets=[{"media_id": i, "media_url": f"u{i}", "slot": i} for i in range(1, 5)])
     assert state.state is LifecycleState.PENDING
     assert state.phase is Phase.MEDIA
     assert state.blocker is BlockerCode.FEATURED_VISION

@@ -1,4 +1,8 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, MediaProgress, Outcome, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaProgress, Outcome, Phase, WorkState
+
+
+def mp(required, count):
+    return MediaProgress(required, tuple(InlineMedia(i, f"u{i}", i) for i in range(1, count + 1)))
 from unicornio_editor.pipeline_v2.session import run_session
 
 
@@ -9,8 +13,8 @@ class Store:
 
 def test_run_session_selects_nearest_to_ready_without_reservations():
     states = {
-        1: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True, media=MediaProgress(4, 0)),
-        2: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.FEATURED_VISION, relevance_approved=True, media=MediaProgress(4, 4)),
+        1: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True, media=mp(4, 0)),
+        2: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.FEATURED_VISION, relevance_approved=True, media=mp(4, 4)),
     }
     class Runner:
         def __init__(self): self.ids = []

@@ -54,7 +54,7 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str]]:
     return result
 
 
-def classify(previous: WorkState, editorial: dict[str, Any], media: dict[str, Any], validation: dict[str, Any]) -> Outcome:
+def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any]) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
     decision = editorial.get("decision")
     if decision == "skip":

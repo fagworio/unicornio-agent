@@ -1,4 +1,4 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaProgress, Phase, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
 
 
@@ -18,7 +18,7 @@ def test_runner_processes_one_post_and_persists_ready():
     calls = []
     stages = {
         "editorial": lambda context, state: {"decision": "process"},
-        "media": lambda context, state, editorial: (calls.append("media") or {}),
+        "media": lambda context, state, editorial: (calls.append("media") or MediaProgress()),
         "compose": lambda context, editorial, media: (calls.append("compose") or {}),
         "validate": lambda context, candidate: {"passed": True, "failures": []},
     }
@@ -46,7 +46,7 @@ def test_runner_exposes_media_blocker_as_pending_retry():
     store = MemoryStore()
     stages = {
         "editorial": lambda context, state: {"decision": "process"},
-        "media": lambda context, state, editorial: {},
+        "media": lambda context, state, editorial: MediaProgress(),
         "compose": lambda context, editorial, media: {},
         "validate": lambda context, candidate: {"passed": False, "failures": [{"gate": "imagens_visao"}]},
     }

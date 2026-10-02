@@ -18,14 +18,17 @@ class StateBackend(Protocol):
 class StateStore:
     KEY = "_hermes_work_state"
 
-    def __init__(self, backend: StateBackend):
+    def __init__(self, backend: StateBackend, legacy_loader=None):
         self._backend = backend
+        self._legacy_loader = legacy_loader
 
     def load(self, post_id: int) -> WorkState:
         raw = self._backend.get(post_id) or {}
         value = raw.get(self.KEY) if isinstance(raw, dict) else None
         if not isinstance(value, dict):
             if isinstance(raw, dict) and raw.get("_hermes_state"):
+                if self._legacy_loader is not None:
+                    return self._legacy_loader.load(post_id, raw)
                 return from_legacy_state({
                     "state": raw.get("_hermes_state"),
                     "attempts": raw.get("_hermes_attempts"),

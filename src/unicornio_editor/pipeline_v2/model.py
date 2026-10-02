@@ -90,32 +90,60 @@ class FeaturedProgress:
 
 
 @dataclass(frozen=True)
+class InlineMedia:
+    media_id: int
+    media_url: str
+    slot: int
+    alt_text: str = ""
+    credit_text: str = ""
+
+    def __post_init__(self) -> None:
+        if self.media_id < 1 or self.slot < 1:
+            raise ValueError("media_id and slot must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"media_id": self.media_id, "media_url": self.media_url, "slot": self.slot, "alt_text": self.alt_text, "credit_text": self.credit_text}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "InlineMedia":
+        return cls(int(value["media_id"]), str(value.get("media_url", "")), int(value.get("slot", value.get("paragraph_index", 0))), str(value.get("alt_text", "")), str(value.get("credit_text", "")))
+
+
+@dataclass(frozen=True)
 class MediaProgress:
     required: int = 0
-    accepted: int = 0
+    inline: tuple[InlineMedia, ...] = ()
     featured: FeaturedProgress = field(default_factory=FeaturedProgress)
 
     def __post_init__(self) -> None:
-        if self.required < 0 or self.accepted < 0:
+        if self.required < 0:
             raise ValueError("media counts cannot be negative")
-        if self.accepted > self.required:
+        ids = [item.media_id for item in self.inline]
+        slots = [item.slot for item in self.inline]
+        if len(ids) != len(set(ids)) or len(slots) != len(set(slots)):
+            raise ValueError("duplicate inline media or slot")
+        if len(self.inline) > self.required:
             raise ValueError("accepted cannot exceed required")
 
     @property
+    def accepted(self) -> int:
+        return len(self.inline)
+
+    @property
     def missing(self) -> int:
-        return self.required - self.accepted
+        return max(0, self.required - self.accepted)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "inline": {"required": self.required, "accepted": self.accepted, "missing": self.missing},
-            "featured": self.featured.to_dict(),
-        }
+        return {"inline": {"required": self.required, "accepted": [item.to_dict() for item in self.inline], "missing": self.missing}, "featured": self.featured.to_dict()}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "MediaProgress":
         value = value or {}
         inline = value.get("inline", value)
-        return cls(int(inline.get("required", 0)), int(inline.get("accepted", 0)), FeaturedProgress.from_dict(value.get("featured")))
+        assets = inline.get("accepted", []) if isinstance(inline, dict) else []
+        if isinstance(assets, int):
+            assets = []
+        return cls(int(inline.get("required", 0)), tuple(InlineMedia.from_dict(item) for item in assets), FeaturedProgress.from_dict(value.get("featured")))
 
 
 @dataclass(frozen=True)

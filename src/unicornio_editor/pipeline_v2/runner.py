@@ -18,12 +18,14 @@ class PipelineRunner:
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
         previous = self.state_store.load(post_id)
         editorial = self.stages["editorial"](context, previous)
-        media: dict[str, Any] = {}
+        media: MediaProgress = previous.media
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
             outcome = classify(previous, editorial, {}, {"passed": False, "failures": []})
         else:
             media = self.stages["media"](context, previous, editorial)
+            if not isinstance(media, MediaProgress):
+                raise TypeError("MediaStage must return MediaProgress")
             candidate = self.stages["compose"](context, editorial, media)
             validation = self.stages["validate"](context, candidate)
             outcome = classify(previous, editorial, media, validation)
@@ -31,27 +33,11 @@ class PipelineRunner:
         return outcome
 
     @staticmethod
-    def _media_progress(previous: WorkState, media: dict[str, Any]) -> MediaProgress:
-        inline = media.get("inline") if isinstance(media, dict) else None
-        featured = media.get("featured") if isinstance(media, dict) else None
-        if not isinstance(inline, dict):
-            return previous.media
-        required = int(inline.get("required", previous.media.required))
-        accepted_raw = inline.get("accepted", [])
-        accepted = accepted_raw if isinstance(accepted_raw, int) else len(accepted_raw or [])
-        featured = featured if isinstance(featured, dict) else {}
-        return MediaProgress(
-            required=required,
-            accepted=min(required, max(0, int(accepted))),
-            featured=FeaturedProgress(
-                status=str(featured.get("status", previous.media.featured.status)),
-                media_id=featured.get("media_id", previous.media.featured.media_id),
-                media_url=featured.get("media_url", previous.media.featured.media_url),
-            ),
-        )
+    def _media_progress(previous: WorkState, media: MediaProgress) -> MediaProgress:
+        return media
 
     @staticmethod
-    def _next_state(previous: WorkState, editorial: dict[str, Any], media: dict[str, Any], outcome: Outcome) -> WorkState:
+    def _next_state(previous: WorkState, editorial: dict[str, Any], media: MediaProgress, outcome: Outcome) -> WorkState:
         progress = PipelineRunner._media_progress(previous, media)
         if outcome.type is OutcomeType.READY:
             return WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, retry=previous.retry, relevance_approved=True, media=progress)

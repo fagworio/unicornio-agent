@@ -1,15 +1,8 @@
 import pytest
 
 from unicornio_editor.pipeline_v2.model import (
-    BlockerCode,
-    FeaturedProgress,
-    LifecycleState,
-    MediaProgress,
-    Outcome,
-    OutcomeType,
-    Phase,
-    RetryInfo,
-    WorkState,
+    BlockerCode, FeaturedProgress, InlineMedia, LifecycleState, MediaProgress,
+    Outcome, OutcomeType, Phase, RetryInfo, WorkState,
 )
 
 
@@ -22,7 +15,7 @@ def test_work_state_round_trips_v2_wire_format():
         relevance_approved=True,
         media=MediaProgress(
             required=4,
-            accepted=4,
+            inline=tuple(InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in range(1, 5)),
             featured=FeaturedProgress(status="vision_rejected", media_id=123),
         ),
     )
@@ -31,16 +24,12 @@ def test_work_state_round_trips_v2_wire_format():
 
     assert restored == state
     assert state.to_dict()["version"] == 2
-    assert state.to_dict()["media"]["inline"] == {
-        "required": 4,
-        "accepted": 4,
-        "missing": 0,
-    }
+    assert [item["media_id"] for item in state.to_dict()["media"]["inline"]["accepted"]] == [1, 2, 3, 4]
 
 
 def test_work_state_rejects_invalid_lifecycle_and_progress():
     with pytest.raises(ValueError, match="accepted cannot exceed required"):
-        MediaProgress(required=2, accepted=3)
+        MediaProgress(required=2, inline=tuple(InlineMedia(i, "u", i) for i in (1, 2, 3)))
 
     with pytest.raises(ValueError, match="READY requires"):
         WorkState(state=LifecycleState.READY, phase=Phase.MEDIA)
