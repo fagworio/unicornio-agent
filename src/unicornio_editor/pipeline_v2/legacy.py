@@ -43,6 +43,13 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
         required = _int(value.get("partial_required"))
         accepted = min(required, _int(value.get("partial_completed")))
         kind = value.get("partial_kind") or ""
+        if (
+            kind == "media"
+            and _int(value.get("partial_missing")) == 0
+            and _int(value.get("partial_completed")) == _int(value.get("partial_required"))
+            and "imagens_visao" in str(value.get("last_error") or "")
+        ):
+            kind = "featured_vision"
         blocker = {
             "featured_vision": BlockerCode.FEATURED_VISION,
             "featured_missing": BlockerCode.FEATURED_MISSING,
@@ -76,6 +83,20 @@ class LegacyStateLoader:
     def __init__(self, manifest_loader):
         self._manifest_loader = manifest_loader
 
+    @staticmethod
+    def _normalize_featured(value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not value:
+            return value
+        normalized = {**value}
+        status = str(normalized.get("status", "missing")).lower()
+        normalized["status"] = {
+            "rejected": "vision_rejected",
+            "vision": "vision_rejected",
+            "vision_rejected": "vision_rejected",
+            "failed": "invalid",
+        }.get(status, status)
+        return normalized
+
     def load(self, post_id: int, wp_meta: dict[str, Any]) -> WorkState:
         manifest = self._manifest_loader(post_id) or {}
         accepted = manifest.get("accepted_media", []) or []
@@ -88,7 +109,7 @@ class LegacyStateLoader:
                 "alt_text": str(item.get("alt_text", "")),
                 "credit_text": str(item.get("credit_text", "")),
             })
-        featured = manifest.get("featured") if isinstance(manifest.get("featured"), dict) else None
+        featured = self._normalize_featured(manifest.get("featured") if isinstance(manifest.get("featured"), dict) else None)
         value = {
             "state": wp_meta.get("_hermes_state"),
             "attempts": wp_meta.get("_hermes_attempts"),

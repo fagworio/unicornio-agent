@@ -2,7 +2,7 @@
 
 from typing import Any, Callable
 
-from .classifier import classify
+from .classifier import classify, classify_stage_error
 from .errors import StageError
 from .model import FeaturedProgress, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
@@ -21,8 +21,8 @@ class PipelineRunner:
         try:
             editorial = self.stages["editorial"](context, previous)
         except StageError as exc:
-            editorial = {"decision": "process"}
-            outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": [{"blocker": exc.blocker.value, "phase": exc.phase.value, "detail": exc.detail}]})
+            editorial = {}
+            outcome = classify_stage_error(previous, exc)
             self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
             return outcome
         media: MediaProgress = previous.media
@@ -38,12 +38,7 @@ class PipelineRunner:
                 validation = self.stages["validate"](context, candidate)
                 outcome = classify(previous, editorial, media, validation)
             except StageError as exc:
-                outcome = classify(
-                    previous,
-                    {"decision": "process"},
-                    media,
-                    {"passed": False, "failures": [{"blocker": exc.blocker.value, "phase": exc.phase.value, "detail": exc.detail}]},
-                )
+                outcome = classify_stage_error(previous, exc)
         self.state_store.commit(post_id, self._next_state(previous, editorial, media, outcome))
         return outcome
 

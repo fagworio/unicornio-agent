@@ -61,14 +61,19 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
     return result
 
 
-def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None) -> Outcome:
+def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None, now: datetime | None = None) -> Outcome:
     if next_at is None:
+        now = now or datetime.now(timezone.utc)
         delay = 30 * (4 ** min(previous.retry.attempts, 3))
-        next_at = (datetime.now(timezone.utc) + timedelta(minutes=delay)).isoformat(timespec="seconds")
+        next_at = (now + timedelta(minutes=delay)).isoformat(timespec="seconds")
     return Outcome.retry(phase, blocker, next_at)
 
 
-def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any]) -> Outcome:
+def classify_stage_error(previous: WorkState, exc: Any, *, now: datetime | None = None) -> Outcome:
+    return _retry(previous, exc.phase, exc.blocker, now=now)
+
+
+def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
     decision = editorial.get("decision")
     if decision == "skip":
@@ -76,7 +81,7 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if decision == "uncertain":
         if previous.retry.attempts >= 1:
             return Outcome.human_required(Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
-        return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
+        return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN, now=now)
     if decision != "process":
         return Outcome.human_required(Phase.RELEVANCE, BlockerCode.INTERNAL_ERROR)
 
@@ -84,14 +89,16 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if not failures and validation.get("passed", False):
         return Outcome.ready()
     if not failures:
-        return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR)
+        return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now)
 
     blockers = [blocker for blocker, _, _ in failures]
     for blocker, _, phase_override in failures:
+        if phase_override is not None:
+            return _retry(previous, phase_override, blocker, now=now)
         if blocker not in MEDIA_BLOCKERS:
             phase = phase_override or (Phase.MEDIA if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN} else (Phase.EDITORIAL if blocker in {
                 BlockerCode.TEXT_QUALITY, BlockerCode.SEO, BlockerCode.STRUCTURE,
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
             } else Phase.VALIDATE))
-            return _retry(previous, phase, blocker)
-    return _retry(previous, Phase.MEDIA, blockers[0])
+            return _retry(previous, phase, blocker, now=now)
+    return _retry(previous, Phase.MEDIA, blockers[0], now=now)
