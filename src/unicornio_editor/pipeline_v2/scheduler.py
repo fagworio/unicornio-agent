@@ -1,6 +1,8 @@
 """Pure distance-to-ready ranking for V2 work states."""
 
-from .model import BlockerCode, Phase, WorkState
+from datetime import datetime, timezone
+
+from .model import BlockerCode, LifecycleState, Phase, WorkState
 
 
 def rank(state: WorkState) -> int:
@@ -16,3 +18,35 @@ def rank(state: WorkState) -> int:
     if state.phase is Phase.RELEVANCE:
         return 100
     return 50
+
+
+def _cooldown_expired(value: str | None, now: datetime) -> bool:
+    if not value:
+        return True
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= now
+
+
+def select(candidates, state_store, *, limit: int = 5, now: datetime | None = None):
+    """Filter eligible pending work, rank it, and reserve one NEW slot when possible."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    now = now or datetime.now(timezone.utc)
+    eligible = []
+    for item in candidates:
+        state = state_store.load(item[0])
+        if state.state is not LifecycleState.PENDING or not _cooldown_expired(state.retry.next_at, now):
+            continue
+        eligible.append((item, state))
+    eligible.sort(key=lambda pair: rank(pair[1]), reverse=True)
+    new_states = [(item, state) for item, state in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
+    if limit == 1 or not new_states:
+        return [item for item, _ in eligible[:limit]]
+    new_item = new_states[0][0]
+    selected = [item for item, _ in eligible if item != new_item][: max(0, limit - 1)]
+    return selected + [new_item]

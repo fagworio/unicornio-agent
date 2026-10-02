@@ -6,6 +6,7 @@ WordPress. Only this boundary knows the V2 persistence key.
 
 from typing import Any, Protocol
 
+from .legacy import from_legacy_state
 from .model import LifecycleState, WorkState
 
 
@@ -24,6 +25,18 @@ class StateStore:
         raw = self._backend.get(post_id) or {}
         value = raw.get(self.KEY) if isinstance(raw, dict) else None
         if not isinstance(value, dict):
+            if isinstance(raw, dict) and raw.get("_hermes_state"):
+                return from_legacy_state({
+                    "state": raw.get("_hermes_state"),
+                    "attempts": raw.get("_hermes_attempts"),
+                    "next_retry_at": raw.get("_hermes_next_retry_at"),
+                    "last_error": raw.get("_hermes_last_error"),
+                    "partial_kind": raw.get("_hermes_partial_kind"),
+                    "partial_required": raw.get("_hermes_media_required"),
+                    "partial_completed": raw.get("_hermes_media_completed"),
+                    "partial_missing": raw.get("_hermes_media_missing"),
+                    "no_progress_attempts": raw.get("_hermes_no_progress_attempts"),
+                })
             return WorkState()
         return WorkState.from_dict(value)
 
