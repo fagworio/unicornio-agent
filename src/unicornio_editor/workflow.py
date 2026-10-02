@@ -574,9 +574,22 @@ def _apply_editorial_unlocked(
                     featured_manifest["media_id"] = featured_id
                     featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
                     featured_manifest["credit_text"] = featured_credit or featured_manifest.get("credit_text", "")
-                required = _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities).get("required", 0)
-                completed = len([item for item in accepted if not item.get("featured")])
-                missing = max(0, required - completed)
+                images_summary, media_drift = _reconcile_partial_media(
+                    content,
+                    _post_title(post) or editorial["seo"]["title"],
+                    image_entities,
+                    accepted,
+                    stored={
+                        "required": partial_manifest.get("required", state_before.get("partial_required", 0)),
+                        "completed": partial_manifest.get("completed", state_before.get("partial_completed", 0)),
+                        "missing": partial_manifest.get("missing", state_before.get("partial_missing", 0)),
+                    },
+                )
+                required = images_summary["required"]
+                completed = images_summary["valid"]
+                missing = images_summary["missing"]
+                if media_drift:
+                    append_telemetry(root, "partial_media_drift", post_id=post_id, **media_drift)
                 featured_status = str(featured_manifest.get("status") or "missing")
                 if missing and featured_status not in {"missing", "valid"}:
                     partial_kind = "mixed_media"
@@ -1199,6 +1212,52 @@ def _images_summary(content: str, title: str, entities: set[str] | None = None) 
         "non_webp": non_webp,
         "duplicates": duplicates,
     }
+
+
+def _reconcile_partial_media(
+    content: str,
+    title: str,
+    entities: set[str] | None,
+    accepted_media: list[dict[str, Any]] | None,
+    *,
+    stored: dict[str, Any] | None = None,
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    """Reconcile real HTML coverage with assets recorded by a PARTIAL run."""
+    summary = _images_summary(content, title, entities)
+    content_urls: set[str] = set()
+    for item in iter_content_images(content):
+        src = str(item.get("src") or "").strip()
+        if src and image_is_relevant(
+            alt_text=str(item.get("alt") or ""),
+            credit_text=str(item.get("caption") or ""),
+            source_url=src,
+            entities=entities or set(),
+        ):
+            content_urls.add(src)
+    accepted_urls = {
+        str(item.get("media_url") or "").strip()
+        for item in (accepted_media or [])
+        if isinstance(item, dict) and not item.get("featured") and item.get("media_url")
+    }
+    required_value = int(stored.get("required") or 0) if stored is not None else 0
+    required = max(summary["required"], required_value)
+    effective_valid = min(required, len(content_urls | accepted_urls))
+    reconciled = {**summary, "required": required, "valid": effective_valid, "missing": max(0, required - effective_valid)}
+    drift = None
+    if stored is not None:
+        stored_value = {
+            "required": int(stored.get("required") or 0),
+            "completed": int(stored.get("completed") or 0),
+            "missing": int(stored.get("missing") or 0),
+        }
+        derived_value = {
+            "required": reconciled["required"],
+            "completed": reconciled["valid"],
+            "missing": reconciled["missing"],
+        }
+        if stored_value != derived_value:
+            drift = {"stored": stored_value, "derived": derived_value}
+    return reconciled, drift
 
 
 
@@ -3232,13 +3291,22 @@ def build_cards(
         cleaned = clean_html(raw)
         images = _images_summary(cleaned, title, entities)
         featured = _featured_diagnosis(client, post, entities)
+        partial_media_drift = None
         if state == STATE_PARTIAL:
-            images = {
-                **images,
-                "required": state_info.get("partial_required", images.get("required", 0)),
-                "valid": state_info.get("partial_completed", images.get("valid", 0)),
-                "missing": state_info.get("partial_missing", images.get("missing", 0)),
-            }
+            partial_manifest = _load_partial_manifest(root, post_id)
+            images, partial_media_drift = _reconcile_partial_media(
+                cleaned,
+                title,
+                entities,
+                _partial_media_records(partial_manifest),
+                stored={
+                    "required": state_info.get("partial_required", images.get("required", 0)),
+                    "completed": state_info.get("partial_completed", images.get("valid", 0)),
+                    "missing": state_info.get("partial_missing", images.get("missing", 0)),
+                },
+            )
+            if partial_media_drift:
+                append_telemetry(root, "partial_media_drift", post_id=post_id, **partial_media_drift)
         fix = _fix_plan(backups_dir, images, featured, blocked) if blocked else None
         if state == STATE_PARTIAL:
             fix = {
@@ -3277,12 +3345,13 @@ def build_cards(
                 "blocked": blocked,
                 "partial": state == STATE_PARTIAL,
                 "partial_progress": {
-                    "required": state_info.get("partial_required", 0),
-                    "completed": state_info.get("partial_completed", 0),
-                    "missing": state_info.get("partial_missing", 0),
+                    "required": images.get("required", state_info.get("partial_required", 0)),
+                    "completed": images.get("valid", state_info.get("partial_completed", 0)),
+                    "missing": images.get("missing", state_info.get("partial_missing", 0)),
                     "processing_passes": state_info.get("processing_passes", 0),
                     "no_progress_attempts": state_info.get("no_progress_attempts", 0),
                 } if state == STATE_PARTIAL else None,
+                "partial_media_drift": partial_media_drift,
                 "partial_kind": partial_kind,
                 "blocked_reason": _blocked_reason(backups_dir) if blocked else None,
                 "fix": fix,

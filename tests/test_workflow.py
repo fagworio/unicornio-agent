@@ -1815,7 +1815,9 @@ class WorkflowTests(unittest.TestCase):
             report = apply_editorial(client, self.config(False), Path(directory), 42, payload)
             self.assertEqual(report["status"], "partial")
             self.assertEqual(report["state"], "partial")
-            self.assertEqual(report["partial"]["missing"], 2)
+            # O conteúdo já cobre as duas imagens inline; a falha restante é
+            # exclusivamente a featured ausente.
+            self.assertEqual(report["partial"]["missing"], 0)
             self.assertEqual(client.updated[0][1]["meta"]["_hermes_state"], "partial")
             # O conteúdo incompleto não é gravado no WordPress.
             self.assertNotIn("content", client.updated[0][1])

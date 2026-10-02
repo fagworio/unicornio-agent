@@ -125,6 +125,7 @@ class MediaProgress:
     required: int = 0
     inline: tuple[InlineMedia, ...] = ()
     featured: FeaturedProgress = field(default_factory=FeaturedProgress)
+    accepted_count: int | None = None
 
     def __post_init__(self) -> None:
         if self.required < 0:
@@ -135,17 +136,21 @@ class MediaProgress:
             raise ValueError("duplicate inline media or slot")
         if len(self.inline) > self.required:
             raise ValueError("accepted cannot exceed required")
+        if self.accepted_count is not None and (
+            self.accepted_count < len(self.inline) or self.accepted_count > self.required
+        ):
+            raise ValueError("accepted_count must cover inline assets and not exceed required")
 
     @property
     def accepted(self) -> int:
-        return len(self.inline)
+        return len(self.inline) if self.accepted_count is None else self.accepted_count
 
     @property
     def missing(self) -> int:
         return max(0, self.required - self.accepted)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"inline": {"required": self.required, "accepted": [item.to_dict() for item in self.inline], "missing": self.missing}, "featured": self.featured.to_dict()}
+        return {"inline": {"required": self.required, "accepted": [item.to_dict() for item in self.inline], "accepted_count": self.accepted, "missing": self.missing}, "featured": self.featured.to_dict()}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "MediaProgress":
@@ -154,7 +159,11 @@ class MediaProgress:
         assets = inline.get("accepted", []) if isinstance(inline, dict) else []
         if isinstance(assets, int):
             assets = []
-        return cls(int(inline.get("required", 0)), tuple(InlineMedia.from_dict(item) for item in assets), FeaturedProgress.from_dict(value.get("featured")))
+        accepted_count = inline.get("accepted_count") if isinstance(inline, dict) else None
+        parsed_count = int(accepted_count) if accepted_count is not None else None
+        if parsed_count is not None and parsed_count == len(assets):
+            parsed_count = None
+        return cls(int(inline.get("required", 0)), tuple(InlineMedia.from_dict(item) for item in assets), FeaturedProgress.from_dict(value.get("featured")), parsed_count)
 
 
 @dataclass(frozen=True)

@@ -87,7 +87,7 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
             blocker=blocker,
             retry=retry,
             relevance_approved=True,
-            media=MediaProgress(required, assets, featured_value),
+            media=MediaProgress(required, assets, featured_value, accepted_count=accepted),
         )
 
     # Preserve V1 media progress even when apply recorded multiple blockers.
@@ -106,7 +106,7 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
     required = _int(value.get("partial_required"))
     assets = tuple(InlineMedia.from_dict(item) for item in (inline_assets or []))
     featured_value = FeaturedProgress(str((featured or {}).get("status", "missing")), (featured or {}).get("media_id"), (featured or {}).get("media_url"))
-    media = MediaProgress(required, assets, featured_value) if required or assets else MediaProgress()
+    media = MediaProgress(required, assets, featured_value, accepted_count=_int(value.get("partial_completed")) if required else None) if required or assets else MediaProgress()
     return WorkState(state=LifecycleState.PENDING, phase=phase, blocker=blocker, retry=retry, relevance_approved=bool(kind in media_kind_blockers), media=media)
 
 
