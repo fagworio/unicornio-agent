@@ -180,6 +180,19 @@ def _partial_retry(
     return {"state": STATE_PARTIAL, "next_retry_at": retry_at.isoformat(timespec="seconds")}
 
 
+def _effective_partial_kind(state_info: dict[str, Any]) -> str | None:
+    """Map legacy media markers to the current featured-vision retry kind."""
+    kind = state_info.get("partial_kind")
+    last_error = str(state_info.get("last_error") or "").casefold()
+    if (
+        kind == "media"
+        and int(state_info.get("partial_missing") or 0) == 0
+        and any(token in last_error for token in ("imagens_visao", "imagens visão", "featured vision"))
+    ):
+        return "featured_vision"
+    return kind
+
+
 def _recover_partial_featured(
     client: WordPressClient,
     post_id: int,
@@ -355,6 +368,7 @@ def _apply_editorial_unlocked(
         if isinstance(item.get("paragraph_index"), int)
     }
     partial_featured_valid = (partial_manifest.get("featured") or {}).get("status") == "valid"
+    partial_featured_rejected = (partial_manifest.get("featured") or {}).get("status") == "vision_rejected"
     if partial_manifest:
         remaining_plan = []
         for item in (editorial.get("media_plan") or []):
@@ -370,7 +384,11 @@ def _apply_editorial_unlocked(
         config=config,
         root=root,
         post_title=_post_title(post),
-        existing_featured_id=int(post.get("featured_media") or 0) or None,
+        existing_featured_id=(
+            None
+            if partial_featured_rejected
+            else int(post.get("featured_media") or 0) or None
+        ),
     )
     media_results, featured_id, featured_credit = _execute_media_plan(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id
@@ -383,7 +401,7 @@ def _apply_editorial_unlocked(
         featured_id, featured_credit = _recover_partial_featured(
             client, post_id, partial_manifest
         )
-    if featured_id is None and not config.dry_run:
+    if featured_id is None and not config.dry_run and not partial_featured_rejected:
         featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
     html = editorial["cleaned_html"]
     if combined_media_results and not config.dry_run:
@@ -435,7 +453,14 @@ def _apply_editorial_unlocked(
     # Tentativas anteriores (antes desta): base do teto deterministico de
     # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
     checklist = run_pre_publish_checklist(
-        post={**post, "featured_media": featured_id or post.get("featured_media")},
+        post={
+            **post,
+            "featured_media": (
+                featured_id
+                if featured_id is not None
+                else (None if partial_featured_rejected else post.get("featured_media"))
+            ),
+        },
         editorial=editorial_with_media,
         content=content,
         backup_path=backup,
@@ -477,7 +502,61 @@ def _apply_editorial_unlocked(
                         seen_media.add(media_id)
                 featured_before = partial_manifest.get("featured") or {}
                 featured_manifest = dict(featured_before) if isinstance(featured_before, dict) else {"status": "missing"}
-                if featured_id:
+                featured_vision_failure = next(
+                    (
+                        row for row in (media_preflight.get("featured_vision") or [])
+                        if isinstance(row, dict) and row.get("status") == "rejected"
+                    ),
+                    None,
+                )
+                checklist_featured_failure = next(
+                    (
+                        item for item in failed_items
+                        if any(token in str(item.get(key) or "").casefold()
+                               for key in ("name", "detail")
+                               for token in ("featured", "imagens_visao", "imagens visão", "vision"))
+                    ),
+                    None,
+                )
+                if not featured_vision_failure and checklist_featured_failure:
+                    featured_vision_failure = {
+                        "reason": str(checklist_featured_failure.get("detail") or checklist_featured_failure.get("name") or "featured vision rejected"),
+                        "index": None,
+                    }
+                if featured_vision_failure:
+                    failed_index = featured_vision_failure.get("index")
+                    candidate = (
+                        (editorial.get("media_plan") or [])[failed_index]
+                        if isinstance(failed_index, int)
+                        and 0 <= failed_index < len(editorial.get("media_plan") or [])
+                        else {}
+                    )
+                    rejected_id = candidate.get("media_library_id") or featured_id or featured_manifest.get("media_id")
+                    rejected_url = str(
+                        candidate.get("direct_image_url")
+                        or (current_featured or {}).get("media_url")
+                        or featured_manifest.get("media_url")
+                        or ""
+                    )
+                    if isinstance(rejected_id, int) and rejected_id > 0:
+                        try:
+                            rejected_url = str(client.get_media(rejected_id).get("source_url") or rejected_url)
+                        except Exception:  # noqa: BLE001 - preserve the candidate evidence
+                            pass
+                    featured_manifest.update({
+                        "status": "vision_rejected",
+                        "media_id": rejected_id,
+                        "media_url": rejected_url,
+                        "reason": str(
+                            featured_vision_failure.get("reason")
+                            or featured_manifest.get("reason")
+                            or "featured vision rejected"
+                        ),
+                    })
+                elif featured_id:
+                    # Upload existence is not a gate result. A featured is
+                    # valid only after the checklist has been evaluated and no
+                    # featured vision gate failed.
                     featured_manifest["status"] = "valid"
                     featured_manifest["media_id"] = featured_id
                     featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
@@ -490,7 +569,7 @@ def _apply_editorial_unlocked(
                     partial_kind = "mixed_media"
                 elif missing:
                     partial_kind = "inline_missing"
-                elif featured_status in {"rejected", "vision", "failed"}:
+                elif featured_status in {"rejected", "vision", "failed", "vision_rejected"}:
                     partial_kind = "featured_vision"
                 elif featured_status != "valid":
                     partial_kind = "featured_missing"
@@ -3138,7 +3217,7 @@ def build_cards(
                 "featured": "provide" if featured.get("action") in {"provide", "replace"} else featured.get("action"),
                 "requires_content": False,
             }
-        partial_kind = state_info.get("partial_kind") if state == STATE_PARTIAL else None
+        partial_kind = _effective_partial_kind(state_info) if state == STATE_PARTIAL else None
         featured_only = partial_kind in {"featured_missing", "featured_vision"} and not images.get("missing")
         cards.append(
             {

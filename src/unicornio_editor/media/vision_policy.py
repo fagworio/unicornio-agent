@@ -69,6 +69,26 @@ def featured_vision_subject(editorial: Mapping[str, Any]) -> str:
         candidate = editorial.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
+    # Editorial schema deliberately keeps post subjects derived rather than
+    # accepting model-supplied top-level identity fields.  Use the same
+    # deterministic extractor as the media evidence gate.
+    try:
+        from .evidence import post_subjects
+        seo = editorial.get("seo") or {}
+        derived = post_subjects(
+            title=str(seo.get("title") or ""),
+            content_html=str(editorial.get("cleaned_html") or ""),
+            focus_keyword=str(seo.get("focus_keyword") or ""),
+        )
+        focus = str(seo.get("focus_keyword") or "").strip()
+        if focus and focus.casefold() not in _GENERIC_FOCUS:
+            if str(editorial.get("cleaned_html") or "").strip():
+                return focus.casefold()
+            return focus
+        if derived and str(derived[0].get("subject") or "").strip():
+            return str(derived[0]["subject"]).strip()
+    except Exception:  # noqa: BLE001 - fallback remains deterministic
+        pass
     seo = editorial.get("seo") or {}
     for key in ("focus_keyword",):
         candidate = editorial.get(key) or seo.get(key)
