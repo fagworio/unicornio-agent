@@ -59,10 +59,12 @@ def next_action(state: WorkState) -> str:
         return "evaluate_relevance"
     if state.phase is Phase.EDITORIAL:
         return "regenerate_editorial"
+    if state.blocker in {BlockerCode.INLINE_MISSING, BlockerCode.MEDIA_INVALID, BlockerCode.MEDIA_DUPLICATE, BlockerCode.MEDIA_ORIGIN}:
+        return "resolve_inline"
+    if state.blocker in {BlockerCode.FEATURED_MISSING, BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION}:
+        return "resolve_featured"
     if state.media.missing > 0:
         return "resolve_inline"
     if state.media.featured.status is not FeaturedStatus.VALID:
         return "resolve_featured"
-    if state.phase is Phase.RELEVANCE:
-        return "evaluate_relevance"
     return "validate"

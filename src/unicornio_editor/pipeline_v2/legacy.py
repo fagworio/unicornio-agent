@@ -91,8 +91,9 @@ def from_legacy_state(value: dict[str, Any] | None, *, inline_assets: list[dict[
         )
 
     # V1 BLOCKED/NEW/PROCESSING and missing state all remain safely pending.
-    phase = Phase.EDITORIAL if old in {"blocked", "processing"} else Phase.RELEVANCE
     blocker = _blocked_blocker(str(value.get("last_error") or "")) if old == "blocked" else None
+    media_blockers = {BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION, BlockerCode.INLINE_MISSING, BlockerCode.MEDIA_INVALID}
+    phase = Phase.MEDIA if blocker in media_blockers else (Phase.EDITORIAL if old in {"blocked", "processing"} else Phase.RELEVANCE)
     return WorkState(state=LifecycleState.PENDING, phase=phase, blocker=blocker, retry=retry)
 
 

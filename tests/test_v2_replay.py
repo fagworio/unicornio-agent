@@ -20,6 +20,8 @@ def test_replay_snapshot_uses_recording_store_and_never_external_state(tmp_path)
         "validate": lambda context, candidate: {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
     }
     result = replay_snapshot(path, stages)
-    assert result["outcome"] == OutcomeType.RETRY.value
+    assert result["outcome"]["type"] == OutcomeType.RETRY.value
     assert result["recording_writes"] == 1
+    assert result["proposed"]["state"] == "pending"
+    assert result["proposed"]["next_action"] == "resolve_inline"
     assert result["context"]["title"]["raw"] == "Replay"
