@@ -1,4 +1,4 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, MediaProgress, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, MediaProgress, Outcome, Phase, WorkState
 from unicornio_editor.pipeline_v2.session import run_session
 
 
@@ -16,7 +16,7 @@ def test_run_session_selects_nearest_to_ready_without_reservations():
         def __init__(self): self.ids = []
         def run_one(self, post_id, context):
             self.ids.append(post_id)
-            return type("Outcome", (), {"type": type("T", (), {"value": "retry"})()})()
+            return Outcome.retry(Phase.MEDIA, BlockerCode.INLINE_MISSING)
     runner = Runner()
     report = run_session([(1, {}), (2, {})], Store(states), runner, limit=1)
     assert runner.ids == [2]
