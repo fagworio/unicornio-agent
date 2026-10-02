@@ -71,6 +71,22 @@ def build_parser() -> argparse.ArgumentParser:
         "queue",
         help="estado deterministico da fila: pending x ja editados (somente leitura)",
     )
+
+    v2_shadow_parser = subparsers.add_parser(
+        "v2-shadow", help="captura e compara V2 em modo estritamente read-only"
+    )
+    v2_shadow_parser.add_argument("post_ids", nargs="+", type=int)
+    v2_shadow_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_shadow_parser.add_argument("--output-dir", type=Path, default=None)
+
+    v2_write_parser = subparsers.add_parser(
+        "v2-write", help="aplica um editorial pela fronteira V2, sem publicar"
+    )
+    v2_write_parser.add_argument("post_id", type=int)
+    v2_write_parser.add_argument("editorial_file", type=Path)
+    v2_write_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_write_parser.add_argument("--write", action="store_true", help="confirma escrita explícita no WordPress")
+
     queue_parser.add_argument("--root", type=Path, default=Path("."))
     queue_parser.add_argument(
         "--monitor",
@@ -1735,7 +1751,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "apply" and getattr(args, "dry_run", False):
             config = replace(config, dry_run=True)
         client = WordPressClient(config)
-        if args.command == "list-pending":
+        if args.command == "v2-shadow":
+            from .pipeline_v2.operational import run_shadow
+
+            output_dir = args.output_dir or (args.root / "work" / "v2-shadow" / "snapshots")
+            result = run_shadow(client, list(args.post_ids), args.root, output_dir)
+        elif args.command == "v2-write":
+            from .pipeline_v2.operational import run_write_one
+
+            editorial = json.loads(args.editorial_file.read_text(encoding="utf-8"))
+            result = run_write_one(client, config, args.root, args.post_id, editorial, allow_write=bool(args.write))
+        elif args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
             if args.compact:
                 result = _compact_listing(result)
