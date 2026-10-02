@@ -4,11 +4,12 @@ Shadow is GET/filesystem-only. The write command is deliberately separate and
 reuses the existing fully gated apply path; it never publishes.
 """
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .legacy import LegacyStateLoader
-from .model import LifecycleState
+from .model import InlineMedia, LifecycleState, MediaProgress
 from .production_reader import ProductionShadowReader
 from .snapshot import capture_snapshot, compare_snapshot
 from .state_store import StateStore
@@ -69,6 +70,26 @@ def run_shadow(client, post_ids: list[int], root: Path, output_dir: Path) -> dic
     }
 
 
+def _merge_ready_media(initial_state, result: dict[str, Any], final_state):
+    """Carry V2 media identity across apply's READY manifest cleanup."""
+    if result.get("status") != "ready":
+        return final_state
+    existing = {item.media_id for item in initial_state.media.inline}
+    added = []
+    for item in result.get("media_plan_results", []) or []:
+        if not isinstance(item, dict) or item.get("featured") or int(item.get("media_id") or 0) in existing:
+            continue
+        added.append(InlineMedia.from_dict({
+            "media_id": int(item["media_id"]),
+            "media_url": str(item.get("media_url", "")),
+            "slot": int(item.get("paragraph_index", len(initial_state.media.inline) * 3)),
+            "alt_text": str(item.get("alt_text", "")),
+            "credit_text": str(item.get("credit_text", "")),
+        }))
+    media = MediaProgress(initial_state.media.required, tuple(initial_state.media.inline) + tuple(added), initial_state.media.featured)
+    return replace(final_state, media=media)
+
+
 def run_write_one(client, config, root: Path, post_id: int, editorial: dict[str, Any], *, allow_write: bool) -> dict[str, Any]:
     if not allow_write:
         raise ValueError("write mode requires --write explicitly")
@@ -83,7 +104,7 @@ def run_write_one(client, config, root: Path, post_id: int, editorial: dict[str,
     result = apply_editorial(counted_client, config, root, post_id, editorial)
     final_post = counted_client.get_post(post_id)
     final_meta = final_post.get("meta", {}) if isinstance(final_post, dict) else {}
-    final_state = legacy_loader.load(post_id, final_meta)
+    final_state = _merge_ready_media(initial_state, result, legacy_loader.load(post_id, final_meta))
     StateStore(WordPressStateBackend(counted_client)).commit(post_id, final_state)
     verified_post = counted_client.get_post(post_id)
     verified_state = StateStore(WordPressStateBackend(counted_client)).load(post_id)
