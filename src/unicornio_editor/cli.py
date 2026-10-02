@@ -595,6 +595,7 @@ def _compact_cards(report: dict) -> dict:
             for key in (
                 "id", "title", "state", "attempts", "retry_mode", "next_retry_at",
                 "previous_relevance_reason", "uncertain_second_pass_eligible", "seo_exists", "images",
+                "wordpress_images", "working_images", "partial_media_drift",
                 "featured", "game_hint", "blocked", "partial", "partial_progress", "requires_content",
             )
         }

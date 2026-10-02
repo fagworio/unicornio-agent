@@ -1239,8 +1239,7 @@ def _reconcile_partial_media(
         for item in (accepted_media or [])
         if isinstance(item, dict) and not item.get("featured") and item.get("media_url")
     }
-    required_value = int(stored.get("required") or 0) if stored is not None else 0
-    required = max(summary["required"], required_value)
+    required = summary["required"]
     effective_valid = min(required, len(content_urls | accepted_urls))
     reconciled = {**summary, "required": required, "valid": effective_valid, "missing": max(0, required - effective_valid)}
     drift = None
@@ -3284,18 +3283,28 @@ def build_cards(
         meta = post.get("meta") or {}
         if not isinstance(meta, dict):
             meta = {}
-        entities = extract_entities(title=title, content_html=raw)
-        # Delta sobre o conteudo LIMPO (o que o apply realmente produz): o
-        # clean_html preserva figuras com credito completo — sem isso o card
-        # contaria imagens que o apply descartaria (loop de rework invisivel).
-        cleaned = clean_html(raw)
-        images = _images_summary(cleaned, title, entities)
+        wordpress_cleaned = clean_html(raw)
+        working_cleaned = wordpress_cleaned
+        if state == STATE_PARTIAL:
+            try:
+                draft = load_draft(root, post_id)
+                draft_html = str(draft.get("cleaned_html") or "")
+                if draft_html:
+                    working_cleaned = clean_html(draft_html)
+            except WorkflowError:
+                pass
+        entities = extract_entities(title=title, content_html=working_cleaned)
+        # O conteúdo publicado e o working draft são visões diferentes:
+        # PARTIAL ainda não grava HTML no WordPress, então a decisão de mídia
+        # deve continuar do draft persistido, não do conteúdo antigo.
+        wordpress_images = _images_summary(wordpress_cleaned, title, extract_entities(title=title, content_html=wordpress_cleaned))
+        images = _images_summary(working_cleaned, title, entities)
         featured = _featured_diagnosis(client, post, entities)
         partial_media_drift = None
         if state == STATE_PARTIAL:
             partial_manifest = _load_partial_manifest(root, post_id)
             images, partial_media_drift = _reconcile_partial_media(
-                cleaned,
+                working_cleaned,
                 title,
                 entities,
                 _partial_media_records(partial_manifest),
@@ -3325,6 +3334,8 @@ def build_cards(
                 "entities": sorted(entities),
                 "original_link": meta.get("original_link"),
                 "seo_exists": _seo_is_valid(meta),
+                "wordpress_images": wordpress_images,
+                "working_images": images,
                 "images": images,
                 "featured": featured,
                 "game_hint": _game_hint(title),

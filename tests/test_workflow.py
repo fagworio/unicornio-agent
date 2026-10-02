@@ -1245,7 +1245,9 @@ class WorkflowTests(unittest.TestCase):
             saved = json.loads((backup / "editorial.partial.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["featured"]["status"], "vision_rejected")
             self.assertEqual(saved["partial_kind"], "featured_vision")
-            self.assertEqual(saved["completed"], 4)
+            # A obrigação atual vem do conteúdo efetivo; o required=4 antigo
+            # serve apenas para drift e não pode inflar um draft curto.
+            self.assertEqual(saved["completed"], 2)
             self.assertEqual(saved["missing"], 0)
 
     def test_apply_dry_run_blocks_media_plan(self):
