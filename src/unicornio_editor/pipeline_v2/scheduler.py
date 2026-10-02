@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from .model import BlockerCode, LifecycleState, Phase, WorkState
+from .model import BlockerCode, FeaturedStatus, LifecycleState, Phase, WorkState
 
 
 def rank(state: WorkState) -> int:
@@ -50,3 +50,17 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
     new_item = new_states[0][0]
     selected = [item for item, _ in eligible if item != new_item][: max(0, limit - 1)]
     return selected + [new_item]
+
+
+def next_action(state: WorkState) -> str:
+    if state.state in {LifecycleState.READY, LifecycleState.PUBLISHED, LifecycleState.SKIPPED, LifecycleState.HUMAN_REQUIRED}:
+        return "none"
+    if state.phase is Phase.EDITORIAL:
+        return "regenerate_editorial"
+    if state.media.missing > 0:
+        return "resolve_inline"
+    if state.media.featured.status is not FeaturedStatus.VALID:
+        return "resolve_featured"
+    if state.phase is Phase.RELEVANCE:
+        return "evaluate_relevance"
+    return "validate"
