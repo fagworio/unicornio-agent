@@ -32,6 +32,9 @@ def compare_snapshot(path: str | Path) -> dict[str, Any]:
     action = next_action(state)
     assets = manifest.get("accepted_media", []) or []
     v1_state = (wp.get("meta", {}) or {}).get("_hermes_state") or "new"
+    active_manifest = v1_state in {"partial", "blocked", "uncertain"}
+    if not active_manifest:
+        assets = []
     expected = {"required": state.media.required, "accepted": state.media.accepted, "missing": state.media.missing, "blocker": state.blocker.value if state.blocker else None, "phase": state.phase.value, "next_action": action}
     report = compare_work_state(post_id, v1_state, state, expected=expected, expected_ids=[int(item["media_id"]) for item in assets], expected_slots=[int(item.get("slot", item.get("paragraph_index", i + 1))) for i, item in enumerate(assets)], expected_action=action, actual_action=action, expected_featured=state.media.featured.status.value)
     report["snapshot"] = str(path)
