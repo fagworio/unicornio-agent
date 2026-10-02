@@ -3157,7 +3157,8 @@ def build_cards(
         state_value = _state_for_card(post)
         post_id = int(post.get("id") or 0)
         state_info = read_state(post)
-        if state_value == STATE_PARTIAL and state_info.get("partial_kind") in {
+        partial_kind = _effective_partial_kind(state_info)
+        if state_value == STATE_PARTIAL and partial_kind in {
             "featured_missing", "featured_vision",
         } and state_info.get("partial_missing", 0) == 0:
             return (-1, post_id)
