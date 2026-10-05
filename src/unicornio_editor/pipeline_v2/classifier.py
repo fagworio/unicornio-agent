@@ -73,7 +73,7 @@ def classify_stage_error(previous: WorkState, exc: Any, *, now: datetime | None 
     return _retry(previous, exc.phase, exc.blocker, now=now)
 
 
-def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None) -> Outcome:
+def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None, no_progress: int | None = None) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
     decision = editorial.get("decision")
     if decision == "skip":
@@ -101,10 +101,7 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
             } else Phase.VALIDATE))
             return _retry(previous, phase, blocker, now=now)
-    if previous.retry.no_progress >= 1 and not (
-        getattr(media, "accepted", 0) > previous.media.accepted
-        or getattr(media.featured, "status", None) != previous.media.featured.status
-        or getattr(media.featured, "media_id", None) != previous.media.featured.media_id
-    ):
+    effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
+    if effective_no_progress >= 2:
         return Outcome.human_required(Phase.MEDIA, blockers[0])
     return _retry(previous, Phase.MEDIA, blockers[0], now=now)

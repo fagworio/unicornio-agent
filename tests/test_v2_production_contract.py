@@ -49,9 +49,40 @@ def test_two_consecutive_media_no_progress_escalates_human():
         {"decision": "process"},
         MediaProgress(2),
         {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
+        no_progress=2,
     )
     assert outcome.type.value == "human_required"
     assert outcome.blocker is BlockerCode.INLINE_MISSING
+
+
+def test_runner_counts_two_real_media_no_progress_attempts():
+    store = Store(WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True, media=MediaProgress(2)))
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda context, state, editorial: MediaProgress(2),
+        "compose": lambda context, editorial, media: {},
+        "validate": lambda context, candidate: {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
+    }
+    runner = PipelineRunner(store, stages)
+    context = {"editorial": {"decision": "process"}}
+    first = runner.run_one(42, context)
+    assert first.type.value == "retry"
+    assert store.state.retry.no_progress == 1
+    second = runner.run_one(42, context)
+    assert second.type.value == "human_required"
+    assert store.state.retry.no_progress == 2
+
+
+def test_missing_persisted_artifact_fails_closed():
+    store = Store(WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True, media=MediaProgress(2)))
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: (_ for _ in ()).throw(AssertionError("media must not run")),
+        "compose": lambda *_: {},
+        "validate": lambda *_: {"passed": True, "failures": []},
+    }
+    outcome = PipelineRunner(store, stages).run_one(42, {})
+    assert outcome.blocker is BlockerCode.MANIFEST_INVALID
 
 
 def test_old_new_post_gets_turn_with_limit_one():

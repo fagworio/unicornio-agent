@@ -16,7 +16,7 @@ def test_runner_persists_media_progress_from_stage():
         "compose": lambda context, editorial, media: {},
         "validate": lambda context, candidate: {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
     }
-    PipelineRunner(store, stages).run_one(1, {})
+    PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
     assert store.state.media.required == 4
     assert store.state.media.accepted == 3
     assert store.state.media.missing == 1

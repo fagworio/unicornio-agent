@@ -46,10 +46,11 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
     eligible.sort(key=lambda pair: rank(pair[1]), reverse=True)
     new_states = [(item, state) for item, state in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
     if limit == 1 and new_states:
-        # A NEW post older than one day must get a turn even when a near-READY
-        # retry exists; otherwise limit=1 can starve the intake indefinitely.
+        # Reserve one deterministic two-hour slot out of every three for an
+        # aged NEW post. The other two slots remain retry-first, bounding
+        # starvation in both directions.
         aged_new = [item for item, _ in new_states if _candidate_age(item, now) >= 1]
-        if aged_new:
+        if aged_new and (now.hour // 2) % 3 == 0:
             return [min(aged_new, key=lambda item: _candidate_date(item))]
     if limit == 1 or not new_states:
         return [item for item, _ in eligible[:limit]]
