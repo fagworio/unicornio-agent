@@ -46,6 +46,7 @@ class ProductionContextLoader:
     def load(self, post: dict[str, Any]) -> dict[str, Any]:
         post_id = int(post["id"])
         directory = self.root / "backups" / str(post_id)
+        candidate = self._read_json(directory / "editorial.candidate.json")
         manifest = self._read_json(directory / "editorial.partial.json")
         draft = self._read_json(directory / "editorial.draft.json")
         if not draft:
@@ -59,6 +60,7 @@ class ProductionContextLoader:
             "meta": post.get("meta") or {},
             "draft": draft,
             "editorial": draft or None,
+            "candidate": candidate or None,
             "manifest": manifest,
             "original_link": (post.get("meta") or {}).get("original_link"),
         }

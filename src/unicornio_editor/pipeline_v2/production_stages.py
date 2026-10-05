@@ -142,7 +142,9 @@ class ProductionValidateStage:
     def __call__(self, context: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
         try:
             post = _post(context)
-            checklist = run_pre_publish_checklist(post=post, editorial=candidate["editorial"], content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
+            checklist_editorial = dict(candidate["editorial"])
+            checklist_editorial.pop("decision", None)
+            checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
             return {"passed": bool(checklist.get("all_passed")), "failures": [{"gate": item["name"]} for item in checklist.get("items", []) if item.get("status") == "fail"], "checklist": checklist}
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.VALIDATE, str(exc)) from exc
