@@ -108,10 +108,17 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
         if phase_override is not None:
             return _retry(previous, phase_override, blocker, now=now)
         if blocker not in MEDIA_BLOCKERS:
-            phase = phase_override or (Phase.MEDIA if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN} else (Phase.EDITORIAL if blocker in {
+            if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
+                phase = Phase.RELEVANCE
+            elif blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN}:
+                phase = Phase.MEDIA
+            elif blocker in {
                 BlockerCode.TEXT_QUALITY, BlockerCode.SEO, BlockerCode.STRUCTURE,
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
-            } else Phase.VALIDATE))
+            }:
+                phase = Phase.EDITORIAL
+            else:
+                phase = Phase.VALIDATE
             return _retry(previous, phase, blocker, now=now)
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     if effective_no_progress >= 2:

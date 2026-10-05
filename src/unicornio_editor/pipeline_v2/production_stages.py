@@ -63,7 +63,9 @@ class ProductionEditorialStage:
             envelope = load_editorial_batch(generated["output"])
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)
             if not item or item.get("status") == "needs_retry":
-                raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, str((item or {}).get("reason") or "editorial provider requested retry"))
+                reason = str((item or {}).get("reason") or "editorial provider requested retry")
+                _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry")})
+                raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, reason)
             editorial = resolve_editorial_defaults(dict(item["editorial"]), _post(context))
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
@@ -72,6 +74,7 @@ class ProductionEditorialStage:
         except StageError:
             raise
         except EditorialProviderError as exc:
+            _write_json(self.root, post_id, "editorial.error.json", {"reason": str(exc), "status": "provider_error"})
             raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, str(exc)) from exc
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, str(exc)) from exc

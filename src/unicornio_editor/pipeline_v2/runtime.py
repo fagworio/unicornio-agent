@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..checklist import required_image_count
+from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import post_subjects
 from ..seo.rank_math import build_meta
@@ -37,7 +38,8 @@ class ProductionMediaResolver:
 
     def __call__(self, context, state, editorial, previous):
         html = str(editorial.get("cleaned_html") or "")
-        needed = max(0, required_image_count(len(html.split()), title=str(context.get("title") or ""), content=html) - previous.accepted)
+        total_required = required_image_count(word_count(html), title=str(context.get("title") or ""), content=html)
+        needed = max(0, total_required - previous.accepted)
         if needed == 0 and previous.featured.status is FeaturedStatus.VALID:
             return previous
         from ..cli import _resolve_media_batch
@@ -48,12 +50,16 @@ class ProductionMediaResolver:
         resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True)
         row = (resolved.get("posts") or [{}])[0]
         plan = []
-        for index, candidate in enumerate(row.get("audit_candidates") or row.get("candidates") or []):
+        approved = list(row.get("reuse") or [])
+        approved.extend(candidate for candidate in (row.get("audit_candidates") or []) if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match")
+        for index, candidate in enumerate(approved):
             if len(plan) >= search_needed:
                 break
             if not candidate.get("direct_image_url"):
                 continue
-            plan.append({**candidate, "paragraph_index": (index - 1) * 3 if previous.featured.status is not FeaturedStatus.VALID else index * 3, "is_featured": previous.featured.status is not FeaturedStatus.VALID and index == 0, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
+            is_featured = previous.featured.status is not FeaturedStatus.VALID and len(plan) == 0
+            slot = 0 if is_featured else (max(0, len(plan) - (1 if previous.featured.status is not FeaturedStatus.VALID else 0)) * 3)
+            plan.append({**candidate, "paragraph_index": slot, "is_featured": is_featured, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
         checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""))
         results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
         inline = list(previous.inline)
@@ -63,8 +69,8 @@ class ProductionMediaResolver:
                 inline.append(InlineMedia(int(row["media_id"]), str(row["media_url"]), int(row.get("paragraph_index", 0)), str(row.get("alt_text", "")), str(row.get("credit_text", ""))))
             if row.get("featured") and row.get("media_id"):
                 featured = FeaturedProgress(FeaturedStatus.VALID, int(row["media_id"]), str(row.get("media_url") or ""))
-        required = max(previous.required, required_image_count(len(html.split()), title=str(context.get("title") or ""), content=html))
-        return MediaProgress(required=required, inline=tuple({item.media_id: item for item in inline}.values()), featured=featured)
+        total_required = required_image_count(word_count(html), title=str(context.get("title") or ""), content=html)
+        return MediaProgress(required=max(previous.required, total_required), inline=tuple({item.media_id: item for item in inline}.values()), featured=featured)
 
 
 class WordPressWriterV2:
@@ -93,7 +99,7 @@ class WordPressWriterV2:
             latest = self.root / "backups" / str(post_id) / "editorial.latest.json"
             if draft.is_file(): latest.write_text(draft.read_text(encoding="utf-8"), encoding="utf-8")
         journal = journal_dir / f"{post_id}.json"
-        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest()}
+        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": context.get("provider_reason")}
         journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
         if outcome.type.value == "ready" and content:
@@ -107,8 +113,18 @@ class WordPressWriterV2:
             self.client.update_post(post_id, update)
             readback = self.client.get_post(post_id)
             changed = True
-        journal.write_text(json.dumps({**intent, "status": "committed", "readback": bool(readback)}, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"wordpress_changed": changed, "readback": bool(readback), "ready_hash": ready_hash}
+        if not isinstance(readback, dict):
+            raise RuntimeError("WordPress read-back missing")
+        readback_meta = readback.get("meta") or {}
+        if readback_meta.get("_hermes_work_state") != state_json:
+            raise RuntimeError("V2 state read-back mismatch")
+        if outcome.type.value == "ready":
+            if (readback.get("content") or {}).get("raw") != content:
+                raise RuntimeError("candidate content read-back mismatch")
+            if readback_meta.get("_hermes_ready_hash") != ready_hash:
+                raise RuntimeError("ready hash read-back mismatch")
+        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"wordpress_changed": changed, "readback": True, "ready_hash": ready_hash}
 
 
 def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
@@ -127,8 +143,14 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             buffered = BufferedStateStore(initial)
             stages = {"editorial": ProductionEditorialStage(client, config, root), "media": ProductionMediaStage(client, config, root, resolver=ProductionMediaResolver(client, config, root)), "compose": ProductionComposeStage(config, root), "validate": ProductionValidateStage(client, config, root)}
             outcome = PipelineRunner(buffered, stages).run_one(post_id, context)
-            write = WordPressWriterV2(client, root).commit(post_id, context, buffered.state, outcome)
-            details.append({"post_id": post_id, "initial_state": initial.state.value, "phase": buffered.state.phase.value, "outcome": outcome.type.value, "blocker": outcome.blocker.value if outcome.blocker else None, **write})
+            error_path = root / "backups" / str(post_id) / "editorial.error.json"
+            if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
+                try:
+                    context["provider_reason"] = json.loads(error_path.read_text(encoding="utf-8")).get("reason")
+                except (OSError, ValueError):
+                    context["provider_reason"] = "provider_error"
+            write = WordPressWriterV2(client, root, policy_version=config.policy_version).commit(post_id, context, buffered.state, outcome)
+            details.append({"post_id": post_id, "initial_state": initial.state.value, "phase": buffered.state.phase.value, "outcome": outcome.type.value, "blocker": outcome.blocker.value if outcome.blocker else None, "detail": context.get("provider_reason"), **write})
         return {"selected": len(selected), "locked": False, "details": details}
     finally:
         lock.release()
