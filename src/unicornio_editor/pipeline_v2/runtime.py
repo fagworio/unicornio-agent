@@ -43,18 +43,19 @@ class ProductionMediaResolver:
         from ..cli import _resolve_media_batch
         subject_rows = post_subjects(title=str(context.get("title") or ""), content_html=html, focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""), game_name=editorial.get("game_name"))
         subject = str((subject_rows[0] if subject_rows else {}).get("subject") or context.get("title") or "")
-        batch = {"schema_version": 1, "batch_id": f"v2-{context['post_id']}", "posts": [{"post_id": int(context["post_id"]), "subject": subject, "query": subject, "needed": needed, "limit": max(needed, 1), "engine": "auto", "size": "xga", "ratio": "w"}]}
+        search_needed = needed + (0 if previous.featured.status is FeaturedStatus.VALID else 1)
+        batch = {"schema_version": 1, "batch_id": f"v2-{context['post_id']}", "posts": [{"post_id": int(context["post_id"]), "subject": subject, "query": subject, "needed": search_needed, "limit": max(search_needed, 1), "engine": "auto", "size": "xga", "ratio": "w"}]}
         resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True)
         row = (resolved.get("posts") or [{}])[0]
         plan = []
         for index, candidate in enumerate(row.get("audit_candidates") or row.get("candidates") or []):
-            if len(plan) >= needed:
+            if len(plan) >= search_needed:
                 break
             if not candidate.get("direct_image_url"):
                 continue
-            plan.append({**candidate, "paragraph_index": index * 3, "is_featured": False, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
+            plan.append({**candidate, "paragraph_index": (index - 1) * 3 if previous.featured.status is not FeaturedStatus.VALID else index * 3, "is_featured": previous.featured.status is not FeaturedStatus.VALID and index == 0, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
         checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""))
-        results, _featured_id, _featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
+        results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
         inline = list(previous.inline)
         featured = previous.featured
         for row in results:

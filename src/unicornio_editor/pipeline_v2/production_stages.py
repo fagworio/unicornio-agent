@@ -102,7 +102,7 @@ class ProductionMediaStage:
                 results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
                 inline = tuple(InlineMedia(int(row["media_id"]), str(row["media_url"]), int(row.get("paragraph_index", 0)), str(row.get("alt_text", "")), str(row.get("credit_text", ""))) for row in results if row.get("status") in {"accepted", "ok"} and row.get("media_id") and not row.get("featured"))
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
-                fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, featured_credit) if featured_id else featured
+                fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
                 media = MediaProgress(required=max(required, len(inline)), inline=inline, featured=fp)
             _write_json(self.root, int(context["post_id"]), "editorial.partial.json", media.to_dict())
             return media
