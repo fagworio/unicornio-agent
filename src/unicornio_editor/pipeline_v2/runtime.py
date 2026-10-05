@@ -50,7 +50,21 @@ class ProductionMediaResolver:
         resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True)
         row = (resolved.get("posts") or [{}])[0]
         plan = []
-        approved = list(row.get("reuse") or [])
+        approved = []
+        for reused in row.get("reuse") or []:
+            if not isinstance(reused, dict):
+                continue
+            # _reuse_from_library returns the compact {url, source, media_id}
+            # shape; _execute_media_plan consumes the canonical media-plan
+            # names. Normalize here so valid library media participates in the
+            # deficit instead of being silently discarded.
+            approved.append({
+                **reused,
+                "direct_image_url": reused.get("direct_image_url") or reused.get("url"),
+                "source_page_url": reused.get("source_page_url") or reused.get("source"),
+                "media_library_id": reused.get("media_library_id") or reused.get("media_id"),
+                "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
+            })
         approved.extend(candidate for candidate in (row.get("audit_candidates") or []) if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match")
         for index, candidate in enumerate(approved):
             if len(plan) >= search_needed:
