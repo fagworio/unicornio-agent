@@ -124,7 +124,7 @@ class ProductionComposeStage:
 
     def __call__(self, context: dict[str, Any], editorial: dict[str, Any], media: MediaProgress) -> dict[str, Any]:
         try:
-            placements: list[dict[str, Any]] = [{"paragraph_index": item.slot, "media_id": item.media_id, "media_url": item.media_url, "alt_text": item.alt_text, "credit_text": item.credit_text, "width": 1200, "height": 800} for item in media.inline]
+            placements: list[dict[str, Any]] = [{"paragraph_index": item.slot, "media_url": item.media_url, "alt_text": item.alt_text, "credit_text": item.credit_text, "width": 1200, "height": 800} for item in media.inline]
             working = dict(editorial)
             working["cleaned_html"] = insert_media(str(editorial["cleaned_html"]), placements, listicle=bool(editorial.get("listicle"))) if placements else str(editorial["cleaned_html"])
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)

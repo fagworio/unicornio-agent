@@ -87,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     v2_write_parser.add_argument("--root", type=Path, default=Path("."))
     v2_write_parser.add_argument("--write", action="store_true", help="confirma escrita explícita no WordPress")
 
+    v2_run_parser = subparsers.add_parser("v2-run", help="executa uma sessão operacional V2")
+    v2_run_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_run_parser.add_argument("--limit", type=int, default=1)
+
     queue_parser.add_argument("--root", type=Path, default=Path("."))
     queue_parser.add_argument(
         "--monitor",
@@ -1762,6 +1766,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             editorial = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = run_write_one(client, config, args.root, args.post_id, editorial, allow_write=bool(args.write))
+        elif args.command == "v2-run":
+            from .pipeline_v2.runtime import run_v2
+
+            result = run_v2(client, config, args.root, limit=int(args.limit))
         elif args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
             if args.compact:
