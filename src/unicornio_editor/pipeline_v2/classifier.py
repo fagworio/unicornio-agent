@@ -101,4 +101,10 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
             } else Phase.VALIDATE))
             return _retry(previous, phase, blocker, now=now)
+    if previous.retry.no_progress >= 1 and not (
+        getattr(media, "accepted", 0) > previous.media.accepted
+        or getattr(media.featured, "status", None) != previous.media.featured.status
+        or getattr(media.featured, "media_id", None) != previous.media.featured.media_id
+    ):
+        return Outcome.human_required(Phase.MEDIA, blockers[0])
     return _retry(previous, Phase.MEDIA, blockers[0], now=now)

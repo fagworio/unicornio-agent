@@ -45,11 +45,33 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
         eligible.append((item, state))
     eligible.sort(key=lambda pair: rank(pair[1]), reverse=True)
     new_states = [(item, state) for item, state in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
+    if limit == 1 and new_states:
+        # A NEW post older than one day must get a turn even when a near-READY
+        # retry exists; otherwise limit=1 can starve the intake indefinitely.
+        aged_new = [item for item, _ in new_states if _candidate_age(item, now) >= 1]
+        if aged_new:
+            return [min(aged_new, key=lambda item: _candidate_date(item))]
     if limit == 1 or not new_states:
         return [item for item, _ in eligible[:limit]]
     new_item = new_states[0][0]
     selected = [item for item, _ in eligible if item != new_item][: max(0, limit - 1)]
     return selected + [new_item]
+
+
+def _candidate_date(item) -> datetime:
+    value = item[1].get("date") if isinstance(item, tuple) and len(item) > 1 else None
+    if isinstance(value, dict):
+        value = value.get("raw") or value.get("rendered")
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return datetime.max.replace(tzinfo=timezone.utc)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _candidate_age(item, now: datetime) -> int:
+    date = _candidate_date(item)
+    return max(0, (now - date).days)
 
 
 def next_action(state: WorkState) -> str:
