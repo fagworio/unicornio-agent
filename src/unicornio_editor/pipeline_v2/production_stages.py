@@ -17,9 +17,9 @@ from ..media.inserter import insert_media
 from ..workflow import (
     _execute_media_plan,
     compose_final_content,
+    attach_trailer_audit,
     resolve_editorial_defaults,
-    validate_media_plan,
-)
+    validate_media_plan,)
 from .errors import StageError
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Phase
 
@@ -50,6 +50,15 @@ class ProductionEditorialStage:
             prepared = prepare_batch(self.client, self.config, self.root, [post_id])
             if prepared.get("prepared") != 1:
                 raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, "post preparation failed")
+            input_path = Path(prepared["editorial_input"])
+            input_payload = json.loads(input_path.read_text(encoding="utf-8"))
+            draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
+            previous_editorial = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
+            validation_path = self.root / "backups" / str(post_id) / "editorial.validation.json"
+            if state.phase is Phase.EDITORIAL and validation_path.is_file():
+                validation = json.loads(validation_path.read_text(encoding="utf-8"))
+                input_payload["posts"][0]["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": validation.get("failures", []), "previous_editorial": previous_editorial or {}}
+                input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
             generated = generate_editorial_batch(
                 prepared["editorial_input"],
                 api_key=self.config.editorial_api_key,
@@ -64,9 +73,24 @@ class ProductionEditorialStage:
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)
             if not item or item.get("status") == "needs_retry":
                 reason = str((item or {}).get("reason") or "editorial provider requested retry")
-                _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry")})
-                raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, reason)
+                reason_lower = reason.casefold()
+                if "meta_description" in reason_lower or "seo" in reason_lower:
+                    blocker, phase = BlockerCode.SEO, Phase.EDITORIAL
+                elif "matched_topics" in reason_lower or "relevan" in reason_lower:
+                    blocker, phase = BlockerCode.RELEVANCE_UNCERTAIN, Phase.RELEVANCE
+                elif "quality" in reason_lower or "keyword" in reason_lower or "content" in reason_lower:
+                    blocker, phase = BlockerCode.TEXT_QUALITY, Phase.EDITORIAL
+                else:
+                    blocker, phase = BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL
+                _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry"), "blocker": blocker.value})
+                raise StageError(blocker, phase, reason)
             editorial = resolve_editorial_defaults(dict(item["editorial"]), _post(context))
+            if state.phase is Phase.EDITORIAL and isinstance(previous_editorial, dict):
+                merged = dict(previous_editorial)
+                merged.update({key: value for key, value in editorial.items() if value is not None})
+                if isinstance(previous_editorial.get("seo"), dict) and isinstance(editorial.get("seo"), dict):
+                    merged["seo"] = {**previous_editorial["seo"], **editorial["seo"]}
+                editorial = merged
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
@@ -131,6 +155,7 @@ class ProductionComposeStage:
             working = dict(editorial)
             working["cleaned_html"] = insert_media(str(editorial["cleaned_html"]), placements, listicle=bool(editorial.get("listicle"))) if placements else str(editorial["cleaned_html"])
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
+            working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "featured_media": media.featured.media_id, "media": media.to_dict(), "trailer": trailer, "trailer_status": trailer_status}
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
@@ -148,7 +173,9 @@ class ProductionValidateStage:
             checklist_editorial = dict(candidate["editorial"])
             checklist_editorial.pop("decision", None)
             checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
-            return {"passed": bool(checklist.get("all_passed")), "failures": [{"gate": item["name"]} for item in checklist.get("items", []) if item.get("status") == "fail"], "checklist": checklist}
+            failures = [{"gate": item["name"], "detail": item.get("detail", "")} for item in checklist.get("items", []) if item.get("status") == "fail"]
+            _write_json(self.root, int(context["post_id"]), "editorial.validation.json", {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist})
+            return {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist}
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.VALIDATE, str(exc)) from exc
 

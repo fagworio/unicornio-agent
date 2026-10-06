@@ -112,9 +112,11 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 phase = Phase.RELEVANCE
             elif blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.MEDIA_ORIGIN}:
                 phase = Phase.MEDIA
+            elif blocker is BlockerCode.TRAILER:
+                phase = Phase.COMPOSE
             elif blocker in {
                 BlockerCode.TEXT_QUALITY, BlockerCode.SEO, BlockerCode.STRUCTURE,
-                BlockerCode.SOURCE, BlockerCode.TRAILER, BlockerCode.SCHEMA,
+                BlockerCode.SOURCE, BlockerCode.SCHEMA,
             }:
                 phase = Phase.EDITORIAL
             else:

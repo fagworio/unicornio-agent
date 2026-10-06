@@ -66,9 +66,9 @@ _MEDIA_ITEM_SCHEMA = {
 _SEO_SCHEMA = {
     "type": ["object", "null"],
     "properties": {
-        "title": {"type": "string"},
-        "meta_description": {"type": "string"},
-        "focus_keyword": {"type": "string"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 65},
+        "meta_description": {"type": "string", "minLength": 120, "maxLength": 160},
+        "focus_keyword": {"type": "string", "minLength": 1},
     },
     "required": ["title", "meta_description", "focus_keyword"],
     "additionalProperties": False,
