@@ -2995,6 +2995,7 @@ def build_queue_report(
     partial_ids: list[int] = []
     recent_blocked: list[int] = []
     eligible_rework: list[int] = []
+    v2_eligible: list[int] = []
     ready_ids: list[int] = []
     awaiting_human_ids: list[int] = []
     uncertain_ids: list[int] = []
@@ -3007,6 +3008,26 @@ def build_queue_report(
         backups_dir = root / "backups" / str(post_id)
         state_info = read_state(post)
         state = state_info["state"]
+        v2_state = None
+        raw_v2_state = (post.get("meta") or {}).get("_hermes_work_state")
+        if raw_v2_state:
+            try:
+                from .pipeline_v2.model import WorkState
+
+                decoded_v2 = json.loads(raw_v2_state) if isinstance(raw_v2_state, str) else raw_v2_state
+                if isinstance(decoded_v2, dict) and decoded_v2.get("version") == 2:
+                    v2_state = WorkState.from_dict(decoded_v2)
+                    # V2 is authoritative whenever present. The legacy
+                    # _hermes_state marker is only a compatibility projection.
+                    state = v2_state.state.value
+                    state_info = {
+                        **state_info,
+                        "attempts": v2_state.retry.attempts,
+                        "next_retry_at": v2_state.retry.next_at or "",
+                        "no_progress_attempts": v2_state.retry.no_progress,
+                    }
+            except (TypeError, ValueError, json.JSONDecodeError):
+                v2_state = None
         latest_file = (backups_dir / "editorial.latest.json").is_file()
         blocked_file = (backups_dir / "editorial.blocked.json").is_file()
         uncertain_file = (backups_dir / "uncertain.json").is_file()
@@ -3045,6 +3066,8 @@ def build_queue_report(
                 eligible_rework.append(post_id)
         else:  # NEW / PROCESSING / desconhecido
             unprocessed.append(post_id)
+            if v2_state is not None and state == "pending" and cooldown_expired(state_info.get("next_retry_at") or ""):
+                v2_eligible.append(post_id)
             if _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
@@ -3067,11 +3090,30 @@ def build_queue_report(
                 "awaiting_human": state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
                 "title": title,
+                "v2": v2_state is not None,
+                "phase": v2_state.phase.value if v2_state is not None else None,
+                "blocker": v2_state.blocker.value if v2_state is not None and v2_state.blocker else None,
+                "no_progress": v2_state.retry.no_progress if v2_state is not None else state_info.get("no_progress_attempts", 0),
+                "eligible": (
+                    cooldown_expired(v2_state.retry.next_at if v2_state is not None else state_info.get("next_retry_at") or "")
+                    and state == "pending"
+                    if v2_state is not None else state in (STATE_NEW, STATE_BLOCKED, STATE_PARTIAL)
+                ),
+                "media": (
+                    {
+                        "required": v2_state.media.required,
+                        "accepted": v2_state.media.accepted,
+                        "missing": v2_state.media.missing,
+                        "featured": v2_state.media.featured.status.value,
+                    }
+                    if v2_state is not None else None
+                ),
             }
         )
     rows.sort(key=lambda row: int(row["id"] or 0))
     unprocessed.sort()
     recent_unprocessed.sort()
+    v2_eligible.sort()
     blocked_ids.sort()
     partial_ids.sort()
     recent_blocked.sort()
@@ -3106,6 +3148,7 @@ def build_queue_report(
         "partial_ids": partial_ids,
         "recent_blocked_ids": recent_blocked,
         "eligible_rework_ids": eligible_rework,
+        "v2_eligible_ids": v2_eligible,
         "ready_ids": ready_ids,
         "awaiting_human_ids": awaiting_human_ids,
         "uncertain_ids": uncertain_ids,

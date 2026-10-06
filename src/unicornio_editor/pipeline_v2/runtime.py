@@ -20,7 +20,7 @@ from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
 from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
-from .scheduler import select
+from .scheduler import _cooldown_expired, select
 
 
 class BufferedStateStore:
@@ -76,6 +76,7 @@ class ProductionMediaResolver:
         )
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
+        subject_meta: dict[str, dict[str, Any]] = {}
 
         def add_query(subject: str, query: str) -> None:
             subject = " ".join(str(subject or "").split()).strip()
@@ -86,6 +87,8 @@ class ProductionMediaResolver:
 
         for row in subject_rows:
             subject = str(row.get("subject") or "").strip()
+            if subject:
+                subject_meta[subject] = row
             add_query(subject, item_query(subject, title, extra=focus_keyword))
         if focus_keyword:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
@@ -112,7 +115,7 @@ class ProductionMediaResolver:
                 }],
             }
             resolved = _resolve_media_batch(
-                self.client, self.config, self.root, batch, full=True, allow_reuse=False
+                self.client, self.config, self.root, batch, full=True, allow_reuse=True
             )
             row = (resolved.get("posts") or [{}])[0]
             candidates: list[dict[str, Any]] = []
@@ -128,6 +131,8 @@ class ProductionMediaResolver:
                     "search_query": query,
                     "role": role,
                     "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
+                    "item_number": (subject_meta.get(subject) or {}).get("item"),
+                    "section_heading": (subject_meta.get(subject) or {}).get("heading") or subject,
                 })
             for candidate in row.get("audit_candidates") or []:
                 if not isinstance(candidate, dict):
@@ -136,6 +141,9 @@ class ProductionMediaResolver:
                 candidate["subject"] = subject
                 candidate["search_query"] = query
                 candidate["role"] = role
+                metadata = subject_meta.get(subject) or {}
+                candidate["item_number"] = metadata.get("item")
+                candidate["section_heading"] = metadata.get("heading") or subject
                 candidates.append(candidate)
             return candidates
 
@@ -157,8 +165,14 @@ class ProductionMediaResolver:
         inline_candidates: list[dict[str, Any]] = []
         if inline_needed:
             for subject, query in subject_queries:
-                inline_candidates.extend(resolve_query(subject, query, inline_needed, "inline"))
-                if len(self._approved_unique(inline_candidates)) >= inline_needed:
+                listicle = sum(1 for row in subject_rows if row.get("item") is not None) >= 2
+                inline_candidates.extend(
+                    resolve_query(subject, query, 1 if listicle else inline_needed, "inline")
+                )
+                # A listicle has an explicit subject identity per numbered
+                # section. Search every item independently; do not let the
+                # first item consume the whole article quota.
+                if not listicle and len(self._approved_unique(inline_candidates)) >= inline_needed:
                     break
 
         all_candidates = self._unique_candidates(featured_candidates + inline_candidates)
@@ -176,6 +190,18 @@ class ProductionMediaResolver:
             if candidate.get("direct_image_url")
             and str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "") not in featured_keys
         ]
+        is_listicle = sum(1 for row in subject_rows if row.get("item") is not None) >= 2
+        if is_listicle:
+            per_item: list[dict[str, Any]] = []
+            seen_items: set[str] = set()
+            for candidate in inline_approved:
+                item_key = str(candidate.get("item_number") or candidate.get("subject") or "")
+                if item_key and item_key not in seen_items:
+                    seen_items.add(item_key)
+                    per_item.append(candidate)
+            inline_approved = per_item + [
+                candidate for candidate in inline_approved if candidate not in per_item
+            ]
 
         plan: list[dict[str, Any]] = []
         if featured_needed and featured_selected:
@@ -211,12 +237,19 @@ class ProductionMediaResolver:
             if status and status not in {"accepted", "ok"}:
                 continue
             if result.get("media_id") and result.get("media_url") and not result.get("featured"):
+                plan_item = next(
+                    (item for item in plan if int(item.get("paragraph_index", -1)) == int(result.get("paragraph_index", -2))),
+                    {},
+                )
                 inline.append(InlineMedia(
                     int(result["media_id"]),
                     str(result["media_url"]),
                     int(result.get("paragraph_index", 0)),
                     str(result.get("alt_text", "")),
                     str(result.get("credit_text", "")),
+                    str(plan_item.get("subject") or ""),
+                    plan_item.get("item_number"),
+                    str(plan_item.get("section_heading") or ""),
                 ))
             if result.get("featured") and result.get("media_id"):
                 featured = FeaturedProgress(
@@ -386,22 +419,119 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
         return {"selected": 0, "locked": True, "details": []}
     try:
         reader = ProductionCandidateReader(client, root)
-        candidates = reader.read(page_size=max(10, limit))
-        selected = select(candidates, reader.state_store, limit=limit)
+        snapshot = reader.snapshot(page_size=max(10, limit))
+        now = datetime.now(timezone.utc)
+        candidates = [
+            (post_id, context) for post_id, context in snapshot
+            if context["v2_state"].state.value == "pending"
+            and _cooldown_expired(context["v2_state"].retry.next_at, now)
+        ]
+
+        class _SnapshotStore:
+            def __init__(self, items):
+                self.states = {post_id: context["v2_state"] for post_id, context in items}
+
+            def load(self, post_id):
+                return self.states[post_id]
+
+        selected = select(candidates, _SnapshotStore(candidates), limit=limit)
+        pending = [
+            context for _post_id, context in snapshot
+            if context["v2_state"].state.value == "pending"
+        ]
+        eligible_ids = {post_id for post_id, _context in candidates}
+        cooldown = [
+            (post_id, context) for post_id, context in snapshot
+            if context["v2_state"].state.value == "pending"
+            and post_id not in eligible_ids
+        ]
+        blockers: dict[str, int] = {}
+        for context in pending:
+            blocker = context["v2_state"].blocker.value if context["v2_state"].blocker else "none"
+            blockers[blocker] = blockers.get(blocker, 0) + 1
+        queue = {
+            "scanned": len(snapshot),
+            "pending": len(pending),
+            "eligible": len(candidates),
+            "cooldown": len(cooldown),
+            "by_blocker": blockers,
+            "next_eligible_at": min(
+                (
+                    context["v2_state"].retry.next_at
+                    for _post_id, context in cooldown
+                    if context["v2_state"].retry.next_at
+                ),
+                default=None,
+            ),
+            "no_progress": {
+                str(post_id): context["v2_state"].retry.no_progress
+                for post_id, context in snapshot
+                if context["v2_state"].retry.no_progress
+            },
+            "media": {
+                str(post_id): {
+                    "required": context["v2_state"].media.required,
+                    "accepted": context["v2_state"].media.accepted,
+                    "missing": context["v2_state"].media.missing,
+                    "featured": context["v2_state"].media.featured.status.value,
+                }
+                for post_id, context in snapshot
+                if context["v2_state"].state.value == "pending"
+            },
+        }
         details = []
+        completed = 0
+        failed = 0
+        stages = {
+            "editorial": ProductionEditorialStage(client, config, root),
+            "media": ProductionMediaStage(
+                client, config, root,
+                resolver=ProductionMediaResolver(client, config, root),
+            ),
+            "compose": ProductionComposeStage(config, root),
+            "validate": ProductionValidateStage(client, config, root),
+        }
         for post_id, context in selected:
             initial = context["v2_state"]
             buffered = BufferedStateStore(initial)
-            stages = {"editorial": ProductionEditorialStage(client, config, root), "media": ProductionMediaStage(client, config, root, resolver=ProductionMediaResolver(client, config, root)), "compose": ProductionComposeStage(config, root), "validate": ProductionValidateStage(client, config, root)}
-            outcome = PipelineRunner(buffered, stages).run_one(post_id, context)
-            error_path = root / "backups" / str(post_id) / "editorial.error.json"
-            if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
-                try:
-                    context["provider_reason"] = json.loads(error_path.read_text(encoding="utf-8")).get("reason")
-                except (OSError, ValueError):
-                    context["provider_reason"] = "provider_error"
-            write = WordPressWriterV2(client, root, policy_version=config.policy_version).commit(post_id, context, buffered.state, outcome)
-            details.append({"post_id": post_id, "initial_state": initial.state.value, "phase": buffered.state.phase.value, "outcome": outcome.type.value, "blocker": outcome.blocker.value if outcome.blocker else None, "detail": outcome.detail or context.get("provider_reason"), **write})
-        return {"selected": len(selected), "locked": False, "details": details}
+            try:
+                outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
+                error_path = root / "backups" / str(post_id) / "editorial.error.json"
+                if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
+                    try:
+                        context["provider_reason"] = json.loads(error_path.read_text(encoding="utf-8")).get("reason")
+                    except (OSError, ValueError):
+                        context["provider_reason"] = "provider_error"
+                write = WordPressWriterV2(
+                    client, root, policy_version=config.policy_version
+                ).commit(post_id, context, buffered.state, outcome)
+                completed += 1
+                details.append({
+                    "post_id": post_id,
+                    "initial_state": initial.state.value,
+                    "phase": buffered.state.phase.value,
+                    "outcome": outcome.type.value,
+                    "blocker": outcome.blocker.value if outcome.blocker else None,
+                    "detail": outcome.detail or context.get("provider_reason"),
+                    **write,
+                })
+            except Exception as exc:  # noqa: BLE001 - isolate one post
+                failed += 1
+                details.append({
+                    "post_id": post_id,
+                    "initial_state": initial.state.value,
+                    "outcome": "error",
+                    "blocker": "internal_error",
+                    "detail": str(exc)[:400],
+                })
+                continue
+        return {
+            "selected": len(selected),
+            "completed": completed,
+            "failed": failed,
+            "locked": False,
+            "queue": queue,
+            "details": details,
+        }
     finally:
         lock.release()

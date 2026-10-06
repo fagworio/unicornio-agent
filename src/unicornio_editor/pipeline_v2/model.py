@@ -107,17 +107,39 @@ class InlineMedia:
     slot: int
     alt_text: str = ""
     credit_text: str = ""
+    subject: str = ""
+    item_number: int | None = None
+    section_heading: str = ""
 
     def __post_init__(self) -> None:
         if self.media_id < 1 or self.slot < 0:
             raise ValueError("media_id must be positive and slot cannot be negative")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"media_id": self.media_id, "media_url": self.media_url, "slot": self.slot, "alt_text": self.alt_text, "credit_text": self.credit_text}
+        return {
+            "media_id": self.media_id,
+            "media_url": self.media_url,
+            "slot": self.slot,
+            "alt_text": self.alt_text,
+            "credit_text": self.credit_text,
+            "subject": self.subject,
+            "item_number": self.item_number,
+            "section_heading": self.section_heading,
+        }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InlineMedia":
-        return cls(int(value["media_id"]), str(value.get("media_url", "")), int(value.get("slot", value.get("paragraph_index", 0))), str(value.get("alt_text", "")), str(value.get("credit_text", "")))
+        item_number = value.get("item_number")
+        return cls(
+            int(value["media_id"]),
+            str(value.get("media_url", "")),
+            int(value.get("slot", value.get("paragraph_index", 0))),
+            str(value.get("alt_text", "")),
+            str(value.get("credit_text", "")),
+            str(value.get("subject", "")),
+            int(item_number) if item_number is not None else None,
+            str(value.get("section_heading", "")),
+        )
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .legacy import LegacyStateLoader
-from .model import LifecycleState
+from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
 
@@ -63,6 +63,9 @@ class ProductionContextLoader:
             "candidate": candidate or None,
             "manifest": manifest,
             "original_link": (post.get("meta") or {}).get("original_link"),
+            # The scheduler uses the persisted publication date to reserve
+            # occasional turns for old NEW posts.
+            "date": post.get("date_gmt") or post.get("date"),
         }
 
 
@@ -83,7 +86,96 @@ class ProductionCandidateReader:
         )
         self.now = now
 
-    def read(self, *, page_size: int = 100, max_pages: int = 100) -> list[tuple[int, dict[str, Any]]]:
+    def _recovered_state(self, post_id: int, state: WorkState) -> WorkState:
+        """Recover durable media progress left by a crash before the WP write."""
+        directory = self.root / "backups" / str(post_id)
+        media_candidates: list[MediaProgress] = []
+        partial = self.context_loader._read_json(directory / "editorial.partial.json")
+        try:
+            if partial:
+                media_candidates.append(MediaProgress.from_dict(partial))
+        except (TypeError, ValueError, KeyError):
+            pass
+        journal = self.context_loader._read_json(
+            self.root / "work" / "v2-journal" / f"{post_id}.json"
+        )
+        try:
+            journal_state = (
+                WorkState.from_dict(journal.get("state"))
+                if isinstance(journal.get("state"), dict) else None
+            )
+            if journal_state is not None:
+                media_candidates.append(journal_state.media)
+        except (TypeError, ValueError, KeyError):
+            pass
+        if not media_candidates:
+            return state
+
+        def verified(media_id: int | None, media_url: str | None) -> bool:
+            if not media_id:
+                return False
+            try:
+                attachment = self.client.get_media(int(media_id))
+            except Exception:  # noqa: BLE001 - recovery is fail-closed
+                return False
+            stored = str(media_url or "").strip()
+            actual = str((attachment or {}).get("source_url") or "").strip()
+            return bool(actual) and (not stored or stored == actual)
+
+        def valid_count(media: MediaProgress) -> int:
+            return sum(
+                1 for item in media.inline
+                if verified(item.media_id, item.media_url)
+            )
+
+        best = state.media
+        best_score = (
+            valid_count(best),
+            int(
+                best.featured.status is FeaturedStatus.VALID
+                and verified(best.featured.media_id, best.featured.media_url)
+            ),
+            best.required,
+        )
+        for candidate in media_candidates:
+            inline = tuple(
+                item for item in candidate.inline
+                if verified(item.media_id, item.media_url)
+            )
+            featured = (
+                candidate.featured
+                if candidate.featured.status is FeaturedStatus.VALID
+                and verified(candidate.featured.media_id, candidate.featured.media_url)
+                else state.media.featured
+            )
+            try:
+                recovered = MediaProgress(
+                    required=candidate.required,
+                    inline=inline,
+                    featured=featured,
+                )
+            except ValueError:
+                continue
+            score = (
+                len(inline),
+                int(featured.status is FeaturedStatus.VALID),
+                recovered.required,
+            )
+            if score > best_score:
+                best, best_score = recovered, score
+        if best == state.media:
+            return state
+        return WorkState(
+            state=state.state,
+            phase=state.phase,
+            blocker=state.blocker,
+            retry=state.retry,
+            relevance_approved=state.relevance_approved,
+            media=best,
+        )
+
+    def snapshot(self, *, page_size: int = 100, max_pages: int = 100) -> list[tuple[int, dict[str, Any]]]:
+        """Return all pending posts, including cooldown/terminal V2 states."""
         candidates: list[tuple[int, dict[str, Any]]] = []
         seen: set[int] = set()
         for page in range(1, max_pages + 1):
@@ -95,14 +187,19 @@ class ProductionCandidateReader:
                 if not isinstance(post_id, int) or post_id in seen:
                     continue
                 seen.add(post_id)
-                state = self.state_store.load(post_id)
-                if state.state is not LifecycleState.PENDING:
-                    continue
-                if not _cooldown_expired(state.retry.next_at, self.now or datetime.now(timezone.utc)):
-                    continue
+                state = self._recovered_state(post_id, self.state_store.load(post_id))
                 context = self.context_loader.load(post)
                 context["v2_state"] = state
                 candidates.append((post_id, context))
             if len(posts) < page_size:
                 break
         return candidates
+
+    def read(self, *, page_size: int = 100, max_pages: int = 100) -> list[tuple[int, dict[str, Any]]]:
+        now = self.now or datetime.now(timezone.utc)
+        return [
+            (post_id, context)
+            for post_id, context in self.snapshot(page_size=page_size, max_pages=max_pages)
+            if context["v2_state"].state is LifecycleState.PENDING
+            and _cooldown_expired(context["v2_state"].retry.next_at, now)
+        ]

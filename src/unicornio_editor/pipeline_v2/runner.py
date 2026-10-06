@@ -8,13 +8,22 @@ from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, L
 
 
 class PipelineRunner:
-    def __init__(self, state_store: Any, stages: dict[str, Callable[..., dict[str, Any]]]):
+    def __init__(self, state_store: Any, stages: dict[str, Callable[..., dict[str, Any]]], config: Any | None = None):
         required = {"editorial", "media", "compose", "validate"}
         missing = required - set(stages)
         if missing:
             raise ValueError(f"missing stages: {sorted(missing)}")
         self.state_store = state_store
         self.stages = stages
+        self.config = config
+
+    def _policy(self) -> dict[str, int]:
+        config = self.config
+        return {
+            "max_media_no_progress": int(getattr(config, "max_partial_no_progress_attempts", 2)),
+            "max_rework_attempts": int(getattr(config, "max_rework_attempts", 3)),
+            "cooldown_minutes": int(getattr(config, "rework_cooldown_minutes", 30)),
+        }
 
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
         previous = self.state_store.load(post_id)
@@ -26,7 +35,7 @@ class PipelineRunner:
                 editorial = self.stages["editorial"](context, previous)
             except StageError as exc:
                 editorial = {}
-                outcome = classify_stage_error(previous, exc)
+                outcome = classify_stage_error(previous, exc, **self._policy())
                 self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
                 return outcome
         if not isinstance(editorial, dict):
@@ -35,6 +44,7 @@ class PipelineRunner:
             outcome = classify_stage_error(
                 previous,
                 StageError(BlockerCode.MANIFEST_INVALID, previous.phase, "persisted editorial draft is missing"),
+                **self._policy(),
             )
             self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
             return outcome
@@ -42,6 +52,7 @@ class PipelineRunner:
             outcome = classify_stage_error(
                 previous,
                 StageError(BlockerCode.MANIFEST_INVALID, previous.phase, "editorial stage returned no document"),
+                **self._policy(),
             )
             self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
             return outcome
@@ -50,7 +61,7 @@ class PipelineRunner:
         validation: dict[str, Any] | None = None
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
-            outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []})
+            outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []}, **self._policy())
         else:
             try:
                 if previous.phase in {Phase.RELEVANCE, Phase.EDITORIAL, Phase.MEDIA}:
@@ -70,20 +81,29 @@ class PipelineRunner:
                 validation = self.stages["validate"](context, candidate)
                 progress = self._media_progressed(previous.media, media) if media_completed else False
                 current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
-                outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress)
+                outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
             except StageError as exc:
-                outcome = classify_stage_error(previous, exc)
-        progress = self._media_progressed(previous.media, media) if media_completed else False
+                outcome = classify_stage_error(previous, exc, **self._policy())
+        # Reconcile first, then measure progress. A newly uploaded asset that
+        # the checklist rejects is not progress and must consume the bounded
+        # media no-progress budget. Reclassify when that correction changes the
+        # counter (the old order incorrectly granted progress before removal).
+        effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
+        progress = self._media_progressed(previous.media, effective_media) if media_completed else False
         current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
+        if media_completed and validation is not None:
+            corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())
+            if corrected != outcome:
+                outcome = corrected
+                effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
         self.state_store.commit(
             post_id,
             self._next_state(
                 previous,
                 editorial,
-                media,
+                effective_media,
                 outcome,
                 no_progress=current_no_progress,
-                validation=validation,
             ),
         )
         return outcome

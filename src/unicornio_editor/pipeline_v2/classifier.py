@@ -74,10 +74,26 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
     return result
 
 
-def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None, now: datetime | None = None, detail: str | None = None) -> Outcome:
+def _retry(
+    previous: WorkState,
+    phase: Phase,
+    blocker: BlockerCode,
+    next_at: str | None = None,
+    now: datetime | None = None,
+    detail: str | None = None,
+    cooldown_minutes: int = 30,
+) -> Outcome:
     if next_at is None:
         now = now or datetime.now(timezone.utc)
-        delay = 30 * (4 ** min(previous.retry.attempts, 3))
+        if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}:
+            # Provider/network failures are operational incidents. They get a
+            # longer window than a media/editorial correction and exponential
+            # growth is bounded so a transient outage does not hot-loop.
+            delay = max(cooldown_minutes, 120) * (2 ** min(previous.retry.attempts, 3))
+        elif blocker is BlockerCode.RELEVANCE_UNCERTAIN:
+            delay = max(cooldown_minutes, 30)
+        else:
+            delay = max(cooldown_minutes, 1) * (4 ** min(previous.retry.attempts, 3))
         next_at = (now + timedelta(minutes=delay)).isoformat(timespec="seconds")
     return Outcome(OutcomeType.RETRY, phase, blocker, next_at, detail)
 
@@ -90,14 +106,38 @@ def editorial_decision(editorial: dict[str, Any]) -> str | None:
     return relevance.get("decision")
 
 
-def classify_stage_error(previous: WorkState, exc: Any, *, now: datetime | None = None) -> Outcome:
+def classify_stage_error(
+    previous: WorkState,
+    exc: Any,
+    *,
+    now: datetime | None = None,
+    max_attempts: int = 3,
+    cooldown_minutes: int = 30,
+    max_media_no_progress: int = 2,
+    max_rework_attempts: int | None = None,
+) -> Outcome:
+    if max_rework_attempts is not None:
+        max_attempts = max_rework_attempts
     detail = str(getattr(exc, "detail", "") or exc)
     if getattr(exc, "human_required", False):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
-    return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail)
+    if previous.retry.attempts + 1 >= max(1, max_attempts):
+        return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
+    return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
 
 
-def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None, no_progress: int | None = None) -> Outcome:
+def classify(
+    previous: WorkState,
+    editorial: dict[str, Any],
+    media: Any,
+    validation: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    no_progress: int | None = None,
+    max_media_no_progress: int = 2,
+    max_rework_attempts: int = 3,
+    cooldown_minutes: int = 30,
+) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
     decision = editorial_decision(editorial)
     if decision == "skip":
@@ -105,7 +145,7 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if decision == "uncertain":
         if previous.retry.attempts >= 1:
             return Outcome.human_required(Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
-        return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN, now=now)
+        return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN, now=now, cooldown_minutes=cooldown_minutes)
     if decision != "process":
         return Outcome.human_required(Phase.RELEVANCE, BlockerCode.INTERNAL_ERROR)
 
@@ -113,14 +153,18 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if not failures and validation.get("passed", False):
         return Outcome.ready()
     if not failures:
-        return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now)
+        if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+            return Outcome.human_required(Phase.VALIDATE, BlockerCode.INTERNAL_ERROR)
+        return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now, cooldown_minutes=cooldown_minutes)
 
     blockers = [blocker for blocker, _, _, _ in failures]
     first_blocker, _, _, first_detail = failures[0]
     detail: str | None = first_detail or None
     for blocker, _, phase_override, failure_detail in failures:
         if phase_override is not None:
-            return _retry(previous, phase_override, blocker, now=now, detail=failure_detail or None)
+            if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+                return Outcome.human_required(phase_override, blocker, detail=failure_detail or None)
+            return _retry(previous, phase_override, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
         if blocker not in MEDIA_BLOCKERS:
             if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
                 phase = Phase.RELEVANCE
@@ -135,8 +179,12 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 phase = Phase.EDITORIAL
             else:
                 phase = Phase.VALIDATE
-            return _retry(previous, phase, blocker, now=now, detail=failure_detail or None)
+            if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+                return Outcome.human_required(phase, blocker, detail=failure_detail or None)
+            return _retry(previous, phase, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
-    if effective_no_progress >= 2:
+    if effective_no_progress >= max(1, max_media_no_progress):
         return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
-    return _retry(previous, Phase.MEDIA, first_blocker, now=now, detail=detail)
+    if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+        return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
+    return _retry(previous, Phase.MEDIA, first_blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
