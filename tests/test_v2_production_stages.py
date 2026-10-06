@@ -120,3 +120,31 @@ def test_validate_persists_dash_repair_in_canonical_draft(tmp_path, monkeypatch)
     assert result["passed"] is True
     draft = (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
     assert "—" not in draft
+
+
+def test_validate_uses_candidate_featured_before_wordpress_projection(tmp_path, monkeypatch):
+    seen_featured = []
+
+    def fake_checklist(**kwargs):
+        seen_featured.append(kwargs["post"]["featured_media"])
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        fake_checklist,
+    )
+    candidate = {
+        "content": "<p>Bailarina — ação.</p>",
+        "editorial": {"cleaned_html": "<p>Bailarina — ação.</p>", "seo": {}},
+        "seo": {},
+        "featured_media": 123,
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {"post_id": 11, "post": {"id": 11, "status": "pending", "title": {"raw": "Bailarina"}, "meta": {}, "featured_media": 0}, "v2_state": None},
+        candidate,
+    )
+    assert result["passed"] is True
+    assert seen_featured == [123]
+    persisted = tmp_path / "backups" / "11" / "editorial.candidate.json"
+    assert persisted.is_file()
+    assert "—" not in persisted.read_text(encoding="utf-8")
