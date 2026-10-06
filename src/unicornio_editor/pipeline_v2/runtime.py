@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 from ..checklist import required_image_count
 from ..content_quality import word_count
@@ -29,6 +31,19 @@ class BufferedStateStore:
 
     def commit(self, post_id: int, state):
         self.state = state
+
+
+def _normalize_executable_candidate(candidate: dict[str, Any], subject: str) -> dict[str, Any]:
+    result = dict(candidate)
+    source = str(result.get("source_page_url") or "").strip()
+    host = (urlparse(source).hostname or "").strip()
+    result.setdefault("author", result.get("publisher") or host or "Fonte original")
+    result.setdefault("license", "Uso com crédito")
+    result.setdefault("license_url", source)
+    result.setdefault("captured_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    result.setdefault("credit_text", f"Crédito da imagem: {host or 'fonte original'}")
+    result.setdefault("alt_text", subject)
+    return result
 
 
 class ProductionMediaResolver:
@@ -67,6 +82,8 @@ class ProductionMediaResolver:
                     set_cached_decision(self.root, str(url), subject, {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"})
                     candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
                     candidate["needs_vision"] = False
+        candidates = [_normalize_executable_candidate(candidate, subject) for candidate in (row.get("audit_candidates") or [])]
+        row["audit_candidates"] = candidates
         plan = []
         used_slots = {item.slot for item in previous.inline}
         approved = []

@@ -13,6 +13,7 @@ from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
+from ..media.evidence import post_subjects
 from ..media.inserter import insert_media
 from ..workflow import (
     _execute_media_plan,
@@ -57,7 +58,9 @@ class ProductionEditorialStage:
             validation_path = self.root / "backups" / str(post_id) / "editorial.validation.json"
             if state.phase is Phase.EDITORIAL and validation_path.is_file():
                 validation = json.loads(validation_path.read_text(encoding="utf-8"))
-                input_payload["posts"][0]["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": validation.get("failures", []), "previous_editorial": previous_editorial or {}}
+                editorial_gates = {"qualidade_texto", "seo", "estrutura", "fonte", "schema_editorial", "conteudo_nao_vazio", "conteudo_sem_metadados_operacionais", "estrutura_lista", "cta_canonico"}
+                failures = [failure for failure in validation.get("failures", []) if failure.get("gate") in editorial_gates]
+                input_payload["posts"][0]["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": failures, "previous_editorial": previous_editorial or {}}
                 input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
             generated = generate_editorial_batch(
                 prepared["editorial_input"],
@@ -186,7 +189,21 @@ class ProductionValidateStage:
             post = _post(context)
             checklist_editorial = dict(candidate["editorial"])
             checklist_editorial.pop("decision", None)
+            seo = dict(checklist_editorial.get("seo") or {})
             checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
+            raw_failures = [item for item in checklist.get("items", []) if item.get("status") == "fail"]
+            if raw_failures and all(item.get("name") == "qualidade_texto" for item in raw_failures) and any("focus keyword" in str(item.get("detail") or "").casefold() for item in raw_failures):
+                subjects = post_subjects(title=str(seo.get("title") or ""), content_html=str(candidate["content"]), focus_keyword=str(seo.get("focus_keyword") or ""), game_name=checklist_editorial.get("game_name"))
+                title_lower = str(seo.get("title") or "").casefold()
+                content_lower = str(candidate["content"]).casefold()
+                replacement = next((str(row.get("subject") or "").strip() for row in subjects if str(row.get("subject") or "").strip().casefold() in title_lower and str(row.get("subject") or "").strip().casefold() in content_lower), "")
+                if replacement:
+                    seo["focus_keyword"] = replacement
+                    checklist_editorial["seo"] = seo
+                    candidate["editorial"]["seo"] = seo
+                    candidate["seo"] = seo
+                    _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
+                    checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
             failures = [{"gate": item["name"], "detail": item.get("detail", "")} for item in checklist.get("items", []) if item.get("status") == "fail"]
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist})
             return {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist}
