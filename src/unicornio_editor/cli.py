@@ -1334,7 +1334,11 @@ def _monitor_line(report: dict) -> str:
             row.get("next_retry_at")
             and (
                 row.get("state") == "blocked"
-                or (row.get("v2") and row.get("state") == "pending")
+                or (
+                    row.get("v2")
+                    and row.get("state") == "pending"
+                    and row.get("id") not in v2_eligible
+                )
             )
         )
     )

@@ -85,12 +85,6 @@ class ProductionMediaResolver:
         total_required = required_image_count(word_count(html), title=title, content=html)
         inline_needed = max(0, total_required - previous.accepted)
         featured_needed = 0 if previous.featured.status is FeaturedStatus.VALID else 1
-        if inline_needed == 0 and featured_needed == 0:
-            return MediaProgress(
-                required=total_required,
-                inline=previous.inline,
-                featured=previous.featured,
-            )
 
         from ..cli import _resolve_media_batch
 
@@ -119,6 +113,17 @@ class ProductionMediaResolver:
                 and str(row.get("subject") or "").casefold().strip() not in covered_subjects
             )
         ]
+        if is_listicle:
+            # A migrated listicle may have accepted media without item_number.
+            # Its deficit is the number of uncovered subjects, not the global
+            # article quota minus a positional count.
+            inline_needed = len(missing_rows)
+        if inline_needed == 0 and featured_needed == 0:
+            return MediaProgress(
+                required=total_required,
+                inline=previous.inline,
+                featured=previous.featured,
+            )
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
         subject_meta: dict[str, dict[str, Any]] = {}
@@ -133,7 +138,7 @@ class ProductionMediaResolver:
         for index, row in missing_rows:
             subject = str(row.get("subject") or "").strip()
             if subject:
-                subject_meta[subject] = {**row, "section_slot": index}
+                subject_meta[subject] = {**row, "section_slot": row.get("section_slot", index)}
             add_query(subject, item_query(subject, title, extra=focus_keyword))
         if focus_keyword and not is_listicle:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
@@ -587,6 +592,10 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             initial = context["v2_state"]
             buffered = BufferedStateStore(initial)
             try:
+                # Mark the transaction before any provider/media work. If the
+                # process dies after an upload, recovery must not mistake the
+                # previous committed journal for a completed run.
+                _write_v2_journal_checkpoint(root, post_id, "running", initial)
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(

@@ -84,6 +84,18 @@ def test_runner_preserves_inline_progress_for_inline_missing():
     assert state.media.inline == (inline,)
 
 
+def test_featured_invalidations_are_not_counted_as_media_progress():
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 20, "https://example.test/f.webp"),
+    )
+    invalid = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.INVALID),
+    )
+    assert not PipelineRunner._media_progressed(previous, invalid)
+
+
 def test_runner_removes_only_structured_invalid_inline_media():
     inline = tuple(
         InlineMedia(i, f"https://example.test/{i}.webp", i * 3)

@@ -38,13 +38,14 @@ class SubjectTests(unittest.TestCase):
         subs = post_subjects(
             title="10 melhores animes",
             content_html=(
-                "<h2>1. Cyberpunk: Edgerunners</h2><p>a</p>"
+                "<p>Introdução.</p><h2>1. Cyberpunk: Edgerunners</h2><p>a</p>"
                 "<h2>2. Pluto</h2><p>b</p>"
             ),
         )
         self.assertEqual([s["item"] for s in subs], [1, 2])
         self.assertEqual(subs[0]["subject"], "Cyberpunk: Edgerunners")
         self.assertEqual(subs[1]["subject"], "Pluto")
+        self.assertEqual([s["section_slot"] for s in subs], [1, 2])
 
     def test_subject_por_imagem_no_listicle_nao_vaza_entre_itens(self):
         subs = post_subjects(

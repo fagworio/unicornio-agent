@@ -62,6 +62,7 @@ class PipelineRunner:
             return outcome
         media: MediaProgress = previous.media
         media_completed = False
+        media_stage_error = False
         validation: dict[str, Any] | None = None
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
@@ -87,14 +88,27 @@ class PipelineRunner:
                 current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
                 outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
             except StageError as exc:
-                outcome = classify_stage_error(previous, exc, **self._policy())
+                media_stage_error = exc.blocker in MEDIA_BLOCKERS and exc.phase is Phase.MEDIA
+                outcome = classify_stage_error(
+                    previous,
+                    exc,
+                    no_progress=previous.retry.no_progress + 1 if media_stage_error else None,
+                    **self._policy(),
+                )
         # Reconcile first, then measure progress. A newly uploaded asset that
         # the checklist rejects is not progress and must consume the bounded
         # media no-progress budget. Reclassify when that correction changes the
         # counter (the old order incorrectly granted progress before removal).
-        effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
+        # A technical MEDIA failure has no trustworthy identity for the asset
+        # that failed. The failed attempt cannot invalidate media accepted in
+        # a previous run; only checklist identities may do that.
+        if media_stage_error:
+            effective_media = previous.media
+        else:
+            effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
         media_attempt = media_completed or (
-            previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS
+            media_stage_error
+            or (previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS)
         )
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
         current_no_progress = (
@@ -138,8 +152,10 @@ class PipelineRunner:
     def _media_progressed(previous: MediaProgress, media: MediaProgress) -> bool:
         return (
             media.accepted > previous.accepted
-            or media.featured.status != previous.featured.status
-            or media.featured.media_id != previous.featured.media_id
+            or (
+                previous.featured.status is not FeaturedStatus.VALID
+                and media.featured.status is FeaturedStatus.VALID
+            )
         )
 
     @staticmethod

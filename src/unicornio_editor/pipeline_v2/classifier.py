@@ -82,14 +82,18 @@ def _retry(
     now: datetime | None = None,
     detail: str | None = None,
     cooldown_minutes: int = 30,
+    backoff_attempts: int | None = None,
 ) -> Outcome:
     if next_at is None:
         now = now or datetime.now(timezone.utc)
+        attempts = previous.retry.attempts if backoff_attempts is None else max(0, backoff_attempts)
         if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}:
             # Provider/network failures are operational incidents. They get a
             # longer window than a media/editorial correction and exponential
             # growth is bounded so a transient outage does not hot-loop.
-            delay = max(cooldown_minutes, 120) * (2 ** min(previous.retry.attempts, 3))
+            delay = max(cooldown_minutes, 120) * (2 ** min(attempts, 3))
+        elif blocker in MEDIA_BLOCKERS:
+            delay = max(cooldown_minutes, 1) * (2 ** min(attempts, 3))
         elif blocker is BlockerCode.RELEVANCE_UNCERTAIN:
             delay = max(cooldown_minutes, 30)
         else:
@@ -115,6 +119,7 @@ def classify_stage_error(
     cooldown_minutes: int = 30,
     max_media_no_progress: int = 2,
     max_rework_attempts: int | None = None,
+    no_progress: int | None = None,
 ) -> Outcome:
     if max_rework_attempts is not None:
         max_attempts = max_rework_attempts
@@ -122,7 +127,15 @@ def classify_stage_error(
     if getattr(exc, "human_required", False):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
     if getattr(exc, "blocker", None) in MEDIA_BLOCKERS:
-        return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
+        return _retry(
+            previous,
+            exc.phase,
+            exc.blocker,
+            now=now,
+            detail=detail,
+            cooldown_minutes=cooldown_minutes,
+            backoff_attempts=no_progress,
+        )
     if previous.retry.attempts + 1 >= max(1, max_attempts):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
     return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
@@ -162,11 +175,20 @@ def classify(
     blockers = [blocker for blocker, _, _, _ in failures]
     first_blocker, _, _, first_detail = failures[0]
     detail: str | None = first_detail or None
+    effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     for blocker, _, phase_override, failure_detail in failures:
         if phase_override is not None:
             if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase_override, blocker, detail=failure_detail or None)
-            return _retry(previous, phase_override, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
+            return _retry(
+                previous,
+                phase_override,
+                blocker,
+                now=now,
+                detail=failure_detail or None,
+                cooldown_minutes=cooldown_minutes,
+                backoff_attempts=effective_no_progress if blocker in MEDIA_BLOCKERS else None,
+            )
         if blocker not in MEDIA_BLOCKERS:
             if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
                 phase = Phase.RELEVANCE
@@ -183,8 +205,23 @@ def classify(
                 phase = Phase.VALIDATE
             if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase, blocker, detail=failure_detail or None)
-            return _retry(previous, phase, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
-    effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
+            return _retry(
+                previous,
+                phase,
+                blocker,
+                now=now,
+                detail=failure_detail or None,
+                cooldown_minutes=cooldown_minutes,
+                backoff_attempts=effective_no_progress if blocker in MEDIA_BLOCKERS else None,
+            )
     if effective_no_progress >= max(1, max_media_no_progress):
         return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
-    return _retry(previous, Phase.MEDIA, first_blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
+    return _retry(
+        previous,
+        Phase.MEDIA,
+        first_blocker,
+        now=now,
+        detail=detail,
+        cooldown_minutes=cooldown_minutes,
+        backoff_attempts=effective_no_progress,
+    )

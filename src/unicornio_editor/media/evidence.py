@@ -87,8 +87,10 @@ def post_subjects(
     # H2 ("O que sabemos até agora") e antes cada um virava item — o subject
     # saía do H2 em vez da entidade do título ("O que sabemos até agora" no
     # lugar de "metroid prime 4"), destruindo o score em notícias normais.
-    numerados: list[tuple[int, str]] = []
-    for h2 in _H2_RE.findall(content_html or ""):
+    numerados: list[tuple[int, str, int]] = []
+    html = content_html or ""
+    for match in _H2_RE.finditer(html):
+        h2 = match.group(1)
         limpo = re.sub(r"\s+", " ", _TAG_RE.sub(" ", h2)).strip()
         achado = _ITEM_RE.match(limpo)
         if not achado:
@@ -97,11 +99,12 @@ def post_subjects(
         # nomeia a obra em si — cortar no ":" perderia metade do nome.
         texto_item = _ITEM_RE.sub("", limpo).strip()
         if texto_item:
-            numerados.append((int(achado.group(1)), texto_item))
+            section_slot = len(re.findall(r"</p\s*>", html[:match.start()], flags=re.IGNORECASE))
+            numerados.append((int(achado.group(1)), texto_item, section_slot))
     if len(numerados) >= 2:
         return [
-            {"item": numero, "heading": texto, "subject": texto}
-            for numero, texto in numerados
+            {"item": numero, "heading": texto, "subject": texto, "section_slot": section_slot}
+            for numero, texto, section_slot in numerados
         ]
 
     principal = _entidade_principal(title)
