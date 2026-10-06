@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from unicornio_editor.pipeline_v2.migration import (
+    repair_known_terminal_states,
     repair_historical_media_human_required,
     rebase_editorial_retries,
     rebase_media_cooldowns,
@@ -153,3 +154,49 @@ def test_historical_repair_reopens_only_exact_audited_media_states():
     second = repair_historical_media_human_required(client, apply=True, now=now)
     assert second["migrated"] == 0
     assert len(client.updates) == 1
+
+
+def test_known_terminal_repair_reopens_only_three_exact_bug_states():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    media_state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_DUPLICATE,
+        retry=RetryInfo(attempts=8, no_progress=2, phase_attempts=1, policy_version=3),
+        relevance_approved=True,
+        media=MediaProgress(
+            required=4,
+            inline=(InlineMedia(1, "https://wp.test/a.webp", 0), InlineMedia(2, "https://wp.test/b.webp", 1), InlineMedia(3, "https://wp.test/c.webp", 2)),
+            featured=FeaturedProgress(FeaturedStatus.VALID, 9, "https://wp.test/f.webp"),
+        ),
+    )
+    editorial_state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.EDITORIAL,
+        blocker=BlockerCode.TEXT_QUALITY,
+        retry=RetryInfo(attempts=7, no_progress=1, phase_attempts=3, policy_version=3),
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(InlineMedia(4, "https://wp.test/x.webp", 0),)),
+    )
+    client = Client([
+        _post(114840, media_state),
+        _post(115002, editorial_state),
+        _post(115004, editorial_state),
+        _post(1, media_state),
+    ])
+    preview = repair_known_terminal_states(client, now=now)
+    assert preview["post_ids"] == [114840, 115002, 115004]
+    assert client.updates == []
+    result = repair_known_terminal_states(client, apply=True, now=now)
+    assert result["migrated"] == 3
+    repaired_media = WorkState.from_dict(json.loads(client.posts[114840]["meta"]["_hermes_work_state"]))
+    assert repaired_media.state is LifecycleState.PENDING
+    assert repaired_media.phase is Phase.MEDIA
+    assert repaired_media.retry.no_progress == 1
+    assert repaired_media.media.accepted == 3
+    assert repaired_media.media.featured.status is FeaturedStatus.VALID
+    for post_id in (115002, 115004):
+        repaired_editorial = WorkState.from_dict(json.loads(client.posts[post_id]["meta"]["_hermes_work_state"]))
+        assert repaired_editorial.phase is Phase.EDITORIAL
+        assert repaired_editorial.retry.phase_attempts == 2
+        assert repaired_editorial.retry.attempts == 7

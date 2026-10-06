@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
-from .model import CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
+from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
 
 
 HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS = frozenset({
@@ -15,6 +15,8 @@ HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS = frozenset({
     114937, 115025, 115027, 115035,
 })
 HISTORICAL_MEDIA_LOSS_IDS = frozenset({114949, 114984, 114987})
+HISTORICAL_MEDIA_DUPLICATE_ID = 114840
+HISTORICAL_EDITORIAL_QUALITY_IDS = frozenset({115002, 115004})
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -350,5 +352,131 @@ def repair_historical_media_human_required(
         "post_ids": migrated_ids if apply else candidates,
         "skipped": skipped,
         "media_loss_requires_evidence": sorted(HISTORICAL_MEDIA_LOSS_IDS),
+        "next_at": current.isoformat(timespec="seconds"),
+    }
+
+
+def _repair_known_terminal_state(
+    post_id: int,
+    state: WorkState,
+    now: datetime,
+    *,
+    max_rework_attempts: int = 3,
+) -> WorkState | None:
+    """Reopen only the three terminal states caused by the identified bugs."""
+    if state.state is not LifecycleState.HUMAN_REQUIRED:
+        return None
+    if state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION:
+        return None
+    if post_id == HISTORICAL_MEDIA_DUPLICATE_ID:
+        if (
+            state.phase is not Phase.MEDIA
+            or state.blocker is not BlockerCode.MEDIA_DUPLICATE
+            or state.media.required != 4
+            or state.media.accepted != 3
+            or state.retry.no_progress != 2
+        ):
+            return None
+        retry = RetryInfo(
+            attempts=state.retry.attempts,
+            no_progress=1,
+            next_at=now.isoformat(timespec="seconds"),
+            policy_version=CURRENT_RETRY_POLICY_VERSION,
+            phase_attempts=state.retry.phase_attempts,
+        )
+        return WorkState(
+            state=LifecycleState.PENDING,
+            phase=Phase.MEDIA,
+            blocker=state.blocker,
+            retry=retry,
+            relevance_approved=state.relevance_approved,
+            media=state.media,
+            version=state.version,
+        )
+    if post_id in HISTORICAL_EDITORIAL_QUALITY_IDS:
+        if (
+            state.phase is not Phase.EDITORIAL
+            or state.blocker is not BlockerCode.TEXT_QUALITY
+            or state.retry.phase_attempts != max_rework_attempts
+        ):
+            return None
+        retry = RetryInfo(
+            attempts=state.retry.attempts,
+            no_progress=state.retry.no_progress,
+            next_at=now.isoformat(timespec="seconds"),
+            policy_version=CURRENT_RETRY_POLICY_VERSION,
+            phase_attempts=max(0, max_rework_attempts - 1),
+        )
+        return WorkState(
+            state=LifecycleState.PENDING,
+            phase=Phase.EDITORIAL,
+            blocker=state.blocker,
+            retry=retry,
+            relevance_approved=state.relevance_approved,
+            media=state.media,
+            version=state.version,
+        )
+    return None
+
+
+def repair_known_terminal_states(
+    client: Any,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+    max_rework_attempts: int = 3,
+) -> dict[str, Any]:
+    """Reopen the exact MEDIA_DUPLICATE/TEXT_QUALITY regressions once."""
+    current = _as_utc(now)
+    post_ids = (HISTORICAL_MEDIA_DUPLICATE_ID, *sorted(HISTORICAL_EDITORIAL_QUALITY_IDS))
+    candidates: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    for post_id in post_ids:
+        try:
+            post = client.get_post(post_id)
+        except Exception as exc:  # noqa: BLE001 - preserve per-post audit
+            skipped.append({"post_id": post_id, "reason": f"read_error: {exc}"})
+            continue
+        state = _read_state(post)
+        migrated = _repair_known_terminal_state(
+            post_id, state, current, max_rework_attempts=max_rework_attempts
+        ) if state is not None else None
+        if migrated is None:
+            skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+            continue
+        candidates.append(post_id)
+
+    migrated_ids: list[int] = []
+    if apply:
+        for post_id in candidates:
+            post = client.get_post(post_id)
+            state = _read_state(post)
+            migrated = _repair_known_terminal_state(
+                post_id, state, current, max_rework_attempts=max_rework_attempts
+            ) if state is not None else None
+            if migrated is None:
+                skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
+                continue
+            meta = post.get("meta") if isinstance(post, dict) else None
+            if not isinstance(meta, dict):
+                raise RuntimeError(f"post {post_id} has no editable meta payload")
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            if _read_state(client.get_post(post_id)) != migrated:
+                raise RuntimeError(f"known terminal repair read-back mismatch for post {post_id}")
+            migrated_ids.append(post_id)
+
+    return {
+        "command": "v2-repair-known-terminal-states",
+        "apply": bool(apply),
+        "policy_version": CURRENT_RETRY_POLICY_VERSION,
+        "allowlisted_post_ids": list(post_ids),
+        "candidates": len(candidates),
+        "migrated": len(migrated_ids) if apply else 0,
+        "post_ids": migrated_ids if apply else candidates,
+        "skipped": skipped,
         "next_at": current.isoformat(timespec="seconds"),
     }

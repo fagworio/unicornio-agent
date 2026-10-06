@@ -1,8 +1,9 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
-from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionMediaStage, ProductionValidateStage
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 
 
 class Config:
@@ -26,6 +27,43 @@ def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     result = stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=2, inline=(existing,))), {})
     assert result.accepted == 1
     assert (tmp_path / "backups/7/editorial.partial.json").exists()
+
+
+def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.json"
+    input_path.write_text('{"posts":[{"post_id":115002}]}', encoding="utf-8")
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.prepare_batch",
+        lambda *_args: {"prepared": 1, "editorial_input": str(input_path)},
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "vazamentos de GTA 6"}],
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.generate_editorial_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider must not run")),
+    )
+    draft_dir = tmp_path / "backups" / "115002"
+    draft_dir.mkdir(parents=True)
+    draft = {
+        "cleaned_html": "<p>Vazamentos sobre GTA 6 revelam novidades.</p>",
+        "seo": {"title": "Vazamentos: GTA 6 ganham força", "focus_keyword": "termo antigo"},
+        "media_plan": [],
+    }
+    (draft_dir / "editorial.draft.json").write_text(json.dumps(draft), encoding="utf-8")
+    state = WorkState(
+        phase=Phase.EDITORIAL,
+        blocker=BlockerCode.TEXT_QUALITY,
+        retry=RetryInfo(phase_attempts=3),
+    )
+    repaired = ProductionEditorialStage(object(), Config(), tmp_path)(
+        {"post_id": 115002, "post": {"id": 115002, "title": {"raw": draft["seo"]["title"]}}},
+        state,
+    )
+    assert repaired["seo"]["focus_keyword"] == "vazamentos de GTA 6"
+    persisted = json.loads((draft_dir / "editorial.draft.json").read_text(encoding="utf-8"))
+    assert persisted["seo"]["focus_keyword"] == "vazamentos de GTA 6"
 
 
 def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):

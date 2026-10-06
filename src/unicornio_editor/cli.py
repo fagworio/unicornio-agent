@@ -553,6 +553,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="grava PENDING/MEDIA com no_progress=1 para os estados que passarem a assinatura",
     )
 
+    repair_known_terminal_parser = subparsers.add_parser(
+        "v2-repair-known-terminal-states",
+        help="reabre somente os três estados terminalizados pelos bugs conhecidos "
+        "de keyword e pHash (dry-run por padrão)",
+    )
+    repair_known_terminal_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_known_terminal_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="grava as transições allowlistadas para PENDING/MEDIA ou PENDING/EDITORIAL",
+    )
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -1148,6 +1160,7 @@ def _resolve_media_batch(
             capacity=needed_web_by_post[post_id],
             enriched_cache=memo_by_query[str(query)],
             post_id=post_id,
+            existing_media_urls=spec.get("existing_media_urls") or [],
             emit_terminal=False,
         )
         accepted_urls_by_query[str(query)].update(
@@ -1192,6 +1205,7 @@ def _resolve_media_batch(
             capacity=needed_web,
             enriched_cache=memo_by_query.get(str(item["query"]), {}),
             post_id=post_id,
+            existing_media_urls=item.get("existing_media_urls") or [],
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1396,6 +1410,7 @@ def _enriquecer_candidatos(
     capacity: int | None = None,
     enriched_cache: dict | None = None,
     post_id: int | None = None,
+    existing_media_urls: list[str] | tuple[str, ...] | None = None,
     emit_terminal: bool = True,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
@@ -1496,18 +1511,25 @@ def _enriquecer_candidatos(
     # era rejeitado por relevância dispensava B e C — que podiam ser a imagem
     # certa. O pipeline agora roda POR CANDIDATO (resolver -> evidencia -> pHash)
     # e a capacidade só conta forte + frame distinto.
-    from .media.visual_hash import image_hashes
+    from .media.visual_hash import image_hashes, similar_image_pairs
 
     hashes_locais: dict[str, str] = {}
+    existing_urls = [str(url).strip() for url in (existing_media_urls or ()) if str(url).strip()]
+    existing_hashes: dict[str, Any] = {}
+    if existing_urls:
+        try:
+            existing_hashes = image_hashes(existing_urls)
+        except Exception:  # noqa: BLE001 - pHash é fail-soft
+            existing_hashes = {}
 
-    def _phash_de(url: str) -> str:
+    def _phash_obj_de(url: str) -> Any:
         chave = str(url or "")
         if chave and chave not in hashes_locais:
             try:
                 hashes_locais.update(image_hashes([chave]))
-            except Exception:  # noqa: BLE001 - pHash é melhor-esforço
+            except Exception:  # noqa: BLE001 - pHash é fail-soft
                 pass
-        return str(hashes_locais.get(chave) or "")
+        return hashes_locais.get(chave)
 
     def _fortes_distintos() -> int:
         vistos: set[str] = set()
@@ -1518,6 +1540,19 @@ def _enriquecer_candidatos(
             if chave:
                 vistos.add(chave)
         return len(vistos)
+
+    def _duplicates_existing(url: str, phash: Any) -> bool:
+        if not url or phash is None or not existing_hashes:
+            return False
+        if url in existing_hashes:
+            return True
+        combined = {**existing_hashes, url: phash}
+        return any(
+            url_a == url or url_b == url
+            for url_a, url_b, _distance in similar_image_pairs(
+                list(combined), hashes=combined
+            )
+        )
 
     def _classificar(cand: dict) -> None:
         """Evidência + proveniência + pHash de UM candidato (fase por candidato)."""
@@ -1595,13 +1630,30 @@ def _enriquecer_candidatos(
         cand["official_source"] = official_source(
             str(cand.get("direct_image_url") or ""), subject
         )
-        if pontos["verdict"] == "deterministic_match":
+        if pontos["verdict"] in ("deterministic_match", "ambiguous"):
             # pHash imediato: a capacidade do resolver exige frame DISTINTO e,
             # sem o hash aqui, a contagem cairia para URL — o mesmo frame servido
             # por duas engines (URLs diferentes) contaria como dois fortes.
-            bruto = _phash_de(str(cand.get("direct_image_url") or ""))
-            if bruto:
-                cand["phash"] = bruto
+            candidate_url = str(cand.get("direct_image_url") or "")
+            bruto_obj = _phash_obj_de(candidate_url)
+            if bruto_obj:
+                cand["phash"] = str(bruto_obj)
+                if _duplicates_existing(candidate_url, bruto_obj):
+                    cand["rejected_reason"] = "duplicate_existing_frame"
+                    cand["evidence"] = {
+                        **pontos,
+                        "score": 0,
+                        "local_score": 0,
+                        "gate": "diversity",
+                        "verdict": "duplicate_existing_frame",
+                        "needs_vision": False,
+                        "reason": "candidato visualmente semelhante a uma mídia já aceita no post",
+                    }
+                    cand["evidence_score"] = 0
+                    cand["needs_vision"] = False
+                    rejeitados.append(cand)
+                    _guardar_memo(cand)
+                    return
         (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
         _guardar_memo(cand)
 
@@ -1887,6 +1939,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .pipeline_v2.migration import repair_historical_media_human_required
 
             result = repair_historical_media_human_required(
+                client,
+                apply=bool(getattr(args, "apply", False)),
+            )
+        elif args.command == "v2-repair-known-terminal-states":
+            from .pipeline_v2.migration import repair_known_terminal_states
+
+            result = repair_known_terminal_states(
                 client,
                 apply=bool(getattr(args, "apply", False)),
             )

@@ -37,6 +37,14 @@ def _keyword_in_text(keyword: str, text: str) -> bool:
     return all(any(token == candidate for candidate in haystack) for token in significant)
 
 
+def keyword_occurs_naturally(keyword: str, title: str, html: str) -> bool:
+    """Apply the publication keyword rule to title and rendered body text."""
+    body = unescape(re.sub(r"<[^>]+>", " ", str(html or "")))
+    return _keyword_in_text(str(keyword or ""), str(title or "")) and _keyword_in_text(
+        str(keyword or ""), body
+    )
+
+
 _AI_PATTERNS = (
     "em conclusão",
     "é importante destacar que",
@@ -104,7 +112,7 @@ def validate_content_quality(
     body = re.sub(r"<[^>]+>", " ", html).casefold()
     title_folded = title.casefold()
     keyword = focus_keyword.casefold().strip()
-    if not _keyword_in_text(keyword, title_folded) or not _keyword_in_text(keyword, body):
+    if not keyword_occurs_naturally(keyword, title_folded, body):
         raise ContentQualityError("focus keyword must occur naturally in title and content")
     for term in related_terms:
         if isinstance(term, str) and term.strip() and term.casefold() not in body:

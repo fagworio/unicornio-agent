@@ -547,6 +547,54 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert events[0]["subject"] == "Redfall"
         assert events[0]["candidate_id"] == "candidate-1"
 
+    def test_existing_media_phash_is_rejected_before_capacity(self):
+        from unicornio_editor import cli
+
+        class FakeHash:
+            def __init__(self, value):
+                self.value = value
+
+            def __sub__(self, other):
+                return abs(self.value - other.value)
+
+        existing_url = "https://wp.test/uploads/sony-3.webp"
+        candidates = [
+            {**self._candidate("https://source.test/sony-5.jpg"), "candidate_id": "duplicate"},
+            {**self._candidate("https://source.test/sony-6.jpg"), "candidate_id": "distinct"},
+        ]
+        with mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+        ), mock.patch(
+            "unicornio_editor.media.evidence.evidence_score",
+            side_effect=lambda subject, **_kwargs: {
+                "subject": subject, "matched": ["subject"], "score": 9,
+                "local_score": 9, "gate": "relevance", "penalties": [],
+                "needs_vision": False, "verdict": "deterministic_match",
+            },
+        ), mock.patch(
+            "unicornio_editor.media.visual_hash.image_hashes",
+            side_effect=lambda urls: {
+                url: FakeHash(
+                    0 if "sony-3" in url else 2 if "sony-5" in url else 20
+                )
+                for url in urls
+            },
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
+        ):
+            approved, rejected, deferred = cli._enriquecer_candidatos(
+                candidates,
+                subject="Sony",
+                termo="Sony jogo",
+                capacity=1,
+                existing_media_urls=[existing_url],
+            )
+        assert [item["candidate_id"] for item in approved] == ["distinct"]
+        assert any(item["evidence"]["verdict"] == "duplicate_existing_frame" for item in rejected)
+        assert deferred == []
+
 
 class DraftPatchTests(unittest.TestCase):
     """P0/P2: rework recebe só o componente; patch parcial mescla no draft."""

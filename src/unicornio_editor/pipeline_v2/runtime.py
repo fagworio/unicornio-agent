@@ -162,6 +162,7 @@ class ProductionMediaResolver:
                     "engine": "auto",
                     "size": "xga",
                     "ratio": "w",
+                    "existing_media_urls": [item.media_url for item in previous.inline],
                 }],
             }
             resolved = _resolve_media_batch(

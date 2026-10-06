@@ -12,8 +12,7 @@ from typing import Any, Callable
 from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
 from ..checklist import required_image_count
-from ..content_quality import normalize_editorial_dashes, word_count
-from ..content_quality import _keyword_in_text
+from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes, word_count
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..list_quality import detect_list_format
@@ -76,6 +75,40 @@ def _post(context: dict[str, Any]) -> dict[str, Any]:
     return post
 
 
+def _repair_focus_keyword_draft(
+    editorial: dict[str, Any],
+    post: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Repair only a deterministic keyword mismatch before provider rework."""
+    seo = dict(editorial.get("seo") or {})
+    title = str(seo.get("title") or "")
+    content = str(editorial.get("cleaned_html") or "")
+    current = str(seo.get("focus_keyword") or "").strip()
+    if current and keyword_occurs_naturally(current, title, content):
+        return None
+    subjects = post_subjects(
+        title=title or str((post.get("title") or {}).get("raw") or ""),
+        content_html=content,
+        focus_keyword=current,
+        game_name=editorial.get("game_name"),
+    )
+    replacement = next(
+        (
+            subject
+            for row in subjects
+            if (subject := str(row.get("subject") or "").strip())
+            and keyword_occurs_naturally(subject, title, content)
+        ),
+        "",
+    )
+    if not replacement:
+        return None
+    repaired = dict(editorial)
+    repaired["seo"] = {**seo, "focus_keyword": replacement}
+    repaired.pop("decision", None)
+    return repaired
+
+
 class ProductionEditorialStage:
     def __init__(self, client: Any, config: Any, root: Path):
         self.client, self.config, self.root = client, config, Path(root)
@@ -90,6 +123,15 @@ class ProductionEditorialStage:
             input_payload = json.loads(input_path.read_text(encoding="utf-8"))
             draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
             previous_editorial = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
+            if (
+                state.phase is Phase.EDITORIAL
+                and state.blocker is BlockerCode.TEXT_QUALITY
+                and isinstance(previous_editorial, dict)
+            ):
+                repaired = _repair_focus_keyword_draft(previous_editorial, _post(context))
+                if repaired is not None:
+                    _write_json(self.root, post_id, "editorial.draft.json", repaired)
+                    return repaired
             validation_path = self.root / "backups" / str(post_id) / "editorial.validation.json"
             if state.phase is Phase.EDITORIAL and validation_path.is_file():
                 validation = json.loads(validation_path.read_text(encoding="utf-8"))
