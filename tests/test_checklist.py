@@ -5,6 +5,7 @@ from unittest import mock
 
 from unicornio_editor.checklist import run_pre_publish_checklist
 from unicornio_editor.config import Config
+from unicornio_editor.media.vision_gate import VisionGateError
 
 
 def editorial_payload(**overrides):
@@ -433,6 +434,44 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertIn("NEGOU", item["detail"])
         self.assertFalse(result["all_passed"])
+
+    def test_vision_provider_error_is_explicit_media_provider_failure(self):
+        content = (
+            "<p>Texto sobre o jogo Redfall e seu lançamento.</p>"
+            '<figure><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            '<figure><img src="https://media.example/b.webp" width="1280" height="720" alt="Redfall key art" /></figure>'
+            "<p>Fonte: <a href=\"https://source.example/news\" rel=\"nofollow noopener\">Source</a>.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        editorial = editorial_payload()
+        editorial["seo"] = {
+            "title": "Redfall ganha data de lançamento",
+            "meta_description": "Uma descrição suficientemente longa sobre o conteúdo de videogame, seus detalhes, plataformas e contexto para o leitor entender a notícia.",
+            "focus_keyword": "Redfall",
+        }
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True,
+            vision_enabled=True, vision_api_key="k", vision_base_url="http://vision.test/v1", vision_model="vision-m",
+        )
+        with mock.patch(
+            "unicornio_editor.checklist.verify_image_subject",
+            side_effect=VisionGateError("API de visao respondeu HTTP 400"),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_path.write_text("{}")
+                result = run_pre_publish_checklist(
+                    post=make_post(meta={"original_link": "https://source.example/news"}),
+                    editorial=editorial,
+                    content=content,
+                    backup_path=backup_path,
+                    config=config,
+                    client=FakeClient(),
+                )
+        item = next(i for i in result["items"] if i["name"] == "imagens_visao")
+        self.assertEqual(item["blocker"], "provider_error")
+        self.assertEqual(item["phase"], "media")
 
     def test_vision_gate_verifies_only_featured(self):
         # Inline NAO paga visao: apenas a featured e verificada (1 chamada),

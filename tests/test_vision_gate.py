@@ -1,7 +1,12 @@
+import io
 import json
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+from urllib.error import HTTPError
 
 from unicornio_editor.media.vision_gate import (
     VisionGateError,
@@ -102,6 +107,36 @@ class VisionGateTests(unittest.TestCase):
     def test_fails_closed_on_missing_subject(self):
         with self.assertRaises(VisionGateError):
             self._verify(subject="   ")
+
+    def test_batch_http_error_records_sanitized_provider_context(self):
+        body = json.dumps({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "unsupported_value",
+                "message": "detail must be low",
+                "api_key": "must-not-leak",
+            }
+        }).encode()
+        error = HTTPError("https://vision.test", 400, "Bad Request", {}, io.BytesIO(body))
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.vision_gate.urlopen", side_effect=error
+        ):
+            with self.assertRaises(VisionGateError):
+                verify_image_subject_batch(
+                    items=[{"candidate_id": "c-1", "image_url": "https://a.test/a.webp", "subject": "A"}],
+                    api_key="test-key", base_url=self.base, model="vision-test", root=Path(directory),
+                )
+            events = [
+                json.loads(line)
+                for line in (Path(directory) / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+        event = events[-1]
+        self.assertEqual(event["error"], "HTTP 400")
+        self.assertEqual(event["response_error_type"], "invalid_request_error")
+        self.assertEqual(event["response_error_code"], "unsupported_value")
+        self.assertEqual(event["response_message"], "detail must be low")
+        self.assertEqual(event["candidate_ids"], ["c-1"])
+        self.assertNotIn("must-not-leak", event["response_body"])
 
     def test_sends_image_and_subject_with_low_detail(self):
         self._verify()

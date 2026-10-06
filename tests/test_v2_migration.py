@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unicornio_editor.pipeline_v2.migration import (
     repair_known_terminal_states,
     repair_historical_media_human_required,
+    repair_media_provider_terminal_states,
     rebase_editorial_retries,
     rebase_media_cooldowns,
 )
@@ -200,3 +201,37 @@ def test_known_terminal_repair_reopens_only_three_exact_bug_states():
         assert repaired_editorial.phase is Phase.EDITORIAL
         assert repaired_editorial.retry.phase_attempts == 2
         assert repaired_editorial.retry.attempts == 7
+
+
+def test_media_provider_repair_allowlists_114840_and_115025():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    media = MediaProgress(required=4, inline=tuple(
+        InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in (1, 2, 3)
+    ))
+    duplicate = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_DUPLICATE,
+        retry=RetryInfo(no_progress=2, policy_version=3),
+        relevance_approved=True,
+        media=media,
+    )
+    vision = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_INVALID,
+        retry=RetryInfo(attempts=9, no_progress=2, policy_version=3),
+        relevance_approved=True,
+        media=media,
+    )
+    client = Client([_post(114840, duplicate), _post(115025, vision)])
+    preview = repair_media_provider_terminal_states(client, now=now)
+    assert preview["post_ids"] == [114840, 115025]
+    result = repair_media_provider_terminal_states(client, apply=True, now=now)
+    assert result["migrated"] == 2
+    for post_id in (114840, 115025):
+        repaired = WorkState.from_dict(json.loads(client.posts[post_id]["meta"]["_hermes_work_state"]))
+        assert repaired.state is LifecycleState.PENDING
+        assert repaired.phase is Phase.MEDIA
+        assert repaired.retry.no_progress == 1
+        assert repaired.media.accepted == 3

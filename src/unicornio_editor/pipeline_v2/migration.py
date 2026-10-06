@@ -17,6 +17,7 @@ HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS = frozenset({
 HISTORICAL_MEDIA_LOSS_IDS = frozenset({114949, 114984, 114987})
 HISTORICAL_MEDIA_DUPLICATE_ID = 114840
 HISTORICAL_EDITORIAL_QUALITY_IDS = frozenset({115002, 115004})
+HISTORICAL_VISION_PROVIDER_ID = 115025
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -474,6 +475,97 @@ def repair_known_terminal_states(
         "apply": bool(apply),
         "policy_version": CURRENT_RETRY_POLICY_VERSION,
         "allowlisted_post_ids": list(post_ids),
+        "candidates": len(candidates),
+        "migrated": len(migrated_ids) if apply else 0,
+        "post_ids": migrated_ids if apply else candidates,
+        "skipped": skipped,
+        "next_at": current.isoformat(timespec="seconds"),
+    }
+
+
+def repair_media_provider_terminal_states(
+    client: Any,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Reopen only the audited duplicate and Vision-provider terminal states."""
+    current = _as_utc(now)
+    allowlist = (HISTORICAL_MEDIA_DUPLICATE_ID, HISTORICAL_VISION_PROVIDER_ID)
+    candidates: list[int] = []
+    skipped: list[dict[str, Any]] = []
+
+    for post_id in allowlist:
+        try:
+            post = client.get_post(post_id)
+        except Exception as exc:  # noqa: BLE001 - preserve per-post audit
+            skipped.append({"post_id": post_id, "reason": f"read_error: {exc}"})
+            continue
+        state = _read_state(post)
+        if (
+            state is None
+            or state.state is not LifecycleState.HUMAN_REQUIRED
+            or state.phase is not Phase.MEDIA
+            or state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION
+            or state.retry.no_progress != 2
+            or (
+                post_id == HISTORICAL_MEDIA_DUPLICATE_ID
+                and (
+                    state.blocker is not BlockerCode.MEDIA_DUPLICATE
+                    or state.media.required != 4
+                    or state.media.accepted != 3
+                )
+            )
+            or (
+                post_id == HISTORICAL_VISION_PROVIDER_ID
+                and state.blocker is not BlockerCode.MEDIA_INVALID
+            )
+        ):
+            skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+            continue
+        candidates.append(post_id)
+
+    migrated_ids: list[int] = []
+    if apply:
+        for post_id in candidates:
+            post = client.get_post(post_id)
+            state = _read_state(post)
+            if state is None:
+                skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
+                continue
+            meta = post.get("meta") if isinstance(post, dict) else None
+            if not isinstance(meta, dict):
+                raise RuntimeError(f"post {post_id} has no editable meta payload")
+            retry = RetryInfo(
+                attempts=state.retry.attempts,
+                no_progress=1,
+                next_at=current.isoformat(timespec="seconds"),
+                policy_version=CURRENT_RETRY_POLICY_VERSION,
+                phase_attempts=state.retry.phase_attempts,
+            )
+            migrated = WorkState(
+                state=LifecycleState.PENDING,
+                phase=Phase.MEDIA,
+                blocker=state.blocker,
+                retry=retry,
+                relevance_approved=state.relevance_approved,
+                media=state.media,
+                version=state.version,
+            )
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            if _read_state(client.get_post(post_id)) != migrated:
+                raise RuntimeError(f"media provider repair read-back mismatch for post {post_id}")
+            migrated_ids.append(post_id)
+
+    return {
+        "command": "v2-repair-media-provider-states",
+        "apply": bool(apply),
+        "policy_version": CURRENT_RETRY_POLICY_VERSION,
+        "allowlisted_post_ids": list(allowlist),
         "candidates": len(candidates),
         "migrated": len(migrated_ids) if apply else 0,
         "post_ids": migrated_ids if apply else candidates,

@@ -100,6 +100,8 @@ def run_pre_publish_checklist(
         detail: str,
         skipped: bool = False,
         invalid_media: list[dict[str, Any]] | None = None,
+        blocker: str | None = None,
+        phase: str | None = None,
     ) -> None:
         item: dict[str, Any] = {
             "name": name,
@@ -108,6 +110,10 @@ def run_pre_publish_checklist(
         }
         if invalid_media:
             item["invalid_media"] = invalid_media
+        if blocker:
+            item["blocker"] = blocker
+        if phase:
+            item["phase"] = phase
         items.append(item)
 
     # 1. Backup snapshot before any processing.
@@ -633,6 +639,7 @@ def run_pre_publish_checklist(
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
         vision_root = _project_root(backup_path)
         vision_failures: list[str] = []
+        vision_provider_errors: list[str] = []
         calls_low = 0
         calls_high = 0
         checked = 0
@@ -686,8 +693,10 @@ def run_pre_publish_checklist(
                     calls_high += 1
                 vision_failures.append(f"{url[:60]}: {reason}")
             except VisionGateError as exc:
+                vision_provider_errors.append(str(exc))
                 vision_failures.append(f"{url[:60]}: {exc}")
             except Exception as exc:  # noqa: BLE001 - report, keep gate
+                vision_provider_errors.append(str(exc))
                 vision_failures.append(f"{url[:60]}: {exc}")
 
         # Featured: low -> high obrigatorio (a imagem mais importante). Inline
@@ -706,10 +715,20 @@ def run_pre_publish_checklist(
                         context="image destaque do artigo",
                         category=featured_vision_category(editorial),
                     )
-            except (VisionGateError, Exception) as exc:  # noqa: BLE001 - report, keep gate
+            except VisionGateError as exc:
+                vision_provider_errors.append(str(exc))
+                vision_failures.append(f"destaque: {exc}")
+            except Exception as exc:  # noqa: BLE001 - report, keep gate
+                vision_provider_errors.append(str(exc))
                 vision_failures.append(f"destaque: {exc}")
         if vision_failures:
-            check("imagens_visao", False, "; ".join(vision_failures[:3]))
+            check(
+                "imagens_visao",
+                False,
+                "; ".join(vision_failures[:3]),
+                blocker="provider_error" if vision_provider_errors else None,
+                phase="media" if vision_provider_errors else None,
+            )
         else:
             check(
                 "imagens_visao",

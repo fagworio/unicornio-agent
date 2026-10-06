@@ -163,6 +163,11 @@ class ProductionMediaResolver:
                     "size": "xga",
                     "ratio": "w",
                     "existing_media_urls": [item.media_url for item in previous.inline],
+                    "existing_media_phashes": {
+                        item.media_url: item.phash
+                        for item in previous.inline
+                        if item.phash
+                    },
                 }],
             }
             resolved = _resolve_media_batch(
@@ -279,6 +284,16 @@ class ProductionMediaResolver:
             post_id=int(context["post_id"]),
             existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
         )
+        vision_errors = [
+            row for row in checked.get("featured_vision", [])
+            if isinstance(row, dict) and row.get("technical")
+        ]
+        if vision_errors:
+            from ..media.vision_gate import VisionGateError
+
+            raise VisionGateError(
+                str(vision_errors[0].get("reason") or "vision provider error")
+            )
         results, _featured_id, _featured_credit = _execute_media_plan(
             {**editorial, "media_plan": plan},
             self.config,
@@ -310,6 +325,7 @@ class ProductionMediaResolver:
                     plan_item.get("section_slot"),
                     int(result.get("width") or 1200),
                     int(result.get("height") or 800),
+                    str(result.get("phash") or ""),
                 ))
             if result.get("featured") and result.get("media_id"):
                 featured = FeaturedProgress(

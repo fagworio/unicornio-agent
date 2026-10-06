@@ -18,6 +18,7 @@ from ..editorial_schema import validate_editorial
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import insert_media
+from ..media.vision_gate import VisionGateError
 from ..workflow import (
     _execute_media_plan,
     compose_final_content,
@@ -225,6 +226,16 @@ class ProductionMediaStage:
                     plan = [item for item in plan if not item.get("is_featured")]
                 plan = [item for item in plan if item.get("is_featured") or int(item.get("paragraph_index", -1)) not in {x.slot for x in accepted.values()}]
                 checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""), existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None, post_id=int(context["post_id"]))
+                vision_errors = [
+                    row for row in checked.get("featured_vision", [])
+                    if isinstance(row, dict) and row.get("technical")
+                ]
+                if vision_errors:
+                    raise StageError(
+                        BlockerCode.PROVIDER_ERROR,
+                        Phase.MEDIA,
+                        str(vision_errors[0].get("reason") or "vision provider error"),
+                    )
                 results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
                 inline = tuple(
                     InlineMedia(
@@ -239,6 +250,7 @@ class ProductionMediaStage:
                         row.get("section_slot"),
                         int(row.get("width") or 1200),
                         int(row.get("height") or 800),
+                        str(row.get("phash") or ""),
                     )
                     for row in results
                     if row.get("status") in {"accepted", "ok"}
@@ -252,6 +264,8 @@ class ProductionMediaStage:
             return media
         except StageError:
             raise
+        except VisionGateError as exc:
+            raise StageError(BlockerCode.PROVIDER_ERROR, Phase.MEDIA, str(exc)) from exc
         except Exception as exc:
             raise StageError(BlockerCode.MEDIA_INVALID, Phase.MEDIA, str(exc)) from exc
 
@@ -362,6 +376,10 @@ class ProductionValidateStage:
                 failure = {"gate": item["name"], "detail": item.get("detail", "")}
                 if item.get("invalid_media"):
                     failure["invalid_media"] = item["invalid_media"]
+                if item.get("blocker"):
+                    failure["blocker"] = item["blocker"]
+                if item.get("phase"):
+                    failure["phase"] = item["phase"]
                 failures.append(failure)
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist})
             return {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist}

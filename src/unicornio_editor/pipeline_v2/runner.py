@@ -121,7 +121,15 @@ class PipelineRunner:
                 validation,
                 previous_media=previous.media,
             )
-        media_attempt = media_completed or (
+        technical_media_error = any(
+            isinstance(failure, dict)
+            and str(failure.get("blocker") or "") == BlockerCode.PROVIDER_ERROR.value
+            and str(failure.get("phase") or "") == Phase.MEDIA.value
+            for failure in (validation or {}).get("failures", [])
+        )
+        if technical_media_error:
+            effective_media = previous.media
+        media_attempt = (media_completed and not technical_media_error) or (
             media_stage_error
             or (previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS)
         )

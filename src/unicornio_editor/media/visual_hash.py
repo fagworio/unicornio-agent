@@ -49,6 +49,18 @@ def image_hashes(urls: list[str], *, timeout: float = 20.0) -> dict[str, Any]:
     return out
 
 
+def phash_from_path(path: str, *, timeout: float = 20.0) -> str:
+    """Return the pHash of a local final image, or empty on an unreadable file."""
+    del timeout  # kept for a symmetric caller contract; local reads do not timeout
+    try:
+        from PIL import Image
+        import imagehash
+
+        return str(imagehash.phash(Image.open(path)))
+    except Exception:  # noqa: BLE001 - fingerprinting is fail-soft
+        return ""
+
+
 def similar_image_pairs(
     urls: list[str],
     *,

@@ -77,7 +77,14 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
             except ValueError:
                 phase_value = None
         detail = str(failure.get("detail") or "")
-        blocker = blocker_for_gate(failure.get("gate"))
+        blocker = None
+        if failure.get("blocker"):
+            try:
+                blocker = BlockerCode(failure["blocker"])
+            except ValueError:
+                blocker = BlockerCode.INTERNAL_ERROR
+        if blocker is None:
+            blocker = blocker_for_gate(failure.get("gate"))
         if blocker is not None:
             result.append((blocker, str(failure.get("gate")), phase_value, detail))
         elif failure.get("blocker"):

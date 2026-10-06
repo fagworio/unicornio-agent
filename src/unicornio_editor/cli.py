@@ -565,6 +565,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="grava as transições allowlistadas para PENDING/MEDIA ou PENDING/EDITORIAL",
     )
 
+    repair_media_provider_parser = subparsers.add_parser(
+        "v2-repair-media-provider-states",
+        help="reabre somente os estados allowlistados de MEDIA_DUPLICATE e erro técnico de Vision",
+    )
+    repair_media_provider_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_media_provider_parser.add_argument("--apply", action="store_true")
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -1161,6 +1168,7 @@ def _resolve_media_batch(
             enriched_cache=memo_by_query[str(query)],
             post_id=post_id,
             existing_media_urls=spec.get("existing_media_urls") or [],
+            existing_media_phashes=spec.get("existing_media_phashes") or {},
             emit_terminal=False,
         )
         accepted_urls_by_query[str(query)].update(
@@ -1206,6 +1214,7 @@ def _resolve_media_batch(
             enriched_cache=memo_by_query.get(str(item["query"]), {}),
             post_id=post_id,
             existing_media_urls=item.get("existing_media_urls") or [],
+            existing_media_phashes=item.get("existing_media_phashes") or {},
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1411,6 +1420,7 @@ def _enriquecer_candidatos(
     enriched_cache: dict | None = None,
     post_id: int | None = None,
     existing_media_urls: list[str] | tuple[str, ...] | None = None,
+    existing_media_phashes: dict[str, str] | None = None,
     emit_terminal: bool = True,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
@@ -1516,9 +1526,21 @@ def _enriquecer_candidatos(
     hashes_locais: dict[str, str] = {}
     existing_urls = [str(url).strip() for url in (existing_media_urls or ()) if str(url).strip()]
     existing_hashes: dict[str, Any] = {}
+    if existing_media_phashes:
+        try:
+            import imagehash
+
+            existing_hashes.update({
+                str(url): imagehash.hex_to_hash(str(value))
+                for url, value in existing_media_phashes.items()
+                if str(url).strip() and str(value).strip()
+            })
+        except (ImportError, ValueError):
+            existing_hashes = {}
     if existing_urls:
         try:
-            existing_hashes = image_hashes(existing_urls)
+            missing_urls = [url for url in existing_urls if url not in existing_hashes]
+            existing_hashes.update(image_hashes(missing_urls))
         except Exception:  # noqa: BLE001 - pHash é fail-soft
             existing_hashes = {}
 
@@ -1946,6 +1968,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .pipeline_v2.migration import repair_known_terminal_states
 
             result = repair_known_terminal_states(
+                client,
+                apply=bool(getattr(args, "apply", False)),
+            )
+        elif args.command == "v2-repair-media-provider-states":
+            from .pipeline_v2.migration import repair_media_provider_terminal_states
+
+            result = repair_media_provider_terminal_states(
                 client,
                 apply=bool(getattr(args, "apply", False)),
             )

@@ -27,6 +27,12 @@ def test_work_state_round_trips_v2_wire_format():
     assert [item["media_id"] for item in state.to_dict()["media"]["inline"]["accepted"]] == [1, 2, 3, 4]
 
 
+def test_inline_media_round_trips_persisted_phash():
+    item = InlineMedia(101, "https://wp.test/101.webp", 1, phash="0123abcd")
+    restored = InlineMedia.from_dict(item.to_dict())
+    assert restored.phash == "0123abcd"
+
+
 def test_work_state_allows_valid_assets_above_current_requirement():
     progress = MediaProgress(required=2, inline=tuple(InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in (1, 2, 3)))
     assert progress.accepted == 3

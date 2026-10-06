@@ -135,6 +135,7 @@ class InlineMedia:
     section_slot: int | None = None
     width: int = 1200
     height: int = 800
+    phash: str = ""
 
     def __post_init__(self) -> None:
         if self.media_id < 1 or self.slot < 0:
@@ -157,6 +158,7 @@ class InlineMedia:
             "section_slot": self.section_slot,
             "width": self.width,
             "height": self.height,
+            "phash": self.phash,
         }
 
     @classmethod
@@ -175,6 +177,7 @@ class InlineMedia:
             int(section_slot) if section_slot is not None else None,
             int(value.get("width", 1200)),
             int(value.get("height", 800)),
+            str(value.get("phash") or ""),
         )
 
 

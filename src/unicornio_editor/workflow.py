@@ -1556,7 +1556,7 @@ def validate_media_plan(
                     ).lower(),
                     detail=str(vision.get("reason") or "")[:160],
                 )
-            if vision["status"] == "rejected":
+            if vision["status"] in {"rejected", "error"}:
                 reason = str(vision["reason"])
         if reason:
             rejected.append({"index": index, "reason": reason})
@@ -1702,8 +1702,20 @@ def _validate_featured_candidate_vision(
             require_key_art=True,
             root=root,  # uma requisicao HTTP = um evento vision_api_request
         )
-    except (VisionGateError, Exception) as exc:  # noqa: BLE001 - fail closed
-        return {"status": "rejected", "reason": f"visao da featured falhou: {exc}", "cached": False}
+    except VisionGateError as exc:
+        return {
+            "status": "error",
+            "technical": True,
+            "reason": f"visao da featured falhou: {exc}",
+            "cached": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return {
+            "status": "error",
+            "technical": True,
+            "reason": f"visao da featured falhou: {exc}",
+            "cached": False,
+        }
     if ok:
         set_cached_decision(
             cache_root,
@@ -2042,6 +2054,9 @@ def _execute_media_plan(
                     webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
                 else:
                     webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+                from .media.visual_hash import phash_from_path
+
+                final_phash = phash_from_path(str(webp)) or str(item.get("phash") or "")
                 # Featured "so texto" nao e key art: rejeita.
                 if is_featured and image_is_mostly_flat(webp):
                     _funnel("conversion", "rejected", item, position, "featured plana")
@@ -2113,6 +2128,7 @@ def _execute_media_plan(
                     "width": width,
                     "height": height,
                     "transparency": transparency,
+                    "phash": final_phash,
                 }
 
             # Fase paralela (I/O-bound). Somente falha ao CRIAR o executor cai

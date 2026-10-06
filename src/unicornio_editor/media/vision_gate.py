@@ -62,6 +62,33 @@ _BATCH_SYSTEM_PROMPT = (
 )
 
 
+def _http_error_context(exc: HTTPError) -> dict[str, str]:
+    """Extract only safe provider error fields from an HTTP response body."""
+    try:
+        raw = exc.read().decode("utf-8", errors="replace")[:2000]
+    except Exception:  # noqa: BLE001 - the body is optional diagnostic context
+        raw = ""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return {"response_body": raw}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        error = payload if isinstance(payload, dict) else {}
+    safe = {
+        key: str(error.get(key) or "")[:500]
+        for key in ("type", "code", "message", "param")
+        if error.get(key) is not None
+    }
+    body = json.dumps(safe, ensure_ascii=False, sort_keys=True)[:2000]
+    return {
+        "response_body": body,
+        "response_error_type": safe.get("type", ""),
+        "response_error_code": safe.get("code", ""),
+        "response_message": safe.get("message", ""),
+    }
+
+
 def _json_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -220,8 +247,9 @@ def _call_vision(
         with urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        error_context = _http_error_context(exc)
         _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
-                           erro=f"HTTP {exc.code}")
+                           erro=f"HTTP {exc.code}", **error_context)
         raise VisionGateError(f"API de visao respondeu HTTP {exc.code}") from exc
     except (URLError, OSError, ValueError) as exc:
         _registrar_chamada(root, detail=detail, model=model, base_url=base_url, erro=str(exc))
@@ -328,9 +356,12 @@ def _call_vision_batch(
         with urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        error_context = _http_error_context(exc)
         _registrar_chamada(
             root, detail=detail, model=model, base_url=base_url,
             erro=f"HTTP {exc.code}", batch_size=len(items),
+            candidate_ids=[str(item["candidate_id"]) for item in items],
+            **error_context,
         )
         raise VisionGateError(f"API de visao respondeu HTTP {exc.code}") from exc
     except (URLError, OSError, ValueError) as exc:
@@ -386,6 +417,8 @@ def _registrar_chamada(
     usage: dict[str, Any] | None = None,
     erro: str = "",
     batch_size: int = 1,
+    candidate_ids: list[str] | None = None,
+    **error_context: str,
 ) -> None:
     """Evento de UMA chamada HTTP à API de visão (com tokens quando houver)."""
     if root is None:
@@ -413,6 +446,11 @@ def _registrar_chamada(
             "error": str(erro or "")[:160],
             "batch_size": max(1, int(batch_size or 1)),
         }
+        if candidate_ids:
+            evento["candidate_ids"] = [str(value)[:80] for value in candidate_ids[:20]]
+        for key, value in error_context.items():
+            if value:
+                evento[key] = str(value)[:2000]
         # Custo da chamada DIRETA (a visao nao passa pelo Hermes): sem isto o teto
         # de USD do cron mede menos do que gastou.
         if custo is not None:
