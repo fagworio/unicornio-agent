@@ -89,7 +89,11 @@ class ProductionMediaResolver:
             # supply a candidate when the old library record is incomplete.
             if all(normalized.get(key) for key in ("source_page_url", "direct_image_url", "author", "license", "license_url", "captured_at", "credit_text", "alt_text")):
                 approved.append(normalized)
-        approved.extend(candidate for candidate in (row.get("audit_candidates") or []) if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match")
+        approved.extend(
+            candidate for candidate in (row.get("audit_candidates") or [])
+            if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+            and all(candidate.get(key) for key in ("direct_image_url", "source_page_url", "author", "license", "license_url", "captured_at", "credit_text", "alt_text"))
+        )
         for index, candidate in enumerate(approved):
             if len(plan) >= search_needed:
                 break
