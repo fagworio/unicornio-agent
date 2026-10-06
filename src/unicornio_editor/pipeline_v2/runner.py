@@ -2,7 +2,7 @@
 
 from typing import Any, Callable
 
-from .classifier import classify, classify_stage_error
+from .classifier import classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, FeaturedProgress, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
@@ -104,6 +104,6 @@ class PipelineRunner:
             phase=outcome.phase or previous.phase,
             blocker=outcome.blocker,
             retry=RetryInfo(previous.retry.attempts + 1, no_progress, outcome.next_at),
-            relevance_approved=editorial.get("decision") == "process" or previous.relevance_approved,
+            relevance_approved=editorial_decision(editorial) == "process" or previous.relevance_approved,
             media=progress,
         )

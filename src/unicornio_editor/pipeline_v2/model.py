@@ -216,6 +216,7 @@ class Outcome:
     phase: Phase | None = None
     blocker: BlockerCode | None = None
     next_at: str | None = None
+    detail: str | None = None
 
     @classmethod
     def ready(cls) -> "Outcome":
@@ -241,4 +242,6 @@ class Outcome:
             result["blocker"] = self.blocker.value
         if self.next_at is not None:
             result["next_at"] = self.next_at
+        if self.detail is not None:
+            result["detail"] = self.detail
         return result

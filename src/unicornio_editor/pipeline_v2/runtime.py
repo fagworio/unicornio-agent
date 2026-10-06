@@ -58,11 +58,13 @@ class ProductionMediaResolver:
         if vision_candidates and getattr(self.config, "vision_enabled", False) and getattr(self.config, "vision_api_key", ""):
             from ..media.vision_gate import verify_image_subject_batch
             decisions = verify_image_subject_batch(items=vision_candidates, api_key=self.config.vision_api_key, base_url=self.config.vision_base_url, model=self.config.vision_model, timeout=self.config.http_timeout, detail=self.config.vision_detail, allow_high=True, root=self.root)
+            from ..media.vision_cache import set_cached_decision
             for candidate in row.get("audit_candidates") or []:
                 url = candidate.get("direct_image_url") or candidate.get("image_url")
                 match = next((item for item in vision_candidates if item["image_url"] == url), None)
                 decision = decisions.get(match["candidate_id"]) if match else None
                 if decision and decision.get("verdict") == "accept":
+                    set_cached_decision(self.root, str(url), subject, {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"})
                     candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
                     candidate["needs_vision"] = False
         plan = []
@@ -142,7 +144,7 @@ class WordPressWriterV2:
             latest = self.root / "backups" / str(post_id) / "editorial.latest.json"
             if draft.is_file(): latest.write_text(draft.read_text(encoding="utf-8"), encoding="utf-8")
         journal = journal_dir / f"{post_id}.json"
-        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": context.get("provider_reason")}
+        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": outcome.detail or context.get("provider_reason")}
         journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
         if outcome.type.value == "ready" and content:
@@ -193,7 +195,7 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
                 except (OSError, ValueError):
                     context["provider_reason"] = "provider_error"
             write = WordPressWriterV2(client, root, policy_version=config.policy_version).commit(post_id, context, buffered.state, outcome)
-            details.append({"post_id": post_id, "initial_state": initial.state.value, "phase": buffered.state.phase.value, "outcome": outcome.type.value, "blocker": outcome.blocker.value if outcome.blocker else None, "detail": context.get("provider_reason"), **write})
+            details.append({"post_id": post_id, "initial_state": initial.state.value, "phase": buffered.state.phase.value, "outcome": outcome.type.value, "blocker": outcome.blocker.value if outcome.blocker else None, "detail": outcome.detail or context.get("provider_reason"), **write})
         return {"selected": len(selected), "locked": False, "details": details}
     finally:
         lock.release()

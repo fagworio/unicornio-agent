@@ -1359,6 +1359,7 @@ def _media_item_rejection(
     client: WordPressClient,
     attachment_cache: dict[int, dict[str, Any]],
     editorial: dict[str, Any] | None = None,
+    root: Path | None = None,
 ) -> str | None:
     """Motivo de rejeicao de um item do media_plan, ou None se valido.
 
@@ -1434,6 +1435,11 @@ def _media_item_rejection(
                 f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
             )
         return None
+    if root is not None and not is_featured:
+        from .media.vision_cache import get_cached_decision
+        cached = get_cached_decision(root, str(item.get("direct_image_url") or ""), str(item.get("subject") or editorial.get("game_name") if isinstance(editorial, dict) else ""))
+        if cached and cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.80:
+            return None
     # P1 (auditoria): alt/credit/search_query escritos pelo AGENTE não são
     # evidência — uma imagem errada com alt "Bleach anime" passava no apply
     # embora a descoberta já a tivesse rejeitado (o agente provava a si mesmo).
@@ -1511,7 +1517,7 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache, editorial)
+        reason = _media_item_rejection(item, entities, client, cache, editorial, root=root)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
@@ -1874,7 +1880,7 @@ def _execute_media_plan(
         return attachment_cache[media_id]
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
-        return _media_item_rejection(item, entities, client, attachment_cache, editorial)
+        return _media_item_rejection(item, entities, client, attachment_cache, editorial, root=root)
 
     if config.dry_run:
         results: list[dict[str, Any]] = []
@@ -3748,7 +3754,31 @@ def retry_post(
         raise WorkflowError(f"post {post_id} nao esta pending/awaiting_human ({post.get('status')})")
     if config.dry_run:
         raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
-    if post.get("status") == "awaiting_human":
+    existing_v2 = (post.get("meta") or {}).get("_hermes_work_state")
+    if existing_v2:
+        try:
+            from .pipeline_v2.model import LifecycleState, RetryInfo, WorkState
+            raw_v2 = json.loads(existing_v2) if isinstance(existing_v2, str) else existing_v2
+            previous = WorkState.from_dict(raw_v2)
+            reopened = WorkState(
+                state=LifecycleState.PENDING,
+                phase=previous.phase,
+                blocker=previous.blocker,
+                retry=RetryInfo(attempts=0, no_progress=0, next_at=None),
+                relevance_approved=previous.relevance_approved,
+                media=previous.media,
+            )
+            serialized = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
+            client.update_post(post_id, {"meta": {"_hermes_work_state": serialized}})
+            readback = client.get_post(post_id)
+            meta = readback.get("meta") or {}
+            verified = meta.get("_hermes_work_state") == serialized
+            if not verified:
+                raise WorkflowError(f"V2 retry read-back failed for post {post_id}")
+            return {"post_id": post_id, "status": "retried", "state": reopened.state.value, "phase": reopened.phase.value, "blocker": reopened.blocker.value if reopened.blocker else None, "attempts": 0, "wordpress_changed": True, "readback": True}
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise WorkflowError(f"estado V2 invalido para retry {post_id}: {exc}") from exc
+
         # Devolve ao fluxo: status pending + reset de estado (o hook
         # transition_post_status do mu-plugin limpa as metas de pipeline).
         client.move_to_status(post_id, "pending")

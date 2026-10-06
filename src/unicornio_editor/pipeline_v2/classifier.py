@@ -73,21 +73,29 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
     return result
 
 
-def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None, now: datetime | None = None) -> Outcome:
+def _retry(previous: WorkState, phase: Phase, blocker: BlockerCode, next_at: str | None = None, now: datetime | None = None, detail: str | None = None) -> Outcome:
     if next_at is None:
         now = now or datetime.now(timezone.utc)
         delay = 30 * (4 ** min(previous.retry.attempts, 3))
         next_at = (now + timedelta(minutes=delay)).isoformat(timespec="seconds")
-    return Outcome.retry(phase, blocker, next_at)
+    return Outcome(OutcomeType.RETRY, phase, blocker, next_at, detail)
+
+
+def editorial_decision(editorial: dict[str, Any]) -> str | None:
+    decision = editorial.get("decision")
+    if decision:
+        return str(decision)
+    relevance = editorial.get("site_relevance") or {}
+    return relevance.get("decision")
 
 
 def classify_stage_error(previous: WorkState, exc: Any, *, now: datetime | None = None) -> Outcome:
-    return _retry(previous, exc.phase, exc.blocker, now=now)
+    return _retry(previous, exc.phase, exc.blocker, now=now, detail=str(getattr(exc, "detail", "") or exc))
 
 
 def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None, no_progress: int | None = None) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
-    decision = editorial.get("decision")
+    decision = editorial_decision(editorial)
     if decision == "skip":
         return Outcome.skipped()
     if decision == "uncertain":
