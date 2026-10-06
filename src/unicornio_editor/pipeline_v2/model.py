@@ -134,12 +134,10 @@ class MediaProgress:
         slots = [item.slot for item in self.inline]
         if len(ids) != len(set(ids)) or len(slots) != len(set(slots)):
             raise ValueError("duplicate inline media or slot")
-        if len(self.inline) > self.required:
-            raise ValueError("accepted cannot exceed required")
         if self.accepted_count is not None and (
-            self.accepted_count < len(self.inline) or self.accepted_count > self.required
+            self.accepted_count < len(self.inline)
         ):
-            raise ValueError("accepted_count must cover inline assets and not exceed required")
+            raise ValueError("accepted_count must cover inline assets")
 
     @property
     def accepted(self) -> int:

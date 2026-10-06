@@ -67,9 +67,12 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
         role = "featured" if "-featured-" in batch["batch_id"] else "inline"
         audit = []
         if role == "featured":
-            audit = [candidate("https://cdn.test/featured.webp", item["subject"], "featured")]
+            audit = [
+                candidate("https://cdn.test/featured.webp", item["subject"], "featured"),
+                candidate("https://cdn.test/featured-alt.webp", item["subject"], "featured-alt"),
+            ]
         elif "Nana" in item["query"]:
-            audit = [candidate("https://cdn.test/inline.webp", item["subject"], "inline")]
+            audit = [candidate("https://cdn.test/featured-alt.webp", item["subject"], "inline")]
         return {"posts": [{"audit_candidates": audit, "reuse": []}]}
 
     def fake_validate(_client, editorial, **_kwargs):
@@ -107,6 +110,6 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
     plan = seen["plan"]
     assert [item["is_featured"] for item in plan] == [True, False]
     assert plan[0]["direct_image_url"] == "https://cdn.test/featured.webp"
-    assert plan[1]["direct_image_url"] == "https://cdn.test/inline.webp"
+    assert plan[1]["direct_image_url"] == "https://cdn.test/featured-alt.webp"
     assert any("Nana anime" in query for query in calls)
     assert result.featured.status is runtime.FeaturedStatus.VALID

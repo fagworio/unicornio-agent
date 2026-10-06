@@ -61,7 +61,7 @@ class ChecklistTests(unittest.TestCase):
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
 
-    def _run_checklist(self, post=None, editorial=None, content=None, backup=True, client=None):
+    def _run_checklist(self, post=None, editorial=None, content=None, backup=True, client=None, media_context=None):
         with tempfile.TemporaryDirectory() as directory:
             backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
             backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +74,7 @@ class ChecklistTests(unittest.TestCase):
                 backup_path=backup_path if backup else None,
                 config=self.config(),
                 client=client or FakeClient(),
+                media_context=media_context,
             )
 
     def statuses(self, result):
@@ -148,6 +149,23 @@ class ChecklistTests(unittest.TestCase):
         )
         result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["relevancia_imagens"], "fail")
+
+    def test_media_failure_identifies_the_invalid_asset(self):
+        content = (
+            '<figure class="aligncenter"><img src="https://media.example/morcego.webp" alt="Morcego real em voo" />'
+            "<figcaption>Crédito da imagem: Fotógrafo. Morcego real. CC0.</figcaption></figure>"
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+        )
+        result = self._run_checklist(
+            content=content,
+            media_context={"inline": {"accepted": [
+                {"media_id": 11, "media_url": "https://media.example/morcego.webp", "slot": 0},
+            ]}},
+        )
+        item = next(i for i in result["items"] if i["name"] == "relevancia_imagens")
+        assert item["invalid_media"] == [{
+            "url": "https://media.example/morcego.webp", "media_id": 11, "slot": 0,
+        }]
 
     def test_duplicate_image_fails_duplicate_gate(self):
         # Reutilizar a mesma URL de imagem varias vezes no corpo e falha

@@ -82,3 +82,21 @@ def test_runner_preserves_inline_progress_for_inline_missing():
     outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.INLINE_MISSING)
     state = PipelineRunner._next_state(previous, {}, previous.media, outcome)
     assert state.media.inline == (inline,)
+
+
+def test_runner_removes_only_structured_invalid_inline_media():
+    inline = tuple(
+        InlineMedia(i, f"https://example.test/{i}.webp", i * 3)
+        for i in (1, 2, 3, 4)
+    )
+    previous = WorkState(media=MediaProgress(required=4, inline=inline))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+    validation = {
+        "failures": [{
+            "gate": "relevancia_imagens",
+            "invalid_media": [{"media_id": 3, "url": "https://example.test/3.webp", "slot": 9}],
+        }],
+    }
+    state = PipelineRunner._next_state(previous, {}, previous.media, outcome, validation=validation)
+    assert [item.media_id for item in state.media.inline] == [1, 2, 4]
+    assert state.media.missing == 1

@@ -82,6 +82,7 @@ def run_pre_publish_checklist(
     config: Config,
     client: WordPressClient | None = None,
     attempts: int = 0,
+    media_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run every policy rule in sequence and report the result per item."""
     if not isinstance(post, Mapping):
@@ -91,16 +92,23 @@ def run_pre_publish_checklist(
     if not isinstance(content, str):
         raise TypeError("content must be a string")
 
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
 
-    def check(name: str, ok: bool, detail: str, skipped: bool = False) -> None:
-        items.append(
-            {
-                "name": name,
-                "status": "skip" if skipped else ("pass" if ok else "fail"),
-                "detail": detail,
-            }
-        )
+    def check(
+        name: str,
+        ok: bool,
+        detail: str,
+        skipped: bool = False,
+        invalid_media: list[dict[str, Any]] | None = None,
+    ) -> None:
+        item: dict[str, Any] = {
+            "name": name,
+            "status": "skip" if skipped else ("pass" if ok else "fail"),
+            "detail": detail,
+        }
+        if invalid_media:
+            item["invalid_media"] = invalid_media
+        items.append(item)
 
     # 1. Backup snapshot before any processing.
     backup_ok = bool(backup_path) and Path(str(backup_path)).exists()
@@ -248,6 +256,54 @@ def run_pre_publish_checklist(
     from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 
     content_images = iter_content_images(content)
+    inline_assets = []
+    if isinstance(media_context, Mapping):
+        inline_payload = media_context.get("inline")
+        if isinstance(inline_payload, Mapping):
+            inline_assets = [
+                item for item in (inline_payload.get("accepted") or [])
+                if isinstance(item, Mapping)
+            ]
+
+    def _asset_descriptor(url: str, ordinal: int) -> dict[str, Any]:
+        clean_url = str(url or "").strip()
+        base_url = clean_url.split("?", 1)[0]
+        match = next(
+            (
+                item for item in inline_assets
+                if str(item.get("media_url") or "").strip() in {clean_url, base_url}
+                or str(item.get("media_url") or "").strip().split("?", 1)[0] == base_url
+            ),
+            None,
+        )
+        result: dict[str, Any] = {"url": clean_url}
+        if match:
+            if match.get("media_id") is not None:
+                result["media_id"] = int(match["media_id"])
+            if match.get("slot") is not None:
+                result["slot"] = int(match["slot"])
+        else:
+            result["slot"] = ordinal
+        return result
+
+    def _descriptors_for(items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        descriptors = [
+            _asset_descriptor(str(item.get("src") or ""), index)
+            for index, item in enumerate(items)
+            if str(item.get("src") or "").strip()
+        ]
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        for descriptor in descriptors:
+            key = (
+                descriptor.get("media_id"),
+                descriptor.get("url"),
+                descriptor.get("slot"),
+            )
+            if key not in seen:
+                seen.add(key)
+                unique.append(descriptor)
+        return unique
     image_entities = extract_entities(
         title=str(editorial.get("seo", {}).get("title") or ""),
         content_html=str(editorial.get("cleaned_html") or ""),
@@ -271,6 +327,7 @@ def run_pre_publish_checklist(
             f"{len(content_images) - len(irrelevant_images)} relevante(s) de "
             f"{len(content_images)} imagem(ns); irrelevantes: "
             f"{', '.join(item.get('alt') or item.get('src') or '?' for item in irrelevant_images) or 'nenhuma'}",
+            invalid_media=_descriptors_for(irrelevant_images),
         )
     else:
         check("relevancia_imagens", True, "sem imagens para validar", skipped=True)
@@ -292,7 +349,15 @@ def run_pre_publish_checklist(
 
     src_counts = _Counter(_img_fingerprint(item.get("src")) for item in content_images)
     repeated = [f"{src} (x{count})" for src, count in src_counts.items() if count > 1 and src]
+    duplicate_images: list[Mapping[str, Any]] = []
     if content_images:
+        seen_fingerprints: set[str] = set()
+        for item in content_images:
+            fingerprint = _img_fingerprint(item.get("src"))
+            if fingerprint in seen_fingerprints:
+                duplicate_images.append(item)
+            else:
+                seen_fingerprints.add(fingerprint)
         check(
             "imagens_duplicadas",
             not repeated,
@@ -301,6 +366,7 @@ def run_pre_publish_checklist(
                 if repeated
                 else f"{len(content_images)} imagem(ns) distintas"
             ),
+            invalid_media=_descriptors_for(duplicate_images),
         )
     else:
         check("imagens_duplicadas", True, "sem imagens para validar", skipped=True)
@@ -319,6 +385,10 @@ def run_pre_publish_checklist(
             similares = similar_image_pairs(urls, hashes=img_hashes)
         except Exception:  # noqa: BLE001 - deps/rede: nao bloqueia o pipeline
             similares = []
+        similar_invalid: list[Mapping[str, Any]] = []
+        if similares:
+            similar_urls = {str(pair[1]) for pair in similares}
+            similar_invalid = [item for item in content_images if str(item.get("src") or "") in similar_urls]
         check(
             "imagens_similares",
             not similares,
@@ -328,6 +398,7 @@ def run_pre_publish_checklist(
                 if similares
                 else f"{len(urls)} imagem(ns) visualmente distintas"
             ),
+            invalid_media=_descriptors_for(similar_invalid),
         )
     else:
         check("imagens_similares", True, "sem imagens para validar", skipped=True)
@@ -435,8 +506,14 @@ def run_pre_publish_checklist(
         except Exception:
             pass  # media lookup failure is reported by the item below
     non_webp = [url for url in image_urls if not url.lower().endswith(".webp")]
+    non_webp_inline = [url for url in img_urls if not url.lower().endswith(".webp")]
     if image_urls:
-        check("imagens_webp", not non_webp, f"{len(image_urls)} imagem(ns); nao-webp: {len(non_webp)}")
+        check(
+            "imagens_webp",
+            not non_webp,
+            f"{len(image_urls)} imagem(ns); nao-webp: {len(non_webp)}",
+            invalid_media=[_asset_descriptor(url, index) for index, url in enumerate(non_webp_inline)],
+        )
     else:
         check("imagens_webp", True, "sem imagens para verificar", skipped=True)
 
@@ -447,22 +524,28 @@ def run_pre_publish_checklist(
     from .media.converter import MAX_INLINE_WIDTH, MIN_INLINE_WIDTH
 
     bad_dimensions: list[str] = []
+    bad_dimension_items: list[Mapping[str, Any]] = []
     for tag in re.findall(r"<img\b[^>]*>", content, flags=re.IGNORECASE):
+        src_match = re.search(r'\bsrc="([^"]+)"', tag, flags=re.IGNORECASE)
+        src = src_match.group(1) if src_match else ""
         width_match = re.search(r'\bwidth="(\d+)"', tag, flags=re.IGNORECASE)
         height_match = re.search(r'\bheight="(\d+)"', tag, flags=re.IGNORECASE)
         if not width_match or not height_match:
             bad_dimensions.append("sem width/height")
+            bad_dimension_items.append({"src": src})
             continue
         width = int(width_match.group(1))
         height = int(height_match.group(1))
         if not MIN_INLINE_WIDTH <= width <= MAX_INLINE_WIDTH or height <= 0:
             bad_dimensions.append(f"{width}x{height}")
+            bad_dimension_items.append({"src": src})
     if inline_images:
         check(
             "dimensoes_imagens",
             not bad_dimensions,
             f"{len(inline_images)} imagem(ns); fora do padrao {MIN_INLINE_WIDTH}-{MAX_INLINE_WIDTH}px: "
             f"{', '.join(bad_dimensions) or 'nenhuma'}",
+            invalid_media=_descriptors_for(bad_dimension_items),
         )
     else:
         check("dimensoes_imagens", True, "sem imagens para verificar", skipped=True)

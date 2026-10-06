@@ -11,7 +11,8 @@ from typing import Any, Callable
 
 from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
-from ..content_quality import normalize_editorial_dashes
+from ..checklist import required_image_count
+from ..content_quality import normalize_editorial_dashes, word_count
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..media.evidence import post_subjects
@@ -33,6 +34,37 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
+
+
+def _persist_draft_repairs(
+    root: Path,
+    post_id: int,
+    *,
+    focus_keyword: str | None = None,
+    normalize_dashes: bool = False,
+) -> None:
+    """Persist deterministic repairs without copying runtime enrichments.
+
+    ``editorial.candidate.json`` contains inserted media, CTA, links and
+    trailer data.  It is a derived artifact, so only the repaired fields are
+    merged into the canonical editorial draft used by the next retry.
+    """
+    path = Path(root) / "backups" / str(post_id) / "editorial.draft.json"
+    if not path.is_file():
+        return
+    try:
+        draft = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(draft, dict):
+        return
+    if normalize_dashes:
+        draft["cleaned_html"] = normalize_editorial_dashes(draft.get("cleaned_html", ""))
+    if focus_keyword:
+        seo = dict(draft.get("seo") or {})
+        seo["focus_keyword"] = focus_keyword
+        draft["seo"] = seo
+    _write_json(Path(root), post_id, "editorial.draft.json", draft)
 
 
 def _post(context: dict[str, Any]) -> dict[str, Any]:
@@ -129,7 +161,11 @@ class ProductionMediaStage:
 
     def __call__(self, context: dict[str, Any], state: Any, editorial: dict[str, Any]) -> MediaProgress:
         previous = state.media
-        required = previous.required
+        required = required_image_count(
+            word_count(str(editorial.get("cleaned_html") or "")),
+            title=str(context.get("title") or ""),
+            content=str(editorial.get("cleaned_html") or ""),
+        )
         accepted = {item.media_id: item for item in previous.inline}
         featured = previous.featured
         try:
@@ -149,7 +185,7 @@ class ProductionMediaStage:
                 inline = tuple(InlineMedia(int(row["media_id"]), str(row["media_url"]), int(row.get("paragraph_index", 0)), str(row.get("alt_text", "")), str(row.get("credit_text", ""))) for row in results if row.get("status") in {"accepted", "ok"} and row.get("media_id") and not row.get("featured"))
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
                 fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
-                media = MediaProgress(required=max(required, len(inline)), inline=inline, featured=fp)
+                media = MediaProgress(required=required, inline=inline, featured=fp)
             _write_json(self.root, int(context["post_id"]), "editorial.partial.json", media.to_dict())
             return media
         except StageError:
@@ -161,7 +197,7 @@ class ProductionMediaStage:
     def _from_result(result: Any, required: int, accepted: dict[int, InlineMedia], featured: FeaturedProgress) -> MediaProgress:
         rows = result if isinstance(result, list) else (result.get("inline") or [])
         inline = tuple(accepted.values()) + tuple(InlineMedia.from_dict(row) for row in rows if int(row.get("media_id", 0)) not in accepted)
-        return MediaProgress(required=max(required, len(inline)), inline=inline, featured=featured)
+        return MediaProgress(required=required, inline=inline, featured=featured)
 
 
 class ProductionComposeStage:
@@ -195,8 +231,9 @@ class ProductionValidateStage:
             candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
             checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
             candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]
+            _persist_draft_repairs(self.root, int(context["post_id"]), normalize_dashes=True)
             seo = dict(checklist_editorial.get("seo") or {})
-            checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
+            checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)), media_context=candidate.get("media"))
             raw_failures = [item for item in checklist.get("items", []) if item.get("status") == "fail"]
             focus_keyword_failure = any(
                 item.get("name") == "qualidade_texto"
@@ -213,9 +250,21 @@ class ProductionValidateStage:
                     checklist_editorial["seo"] = seo
                     candidate["editorial"]["seo"] = seo
                     candidate["seo"] = seo
+                    _persist_draft_repairs(
+                        self.root,
+                        int(context["post_id"]),
+                        focus_keyword=str(replacement),
+                    )
                     _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
-                    checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
-            failures = [{"gate": item["name"], "detail": item.get("detail", "")} for item in checklist.get("items", []) if item.get("status") == "fail"]
+                    checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)), media_context=candidate.get("media"))
+            failures = []
+            for item in checklist.get("items", []):
+                if item.get("status") != "fail":
+                    continue
+                failure = {"gate": item["name"], "detail": item.get("detail", "")}
+                if item.get("invalid_media"):
+                    failure["invalid_media"] = item["invalid_media"]
+                failures.append(failure)
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist})
             return {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist}
         except Exception as exc:

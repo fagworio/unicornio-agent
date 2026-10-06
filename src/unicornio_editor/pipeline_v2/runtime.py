@@ -163,10 +163,10 @@ class ProductionMediaResolver:
             candidate for candidate in self._approved_unique(featured_candidates)
             if candidate.get("direct_image_url")
         ]
+        featured_selected = featured_approved[0] if featured_approved else None
         featured_keys = {
-            str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
-            for candidate in featured_approved
-        }
+            str(featured_selected.get("media_library_id") or featured_selected.get("direct_image_url") or "")
+        } if featured_selected else set()
         inline_approved = [
             candidate for candidate in self._approved_unique(inline_candidates)
             if candidate.get("direct_image_url")
@@ -174,8 +174,8 @@ class ProductionMediaResolver:
         ]
 
         plan: list[dict[str, Any]] = []
-        if featured_needed and featured_approved:
-            plan.append(self._plan_item(featured_approved[0], featured_approved[0].get("subject") or title, 0, True))
+        if featured_needed and featured_selected:
+            plan.append(self._plan_item(featured_selected, featured_selected.get("subject") or title, 0, True))
         used_slots = {item.slot for item in previous.inline}
         for candidate in inline_approved[:inline_needed]:
             slot = 0
@@ -221,7 +221,7 @@ class ProductionMediaResolver:
                     str(result.get("media_url") or ""),
                 )
         return MediaProgress(
-            required=max(previous.required, total_required),
+            required=total_required,
             inline=tuple({item.media_id: item for item in inline}.values()),
             featured=featured,
         )

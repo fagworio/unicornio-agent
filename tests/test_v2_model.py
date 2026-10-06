@@ -27,9 +27,10 @@ def test_work_state_round_trips_v2_wire_format():
     assert [item["media_id"] for item in state.to_dict()["media"]["inline"]["accepted"]] == [1, 2, 3, 4]
 
 
-def test_work_state_rejects_invalid_lifecycle_and_progress():
-    with pytest.raises(ValueError, match="accepted cannot exceed required"):
-        MediaProgress(required=2, inline=tuple(InlineMedia(i, "u", i) for i in (1, 2, 3)))
+def test_work_state_allows_valid_assets_above_current_requirement():
+    progress = MediaProgress(required=2, inline=tuple(InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in (1, 2, 3)))
+    assert progress.accepted == 3
+    assert progress.missing == 0
 
     with pytest.raises(ValueError, match="READY requires"):
         WorkState(state=LifecycleState.READY, phase=Phase.MEDIA)

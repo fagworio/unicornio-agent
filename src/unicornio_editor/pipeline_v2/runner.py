@@ -2,7 +2,7 @@
 
 from typing import Any, Callable
 
-from .classifier import classify, classify_stage_error, editorial_decision
+from .classifier import blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
@@ -47,6 +47,7 @@ class PipelineRunner:
             return outcome
         media: MediaProgress = previous.media
         media_completed = False
+        validation: dict[str, Any] | None = None
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
             outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []})
@@ -74,7 +75,17 @@ class PipelineRunner:
                 outcome = classify_stage_error(previous, exc)
         progress = self._media_progressed(previous.media, media) if media_completed else False
         current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
-        self.state_store.commit(post_id, self._next_state(previous, editorial, media, outcome, no_progress=current_no_progress))
+        self.state_store.commit(
+            post_id,
+            self._next_state(
+                previous,
+                editorial,
+                media,
+                outcome,
+                no_progress=current_no_progress,
+                validation=validation,
+            ),
+        )
         return outcome
 
     @staticmethod
@@ -90,7 +101,11 @@ class PipelineRunner:
         )
 
     @staticmethod
-    def _reconcile_media_for_outcome(media: MediaProgress, outcome: Outcome) -> MediaProgress:
+    def _reconcile_media_for_outcome(
+        media: MediaProgress,
+        outcome: Outcome,
+        validation: dict[str, Any] | None = None,
+    ) -> MediaProgress:
         """Remove progress that a validation blocker has explicitly invalidated.
 
         Keeping rejected assets makes the next media pass believe that the
@@ -101,39 +116,86 @@ class PipelineRunner:
         accepted assets are still valid and only more images are needed.
         """
         blocker = outcome.blocker
-        if blocker in {
+        validation_blockers = {
+            mapped
+            for failure in (validation or {}).get("failures", []) or []
+            if isinstance(failure, dict)
+            for mapped in [blocker_for_gate(failure.get("gate"))]
+            if mapped is not None
+        }
+        featured_blockers = {
             BlockerCode.FEATURED_MISSING,
             BlockerCode.FEATURED_INVALID,
             BlockerCode.FEATURED_VISION,
-        }:
-            status = {
-                BlockerCode.FEATURED_MISSING: FeaturedStatus.MISSING,
-                BlockerCode.FEATURED_INVALID: FeaturedStatus.INVALID,
-                BlockerCode.FEATURED_VISION: FeaturedStatus.VISION_REJECTED,
-            }[blocker]
-            return MediaProgress(
+        }
+        active_featured = featured_blockers.intersection(
+            {blocker} | validation_blockers
+        )
+        if active_featured:
+            status = FeaturedStatus.MISSING
+            if BlockerCode.FEATURED_VISION in active_featured:
+                status = FeaturedStatus.VISION_REJECTED
+            elif BlockerCode.FEATURED_INVALID in active_featured:
+                status = FeaturedStatus.INVALID
+            media = MediaProgress(
                 required=media.required,
                 inline=media.inline,
                 featured=FeaturedProgress(status, None, None),
-                accepted_count=media.accepted_count,
             )
-        if blocker in {
+
+        inline_blockers = {
             BlockerCode.MEDIA_INVALID,
             BlockerCode.MEDIA_DUPLICATE,
             BlockerCode.MEDIA_ORIGIN,
-        }:
-            return MediaProgress(
-                required=media.required,
-                inline=(),
-                featured=media.featured,
-                accepted_count=0,
-            )
-        return media
+        }
+        active_inline = inline_blockers.intersection({blocker} | validation_blockers)
+        if not active_inline:
+            return media
+
+        invalid_media: list[dict[str, Any]] = []
+        for failure in (validation or {}).get("failures", []) or []:
+            if not isinstance(failure, dict):
+                continue
+            if blocker_for_gate(failure.get("gate")) in inline_blockers:
+                invalid_media.extend(
+                    item for item in (failure.get("invalid_media") or [])
+                    if isinstance(item, dict)
+                )
+        if not invalid_media:
+            # Stage errors and legacy checklist payloads have no safe identity;
+            # preserve no known-invalid inline asset rather than looping on it.
+            return MediaProgress(required=media.required, inline=(), featured=media.featured)
+
+        def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
+            if invalid.get("media_id") is not None:
+                try:
+                    if item.media_id == int(invalid["media_id"]):
+                        return True
+                except (TypeError, ValueError):
+                    pass
+            invalid_url = str(invalid.get("url") or invalid.get("media_url") or "").strip()
+            if invalid_url and item.media_url.strip() == invalid_url:
+                return True
+            if invalid.get("slot") is not None:
+                try:
+                    if item.slot == int(invalid["slot"]):
+                        return True
+                except (TypeError, ValueError):
+                    pass
+            return False
+
+        remaining = tuple(
+            item for item in media.inline
+            if not any(same_asset(item, invalid) for invalid in invalid_media)
+        )
+        if len(remaining) == len(media.inline):
+            remaining = ()
+        return MediaProgress(required=media.required, inline=remaining, featured=media.featured)
 
     @staticmethod
-    def _next_state(previous: WorkState, editorial: dict[str, Any], media: MediaProgress, outcome: Outcome, *, no_progress: int | None = None) -> WorkState:
+    def _next_state(previous: WorkState, editorial: dict[str, Any], media: MediaProgress, outcome: Outcome, *, no_progress: int | None = None, validation: dict[str, Any] | None = None) -> WorkState:
         progress = PipelineRunner._reconcile_media_for_outcome(
-            PipelineRunner._media_progress(previous, media), outcome
+            PipelineRunner._media_progress(previous, media), outcome, validation
         )
         no_progress = previous.retry.no_progress if no_progress is None else no_progress
         if outcome.type is OutcomeType.READY:

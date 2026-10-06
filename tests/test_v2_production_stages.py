@@ -78,6 +78,12 @@ def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkey
         "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
         fake_checklist,
     )
+    draft_dir = tmp_path / "backups" / "9"
+    draft_dir.mkdir(parents=True)
+    (draft_dir / "editorial.draft.json").write_text(
+        '{"cleaned_html":"<p>Bailarina acompanha uma história de ação.</p>","seo":{"focus_keyword":"termo antigo"}}',
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         "unicornio_editor.pipeline_v2.production_stages.post_subjects",
         lambda **_kwargs: [{"subject": "Bailarina"}],
@@ -88,3 +94,29 @@ def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkey
     )
     assert seen_keywords == ["termo antigo", "Bailarina"]
     assert result["passed"] is True
+    assert '"focus_keyword": "Bailarina"' in (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
+
+
+def test_validate_persists_dash_repair_in_canonical_draft(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        lambda **_: {"all_passed": True, "items": []},
+    )
+    draft_dir = tmp_path / "backups" / "10"
+    draft_dir.mkdir(parents=True)
+    (draft_dir / "editorial.draft.json").write_text(
+        '{"cleaned_html":"<p>Bailarina — ação.</p>","seo":{}}',
+        encoding="utf-8",
+    )
+    candidate = {
+        "content": "<p>Bailarina — ação.</p>",
+        "editorial": {"cleaned_html": "<p>Bailarina — ação.</p>", "seo": {}},
+        "seo": {},
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {"post_id": 10, "post": {"id": 10, "status": "pending", "title": {"raw": "Bailarina"}, "meta": {}}, "v2_state": None},
+        candidate,
+    )
+    assert result["passed"] is True
+    draft = (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
+    assert "—" not in draft
