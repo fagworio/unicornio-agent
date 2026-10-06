@@ -15,6 +15,7 @@ from ..checklist import required_image_count
 from ..content_quality import normalize_editorial_dashes, word_count
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
+from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import insert_media
 from ..workflow import (
@@ -182,7 +183,25 @@ class ProductionMediaStage:
                 plan = [item for item in plan if item.get("is_featured") or int(item.get("paragraph_index", -1)) not in {x.slot for x in accepted.values()}]
                 checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""), existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None)
                 results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
-                inline = tuple(InlineMedia(int(row["media_id"]), str(row["media_url"]), int(row.get("paragraph_index", 0)), str(row.get("alt_text", "")), str(row.get("credit_text", ""))) for row in results if row.get("status") in {"accepted", "ok"} and row.get("media_id") and not row.get("featured"))
+                inline = tuple(
+                    InlineMedia(
+                        int(row["media_id"]),
+                        str(row["media_url"]),
+                        int(row.get("paragraph_index", 0)),
+                        str(row.get("alt_text", "")),
+                        str(row.get("credit_text", "")),
+                        str(row.get("subject") or ""),
+                        row.get("item_number"),
+                        str(row.get("section_heading") or ""),
+                        row.get("section_slot"),
+                        int(row.get("width") or 1200),
+                        int(row.get("height") or 800),
+                    )
+                    for row in results
+                    if row.get("status") in {"accepted", "ok"}
+                    and row.get("media_id")
+                    and not row.get("featured")
+                )
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
                 fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
                 media = MediaProgress(required=required, inline=inline, featured=fp)
@@ -206,9 +225,31 @@ class ProductionComposeStage:
 
     def __call__(self, context: dict[str, Any], editorial: dict[str, Any], media: MediaProgress) -> dict[str, Any]:
         try:
-            placements: list[dict[str, Any]] = [{"paragraph_index": item.slot, "media_url": item.media_url, "alt_text": item.alt_text, "credit_text": item.credit_text, "width": 1200, "height": 800} for item in media.inline]
+            is_listicle = detect_list_format(
+                str(context.get("title") or ""),
+                str(editorial.get("cleaned_html") or ""),
+            ) is not None
+            placements: list[dict[str, Any]] = [
+                {
+                    "paragraph_index": (
+                        item.section_slot
+                        if is_listicle and item.section_slot is not None
+                        else (index if is_listicle else item.slot)
+                    ),
+                    "media_url": item.media_url,
+                    "alt_text": item.alt_text,
+                    "credit_text": item.credit_text,
+                    "width": item.width,
+                    "height": item.height,
+                }
+                for index, item in enumerate(media.inline)
+            ]
             working = dict(editorial)
-            working["cleaned_html"] = insert_media(str(editorial["cleaned_html"]), placements, listicle=bool(editorial.get("listicle"))) if placements else str(editorial["cleaned_html"])
+            working["cleaned_html"] = insert_media(
+                str(editorial["cleaned_html"]),
+                placements,
+                listicle=is_listicle,
+            ) if placements else str(editorial["cleaned_html"])
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)

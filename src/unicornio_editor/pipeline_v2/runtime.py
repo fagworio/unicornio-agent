@@ -12,6 +12,7 @@ from ..checklist import required_image_count
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import item_query, post_subjects
+from ..list_quality import detect_list_format
 from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
@@ -32,6 +33,31 @@ class BufferedStateStore:
 
     def commit(self, post_id: int, state):
         self.state = state
+
+
+def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -> None:
+    """Persist only the reconciled V2 media state for crash recovery."""
+    target = Path(root) / "backups" / str(post_id) / "editorial.partial.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(media.to_dict(), ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+
+
+def _write_v2_journal_checkpoint(root: Path, post_id: int, status: str, state) -> None:
+    target = Path(root) / "work" / "v2-journal" / f"{post_id}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {"status": status, "post_id": post_id, "state": state.to_dict()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _normalize_executable_candidate(candidate: dict[str, Any], subject: str) -> dict[str, Any]:
@@ -74,6 +100,25 @@ class ProductionMediaResolver:
             focus_keyword=focus_keyword,
             game_name=editorial.get("game_name"),
         )
+        is_listicle = detect_list_format(title, html) is not None
+        covered_items = {
+            str(item.item_number)
+            for item in previous.inline
+            if item.item_number is not None
+        }
+        covered_subjects = {
+            item.subject.casefold().strip()
+            for item in previous.inline
+            if item.subject.strip()
+        }
+        missing_rows = [
+            (index, row) for index, row in enumerate(subject_rows)
+            if not is_listicle
+            or (
+                str(row.get("item")) not in covered_items
+                and str(row.get("subject") or "").casefold().strip() not in covered_subjects
+            )
+        ]
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
         subject_meta: dict[str, dict[str, Any]] = {}
@@ -85,15 +130,15 @@ class ProductionMediaResolver:
                 subject_queries.append((subject or query, query))
                 seen_queries.add(query.casefold())
 
-        for row in subject_rows:
+        for index, row in missing_rows:
             subject = str(row.get("subject") or "").strip()
             if subject:
-                subject_meta[subject] = row
+                subject_meta[subject] = {**row, "section_slot": index}
             add_query(subject, item_query(subject, title, extra=focus_keyword))
-        if focus_keyword:
+        if focus_keyword and not is_listicle:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
             add_query(main_subject, item_query(focus_keyword, title))
-        if not subject_queries:
+        if not subject_queries and not is_listicle:
             add_query(title, item_query(title, title, extra=focus_keyword))
 
         def resolve_query(subject: str, query: str, needed: int, role: str) -> list[dict[str, Any]]:
@@ -133,6 +178,7 @@ class ProductionMediaResolver:
                     "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
                     "item_number": (subject_meta.get(subject) or {}).get("item"),
                     "section_heading": (subject_meta.get(subject) or {}).get("heading") or subject,
+                    "section_slot": (subject_meta.get(subject) or {}).get("section_slot"),
                 })
             for candidate in row.get("audit_candidates") or []:
                 if not isinstance(candidate, dict):
@@ -144,12 +190,15 @@ class ProductionMediaResolver:
                 metadata = subject_meta.get(subject) or {}
                 candidate["item_number"] = metadata.get("item")
                 candidate["section_heading"] = metadata.get("heading") or subject
+                candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
             return candidates
 
         featured_candidates: list[dict[str, Any]] = []
         if featured_needed:
-            featured_subject, featured_query = subject_queries[0]
+            featured_row = subject_rows[0] if subject_rows else {}
+            featured_subject = str(featured_row.get("subject") or title)
+            featured_query = item_query(featured_subject, title, extra=focus_keyword)
             # Key-art is a separate search role.  If the contextual query has
             # no usable result, the explicit key-art query provides a second
             # pool without ever turning an inline candidate into the featured.
@@ -165,14 +214,13 @@ class ProductionMediaResolver:
         inline_candidates: list[dict[str, Any]] = []
         if inline_needed:
             for subject, query in subject_queries:
-                listicle = sum(1 for row in subject_rows if row.get("item") is not None) >= 2
                 inline_candidates.extend(
-                    resolve_query(subject, query, 1 if listicle else inline_needed, "inline")
+                    resolve_query(subject, query, 1 if is_listicle else inline_needed, "inline")
                 )
                 # A listicle has an explicit subject identity per numbered
                 # section. Search every item independently; do not let the
                 # first item consume the whole article quota.
-                if not listicle and len(self._approved_unique(inline_candidates)) >= inline_needed:
+                if not is_listicle and len(self._approved_unique(inline_candidates)) >= inline_needed:
                     break
 
         all_candidates = self._unique_candidates(featured_candidates + inline_candidates)
@@ -190,7 +238,6 @@ class ProductionMediaResolver:
             if candidate.get("direct_image_url")
             and str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "") not in featured_keys
         ]
-        is_listicle = sum(1 for row in subject_rows if row.get("item") is not None) >= 2
         if is_listicle:
             per_item: list[dict[str, Any]] = []
             seen_items: set[str] = set()
@@ -208,10 +255,13 @@ class ProductionMediaResolver:
             plan.append(self._plan_item(featured_selected, featured_selected.get("subject") or title, 0, True))
         used_slots = {item.slot for item in previous.inline}
         for candidate in inline_approved[:inline_needed]:
-            slot = 0
-            while slot in used_slots:
-                slot += 3
-            used_slots.add(slot)
+            if is_listicle:
+                slot = int(candidate.get("section_slot", 0))
+            else:
+                slot = 0
+                while slot in used_slots:
+                    slot += 3
+                used_slots.add(slot)
             plan.append(self._plan_item(candidate, candidate.get("subject") or title, slot, False))
 
         checked = validate_media_plan(
@@ -250,6 +300,9 @@ class ProductionMediaResolver:
                     str(plan_item.get("subject") or ""),
                     plan_item.get("item_number"),
                     str(plan_item.get("section_heading") or ""),
+                    plan_item.get("section_slot"),
+                    int(result.get("width") or 1200),
+                    int(result.get("height") or 800),
                 ))
             if result.get("featured") and result.get("media_id"):
                 featured = FeaturedProgress(
@@ -315,24 +368,59 @@ class ProductionMediaResolver:
         if not vision_candidates or not getattr(self.config, "vision_enabled", False) or not getattr(self.config, "vision_api_key", ""):
             return
         from ..media.vision_gate import verify_image_subject_batch
-        decisions: dict[str, dict[str, Any]] = {}
-        for offset in range(0, len(vision_candidates), 20):
-            decisions.update(verify_image_subject_batch(
-                items=vision_candidates[offset:offset + 20],
+        from ..observability import append_telemetry
+
+        budget = max(0, int(getattr(self.config, "vision_max_low", 0)))
+        low_items = vision_candidates[:budget]
+        skipped = max(0, len(vision_candidates) - len(low_items))
+        if skipped:
+            append_telemetry(
+                self.root,
+                "vision_budget_exhausted",
+                candidates=len(vision_candidates),
+                low_budget=budget,
+                skipped=skipped,
+            )
+        if not low_items:
+            return
+
+        low_decisions: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(low_items), 20):
+            low_decisions.update(verify_image_subject_batch(
+                items=low_items[offset:offset + 20],
                 api_key=self.config.vision_api_key,
                 base_url=self.config.vision_base_url,
                 model=self.config.vision_model,
                 timeout=self.config.http_timeout,
                 detail=self.config.vision_detail,
-                allow_high=True,
+                allow_high=False,
+                root=self.root,
+            ))
+        high_items = [
+            item for item in low_items
+            if item.get("require_key_art")
+            and low_decisions.get(item["candidate_id"], {}).get("verdict") == "inconclusive"
+        ]
+        high_decisions: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(high_items), 20):
+            high_decisions.update(verify_image_subject_batch(
+                items=high_items[offset:offset + 20],
+                api_key=self.config.vision_api_key,
+                base_url=self.config.vision_base_url,
+                model=self.config.vision_model,
+                timeout=self.config.http_timeout,
+                detail="high",
+                allow_high=False,
                 root=self.root,
             ))
         from ..media.vision_cache import set_cached_decision
-        by_url = {str(item["image_url"]): item for item in vision_candidates}
+        by_url = {str(item["image_url"]): item for item in low_items}
         for candidate in candidates:
             url = str(candidate.get("direct_image_url") or "")
             item = by_url.get(url)
-            decision = decisions.get(item["candidate_id"]) if item else None
+            decision = low_decisions.get(item["candidate_id"]) if item else None
+            if item and item["candidate_id"] in high_decisions:
+                decision = high_decisions[item["candidate_id"]]
             if decision and decision.get("verdict") == "accept":
                 set_cached_decision(
                     self.root,
@@ -394,6 +482,10 @@ class WordPressWriterV2:
             readback = post
             changed = False
         else:
+            journal.write_text(
+                json.dumps({**intent, "status": "committing"}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             self.client.update_post(post_id, update)
             readback = self.client.get_post(post_id)
             changed = True
@@ -496,6 +588,10 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             buffered = BufferedStateStore(initial)
             try:
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
+                _write_v2_media_checkpoint(root, post_id, buffered.state.media)
+                _write_v2_journal_checkpoint(
+                    root, post_id, "validated", buffered.state
+                )
                 error_path = root / "backups" / str(post_id) / "editorial.error.json"
                 if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
                     try:

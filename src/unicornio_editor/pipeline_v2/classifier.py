@@ -121,6 +121,8 @@ def classify_stage_error(
     detail = str(getattr(exc, "detail", "") or exc)
     if getattr(exc, "human_required", False):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
+    if getattr(exc, "blocker", None) in MEDIA_BLOCKERS:
+        return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
     if previous.retry.attempts + 1 >= max(1, max_attempts):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
     return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)
@@ -162,7 +164,7 @@ def classify(
     detail: str | None = first_detail or None
     for blocker, _, phase_override, failure_detail in failures:
         if phase_override is not None:
-            if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+            if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase_override, blocker, detail=failure_detail or None)
             return _retry(previous, phase_override, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
         if blocker not in MEDIA_BLOCKERS:
@@ -179,12 +181,10 @@ def classify(
                 phase = Phase.EDITORIAL
             else:
                 phase = Phase.VALIDATE
-            if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+            if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase, blocker, detail=failure_detail or None)
             return _retry(previous, phase, blocker, now=now, detail=failure_detail or None, cooldown_minutes=cooldown_minutes)
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     if effective_no_progress >= max(1, max_media_no_progress):
-        return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
-    if previous.retry.attempts + 1 >= max(1, max_rework_attempts):
         return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
     return _retry(previous, Phase.MEDIA, first_blocker, now=now, detail=detail, cooldown_minutes=cooldown_minutes)

@@ -1318,11 +1318,25 @@ def _monitor_line(report: dict) -> str:
     bucket de parede — evita rework eterno queimando tokens.
     """
     parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
-    parts += [str(pid) for pid in report.get("unprocessed_ids", [])]
+    parts += [str(pid) for pid in report.get("v2_eligible_ids", [])]
+    v2_ids = {
+        int(row["id"]) for row in (report.get("posts") or [])
+        if row.get("v2") and isinstance(row.get("id"), int)
+    }
+    parts += [
+        str(pid) for pid in report.get("unprocessed_ids", [])
+        if pid not in v2_ids
+    ]
     in_cooldown = sorted(
         f"{row['id']}@{str(row.get('next_retry_at') or '')[:16]}"
         for row in (report.get("posts") or [])
-        if row.get("state") == "blocked" and row.get("next_retry_at")
+        if (
+            row.get("next_retry_at")
+            and (
+                row.get("state") == "blocked"
+                or (row.get("v2") and row.get("state") == "pending")
+            )
+        )
     )
     parts += in_cooldown
     return " ".join(parts) or "0"

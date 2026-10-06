@@ -1863,6 +1863,23 @@ def _execute_media_plan(
             source_domain=(urlparse(source).hostname or "").lower(),
             detail=detail[:160],
         )
+        if stage == "source_verify":
+            normalized_detail = detail.casefold()
+            if status == "passed":
+                verification = "source_verified"
+            elif any(token in normalized_detail for token in ("pagina de origem", "source_page", "fonte instavel")):
+                verification = "missing_source_page"
+            elif any(token in normalized_detail for token in ("divergente", "mismatch", "bytes diferentes")):
+                verification = "source_mismatch"
+            else:
+                verification = "source_rejected"
+            append_telemetry(
+                root,
+                "source_verification",
+                verification=verification,
+                item_index=position,
+                detail=detail[:160],
+            )
 
     def _attachment_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         """Resolve a Media Library attachment referenced by ``media_library_id``.
@@ -2055,6 +2072,10 @@ def _execute_media_plan(
                     "media_url": media_url,
                     "alt_text": item["alt_text"],
                     "credit_text": item["credit_text"],
+                    "subject": item.get("subject"),
+                    "item_number": item.get("item_number"),
+                    "section_heading": item.get("section_heading"),
+                    "section_slot": item.get("section_slot"),
                     "featured": is_featured,
                     "width": width,
                     "height": height,
@@ -3048,7 +3069,7 @@ def build_queue_report(
             uncertain_ids.append(post_id)
             if uncertain_second_pass_eligible(post):
                 uncertain_second_pass_ids.append(post_id)
-        elif state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"):
+        elif state in {STATE_AWAITING_HUMAN, "human_required"} or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
         elif state == STATE_SKIPPED:
             skipped_ids.append(post_id)
@@ -3064,11 +3085,12 @@ def build_queue_report(
             partial_ids.append(post_id)
             if retry_eligible(effective_state):
                 eligible_rework.append(post_id)
-        else:  # NEW / PROCESSING / desconhecido
-            unprocessed.append(post_id)
+        else:  # NEW / PROCESSING / V2 pending / desconhecido
+            if v2_state is None:
+                unprocessed.append(post_id)
             if v2_state is not None and state == "pending" and cooldown_expired(state_info.get("next_retry_at") or ""):
                 v2_eligible.append(post_id)
-            if _is_recent(post, cutoff):
+            if v2_state is None and _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
         rows.append(
@@ -3087,7 +3109,7 @@ def build_queue_report(
                 "partial": state == STATE_PARTIAL,
                 "uncertain": state == STATE_UNCERTAIN,
                 "uncertain_second_pass_eligible": uncertain_second_pass_eligible(post),
-                "awaiting_human": state == STATE_AWAITING_HUMAN or post.get("_wp_awaiting_human"),
+                "awaiting_human": state in {STATE_AWAITING_HUMAN, "human_required"} or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
                 "title": title,
                 "v2": v2_state is not None,

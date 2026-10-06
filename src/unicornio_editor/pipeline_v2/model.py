@@ -110,10 +110,17 @@ class InlineMedia:
     subject: str = ""
     item_number: int | None = None
     section_heading: str = ""
+    section_slot: int | None = None
+    width: int = 1200
+    height: int = 800
 
     def __post_init__(self) -> None:
         if self.media_id < 1 or self.slot < 0:
             raise ValueError("media_id must be positive and slot cannot be negative")
+        if self.section_slot is not None and self.section_slot < 0:
+            raise ValueError("section_slot cannot be negative")
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("media dimensions must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,11 +132,15 @@ class InlineMedia:
             "subject": self.subject,
             "item_number": self.item_number,
             "section_heading": self.section_heading,
+            "section_slot": self.section_slot,
+            "width": self.width,
+            "height": self.height,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InlineMedia":
         item_number = value.get("item_number")
+        section_slot = value.get("section_slot")
         return cls(
             int(value["media_id"]),
             str(value.get("media_url", "")),
@@ -139,6 +150,9 @@ class InlineMedia:
             str(value.get("subject", "")),
             int(item_number) if item_number is not None else None,
             str(value.get("section_heading", "")),
+            int(section_slot) if section_slot is not None else None,
+            int(value.get("width", 1200)),
+            int(value.get("height", 800)),
         )
 
 

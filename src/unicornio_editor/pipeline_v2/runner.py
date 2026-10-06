@@ -2,7 +2,7 @@
 
 from typing import Any, Callable
 
-from .classifier import blocker_for_gate, classify, classify_stage_error, editorial_decision
+from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
@@ -20,7 +20,11 @@ class PipelineRunner:
     def _policy(self) -> dict[str, int]:
         config = self.config
         return {
-            "max_media_no_progress": int(getattr(config, "max_partial_no_progress_attempts", 2)),
+            "max_media_no_progress": int(getattr(
+                config,
+                "max_media_search_attempts",
+                getattr(config, "max_partial_no_progress_attempts", 2),
+            )),
             "max_rework_attempts": int(getattr(config, "max_rework_attempts", 3)),
             "cooldown_minutes": int(getattr(config, "rework_cooldown_minutes", 30)),
         }
@@ -89,8 +93,25 @@ class PipelineRunner:
         # media no-progress budget. Reclassify when that correction changes the
         # counter (the old order incorrectly granted progress before removal).
         effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
-        progress = self._media_progressed(previous.media, effective_media) if media_completed else False
-        current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
+        media_attempt = media_completed or (
+            previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS
+        )
+        progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
+        current_no_progress = (
+            (0 if progress else previous.retry.no_progress + 1)
+            if media_attempt else previous.retry.no_progress
+        )
+        if (
+            media_attempt
+            and outcome.type is OutcomeType.RETRY
+            and current_no_progress >= self._policy()["max_media_no_progress"]
+            and outcome.blocker in MEDIA_BLOCKERS
+        ):
+            outcome = Outcome.human_required(
+                outcome.phase or Phase.MEDIA,
+                outcome.blocker,
+                detail=outcome.detail,
+            )
         if media_completed and validation is not None:
             corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())
             if corrected != outcome:
@@ -104,6 +125,7 @@ class PipelineRunner:
                 effective_media,
                 outcome,
                 no_progress=current_no_progress,
+                media_reconciled=True,
             ),
         )
         return outcome
@@ -213,9 +235,26 @@ class PipelineRunner:
         return MediaProgress(required=media.required, inline=remaining, featured=media.featured)
 
     @staticmethod
-    def _next_state(previous: WorkState, editorial: dict[str, Any], media: MediaProgress, outcome: Outcome, *, no_progress: int | None = None, validation: dict[str, Any] | None = None) -> WorkState:
-        progress = PipelineRunner._reconcile_media_for_outcome(
-            PipelineRunner._media_progress(previous, media), outcome, validation
+    def _next_state(
+        previous: WorkState,
+        editorial: dict[str, Any],
+        media: MediaProgress,
+        outcome: Outcome,
+        *,
+        no_progress: int | None = None,
+        validation: dict[str, Any] | None = None,
+        media_reconciled: bool = False,
+    ) -> WorkState:
+        # run_one passes the effective media explicitly. Keeping the
+        # compatibility default lets older direct callers still ask this
+        # helper to reconcile raw media, without ever reconciling the same
+        # result twice in the production path.
+        progress = (
+            PipelineRunner._media_progress(previous, media)
+            if media_reconciled
+            else PipelineRunner._reconcile_media_for_outcome(
+                PipelineRunner._media_progress(previous, media), outcome, validation
+            )
         )
         no_progress = previous.retry.no_progress if no_progress is None else no_progress
         if outcome.type is OutcomeType.READY:

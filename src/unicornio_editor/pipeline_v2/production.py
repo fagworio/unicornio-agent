@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..checklist import required_image_count
+from ..content_quality import word_count
 from .legacy import LegacyStateLoader
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
@@ -86,9 +88,44 @@ class ProductionCandidateReader:
         )
         self.now = now
 
-    def _recovered_state(self, post_id: int, state: WorkState) -> WorkState:
-        """Recover durable media progress left by a crash before the WP write."""
+    def _recovered_state(
+        self,
+        post_id: int,
+        state: WorkState,
+        context: dict[str, Any] | None = None,
+    ) -> WorkState:
+        """Recover only from an interrupted, verifiable V2 transaction."""
+        context = context or {}
         directory = self.root / "backups" / str(post_id)
+        journal_path = self.root / "work" / "v2-journal" / f"{post_id}.json"
+        journal = self.context_loader._read_json(journal_path)
+        journal_status = str(journal.get("status") or "")
+        active_journal = bool(journal) and journal_status != "committed"
+        title = str(context.get("title") or "")
+        editorial = context.get("editorial") or context.get("draft") or {}
+        html = str(editorial.get("cleaned_html") or context.get("content") or "")
+        current_required = required_image_count(
+            word_count(html),
+            title=title,
+            content=html,
+        )
+        current_media = state.media
+        if current_media.required != current_required:
+            current_media = MediaProgress(
+                required=current_required,
+                inline=current_media.inline,
+                featured=current_media.featured,
+            )
+        if not active_journal:
+            return WorkState(
+                state=state.state,
+                phase=state.phase,
+                blocker=state.blocker,
+                retry=state.retry,
+                relevance_approved=state.relevance_approved,
+                media=current_media,
+            )
+
         media_candidates: list[MediaProgress] = []
         partial = self.context_loader._read_json(directory / "editorial.partial.json")
         try:
@@ -96,9 +133,6 @@ class ProductionCandidateReader:
                 media_candidates.append(MediaProgress.from_dict(partial))
         except (TypeError, ValueError, KeyError):
             pass
-        journal = self.context_loader._read_json(
-            self.root / "work" / "v2-journal" / f"{post_id}.json"
-        )
         try:
             journal_state = (
                 WorkState.from_dict(journal.get("state"))
@@ -109,7 +143,32 @@ class ProductionCandidateReader:
         except (TypeError, ValueError, KeyError):
             pass
         if not media_candidates:
-            return state
+            return WorkState(
+                state=state.state,
+                phase=state.phase,
+                blocker=state.blocker,
+                retry=state.retry,
+                relevance_approved=state.relevance_approved,
+                media=current_media,
+            )
+
+        rejected_ids: set[int] = set()
+        rejected_urls: set[str] = set()
+        validation = self.context_loader._read_json(directory / "editorial.validation.json")
+        for failure in validation.get("failures") or []:
+            if not isinstance(failure, dict):
+                continue
+            for invalid in failure.get("invalid_media") or []:
+                if not isinstance(invalid, dict):
+                    continue
+                try:
+                    if invalid.get("media_id") is not None:
+                        rejected_ids.add(int(invalid["media_id"]))
+                except (TypeError, ValueError):
+                    pass
+                value = str(invalid.get("url") or invalid.get("media_url") or "").strip()
+                if value:
+                    rejected_urls.add(value)
 
         def verified(media_id: int | None, media_url: str | None) -> bool:
             if not media_id:
@@ -125,21 +184,24 @@ class ProductionCandidateReader:
         def valid_count(media: MediaProgress) -> int:
             return sum(
                 1 for item in media.inline
-                if verified(item.media_id, item.media_url)
+                if item.media_id not in rejected_ids
+                and item.media_url not in rejected_urls
+                and verified(item.media_id, item.media_url)
             )
 
-        best = state.media
+        best = current_media
         best_score = (
             valid_count(best),
             int(
                 best.featured.status is FeaturedStatus.VALID
                 and verified(best.featured.media_id, best.featured.media_url)
             ),
-            best.required,
         )
         for candidate in media_candidates:
             inline = tuple(
                 item for item in candidate.inline
+                if item.media_id not in rejected_ids
+                and item.media_url not in rejected_urls
                 if verified(item.media_id, item.media_url)
             )
             featured = (
@@ -150,7 +212,7 @@ class ProductionCandidateReader:
             )
             try:
                 recovered = MediaProgress(
-                    required=candidate.required,
+                    required=current_required,
                     inline=inline,
                     featured=featured,
                 )
@@ -159,11 +221,10 @@ class ProductionCandidateReader:
             score = (
                 len(inline),
                 int(featured.status is FeaturedStatus.VALID),
-                recovered.required,
             )
             if score > best_score:
                 best, best_score = recovered, score
-        if best == state.media:
+        if best == current_media and current_media == state.media:
             return state
         return WorkState(
             state=state.state,
@@ -187,8 +248,12 @@ class ProductionCandidateReader:
                 if not isinstance(post_id, int) or post_id in seen:
                     continue
                 seen.add(post_id)
-                state = self._recovered_state(post_id, self.state_store.load(post_id))
                 context = self.context_loader.load(post)
+                state = self._recovered_state(
+                    post_id,
+                    self.state_store.load(post_id),
+                    context,
+                )
                 context["v2_state"] = state
                 candidates.append((post_id, context))
             if len(posts) < page_size:
