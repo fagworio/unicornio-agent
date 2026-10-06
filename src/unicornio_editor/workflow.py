@@ -2428,6 +2428,20 @@ def publish_post(
         return _publish_post_unlocked(client, config, root, post_id)
 
 
+def _read_v2_work_state(post: dict[str, Any]) -> dict[str, Any] | None:
+    meta = post.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+    raw = meta.get("_hermes_work_state")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"state": "invalid"}
+    return value if isinstance(value, dict) else {"state": "invalid"}
+
+
 def _publish_post_unlocked(
     client: WordPressClient,
     config: Config,
@@ -2453,7 +2467,13 @@ def _publish_post_unlocked(
             "status": "skipped",
             "reason": f"post status is {post.get('status')}, expected pending",
         }
-    state_info = read_state(post)
+    v2_state = _read_v2_work_state(post)
+    if v2_state is not None:
+        if v2_state.get("state") != "ready":
+            return {"post_id": post_id, "wordpress_changed": False, "status": "skipped", "reason": f"estado V2 {v2_state.get('state')} fora da fila de publicacao", "state": v2_state.get("state")}
+        state_info = {"state": STATE_READY, "ready_hash": str((post.get("meta") or {}).get("_hermes_ready_hash") or "")}
+    else:
+        state_info = read_state(post)
     state = state_info["state"]
     if state not in (None, STATE_READY):
         return {
@@ -2661,7 +2681,13 @@ def publish_ready_posts(
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, int):
             continue
-        state_info = read_state(candidate)
+        v2_state = _read_v2_work_state(candidate)
+        if v2_state is not None:
+            if v2_state.get("state") != "ready":
+                continue
+            state_info = {"state": STATE_READY, "ready_hash": str((candidate.get("meta") or {}).get("_hermes_ready_hash") or "")}
+        else:
+            state_info = read_state(candidate)
         if state_info["state"] not in (None, STATE_READY):
             continue  # fora da fila de publicacao — sem chamadas caras
         if state_info["state"] is None:

@@ -13,6 +13,7 @@ from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import post_subjects
 from ..seo.rank_math import build_meta
+from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
@@ -161,9 +162,10 @@ class WordPressWriterV2:
             manifest = build_ready_manifest(post_id=post_id, content=content, featured_media=candidate.get("featured_media"), seo=seo, original_link=context.get("original_link"), editorial=candidate.get("editorial"), policy_version=self.policy_version)
             ready_hash = manifest_hash(manifest)
             payload_meta.update({"_hermes_ready_manifest": serialize_manifest(manifest), "_hermes_ready_hash": ready_hash})
-            draft = self.root / "backups" / str(post_id) / "editorial.draft.json"
+            payload_meta.update(build_state_markers(STATE_READY, ready_hash=ready_hash, policy_version=self.policy_version))
             latest = self.root / "backups" / str(post_id) / "editorial.latest.json"
-            if draft.is_file(): latest.write_text(draft.read_text(encoding="utf-8"), encoding="utf-8")
+            latest.parent.mkdir(parents=True, exist_ok=True)
+            latest.write_text(json.dumps(candidate.get("editorial") or {}, ensure_ascii=False, indent=2), encoding="utf-8")
         journal = journal_dir / f"{post_id}.json"
         intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": outcome.detail or context.get("provider_reason")}
         journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
