@@ -233,7 +233,7 @@ def _normalize_output(
             raise EditorialProviderError(f"status editorial invalido para {post_id}: {status!r}")
         retry_kind = str(item.get("retry_kind") or "none")
         if status == "needs_retry" and retry_kind != "media":
-            normalized.append({"post_id": post_id, "status": status, "reason": reason or "retry solicitado"})
+            normalized.append({"post_id": post_id, "status": status, "reason": reason or "retry solicitado", "retry_kind": retry_kind})
         else:
             editorial = item.get("editorial")
             if isinstance(editorial, str):
@@ -262,6 +262,8 @@ def _normalize_output(
             # descoberta continua acontecendo no apply.
             if editorial.get("needs_trailer") and not editorial.get("trailer_url"):
                 editorial = {**editorial, "needs_trailer": False, "trailer_url": None}
+            if status == "needs_retry" and retry_kind == "media":
+                editorial = {**editorial, "media_plan": []}
             try:
                 checked = validate_editorial(editorial, min_confidence=min_confidence)
                 allowed_topics = set((relevance_policies or {}).get(post_id) or ())
@@ -289,7 +291,7 @@ def _normalize_output(
                     "post_id": post_id,
                     "status": "ok",
                     "reason": reason,
-                    "retry_kind": "none",
+                    "retry_kind": retry_kind,
                     "editorial": checked,
                 })
         seen.add(post_id)

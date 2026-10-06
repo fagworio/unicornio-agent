@@ -91,7 +91,10 @@ def editorial_decision(editorial: dict[str, Any]) -> str | None:
 
 
 def classify_stage_error(previous: WorkState, exc: Any, *, now: datetime | None = None) -> Outcome:
-    return _retry(previous, exc.phase, exc.blocker, now=now, detail=str(getattr(exc, "detail", "") or exc))
+    detail = str(getattr(exc, "detail", "") or exc)
+    if getattr(exc, "human_required", False):
+        return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
+    return _retry(previous, exc.phase, exc.blocker, now=now, detail=detail)
 
 
 def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validation: dict[str, Any], *, now: datetime | None = None, no_progress: int | None = None) -> Outcome:
@@ -113,11 +116,11 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
         return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now)
 
     blockers = [blocker for blocker, _, _, _ in failures]
-    detail: str | None = None
+    first_blocker, _, _, first_detail = failures[0]
+    detail: str | None = first_detail or None
     for blocker, _, phase_override, failure_detail in failures:
-        detail = failure_detail or None
         if phase_override is not None:
-            return _retry(previous, phase_override, blocker, now=now, detail=detail)
+            return _retry(previous, phase_override, blocker, now=now, detail=failure_detail or None)
         if blocker not in MEDIA_BLOCKERS:
             if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
                 phase = Phase.RELEVANCE
@@ -132,8 +135,8 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 phase = Phase.EDITORIAL
             else:
                 phase = Phase.VALIDATE
-            return _retry(previous, phase, blocker, now=now, detail=detail)
+            return _retry(previous, phase, blocker, now=now, detail=failure_detail or None)
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     if effective_no_progress >= 2:
-        return Outcome.human_required(Phase.MEDIA, blockers[0], detail=detail)
-    return _retry(previous, Phase.MEDIA, blockers[0], now=now, detail=detail)
+        return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
+    return _retry(previous, Phase.MEDIA, first_blocker, now=now, detail=detail)

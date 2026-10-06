@@ -72,16 +72,26 @@ class ProductionEditorialStage:
             envelope = load_editorial_batch(generated["output"])
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)
             if not item or item.get("status") == "needs_retry":
+                retry_kind = str((item or {}).get("retry_kind") or "none")
                 reason = str((item or {}).get("reason") or "editorial provider requested retry")
-                reason_lower = reason.casefold()
-                if "meta_description" in reason_lower or "seo" in reason_lower:
+                if retry_kind == "facts":
+                    raise StageError(BlockerCode.TEXT_QUALITY, Phase.EDITORIAL, reason, human_required=True)
+                if retry_kind == "seo":
                     blocker, phase = BlockerCode.SEO, Phase.EDITORIAL
-                elif "matched_topics" in reason_lower or "relevan" in reason_lower:
+                elif retry_kind == "relevance":
                     blocker, phase = BlockerCode.RELEVANCE_UNCERTAIN, Phase.RELEVANCE
-                elif "quality" in reason_lower or "keyword" in reason_lower or "content" in reason_lower:
+                elif retry_kind == "text":
                     blocker, phase = BlockerCode.TEXT_QUALITY, Phase.EDITORIAL
                 else:
-                    blocker, phase = BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL
+                    reason_lower = reason.casefold()
+                    if "meta_description" in reason_lower or "seo" in reason_lower:
+                        blocker, phase = BlockerCode.SEO, Phase.EDITORIAL
+                    elif "matched_topics" in reason_lower or "relevan" in reason_lower:
+                        blocker, phase = BlockerCode.RELEVANCE_UNCERTAIN, Phase.RELEVANCE
+                    elif "quality" in reason_lower or "keyword" in reason_lower or "content" in reason_lower:
+                        blocker, phase = BlockerCode.TEXT_QUALITY, Phase.EDITORIAL
+                    else:
+                        blocker, phase = BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL
                 _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry"), "blocker": blocker.value})
                 raise StageError(blocker, phase, reason)
             raw_editorial = dict(item["editorial"])
