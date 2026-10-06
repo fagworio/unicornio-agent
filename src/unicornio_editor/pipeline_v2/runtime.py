@@ -47,7 +47,7 @@ class ProductionMediaResolver:
         subject = str((subject_rows[0] if subject_rows else {}).get("subject") or context.get("title") or "")
         search_needed = needed + (0 if previous.featured.status is FeaturedStatus.VALID else 1)
         batch = {"schema_version": 1, "batch_id": f"v2-{context['post_id']}", "posts": [{"post_id": int(context["post_id"]), "subject": subject, "query": subject, "needed": search_needed, "limit": max(search_needed, 1), "engine": "auto", "size": "xga", "ratio": "w"}]}
-        resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True)
+        resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True, allow_reuse=False)
         row = (resolved.get("posts") or [{}])[0]
         vision_candidates = []
         for candidate in row.get("audit_candidates") or []:

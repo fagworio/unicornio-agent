@@ -1061,6 +1061,7 @@ def _resolve_media_batch(
     batch: dict[str, Any],
     *,
     full: bool = False,
+    allow_reuse: bool = True,
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
 
@@ -1083,7 +1084,7 @@ def _resolve_media_batch(
     searchable = []
     for item in posts:
         post_id = int(item["post_id"])
-        reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"]))
+        reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"])) if allow_reuse else []
         reuse_by_post[post_id] = reuse
         needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
         if needed_web_by_post[post_id] > 0:

@@ -146,8 +146,11 @@ envelope already carries a verified trailer URL. Do fill game_name when the
 subject is a game. Use needs_retry only when the text/SEO facts themselves
 cannot be handled safely. When decision=process, matched_topics MUST contain
 one or more values copied exactly from relevance_policy.allowed_topics. Do not
-return synonyms, subcategories, translations or derived labels in place of the
-allowed labels."""
+Do not return synonyms, subcategories, translations or derived labels in place of the
+allowed labels. When a post contains a rework object, treat previous_editorial as
+its baseline, correct specifically the failed_gates, preserve fields that do not
+need changes, and attempt the requested correction instead of returning
+needs_retry merely because the previous version failed those gates."""
 
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:

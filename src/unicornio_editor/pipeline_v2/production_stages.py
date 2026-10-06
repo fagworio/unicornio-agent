@@ -84,13 +84,17 @@ class ProductionEditorialStage:
                     blocker, phase = BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL
                 _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry"), "blocker": blocker.value})
                 raise StageError(blocker, phase, reason)
-            editorial = resolve_editorial_defaults(dict(item["editorial"]), _post(context))
+            raw_editorial = dict(item["editorial"])
             if state.phase is Phase.EDITORIAL and isinstance(previous_editorial, dict):
-                merged = dict(previous_editorial)
-                merged.update({key: value for key, value in editorial.items() if value is not None})
-                if isinstance(previous_editorial.get("seo"), dict) and isinstance(editorial.get("seo"), dict):
-                    merged["seo"] = {**previous_editorial["seo"], **editorial["seo"]}
-                editorial = merged
+                previous_clean = dict(previous_editorial)
+                previous_clean.pop("decision", None)
+                merged = dict(previous_clean)
+                merged.update({key: value for key, value in raw_editorial.items() if value is not None})
+                if isinstance(previous_clean.get("seo"), dict) and isinstance(raw_editorial.get("seo"), dict):
+                    merged["seo"] = {**previous_clean["seo"], **raw_editorial["seo"]}
+                editorial = resolve_editorial_defaults(merged, _post(context))
+            else:
+                editorial = resolve_editorial_defaults(raw_editorial, _post(context))
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
