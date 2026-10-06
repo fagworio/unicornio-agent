@@ -64,6 +64,11 @@ class PipelineRunner:
         media_completed = False
         media_stage_error = False
         validation: dict[str, Any] | None = None
+        media_base_no_progress = (
+            previous.retry.no_progress
+            if previous.phase is Phase.MEDIA
+            else 0
+        )
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
             outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []}, **self._policy())
@@ -85,14 +90,18 @@ class PipelineRunner:
                     candidate = context.get("draft") or {}
                 validation = self.stages["validate"](context, candidate)
                 progress = self._media_progressed(previous.media, media) if media_completed else False
-                current_no_progress = (0 if progress else previous.retry.no_progress + 1) if media_completed else previous.retry.no_progress
+                current_no_progress = (
+                    (0 if progress else media_base_no_progress + 1)
+                    if media_completed
+                    else media_base_no_progress
+                )
                 outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
             except StageError as exc:
                 media_stage_error = exc.blocker in MEDIA_BLOCKERS and exc.phase is Phase.MEDIA
                 outcome = classify_stage_error(
                     previous,
                     exc,
-                    no_progress=previous.retry.no_progress + 1 if media_stage_error else None,
+                    no_progress=media_base_no_progress + 1 if media_stage_error else None,
                     **self._policy(),
                 )
         # Reconcile first, then measure progress. A newly uploaded asset that
@@ -105,15 +114,20 @@ class PipelineRunner:
         if media_stage_error:
             effective_media = previous.media
         else:
-            effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
+            effective_media = self._reconcile_media_for_outcome(
+                media,
+                outcome,
+                validation,
+                previous_media=previous.media,
+            )
         media_attempt = media_completed or (
             media_stage_error
             or (previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS)
         )
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
         current_no_progress = (
-            (0 if progress else previous.retry.no_progress + 1)
-            if media_attempt else previous.retry.no_progress
+            (0 if progress else media_base_no_progress + 1)
+            if media_attempt else media_base_no_progress
         )
         if (
             media_attempt
@@ -130,7 +144,12 @@ class PipelineRunner:
             corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())
             if corrected != outcome:
                 outcome = corrected
-                effective_media = self._reconcile_media_for_outcome(media, outcome, validation)
+                effective_media = self._reconcile_media_for_outcome(
+                    media,
+                    outcome,
+                    validation,
+                    previous_media=previous.media,
+                )
         self.state_store.commit(
             post_id,
             self._next_state(
@@ -163,13 +182,15 @@ class PipelineRunner:
         media: MediaProgress,
         outcome: Outcome,
         validation: dict[str, Any] | None = None,
+        *,
+        previous_media: MediaProgress | None = None,
     ) -> MediaProgress:
         """Remove progress that a validation blocker has explicitly invalidated.
 
         Keeping rejected assets makes the next media pass believe that the
         deficit is already satisfied.  Featured failures invalidate only the
-        featured slot; generic inline media failures conservatively clear all
-        inline assets because the checklist does not identify a safe asset id.
+        featured slot. Inline failures remove only assets with an explicit,
+        matching identity; an ambiguous checklist never clears the baseline.
         ``INLINE_MISSING`` is intentionally preserved: it means the existing
         accepted assets are still valid and only more images are needed.
         """
@@ -219,10 +240,12 @@ class PipelineRunner:
                     item for item in (failure.get("invalid_media") or [])
                     if isinstance(item, dict)
                 )
+        safe_previous_inline = previous_media.inline if previous_media is not None else media.inline
         if not invalid_media:
-            # Stage errors and legacy checklist payloads have no safe identity;
-            # preserve no known-invalid inline asset rather than looping on it.
-            return MediaProgress(required=media.required, inline=(), featured=media.featured)
+            # A blocker without an asset identity cannot authorize destructive
+            # reconciliation. Keep the last known-good assets and discard only
+            # the untrusted delta from this attempt.
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured)
 
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:
@@ -242,12 +265,23 @@ class PipelineRunner:
                     pass
             return False
 
+        all_inline: dict[int, InlineMedia] = {
+            item.media_id: item for item in (previous_media.inline if previous_media else ())
+        }
+        all_inline.update({item.media_id: item for item in media.inline})
+        matched_any = any(
+            same_asset(item, invalid)
+            for item in all_inline.values()
+            for invalid in invalid_media
+        )
+        if not matched_any:
+            # An unrecognized descriptor is not a safe identity. Discard only
+            # the current untrusted delta and preserve the previous baseline.
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured)
         remaining = tuple(
-            item for item in media.inline
+            item for item in all_inline.values()
             if not any(same_asset(item, invalid) for invalid in invalid_media)
         )
-        if len(remaining) == len(media.inline):
-            remaining = ()
         return MediaProgress(required=media.required, inline=remaining, featured=media.featured)
 
     @staticmethod
@@ -269,11 +303,16 @@ class PipelineRunner:
             PipelineRunner._media_progress(previous, media)
             if media_reconciled
             else PipelineRunner._reconcile_media_for_outcome(
-                PipelineRunner._media_progress(previous, media), outcome, validation
+                PipelineRunner._media_progress(previous, media),
+                outcome,
+                validation,
+                previous_media=previous.media,
             )
         )
-        no_progress = previous.retry.no_progress if no_progress is None else no_progress
         target_phase = outcome.phase or previous.phase
+        no_progress = previous.retry.no_progress if no_progress is None else no_progress
+        if target_phase is not Phase.MEDIA:
+            no_progress = 0
         phase_attempts = (
             previous.retry.phase_attempts + 1
             if target_phase is previous.phase

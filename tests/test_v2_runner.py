@@ -56,12 +56,12 @@ def test_runner_exposes_media_blocker_as_pending_retry():
     assert store.state.state is WorkState().state
 
 
-def test_runner_clears_inline_progress_after_media_rejection():
+def test_runner_preserves_inline_progress_after_unidentified_media_rejection():
     inline = InlineMedia(10, "https://example.test/a.webp", 0)
     previous = WorkState(media=MediaProgress(required=2, inline=(inline,)))
     outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
     state = PipelineRunner._next_state(previous, {}, previous.media, outcome)
-    assert state.media.inline == ()
+    assert state.media.inline == (inline,)
     assert state.media.required == 2
 
 
@@ -113,6 +113,113 @@ def test_phase_attempts_reset_when_retry_changes_phase():
     assert state.retry.attempts == 8
     assert state.retry.phase_attempts == 1
     assert state.retry.policy_version == 3
+
+
+def test_media_no_progress_from_editorial_starts_a_fresh_media_budget():
+    inline = InlineMedia(10, "https://example.test/a.webp", 0)
+    previous = WorkState(
+        phase=Phase.EDITORIAL,
+        retry=RetryInfo(no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(inline,)),
+    )
+    store = MemoryStore(previous)
+    stages = {
+        "editorial": lambda *_: {"decision": "process"},
+        "media": lambda *_: previous.media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(1, {})
+
+    assert outcome.type is OutcomeType.RETRY
+    assert store.state.phase is Phase.MEDIA
+    assert store.state.retry.no_progress == 1
+
+
+def test_media_no_progress_continues_only_within_media_phase():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(required=2),
+    )
+    store = MemoryStore(previous)
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: previous.media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+
+    assert outcome.type is OutcomeType.HUMAN_REQUIRED
+    assert store.state.retry.no_progress == 2
+
+
+def test_media_no_progress_resets_when_final_outcome_is_editorial():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(required=2),
+    )
+    store = MemoryStore(previous)
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: previous.media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {"passed": False, "failures": [{"gate": "qualidade_texto"}]},
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.EDITORIAL
+    assert store.state.retry.no_progress == 0
+
+
+def test_reconciliation_preserves_previous_when_invalid_media_has_no_identity():
+    first = InlineMedia(10, "https://example.test/first.webp", 0)
+    second = InlineMedia(11, "https://example.test/second.webp", 3)
+    previous = MediaProgress(required=2, inline=(first,))
+    current = MediaProgress(required=2, inline=(first, second))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+
+    result = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "imagens_webp", "invalid_media": []}]},
+        previous_media=previous,
+    )
+
+    assert result.inline == (first,)
+
+
+def test_reconciliation_removes_only_explicitly_invalidated_asset():
+    first = InlineMedia(10, "https://example.test/first.webp", 0)
+    second = InlineMedia(11, "https://example.test/second.webp", 3)
+    previous = MediaProgress(required=2, inline=(first,))
+    current = MediaProgress(required=2, inline=(first, second))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+
+    removed_old = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "imagens_webp", "invalid_media": [{"media_id": 10}]}]},
+        previous_media=previous,
+    )
+    removed_new = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "imagens_webp", "invalid_media": [{"media_id": 11}]}]},
+        previous_media=previous,
+    )
+
+    assert [item.media_id for item in removed_old.inline] == [11]
+    assert [item.media_id for item in removed_new.inline] == [10]
 
 
 def test_runner_removes_only_structured_invalid_inline_media():
