@@ -222,6 +222,40 @@ def test_reconciliation_removes_only_explicitly_invalidated_asset():
     assert [item.media_id for item in removed_new.inline] == [10]
 
 
+def test_reconciliation_removes_new_asset_by_url_and_preserves_previous():
+    first = InlineMedia(10, "https://example.test/first.webp", 0)
+    second = InlineMedia(11, "https://example.test/second.webp", 3)
+    previous = MediaProgress(required=2, inline=(first,))
+    current = MediaProgress(required=2, inline=(first, second))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+
+    result = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "imagens_webp", "invalid_media": [{"url": "HTTPS://EXAMPLE.TEST/second.webp/"}]}]},
+        previous_media=previous,
+    )
+
+    assert [item.media_id for item in result.inline] == [10]
+
+
+def test_reconciliation_never_uses_slot_when_url_is_unknown():
+    first = InlineMedia(10, "https://example.test/first.webp", 0)
+    second = InlineMedia(11, "https://example.test/second.webp", 3)
+    previous = MediaProgress(required=2, inline=(first,))
+    current = MediaProgress(required=2, inline=(first, second))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+
+    result = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "imagens_webp", "invalid_media": [{"url": "https://unknown.test/nope.webp", "slot": 0}]}]},
+        previous_media=previous,
+    )
+
+    assert [item.media_id for item in result.inline] == [10]
+
+
 def test_runner_removes_only_structured_invalid_inline_media():
     inline = tuple(
         InlineMedia(i, f"https://example.test/{i}.webp", i * 3)

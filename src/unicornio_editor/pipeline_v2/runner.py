@@ -1,6 +1,7 @@
 """V2 orchestration over injected stages; no provider or WP imports."""
 
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
@@ -250,20 +251,28 @@ class PipelineRunner:
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:
                 try:
-                    if item.media_id == int(invalid["media_id"]):
-                        return True
+                    return item.media_id == int(invalid["media_id"])
                 except (TypeError, ValueError):
-                    pass
+                    return False
             invalid_url = str(invalid.get("url") or invalid.get("media_url") or "").strip()
-            if invalid_url and item.media_url.strip() == invalid_url:
-                return True
-            if invalid.get("slot") is not None:
-                try:
-                    if item.slot == int(invalid["slot"]):
-                        return True
-                except (TypeError, ValueError):
-                    pass
-            return False
+            if not invalid_url:
+                # Slot is a placement ordinal, not an asset identity. It is
+                # intentionally never sufficient for destructive cleanup.
+                return False
+
+            def normalize_url(value: str) -> str:
+                parsed = urlsplit(value.strip())
+                if not parsed.scheme or not parsed.netloc:
+                    return value.strip()
+                return urlunsplit((
+                    parsed.scheme.lower(),
+                    parsed.netloc.lower(),
+                    parsed.path.rstrip("/") or "/",
+                    parsed.query,
+                    "",
+                ))
+
+            return normalize_url(item.media_url) == normalize_url(invalid_url)
 
         all_inline: dict[int, InlineMedia] = {
             item.media_id: item for item in (previous_media.inline if previous_media else ())
