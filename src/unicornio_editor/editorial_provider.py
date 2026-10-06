@@ -115,9 +115,10 @@ _OUTPUT_SCHEMA = {
                     "post_id": {"type": "integer"},
                     "status": {"type": "string", "enum": ["ok", "needs_retry"]},
                     "reason": {"type": "string"},
+                    "retry_kind": {"type": "string", "enum": ["none", "text", "seo", "relevance", "facts", "media"]},
                     "editorial": _EDITORIAL_SCHEMA,
                 },
-                "required": ["post_id", "status", "reason", "editorial"],
+                "required": ["post_id", "status", "reason", "retry_kind", "editorial"],
                 "additionalProperties": False,
             },
         },
@@ -146,12 +147,13 @@ envelope already carries a verified trailer URL. Do fill game_name when the
 subject is a game. Use needs_retry only when the text/SEO facts themselves
 cannot be handled safely. When decision=process, matched_topics MUST contain
 one or more values copied exactly from relevance_policy.allowed_topics. Do not
-Do not return synonyms, subcategories, translations or derived labels in place of the
+return synonyms, subcategories, translations or derived labels in place of the
 allowed labels. When a post contains a rework object, treat previous_editorial as
 its baseline, correct specifically the failed_gates, preserve fields that do not
-need changes, and attempt the requested correction instead of returning
-needs_retry merely because the previous version failed those gates."""
-
+need changes, and attempt the requested correction. If a retry is needed, set
+retry_kind to text, seo, relevance, facts, or media. Use retry_kind=media only
+when the editorial payload itself is valid and the remaining media work is
+deterministic; never use a media retry to block a valid editorial."""
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
     source = Path(path)
@@ -229,7 +231,8 @@ def _normalize_output(
         reason = str(item.get("reason") or "").strip()
         if status not in {"ok", "needs_retry"}:
             raise EditorialProviderError(f"status editorial invalido para {post_id}: {status!r}")
-        if status == "needs_retry":
+        retry_kind = str(item.get("retry_kind") or "none")
+        if status == "needs_retry" and retry_kind != "media":
             normalized.append({"post_id": post_id, "status": status, "reason": reason or "retry solicitado"})
         else:
             editorial = item.get("editorial")
@@ -248,7 +251,9 @@ def _normalize_output(
                     seen.add(post_id)
                     continue
             if not isinstance(editorial, dict):
-                raise EditorialProviderError(f"editorial ausente para {post_id}")
+                normalized.append({"post_id": post_id, "status": "needs_retry", "reason": reason or "editorial ausente", "retry_kind": retry_kind})
+                seen.add(post_id)
+                continue
             # O trailer e descoberto de forma DETERMINISTICA pelo codigo (por
             # `game_name`, em compose_final_content): nao existe busca de
             # trailer nesta chamada sem ferramentas. Se o modelo sinalizou
@@ -284,6 +289,7 @@ def _normalize_output(
                     "post_id": post_id,
                     "status": "ok",
                     "reason": reason,
+                    "retry_kind": "none",
                     "editorial": checked,
                 })
         seen.add(post_id)

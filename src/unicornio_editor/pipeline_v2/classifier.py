@@ -49,8 +49,8 @@ def blocker_for_gate(gate: str | None) -> BlockerCode | None:
     return GATE_TO_BLOCKER.get(str(gate or ""))
 
 
-def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase | None]]:
-    result: list[tuple[BlockerCode, str, Phase | None]] = []
+def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase | None, str]]:
+    result: list[tuple[BlockerCode, str, Phase | None, str]] = []
     for failure in validation.get("failures", []) or []:
         if not isinstance(failure, dict):
             continue
@@ -60,16 +60,17 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
                 phase_value = Phase(failure["phase"])
             except ValueError:
                 phase_value = None
+        detail = str(failure.get("detail") or "")
         blocker = blocker_for_gate(failure.get("gate"))
         if blocker is not None:
-            result.append((blocker, str(failure.get("gate")), phase_value))
+            result.append((blocker, str(failure.get("gate")), phase_value, detail))
         elif failure.get("blocker"):
             try:
-                result.append((BlockerCode(failure["blocker"]), str(failure.get("gate", "")), phase_value))
+                result.append((BlockerCode(failure["blocker"]), str(failure.get("gate", "")), phase_value, detail))
             except ValueError:
-                result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value))
+                result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value, detail))
         else:
-            result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value))
+            result.append((BlockerCode.INTERNAL_ERROR, str(failure.get("gate", "")), phase_value, detail))
     return result
 
 
@@ -111,10 +112,12 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
     if not failures:
         return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now)
 
-    blockers = [blocker for blocker, _, _ in failures]
-    for blocker, _, phase_override in failures:
+    blockers = [blocker for blocker, _, _, _ in failures]
+    detail: str | None = None
+    for blocker, _, phase_override, failure_detail in failures:
+        detail = failure_detail or None
         if phase_override is not None:
-            return _retry(previous, phase_override, blocker, now=now)
+            return _retry(previous, phase_override, blocker, now=now, detail=detail)
         if blocker not in MEDIA_BLOCKERS:
             if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
                 phase = Phase.RELEVANCE
@@ -129,8 +132,8 @@ def classify(previous: WorkState, editorial: dict[str, Any], media: Any, validat
                 phase = Phase.EDITORIAL
             else:
                 phase = Phase.VALIDATE
-            return _retry(previous, phase, blocker, now=now)
+            return _retry(previous, phase, blocker, now=now, detail=detail)
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     if effective_no_progress >= 2:
-        return Outcome.human_required(Phase.MEDIA, blockers[0])
-    return _retry(previous, Phase.MEDIA, blockers[0], now=now)
+        return Outcome.human_required(Phase.MEDIA, blockers[0], detail=detail)
+    return _retry(previous, Phase.MEDIA, blockers[0], now=now, detail=detail)

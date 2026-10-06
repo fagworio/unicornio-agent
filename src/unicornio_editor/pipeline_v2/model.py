@@ -227,8 +227,8 @@ class Outcome:
         return cls(OutcomeType.RETRY, phase, blocker, next_at)
 
     @classmethod
-    def human_required(cls, phase: Phase | None = None, blocker: BlockerCode | None = None) -> "Outcome":
-        return cls(OutcomeType.HUMAN_REQUIRED, phase, blocker)
+    def human_required(cls, phase: Phase | None = None, blocker: BlockerCode | None = None, detail: str | None = None) -> "Outcome":
+        return cls(OutcomeType.HUMAN_REQUIRED, phase, blocker, None, detail)
 
     @classmethod
     def skipped(cls) -> "Outcome":

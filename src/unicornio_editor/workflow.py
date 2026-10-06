@@ -3769,6 +3769,8 @@ def retry_post(
                 media=previous.media,
             )
             serialized = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
+            if post.get("status") == "awaiting_human":
+                client.move_to_status(post_id, "pending")
             client.update_post(post_id, {"meta": {"_hermes_work_state": serialized}})
             readback = client.get_post(post_id)
             meta = readback.get("meta") or {}
