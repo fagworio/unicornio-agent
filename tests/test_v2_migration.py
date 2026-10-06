@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from unittest import mock
 
 from unicornio_editor.pipeline_v2.migration import (
     repair_known_terminal_states,
@@ -217,21 +218,56 @@ def test_media_provider_repair_allowlists_114840_and_115025():
         media=media,
     )
     vision = WorkState(
-        state=LifecycleState.HUMAN_REQUIRED,
+        state=LifecycleState.PENDING,
         phase=Phase.MEDIA,
         blocker=BlockerCode.MEDIA_INVALID,
-        retry=RetryInfo(attempts=9, no_progress=2, policy_version=3),
+        retry=RetryInfo(attempts=6, no_progress=1, phase_attempts=1, policy_version=3),
         relevance_approved=True,
-        media=media,
+        media=MediaProgress(required=4),
     )
     client = Client([_post(114840, duplicate), _post(115025, vision)])
-    preview = repair_media_provider_terminal_states(client, now=now)
+    with mock.patch(
+        "unicornio_editor.media.visual_hash.image_hashes",
+        side_effect=lambda urls: {url: "0123abcd" for url in urls},
+    ):
+        preview = repair_media_provider_terminal_states(client, now=now)
     assert preview["post_ids"] == [114840, 115025]
-    result = repair_media_provider_terminal_states(client, apply=True, now=now)
+    with mock.patch(
+        "unicornio_editor.media.visual_hash.image_hashes",
+        side_effect=lambda urls: {url: "0123abcd" for url in urls},
+    ):
+        result = repair_media_provider_terminal_states(client, apply=True, now=now)
     assert result["migrated"] == 2
     for post_id in (114840, 115025):
         repaired = WorkState.from_dict(json.loads(client.posts[post_id]["meta"]["_hermes_work_state"]))
         assert repaired.state is LifecycleState.PENDING
         assert repaired.phase is Phase.MEDIA
-        assert repaired.retry.no_progress == 1
-        assert repaired.media.accepted == 3
+    repaired_media = WorkState.from_dict(json.loads(client.posts[114840]["meta"]["_hermes_work_state"]))
+    assert repaired_media.retry.no_progress == 1
+    assert repaired_media.media.accepted == 3
+    assert all(item.phash == "0123abcd" for item in repaired_media.media.inline)
+    repaired_vision = WorkState.from_dict(json.loads(client.posts[115025]["meta"]["_hermes_work_state"]))
+    assert repaired_vision.blocker is BlockerCode.PROVIDER_ERROR
+    assert repaired_vision.retry.no_progress == 0
+
+
+def test_media_provider_repair_does_not_reopen_without_complete_baseline_phash():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_DUPLICATE,
+        retry=RetryInfo(no_progress=2, policy_version=3),
+        relevance_approved=True,
+        media=MediaProgress(required=4, inline=tuple(
+            InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in (1, 2, 3)
+        )),
+    )
+    client = Client([_post(114840, state)])
+    with mock.patch(
+        "unicornio_editor.media.visual_hash.image_hashes",
+        return_value={"https://wp.test/1.webp": "0123abcd"},
+    ):
+        result = repair_media_provider_terminal_states(client, now=now)
+    assert result["post_ids"] == []
+    assert {"post_id": 114840, "reason": "baseline_phash_unavailable"} in result["skipped"]

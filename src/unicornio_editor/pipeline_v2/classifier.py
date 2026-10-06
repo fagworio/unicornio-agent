@@ -147,6 +147,15 @@ def classify_stage_error(
     if max_rework_attempts is not None:
         max_attempts = max_rework_attempts
     detail = str(getattr(exc, "detail", "") or exc)
+    if getattr(exc, "blocker", None) in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}:
+        return _retry(
+            previous,
+            exc.phase,
+            exc.blocker,
+            now=now,
+            detail=detail,
+            cooldown_minutes=cooldown_minutes,
+        )
     if getattr(exc, "human_required", False):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
     if getattr(exc, "blocker", None) in MEDIA_BLOCKERS:
@@ -209,6 +218,27 @@ def classify(
         return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now, cooldown_minutes=cooldown_minutes)
 
     blockers = [blocker for blocker, _, _, _ in failures]
+    operational_failure = next(
+        (
+            (blocker, phase_override, failure_detail)
+            for blocker, _gate, phase_override, failure_detail in failures
+            if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}
+        ),
+        None,
+    )
+    if operational_failure is not None:
+        blocker, phase_override, failure_detail = operational_failure
+        phase = phase_override or (
+            Phase.MEDIA if blocker is BlockerCode.PROVIDER_ERROR else Phase.PUBLISH
+        )
+        return _retry(
+            previous,
+            phase,
+            blocker,
+            now=now,
+            detail=failure_detail or None,
+            cooldown_minutes=cooldown_minutes,
+        )
     first_blocker, _, _, first_detail = failures[0]
     detail: str | None = first_detail or None
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress

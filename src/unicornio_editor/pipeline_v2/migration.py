@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -495,6 +496,8 @@ def repair_media_provider_terminal_states(
     candidates: list[int] = []
     skipped: list[dict[str, Any]] = []
 
+    prepared: dict[int, WorkState] = {}
+    original: dict[int, WorkState] = {}
     for post_id in allowlist:
         try:
             post = client.get_post(post_id)
@@ -502,56 +505,79 @@ def repair_media_provider_terminal_states(
             skipped.append({"post_id": post_id, "reason": f"read_error: {exc}"})
             continue
         state = _read_state(post)
+        if state is None or state.phase is not Phase.MEDIA or state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION:
+            skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+            continue
+        original[post_id] = state
+        if post_id == HISTORICAL_MEDIA_DUPLICATE_ID:
+            if (
+                state.state is not LifecycleState.HUMAN_REQUIRED
+                or state.blocker is not BlockerCode.MEDIA_DUPLICATE
+                or state.retry.no_progress != 2
+                or state.media.required != 4
+                or state.media.accepted != 3
+            ):
+                skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+                continue
+            from ..media.visual_hash import image_hashes
+
+            urls = [item.media_url for item in state.media.inline]
+            hashes = image_hashes(urls)
+            if any(not hashes.get(url) for url in urls):
+                skipped.append({"post_id": post_id, "reason": "baseline_phash_unavailable"})
+                continue
+            inline = tuple(
+                replace(item, phash=str(hashes[item.media_url]))
+                for item in state.media.inline
+            )
+            media = replace(state.media, inline=inline)
+            retry = replace(
+                state.retry,
+                no_progress=1,
+                next_at=current.isoformat(timespec="seconds"),
+            )
+            prepared[post_id] = replace(
+                state,
+                state=LifecycleState.PENDING,
+                retry=retry,
+                media=media,
+            )
+            candidates.append(post_id)
+            continue
         if (
-            state is None
-            or state.state is not LifecycleState.HUMAN_REQUIRED
-            or state.phase is not Phase.MEDIA
-            or state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION
-            or state.retry.no_progress != 2
-            or (
-                post_id == HISTORICAL_MEDIA_DUPLICATE_ID
-                and (
-                    state.blocker is not BlockerCode.MEDIA_DUPLICATE
-                    or state.media.required != 4
-                    or state.media.accepted != 3
-                )
-            )
-            or (
-                post_id == HISTORICAL_VISION_PROVIDER_ID
-                and state.blocker is not BlockerCode.MEDIA_INVALID
-            )
+            state.state is not LifecycleState.PENDING
+            or state.blocker is not BlockerCode.MEDIA_INVALID
+            or state.retry.attempts != 6
+            or state.retry.phase_attempts != 1
+            or state.retry.no_progress != 1
+            or state.media.required != 4
+            or state.media.accepted != 0
         ):
             skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
             continue
+        prepared[post_id] = replace(
+            state,
+            blocker=BlockerCode.PROVIDER_ERROR,
+            retry=replace(
+                state.retry,
+                no_progress=0,
+                next_at=current.isoformat(timespec="seconds"),
+            ),
+        )
         candidates.append(post_id)
 
     migrated_ids: list[int] = []
     if apply:
         for post_id in candidates:
             post = client.get_post(post_id)
+            migrated = prepared.get(post_id)
             state = _read_state(post)
-            if state is None:
+            if migrated is None or state is None or state != original.get(post_id):
                 skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
                 continue
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            retry = RetryInfo(
-                attempts=state.retry.attempts,
-                no_progress=1,
-                next_at=current.isoformat(timespec="seconds"),
-                policy_version=CURRENT_RETRY_POLICY_VERSION,
-                phase_attempts=state.retry.phase_attempts,
-            )
-            migrated = WorkState(
-                state=LifecycleState.PENDING,
-                phase=Phase.MEDIA,
-                blocker=state.blocker,
-                retry=retry,
-                relevance_approved=state.relevance_approved,
-                media=state.media,
-                version=state.version,
-            )
             updated_meta = dict(meta)
             updated_meta["_hermes_work_state"] = json.dumps(
                 migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
