@@ -37,12 +37,12 @@ def _normalize_executable_candidate(candidate: dict[str, Any], subject: str) -> 
     result = dict(candidate)
     source = str(result.get("source_page_url") or "").strip()
     host = (urlparse(source).hostname or "").strip()
-    result.setdefault("author", result.get("publisher") or host or "Fonte original")
-    result.setdefault("license", "Uso com crédito")
-    result.setdefault("license_url", source)
-    result.setdefault("captured_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    result.setdefault("credit_text", f"Crédito da imagem: {host or 'fonte original'}")
-    result.setdefault("alt_text", subject)
+    result["author"] = result.get("author") or result.get("publisher") or host or "Fonte original"
+    result["license"] = result.get("license") or "Uso com crédito"
+    result["license_url"] = result.get("license_url") or source
+    result["captured_at"] = result.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result["credit_text"] = result.get("credit_text") or f"Crédito da imagem: {host or 'fonte original'}"
+    result["alt_text"] = result.get("alt_text") or subject
     return result
 
 
