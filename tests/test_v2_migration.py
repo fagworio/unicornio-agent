@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from unicornio_editor.pipeline_v2.migration import rebase_media_cooldowns
+from unicornio_editor.pipeline_v2.migration import rebase_editorial_retries, rebase_media_cooldowns
 from unicornio_editor.pipeline_v2.model import (
     BlockerCode,
     FeaturedProgress,
@@ -65,7 +65,8 @@ def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
     assert migrated.retry.attempts == 5
     assert migrated.retry.no_progress == 1
     assert migrated.retry.next_at == "2026-10-06T20:00:00+00:00"
-    assert migrated.retry.policy_version == 2
+    assert migrated.retry.policy_version == 3
+    assert migrated.retry.phase_attempts == 0
     assert migrated.phase is state.phase
     assert migrated.blocker is state.blocker
     assert migrated.media == state.media
@@ -73,3 +74,34 @@ def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
     second = rebase_media_cooldowns(client, apply=True, now=now)
     assert second["candidates"] == 0
     assert len(client.updates) == 1
+
+
+def test_rebase_editorial_retries_resets_only_phase_budget():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    state = WorkState(
+        phase=Phase.EDITORIAL,
+        blocker=BlockerCode.TEXT_QUALITY,
+        retry=RetryInfo(
+            attempts=7,
+            no_progress=2,
+            next_at="2026-10-06T23:00:00+00:00",
+            phase_attempts=4,
+        ),
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            inline=(InlineMedia(17, "https://cdn.test/a.webp", 0),),
+        ),
+    )
+    client = Client([_post(9, state)])
+
+    result = rebase_editorial_retries(client, apply=True, now=now)
+
+    assert result["migrated"] == 1
+    migrated = WorkState.from_dict(json.loads(client.posts[9]["meta"]["_hermes_work_state"]))
+    assert migrated.retry.attempts == 7
+    assert migrated.retry.no_progress == 2
+    assert migrated.retry.phase_attempts == 0
+    assert migrated.retry.policy_version == 3
+    assert migrated.retry.next_at == "2026-10-06T20:00:00+00:00"
+    assert migrated.media == state.media

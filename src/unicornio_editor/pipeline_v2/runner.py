@@ -273,17 +273,23 @@ class PipelineRunner:
             )
         )
         no_progress = previous.retry.no_progress if no_progress is None else no_progress
+        target_phase = outcome.phase or previous.phase
+        phase_attempts = (
+            previous.retry.phase_attempts + 1
+            if target_phase is previous.phase
+            else 1
+        )
         if outcome.type is OutcomeType.READY:
             return WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, retry=previous.retry, relevance_approved=True, media=progress)
         if outcome.type is OutcomeType.SKIPPED:
             return WorkState(state=LifecycleState.SKIPPED, phase=Phase.RELEVANCE, retry=previous.retry, media=progress)
         if outcome.type is OutcomeType.HUMAN_REQUIRED:
-            return WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=outcome.phase or previous.phase, blocker=outcome.blocker, retry=RetryInfo(previous.retry.attempts, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION), relevance_approved=previous.relevance_approved, media=progress)
+            return WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=target_phase, blocker=outcome.blocker, retry=RetryInfo(previous.retry.attempts, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION, phase_attempts), relevance_approved=previous.relevance_approved, media=progress)
         return WorkState(
             state=LifecycleState.PENDING,
-            phase=outcome.phase or previous.phase,
+            phase=target_phase,
             blocker=outcome.blocker,
-            retry=RetryInfo(previous.retry.attempts + 1, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION),
+            retry=RetryInfo(previous.retry.attempts + 1, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION, phase_attempts),
             relevance_approved=editorial_decision(editorial) == "process" or previous.relevance_approved,
             media=progress,
         )

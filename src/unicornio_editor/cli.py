@@ -528,6 +528,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rebase_cooldowns_parser.add_argument("--limit", type=int, default=0)
 
+    rebase_editorial_parser = subparsers.add_parser(
+        "v2-rebase-editorial-retries",
+        help="rebaseia cooldowns V2 de EDITORIAL criados pelo budget global "
+        "(dry-run por padrão; preserva tentativas e mídia)",
+    )
+    rebase_editorial_parser.add_argument("--root", type=Path, default=Path("."))
+    rebase_editorial_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="grava phase_attempts=0, next_at=agora e a versão atual no WordPress",
+    )
+    rebase_editorial_parser.add_argument("--limit", type=int, default=0)
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -1843,6 +1856,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .pipeline_v2.migration import rebase_media_cooldowns
 
             result = rebase_media_cooldowns(
+                client,
+                apply=bool(getattr(args, "apply", False)),
+                limit=int(getattr(args, "limit", 0) or 0),
+            )
+        elif args.command == "v2-rebase-editorial-retries":
+            from .pipeline_v2.migration import rebase_editorial_retries
+
+            result = rebase_editorial_retries(
                 client,
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),

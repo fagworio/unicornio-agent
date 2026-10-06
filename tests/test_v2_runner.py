@@ -1,4 +1,4 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Outcome, OutcomeType, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
 
 
@@ -94,6 +94,25 @@ def test_featured_invalidations_are_not_counted_as_media_progress():
         featured=FeaturedProgress(FeaturedStatus.INVALID),
     )
     assert not PipelineRunner._media_progressed(previous, invalid)
+
+
+def test_phase_attempts_reset_when_retry_changes_phase():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(attempts=7, phase_attempts=4),
+        relevance_approved=True,
+    )
+    outcome = Outcome(OutcomeType.RETRY, Phase.EDITORIAL, BlockerCode.TEXT_QUALITY)
+    state = PipelineRunner._next_state(
+        previous,
+        {"decision": "process"},
+        previous.media,
+        outcome,
+        media_reconciled=True,
+    )
+    assert state.retry.attempts == 8
+    assert state.retry.phase_attempts == 1
+    assert state.retry.policy_version == 3
 
 
 def test_runner_removes_only_structured_invalid_inline_media():

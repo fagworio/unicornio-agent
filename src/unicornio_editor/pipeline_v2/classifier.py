@@ -44,9 +44,25 @@ MEDIA_BLOCKERS = frozenset({
     BlockerCode.MEDIA_ORIGIN,
 })
 
+EDITORIAL_BLOCKERS = frozenset({
+    BlockerCode.TEXT_QUALITY,
+    BlockerCode.SEO,
+    BlockerCode.STRUCTURE,
+    BlockerCode.SOURCE,
+    BlockerCode.SCHEMA,
+})
+
 
 def blocker_for_gate(gate: str | None) -> BlockerCode | None:
     return GATE_TO_BLOCKER.get(str(gate or ""))
+
+
+def _phase_attempts(previous: WorkState, phase: Phase) -> int:
+    return previous.retry.phase_attempts if previous.phase is phase else 0
+
+
+def _editorial_attempt(previous: WorkState, phase: Phase) -> int:
+    return _phase_attempts(previous, phase) + 1
 
 
 def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase | None, str]]:
@@ -97,7 +113,7 @@ def _retry(
         elif blocker is BlockerCode.RELEVANCE_UNCERTAIN:
             delay = max(cooldown_minutes, 30)
         else:
-            delay = max(cooldown_minutes, 1) * (4 ** min(previous.retry.attempts, 3))
+            delay = max(cooldown_minutes, 1) * (4 ** min(attempts, 3))
         next_at = (now + timedelta(minutes=delay)).isoformat(timespec="seconds")
     return Outcome(OutcomeType.RETRY, phase, blocker, next_at, detail)
 
@@ -135,6 +151,19 @@ def classify_stage_error(
             detail=detail,
             cooldown_minutes=cooldown_minutes,
             backoff_attempts=no_progress,
+        )
+    if getattr(exc, "blocker", None) in EDITORIAL_BLOCKERS:
+        phase_attempt = _editorial_attempt(previous, exc.phase)
+        if phase_attempt >= max(1, max_attempts):
+            return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
+        return _retry(
+            previous,
+            exc.phase,
+            exc.blocker,
+            now=now,
+            detail=detail,
+            cooldown_minutes=cooldown_minutes,
+            backoff_attempts=max(0, phase_attempt - 1),
         )
     if previous.retry.attempts + 1 >= max(1, max_attempts):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
@@ -178,7 +207,14 @@ def classify(
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
     for blocker, _, phase_override, failure_detail in failures:
         if phase_override is not None:
-            if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+            editorial_attempt = (
+                _editorial_attempt(previous, phase_override)
+                if blocker in EDITORIAL_BLOCKERS or phase_override is Phase.EDITORIAL
+                else None
+            )
+            if editorial_attempt is not None and editorial_attempt >= max(1, max_rework_attempts):
+                return Outcome.human_required(phase_override, blocker, detail=failure_detail or None)
+            if blocker not in MEDIA_BLOCKERS and editorial_attempt is None and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase_override, blocker, detail=failure_detail or None)
             return _retry(
                 previous,
@@ -187,7 +223,13 @@ def classify(
                 now=now,
                 detail=failure_detail or None,
                 cooldown_minutes=cooldown_minutes,
-                backoff_attempts=effective_no_progress if blocker in MEDIA_BLOCKERS else None,
+                backoff_attempts=(
+                    effective_no_progress
+                    if blocker in MEDIA_BLOCKERS
+                    else max(0, editorial_attempt - 1)
+                    if editorial_attempt is not None
+                    else None
+                ),
             )
         if blocker not in MEDIA_BLOCKERS:
             if blocker is BlockerCode.RELEVANCE_UNCERTAIN:
@@ -203,7 +245,14 @@ def classify(
                 phase = Phase.EDITORIAL
             else:
                 phase = Phase.VALIDATE
-            if blocker not in MEDIA_BLOCKERS and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
+            editorial_attempt = (
+                _editorial_attempt(previous, phase)
+                if blocker in EDITORIAL_BLOCKERS or phase is Phase.EDITORIAL
+                else None
+            )
+            if editorial_attempt is not None and editorial_attempt >= max(1, max_rework_attempts):
+                return Outcome.human_required(phase, blocker, detail=failure_detail or None)
+            if blocker not in MEDIA_BLOCKERS and editorial_attempt is None and previous.retry.attempts + 1 >= max(1, max_rework_attempts):
                 return Outcome.human_required(phase, blocker, detail=failure_detail or None)
             return _retry(
                 previous,
@@ -212,7 +261,13 @@ def classify(
                 now=now,
                 detail=failure_detail or None,
                 cooldown_minutes=cooldown_minutes,
-                backoff_attempts=effective_no_progress if blocker in MEDIA_BLOCKERS else None,
+                backoff_attempts=(
+                    effective_no_progress
+                    if blocker in MEDIA_BLOCKERS
+                    else max(0, editorial_attempt - 1)
+                    if editorial_attempt is not None
+                    else None
+                ),
             )
     if effective_no_progress >= max(1, max_media_no_progress):
         return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
