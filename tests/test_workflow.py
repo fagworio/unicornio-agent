@@ -724,6 +724,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["rejected"][0]["index"], 1)
         self.assertIn("sem relacao", result["rejected"][0]["reason"])
 
+    def test_media_funnel_events_keep_post_context(self):
+        payload = editorial_payload()
+        payload["media_plan"] = [{
+            **self.media_item(),
+            "subject": "videogame",
+            "search_query": "videogame lançamento",
+            "candidate_id": "42-candidate-1",
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            validate_media_plan(FakeClient(self.post()), payload, root=root, post_id=42)
+            events = [
+                json.loads(line)
+                for line in (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "media_funnel"
+            ]
+        assert events
+        assert all(event["post_id"] == 42 for event in events)
+        assert all(event["query"] == "videogame lançamento" for event in events)
+        assert all(event["subject"] == "videogame" for event in events)
+
     def test_media_validate_reports_listicle_capacity_without_counting_featured(self):
         payload = editorial_payload()
         payload["seo"]["title"] = "4 melhores jogos para fãs de Redfall"

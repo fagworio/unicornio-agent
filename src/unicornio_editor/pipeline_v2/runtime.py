@@ -275,6 +275,7 @@ class ProductionMediaResolver:
             config=self.config,
             root=self.root,
             post_title=title,
+            post_id=int(context["post_id"]),
             existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
         )
         results, _featured_id, _featured_credit = _execute_media_plan(

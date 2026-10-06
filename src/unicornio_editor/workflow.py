@@ -397,6 +397,7 @@ def _apply_editorial_unlocked(
         config=config,
         root=root,
         post_title=_post_title(post),
+        post_id=post_id,
         existing_featured_id=(
             None
             if partial_featured_rejected
@@ -1485,6 +1486,7 @@ def validate_media_plan(
     root: Path | None = None,
     post_title: str = "",
     existing_featured_id: int | None = None,
+    post_id: int | None = None,
 ) -> dict[str, Any]:
     """Valida o media_plan de um editorial SEM executar download/upload.
 
@@ -1513,6 +1515,11 @@ def validate_media_plan(
                 status="seen",
                 item_index=index,
                 featured=bool(item.get("is_featured")),
+                post_id=post_id,
+                query=str(item.get("search_query") or item.get("query") or ""),
+                subject=str(item.get("subject") or ""),
+                role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                candidate_id=str(item.get("candidate_id") or ""),
                 source_domain=(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
@@ -1539,6 +1546,11 @@ def validate_media_plan(
                     status=vision["status"],
                     item_index=index,
                     featured=True,
+                    post_id=post_id,
+                    query=str(item.get("search_query") or item.get("query") or ""),
+                    subject=str(item.get("subject") or ""),
+                    role="featured",
+                    candidate_id=str(item.get("candidate_id") or ""),
                     source_domain=(
                         urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                     ).lower(),
@@ -1558,6 +1570,11 @@ def validate_media_plan(
                 status="rejected" if reason else "passed",
                 item_index=index,
                 featured=bool(item.get("is_featured")),
+                post_id=post_id,
+                query=str(item.get("search_query") or item.get("query") or ""),
+                subject=str(item.get("subject") or ""),
+                role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                candidate_id=str(item.get("candidate_id") or ""),
                 source_domain=(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
@@ -1585,6 +1602,11 @@ def validate_media_plan(
                 item_index=-1,
                 featured=True,
                 existing=True,
+                post_id=post_id,
+                query="",
+                subject=str(editorial.get("game_name") or ""),
+                role="featured",
+                candidate_id="",
                 source_domain=(
                     urlparse(str(attachment.get("source_url") or "")).hostname or ""
                 ).lower(),
@@ -1860,6 +1882,11 @@ def _execute_media_plan(
             status=status,
             item_index=position,
             featured=bool(item.get("is_featured")),
+            post_id=post_id,
+            query=str(item.get("search_query") or item.get("query") or ""),
+            subject=str(item.get("subject") or ""),
+            role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+            candidate_id=str(item.get("candidate_id") or ""),
             source_domain=(urlparse(source).hostname or "").lower(),
             detail=detail[:160],
         )
@@ -1878,6 +1905,12 @@ def _execute_media_plan(
                 "source_verification",
                 verification=verification,
                 item_index=position,
+                post_id=post_id,
+                query=str(item.get("search_query") or item.get("query") or ""),
+                subject=str(item.get("subject") or ""),
+                role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                candidate_id=str(item.get("candidate_id") or ""),
+                source_domain=(urlparse(source).hostname or "").lower(),
                 detail=detail[:160],
             )
 

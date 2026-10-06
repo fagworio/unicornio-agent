@@ -54,9 +54,9 @@ def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
 def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkeypatch):
     seen_keywords = []
     candidate = {
-        "content": "<p>Bailarina acompanha uma história de ação.</p>",
+        "content": "<p>Vazamentos sobre GTA 6 revelam novidades da produção.</p>",
         "editorial": {
-            "cleaned_html": "<p>Bailarina acompanha uma história de ação.</p>",
+            "cleaned_html": "<p>Vazamentos sobre GTA 6 revelam novidades da produção.</p>",
             "seo": {"title": "Bailarina: novo filme", "focus_keyword": "termo antigo"},
         },
         "seo": {"title": "Bailarina: novo filme", "focus_keyword": "termo antigo"},
@@ -86,15 +86,43 @@ def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkey
     )
     monkeypatch.setattr(
         "unicornio_editor.pipeline_v2.production_stages.post_subjects",
-        lambda **_kwargs: [{"subject": "Bailarina"}],
+        lambda **_kwargs: [{"subject": "vazamentos de GTA 6"}],
     )
-    post = {"id": 9, "status": "pending", "title": {"raw": "Bailarina: novo filme"}, "meta": {}}
+    candidate["editorial"]["seo"]["title"] = "Vazamentos: GTA 6 ganham força"
+    candidate["seo"]["title"] = "Vazamentos: GTA 6 ganham força"
+    post = {"id": 9, "status": "pending", "title": {"raw": "Vazamentos: GTA 6 ganham força"}, "meta": {}}
     result = ProductionValidateStage(object(), Config(), tmp_path)(
         {"post_id": 9, "post": post, "v2_state": None}, candidate
     )
-    assert seen_keywords == ["termo antigo", "Bailarina"]
+    assert seen_keywords == ["termo antigo", "vazamentos de GTA 6"]
     assert result["passed"] is True
-    assert '"focus_keyword": "Bailarina"' in (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
+    assert '"focus_keyword": "vazamentos de GTA 6"' in (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
+
+
+def test_validate_does_not_repair_focus_keyword_when_token_order_is_wrong(tmp_path, monkeypatch):
+    candidate = {
+        "content": "<p>GTA 6 vazamentos continuam sem confirmação oficial.</p>",
+        "editorial": {
+            "cleaned_html": "<p>GTA 6 vazamentos continuam sem confirmação oficial.</p>",
+            "seo": {"title": "Vazamentos: GTA 6 ganham força", "focus_keyword": "termo antigo"},
+        },
+        "seo": {"title": "Vazamentos: GTA 6 ganham força", "focus_keyword": "termo antigo"},
+    }
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        lambda **_: {"all_passed": False, "items": [{"name": "qualidade_texto", "status": "fail", "detail": "focus keyword must occur naturally"}]},
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "vazamentos de GTA 6"}],
+    )
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {"post_id": 11, "post": {"id": 11, "status": "pending", "title": {"raw": "Vazamentos: GTA 6 ganham força"}, "meta": {}}, "v2_state": None},
+        candidate,
+    )
+    assert result["passed"] is False
+    assert candidate["seo"]["focus_keyword"] == "termo antigo"
+
 
 
 def test_validate_persists_dash_repair_in_canonical_draft(tmp_path, monkeypatch):

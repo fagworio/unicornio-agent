@@ -521,6 +521,32 @@ class EnrichmentMemoTests(unittest.TestCase):
         self.assertEqual(deferidos[0]["evidence"]["verdict"], "capacity_met")
         self.assertFalse(deferidos[0]["evidence"]["needs_vision"])
 
+    def test_candidate_terminal_keeps_post_context(self):
+        from unicornio_editor import cli
+
+        candidate = self._candidate("https://a/1.jpg")
+        candidate["candidate_id"] = "candidate-1"
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
+        ):
+            cli._enriquecer_candidatos(
+                [candidate], subject="Redfall", termo="Redfall jogo", root=Path(directory), post_id=42
+            )
+            events = [
+                json.loads(line)
+                for line in (Path(directory) / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "media_candidate_terminal"
+            ]
+        assert events
+        assert events[0]["post_id"] == 42
+        assert events[0]["query"] == "Redfall jogo"
+        assert events[0]["subject"] == "Redfall"
+        assert events[0]["candidate_id"] == "candidate-1"
+
 
 class DraftPatchTests(unittest.TestCase):
     """P0/P2: rework recebe só o componente; patch parcial mescla no draft."""

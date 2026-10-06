@@ -1191,6 +1191,7 @@ def _resolve_media_batch(
             root=root,
             capacity=needed_web,
             enriched_cache=memo_by_query.get(str(item["query"]), {}),
+            post_id=post_id,
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1762,10 +1763,12 @@ def _enriquecer_candidatos(
                         post_id=int(post_id) if post_id else None,
                         query=str(cand.get("query") or termo or ""),
                         subject=str(subject or ""),
+                        role=str(cand.get("role") or ""),
                         engine=str(cand.get("engine") or "unknown"),
                         discovery_image_url=str(cand.get("discovery_image_url") or cand.get("direct_image_url") or ""),
                         direct_image_url=str(cand.get("direct_image_url") or ""),
                         source_page_url=str(cand.get("source_page_url") or ""),
+                        source_domain=(urlparse(str(cand.get("source_page_url") or cand.get("direct_image_url") or "")).hostname or "").lower(),
                         status=status,
                         reason_code=reason_code,
                         verification_level=str(cand.get("verification_level") or ""),
@@ -2181,6 +2184,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "media_funnel",
                         stage="discovery",
                         status="passed",
+                        post_id=post_id_ref,
+                        query=args.termo,
+                        subject=subject_alvo,
+                        role="inline",
+                        candidate_id=str(candidate.get("candidate_id") or ""),
                         source_domain=(urlparse(direct_url).hostname or "").lower(),
                         engine=str(candidate.get("engine") or "unknown"),
                     )
@@ -2435,6 +2443,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         direct_url = str(candidate.get("direct_image_url") or "")
                         append_telemetry(
                             args.root, "media_funnel", stage="discovery", status="passed",
+                            post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
+                            query=query,
+                            subject=subject_item,
+                            role="inline",
+                            candidate_id=str(candidate.get("candidate_id") or ""),
                             source_domain=(urlparse(direct_url).hostname or "").lower(),
                             engine=str(candidate.get("engine") or "unknown"), batch=True,
                         )
@@ -2584,6 +2597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config=config,
                 root=args.root,
                 post_title=post_title,
+                post_id=int(args.post_id) if args.post_id else None,
                 existing_featured_id=existing_featured_id,
             )
             # Regra do repo: detalhe completo em arquivo, stdout pequeno.

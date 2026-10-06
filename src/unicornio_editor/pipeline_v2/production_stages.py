@@ -13,6 +13,7 @@ from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
 from ..checklist import required_image_count
 from ..content_quality import normalize_editorial_dashes, word_count
+from ..content_quality import _keyword_in_text
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..list_quality import detect_list_format
@@ -181,7 +182,7 @@ class ProductionMediaStage:
                 if featured.status is FeaturedStatus.VALID:
                     plan = [item for item in plan if not item.get("is_featured")]
                 plan = [item for item in plan if item.get("is_featured") or int(item.get("paragraph_index", -1)) not in {x.slot for x in accepted.values()}]
-                checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""), existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None)
+                checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""), existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None, post_id=int(context["post_id"]))
                 results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
                 inline = tuple(
                     InlineMedia(
@@ -290,7 +291,16 @@ class ProductionValidateStage:
                 subjects = post_subjects(title=str(seo.get("title") or ""), content_html=str(candidate["content"]), focus_keyword=str(seo.get("focus_keyword") or ""), game_name=checklist_editorial.get("game_name"))
                 title_lower = str(seo.get("title") or "").casefold()
                 content_lower = str(candidate["content"]).casefold()
-                replacement = next((str(row.get("subject") or "").strip() for row in subjects if str(row.get("subject") or "").strip().casefold() in title_lower and str(row.get("subject") or "").strip().casefold() in content_lower), "")
+                replacement = next(
+                    (
+                        subject
+                        for row in subjects
+                        if (subject := str(row.get("subject") or "").strip())
+                        and _keyword_in_text(subject, title_lower)
+                        and _keyword_in_text(subject, content_lower)
+                    ),
+                    "",
+                )
                 if replacement:
                     seo["focus_keyword"] = replacement
                     checklist_editorial["seo"] = seo
