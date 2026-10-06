@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
-from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
 
 class PipelineRunner:
@@ -278,12 +278,12 @@ class PipelineRunner:
         if outcome.type is OutcomeType.SKIPPED:
             return WorkState(state=LifecycleState.SKIPPED, phase=Phase.RELEVANCE, retry=previous.retry, media=progress)
         if outcome.type is OutcomeType.HUMAN_REQUIRED:
-            return WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=outcome.phase or previous.phase, blocker=outcome.blocker, retry=RetryInfo(previous.retry.attempts, no_progress, outcome.next_at), relevance_approved=previous.relevance_approved, media=progress)
+            return WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=outcome.phase or previous.phase, blocker=outcome.blocker, retry=RetryInfo(previous.retry.attempts, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION), relevance_approved=previous.relevance_approved, media=progress)
         return WorkState(
             state=LifecycleState.PENDING,
             phase=outcome.phase or previous.phase,
             blocker=outcome.blocker,
-            retry=RetryInfo(previous.retry.attempts + 1, no_progress, outcome.next_at),
+            retry=RetryInfo(previous.retry.attempts + 1, no_progress, outcome.next_at, CURRENT_RETRY_POLICY_VERSION),
             relevance_approved=editorial_decision(editorial) == "process" or previous.relevance_approved,
             media=progress,
         )

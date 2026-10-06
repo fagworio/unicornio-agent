@@ -515,6 +515,19 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="sem esta flag o comando apenas relata o que faria")
     migrate_parser.add_argument("--limit", type=int, default=0)
 
+    rebase_cooldowns_parser = subparsers.add_parser(
+        "v2-rebase-cooldowns",
+        help="rebaseia cooldowns V2 de MEDIA criados por política antiga "
+        "(dry-run por padrão; preserva tentativas e progresso)",
+    )
+    rebase_cooldowns_parser.add_argument("--root", type=Path, default=Path("."))
+    rebase_cooldowns_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="grava next_at=agora e a versão atual da política no WordPress",
+    )
+    rebase_cooldowns_parser.add_argument("--limit", type=int, default=0)
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -1823,6 +1836,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = migrate_legacy_state(
                 client, config, args.root,
+                apply=bool(getattr(args, "apply", False)),
+                limit=int(getattr(args, "limit", 0) or 0),
+            )
+        elif args.command == "v2-rebase-cooldowns":
+            from .pipeline_v2.migration import rebase_media_cooldowns
+
+            result = rebase_media_cooldowns(
+                client,
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),
             )

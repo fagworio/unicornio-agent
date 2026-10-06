@@ -55,23 +55,37 @@ class OutcomeType(_ValueEnum):
     SKIPPED = "skipped"
 
 
+CURRENT_RETRY_POLICY_VERSION = 2
+
+
 @dataclass(frozen=True)
 class RetryInfo:
     attempts: int = 0
     no_progress: int = 0
     next_at: str | None = None
+    policy_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.attempts < 0 or self.no_progress < 0:
+        if self.attempts < 0 or self.no_progress < 0 or self.policy_version < 1:
             raise ValueError("retry counters cannot be negative")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"attempts": self.attempts, "no_progress": self.no_progress, "next_at": self.next_at}
+        return {
+            "attempts": self.attempts,
+            "no_progress": self.no_progress,
+            "next_at": self.next_at,
+            "policy_version": self.policy_version,
+        }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "RetryInfo":
         value = value or {}
-        return cls(int(value.get("attempts", 0)), int(value.get("no_progress", 0)), value.get("next_at"))
+        return cls(
+            int(value.get("attempts", 0)),
+            int(value.get("no_progress", 0)),
+            value.get("next_at"),
+            int(value.get("policy_version", 1)),
+        )
 
 
 class FeaturedStatus(_ValueEnum):
