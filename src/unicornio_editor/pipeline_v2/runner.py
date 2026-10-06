@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from .classifier import blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
-from .model import BlockerCode, FeaturedProgress, FeaturedStatus, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
 
 class PipelineRunner:
