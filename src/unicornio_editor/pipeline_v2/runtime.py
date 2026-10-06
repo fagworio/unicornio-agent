@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from ..checklist import required_image_count
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
-from ..media.evidence import post_subjects
+from ..media.evidence import item_query, post_subjects
 from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
@@ -54,90 +54,269 @@ class ProductionMediaResolver:
 
     def __call__(self, context, state, editorial, previous):
         html = str(editorial.get("cleaned_html") or "")
-        total_required = required_image_count(word_count(html), title=str(context.get("title") or ""), content=html)
-        needed = max(0, total_required - previous.accepted)
-        if needed == 0 and previous.featured.status is FeaturedStatus.VALID:
+        title = str(context.get("title") or "")
+        focus_keyword = str((editorial.get("seo") or {}).get("focus_keyword") or "")
+        total_required = required_image_count(word_count(html), title=title, content=html)
+        inline_needed = max(0, total_required - previous.accepted)
+        featured_needed = 0 if previous.featured.status is FeaturedStatus.VALID else 1
+        if inline_needed == 0 and featured_needed == 0:
             return previous
+
         from ..cli import _resolve_media_batch
-        subject_rows = post_subjects(title=str(context.get("title") or ""), content_html=html, focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""), game_name=editorial.get("game_name"))
-        subject = str((subject_rows[0] if subject_rows else {}).get("subject") or context.get("title") or "")
-        search_needed = needed + (0 if previous.featured.status is FeaturedStatus.VALID else 1)
-        batch = {"schema_version": 1, "batch_id": f"v2-{context['post_id']}", "posts": [{"post_id": int(context["post_id"]), "subject": subject, "query": subject, "needed": search_needed, "limit": max(search_needed, 1), "engine": "auto", "size": "xga", "ratio": "w"}]}
-        resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True, allow_reuse=False)
-        row = (resolved.get("posts") or [{}])[0]
+
+        subject_rows = post_subjects(
+            title=title,
+            content_html=html,
+            focus_keyword=focus_keyword,
+            game_name=editorial.get("game_name"),
+        )
+        subject_queries: list[tuple[str, str]] = []
+        seen_queries: set[str] = set()
+
+        def add_query(subject: str, query: str) -> None:
+            subject = " ".join(str(subject or "").split()).strip()
+            query = " ".join(str(query or "").split()).strip()
+            if query and query.casefold() not in seen_queries:
+                subject_queries.append((subject or query, query))
+                seen_queries.add(query.casefold())
+
+        for row in subject_rows:
+            subject = str(row.get("subject") or "").strip()
+            add_query(subject, item_query(subject, title, extra=focus_keyword))
+        if focus_keyword:
+            main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
+            add_query(main_subject, item_query(focus_keyword, title))
+        if not subject_queries:
+            add_query(title, item_query(title, title, extra=focus_keyword))
+
+        def resolve_query(subject: str, query: str, needed: int, role: str) -> list[dict[str, Any]]:
+            if needed <= 0:
+                return []
+            digest = hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest()[:10]
+            batch = {
+                "schema_version": 1,
+                "batch_id": f"v2-{context['post_id']}-{role}-{digest}",
+                "posts": [{
+                    "post_id": int(context["post_id"]),
+                    "subject": subject,
+                    "query": query,
+                    "needed": needed,
+                    "limit": max(needed, 3),
+                    "engine": "auto",
+                    "size": "xga",
+                    "ratio": "w",
+                }],
+            }
+            resolved = _resolve_media_batch(
+                self.client, self.config, self.root, batch, full=True, allow_reuse=False
+            )
+            row = (resolved.get("posts") or [{}])[0]
+            candidates: list[dict[str, Any]] = []
+            for reused in row.get("reuse") or []:
+                if not isinstance(reused, dict):
+                    continue
+                candidates.append({
+                    **reused,
+                    "direct_image_url": reused.get("direct_image_url") or reused.get("url"),
+                    "source_page_url": reused.get("source_page_url") or reused.get("source"),
+                    "media_library_id": reused.get("media_library_id") or reused.get("media_id"),
+                    "subject": subject,
+                    "search_query": query,
+                    "role": role,
+                    "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
+                })
+            for candidate in row.get("audit_candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate = dict(candidate)
+                candidate["subject"] = subject
+                candidate["search_query"] = query
+                candidate["role"] = role
+                candidates.append(candidate)
+            return candidates
+
+        featured_candidates: list[dict[str, Any]] = []
+        if featured_needed:
+            featured_subject, featured_query = subject_queries[0]
+            # Key-art is a separate search role.  If the contextual query has
+            # no usable result, the explicit key-art query provides a second
+            # pool without ever turning an inline candidate into the featured.
+            featured_queries = [
+                (featured_subject, f"{featured_query} key art"),
+                (featured_subject, featured_query),
+            ]
+            for subject, query in featured_queries:
+                featured_candidates.extend(resolve_query(subject, query, 1, "featured"))
+                if any(self._is_approved(candidate) for candidate in featured_candidates):
+                    break
+
+        inline_candidates: list[dict[str, Any]] = []
+        if inline_needed:
+            for subject, query in subject_queries:
+                inline_candidates.extend(resolve_query(subject, query, inline_needed, "inline"))
+                if len(self._approved_unique(inline_candidates)) >= inline_needed:
+                    break
+
+        all_candidates = self._unique_candidates(featured_candidates + inline_candidates)
+        self._resolve_ambiguous_vision(all_candidates)
+        featured_approved = [
+            candidate for candidate in self._approved_unique(featured_candidates)
+            if candidate.get("direct_image_url")
+        ]
+        featured_keys = {
+            str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
+            for candidate in featured_approved
+        }
+        inline_approved = [
+            candidate for candidate in self._approved_unique(inline_candidates)
+            if candidate.get("direct_image_url")
+            and str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "") not in featured_keys
+        ]
+
+        plan: list[dict[str, Any]] = []
+        if featured_needed and featured_approved:
+            plan.append(self._plan_item(featured_approved[0], featured_approved[0].get("subject") or title, 0, True))
+        used_slots = {item.slot for item in previous.inline}
+        for candidate in inline_approved[:inline_needed]:
+            slot = 0
+            while slot in used_slots:
+                slot += 3
+            used_slots.add(slot)
+            plan.append(self._plan_item(candidate, candidate.get("subject") or title, slot, False))
+
+        checked = validate_media_plan(
+            self.client,
+            {**editorial, "media_plan": plan},
+            config=self.config,
+            root=self.root,
+            post_title=title,
+            existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
+        )
+        results, _featured_id, _featured_credit = _execute_media_plan(
+            {**editorial, "media_plan": plan},
+            self.config,
+            self.client,
+            self.root,
+            preflight=checked,
+            post_id=int(context["post_id"]),
+        )
+        inline = list(previous.inline)
+        featured = previous.featured
+        for result in results:
+            status = result.get("status")
+            if status and status not in {"accepted", "ok"}:
+                continue
+            if result.get("media_id") and result.get("media_url") and not result.get("featured"):
+                inline.append(InlineMedia(
+                    int(result["media_id"]),
+                    str(result["media_url"]),
+                    int(result.get("paragraph_index", 0)),
+                    str(result.get("alt_text", "")),
+                    str(result.get("credit_text", "")),
+                ))
+            if result.get("featured") and result.get("media_id"):
+                featured = FeaturedProgress(
+                    FeaturedStatus.VALID,
+                    int(result["media_id"]),
+                    str(result.get("media_url") or ""),
+                )
+        return MediaProgress(
+            required=max(previous.required, total_required),
+            inline=tuple({item.media_id: item for item in inline}.values()),
+            featured=featured,
+        )
+
+    @staticmethod
+    def _has_provenance(candidate: dict[str, Any]) -> bool:
+        return all(candidate.get(key) for key in (
+            "source_page_url", "direct_image_url", "author", "license",
+            "license_url", "captured_at", "credit_text", "alt_text",
+        ))
+
+    @classmethod
+    def _is_approved(cls, candidate: dict[str, Any]) -> bool:
+        return (
+            (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+            and cls._has_provenance(candidate)
+        )
+
+    @classmethod
+    def _approved_unique(cls, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = _normalize_executable_candidate(candidate, str(candidate.get("subject") or ""))
+            key = str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
+            if key and key not in seen and cls._is_approved(candidate):
+                seen.add(key)
+                result.append(candidate)
+        return result
+
+    @staticmethod
+    def _unique_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
+            if key and key not in seen:
+                seen.add(key)
+                result.append(candidate)
+        return result
+
+    def _resolve_ambiguous_vision(self, candidates: list[dict[str, Any]]) -> None:
         vision_candidates = []
-        for candidate in row.get("audit_candidates") or []:
+        for index, candidate in enumerate(candidates):
             url = candidate.get("direct_image_url") or candidate.get("image_url")
             verdict = (candidate.get("evidence") or {}).get("verdict")
             if url and verdict in {"ambiguous", "needs_vision", "inconclusive"}:
-                vision_candidates.append({"candidate_id": str(candidate.get("candidate_id") or candidate.get("id") or len(vision_candidates)), "image_url": url, "subject": subject, "require_key_art": False})
-        if vision_candidates and getattr(self.config, "vision_enabled", False) and getattr(self.config, "vision_api_key", ""):
-            from ..media.vision_gate import verify_image_subject_batch
-            decisions = verify_image_subject_batch(items=vision_candidates, api_key=self.config.vision_api_key, base_url=self.config.vision_base_url, model=self.config.vision_model, timeout=self.config.http_timeout, detail=self.config.vision_detail, allow_high=True, root=self.root)
-            from ..media.vision_cache import set_cached_decision
-            for candidate in row.get("audit_candidates") or []:
-                url = candidate.get("direct_image_url") or candidate.get("image_url")
-                match = next((item for item in vision_candidates if item["image_url"] == url), None)
-                decision = decisions.get(match["candidate_id"]) if match else None
-                if decision and decision.get("verdict") == "accept":
-                    set_cached_decision(self.root, str(url), subject, {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"})
-                    candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
-                    candidate["needs_vision"] = False
-        candidates = [_normalize_executable_candidate(candidate, subject) for candidate in (row.get("audit_candidates") or [])]
-        row["audit_candidates"] = candidates
-        plan = []
-        used_slots = {item.slot for item in previous.inline}
-        approved = []
-        for reused in row.get("reuse") or []:
-            if not isinstance(reused, dict):
-                continue
-            # _reuse_from_library returns the compact {url, source, media_id}
-            # shape; _execute_media_plan consumes the canonical media-plan
-            # names. Normalize here so valid library media participates in the
-            # deficit instead of being silently discarded.
-            normalized = {
-                **reused,
-                "direct_image_url": reused.get("direct_image_url") or reused.get("url"),
-                "source_page_url": reused.get("source_page_url") or reused.get("source"),
-                "media_library_id": reused.get("media_library_id") or reused.get("media_id"),
-                "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
-            }
-            # Reuse is safe only when the persisted provenance contract is
-            # complete. Do not invent author/license fields; let web discovery
-            # supply a candidate when the old library record is incomplete.
-            if all(normalized.get(key) for key in ("source_page_url", "direct_image_url", "author", "license", "license_url", "captured_at", "credit_text", "alt_text")):
-                approved.append(normalized)
-        approved.extend(
-            candidate for candidate in (row.get("audit_candidates") or [])
-            if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and all(candidate.get(key) for key in ("direct_image_url", "source_page_url", "author", "license", "license_url", "captured_at", "credit_text", "alt_text"))
-        )
-        for index, candidate in enumerate(approved):
-            if len(plan) >= search_needed:
-                break
-            if not candidate.get("direct_image_url"):
-                continue
-            if previous.featured.status is not FeaturedStatus.VALID and len(plan) == 0:
-                is_featured = True
-                slot = 0
-            else:
-                is_featured = False
-                slot = 0
-                while slot in used_slots:
-                    slot += 3
-                used_slots.add(slot)
-            plan.append({**candidate, "paragraph_index": slot, "is_featured": is_featured, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
-        checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""))
-        results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
-        inline = list(previous.inline)
-        featured = previous.featured
-        for row in results:
-            if row.get("media_id") and row.get("media_url") and not row.get("featured"):
-                inline.append(InlineMedia(int(row["media_id"]), str(row["media_url"]), int(row.get("paragraph_index", 0)), str(row.get("alt_text", "")), str(row.get("credit_text", ""))))
-            if row.get("featured") and row.get("media_id"):
-                featured = FeaturedProgress(FeaturedStatus.VALID, int(row["media_id"]), str(row.get("media_url") or ""))
-        total_required = required_image_count(word_count(html), title=str(context.get("title") or ""), content=html)
-        return MediaProgress(required=max(previous.required, total_required), inline=tuple({item.media_id: item for item in inline}.values()), featured=featured)
+                vision_candidates.append({
+                    "candidate_id": str(candidate.get("candidate_id") or f"v2-{index}"),
+                    "image_url": url,
+                    "subject": str(candidate.get("subject") or ""),
+                    "require_key_art": bool(candidate.get("role") == "featured"),
+                })
+        if not vision_candidates or not getattr(self.config, "vision_enabled", False) or not getattr(self.config, "vision_api_key", ""):
+            return
+        from ..media.vision_gate import verify_image_subject_batch
+        decisions: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(vision_candidates), 20):
+            decisions.update(verify_image_subject_batch(
+                items=vision_candidates[offset:offset + 20],
+                api_key=self.config.vision_api_key,
+                base_url=self.config.vision_base_url,
+                model=self.config.vision_model,
+                timeout=self.config.http_timeout,
+                detail=self.config.vision_detail,
+                allow_high=True,
+                root=self.root,
+            ))
+        from ..media.vision_cache import set_cached_decision
+        by_url = {str(item["image_url"]): item for item in vision_candidates}
+        for candidate in candidates:
+            url = str(candidate.get("direct_image_url") or "")
+            item = by_url.get(url)
+            decision = decisions.get(item["candidate_id"]) if item else None
+            if decision and decision.get("verdict") == "accept":
+                set_cached_decision(
+                    self.root,
+                    url,
+                    str(candidate.get("subject") or ""),
+                    {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"},
+                )
+                candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
+                candidate["needs_vision"] = False
+
+    @staticmethod
+    def _plan_item(candidate: dict[str, Any], subject: str, slot: int, featured: bool) -> dict[str, Any]:
+        return {
+            **candidate,
+            "paragraph_index": slot,
+            "is_featured": featured,
+            "alt_text": candidate.get("alt_text") or subject,
+            "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}",
+            "width": 1200,
+            "height": 800,
+        }
 
 
 class WordPressWriterV2:

@@ -3,6 +3,7 @@ import unittest
 from unicornio_editor.content_quality import (
     ContentQualityError,
     minimum_image_count,
+    normalize_editorial_dashes,
     validate_centered_images,
     validate_content_quality,
     word_count,
@@ -10,6 +11,14 @@ from unicornio_editor.content_quality import (
 
 
 class ContentQualityTests(unittest.TestCase):
+    def test_normalize_editorial_dashes_changes_text_not_markup(self):
+        html = '<p>Bailarina — ação</p><a href="https://example.test/a—b">Leia – mais</a>'
+        normalized = normalize_editorial_dashes(html)
+        self.assertEqual(
+            normalized,
+            '<p>Bailarina  -  ação</p><a href="https://example.test/a—b">Leia  -  mais</a>',
+        )
+
     def test_image_thresholds_follow_editorial_policy(self):
         self.assertEqual(minimum_image_count(600), 2)
         self.assertEqual(minimum_image_count(601), 4)

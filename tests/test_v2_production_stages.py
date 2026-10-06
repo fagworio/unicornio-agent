@@ -49,3 +49,42 @@ def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
         {"post_id": 8, "post": post, "v2_state": None}, candidate
     )
     assert set(validation) >= {"passed", "failures", "checklist"}
+
+
+def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkeypatch):
+    seen_keywords = []
+    candidate = {
+        "content": "<p>Bailarina acompanha uma história de ação.</p>",
+        "editorial": {
+            "cleaned_html": "<p>Bailarina acompanha uma história de ação.</p>",
+            "seo": {"title": "Bailarina: novo filme", "focus_keyword": "termo antigo"},
+        },
+        "seo": {"title": "Bailarina: novo filme", "focus_keyword": "termo antigo"},
+    }
+
+    def fake_checklist(**kwargs):
+        seen_keywords.append(kwargs["editorial"]["seo"]["focus_keyword"])
+        if len(seen_keywords) == 1:
+            return {
+                "all_passed": False,
+                "items": [
+                    {"name": "qualidade_texto", "status": "fail", "detail": "focus keyword must occur naturally"},
+                    {"name": "imagens_no_corpo", "status": "fail", "detail": "inline media missing"},
+                ],
+            }
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        fake_checklist,
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "Bailarina"}],
+    )
+    post = {"id": 9, "status": "pending", "title": {"raw": "Bailarina: novo filme"}, "meta": {}}
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {"post_id": 9, "post": post, "v2_state": None}, candidate
+    )
+    assert seen_keywords == ["termo antigo", "Bailarina"]
+    assert result["passed"] is True

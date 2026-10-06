@@ -51,6 +51,22 @@ def word_count(html: str) -> int:
     return len(re.findall(r"\b[\wÀ-ÿ]+\b", text))
 
 
+def normalize_editorial_dashes(html: str) -> str:
+    """Normalize typographic dashes in text without changing HTML markup.
+
+    Provider output is allowed to use either em or en dashes, but the
+    publication gate intentionally rejects them because they recur in low
+    quality copy.  This repair is deterministic and runs before the provider
+    is asked to regenerate the article.  Splitting tags from text keeps URLs,
+    attributes and tag syntax untouched.
+    """
+    parts = re.split(r"(<[^>]+>)", str(html or ""))
+    return "".join(
+        part if part.startswith("<") else part.replace("—", " - ").replace("–", " - ")
+        for part in parts
+    )
+
+
 def minimum_image_count(words: int) -> int:
     if words <= 600:
         return 2

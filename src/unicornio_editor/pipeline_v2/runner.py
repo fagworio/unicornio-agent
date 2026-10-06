@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from .classifier import classify, classify_stage_error, editorial_decision
 from .errors import StageError
-from .model import BlockerCode, FeaturedProgress, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from .model import BlockerCode, FeaturedProgress, FeaturedStatus, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 
 
 class PipelineRunner:
@@ -90,8 +90,51 @@ class PipelineRunner:
         )
 
     @staticmethod
+    def _reconcile_media_for_outcome(media: MediaProgress, outcome: Outcome) -> MediaProgress:
+        """Remove progress that a validation blocker has explicitly invalidated.
+
+        Keeping rejected assets makes the next media pass believe that the
+        deficit is already satisfied.  Featured failures invalidate only the
+        featured slot; generic inline media failures conservatively clear all
+        inline assets because the checklist does not identify a safe asset id.
+        ``INLINE_MISSING`` is intentionally preserved: it means the existing
+        accepted assets are still valid and only more images are needed.
+        """
+        blocker = outcome.blocker
+        if blocker in {
+            BlockerCode.FEATURED_MISSING,
+            BlockerCode.FEATURED_INVALID,
+            BlockerCode.FEATURED_VISION,
+        }:
+            status = {
+                BlockerCode.FEATURED_MISSING: FeaturedStatus.MISSING,
+                BlockerCode.FEATURED_INVALID: FeaturedStatus.INVALID,
+                BlockerCode.FEATURED_VISION: FeaturedStatus.VISION_REJECTED,
+            }[blocker]
+            return MediaProgress(
+                required=media.required,
+                inline=media.inline,
+                featured=FeaturedProgress(status, None, None),
+                accepted_count=media.accepted_count,
+            )
+        if blocker in {
+            BlockerCode.MEDIA_INVALID,
+            BlockerCode.MEDIA_DUPLICATE,
+            BlockerCode.MEDIA_ORIGIN,
+        }:
+            return MediaProgress(
+                required=media.required,
+                inline=(),
+                featured=media.featured,
+                accepted_count=0,
+            )
+        return media
+
+    @staticmethod
     def _next_state(previous: WorkState, editorial: dict[str, Any], media: MediaProgress, outcome: Outcome, *, no_progress: int | None = None) -> WorkState:
-        progress = PipelineRunner._media_progress(previous, media)
+        progress = PipelineRunner._reconcile_media_for_outcome(
+            PipelineRunner._media_progress(previous, media), outcome
+        )
         no_progress = previous.retry.no_progress if no_progress is None else no_progress
         if outcome.type is OutcomeType.READY:
             return WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, retry=previous.retry, relevance_approved=True, media=progress)

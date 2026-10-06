@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
+from ..content_quality import normalize_editorial_dashes
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..media.evidence import post_subjects
@@ -108,6 +109,7 @@ class ProductionEditorialStage:
                 editorial = resolve_editorial_defaults(merged, _post(context))
             else:
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
+            editorial["cleaned_html"] = normalize_editorial_dashes(editorial.get("cleaned_html", ""))
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
@@ -173,6 +175,7 @@ class ProductionComposeStage:
             working["cleaned_html"] = insert_media(str(editorial["cleaned_html"]), placements, listicle=bool(editorial.get("listicle"))) if placements else str(editorial["cleaned_html"])
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
+            content = normalize_editorial_dashes(content)
             candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "featured_media": media.featured.media_id, "media": media.to_dict(), "trailer": trailer, "trailer_status": trailer_status}
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
@@ -189,10 +192,18 @@ class ProductionValidateStage:
             post = _post(context)
             checklist_editorial = dict(candidate["editorial"])
             checklist_editorial.pop("decision", None)
+            candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
+            checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
+            candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]
             seo = dict(checklist_editorial.get("seo") or {})
             checklist = run_pre_publish_checklist(post=post, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)))
             raw_failures = [item for item in checklist.get("items", []) if item.get("status") == "fail"]
-            if raw_failures and all(item.get("name") == "qualidade_texto" for item in raw_failures) and any("focus keyword" in str(item.get("detail") or "").casefold() for item in raw_failures):
+            focus_keyword_failure = any(
+                item.get("name") == "qualidade_texto"
+                and "focus keyword" in str(item.get("detail") or "").casefold()
+                for item in raw_failures
+            )
+            if focus_keyword_failure:
                 subjects = post_subjects(title=str(seo.get("title") or ""), content_html=str(candidate["content"]), focus_keyword=str(seo.get("focus_keyword") or ""), game_name=checklist_editorial.get("game_name"))
                 title_lower = str(seo.get("title") or "").casefold()
                 content_lower = str(candidate["content"]).casefold()

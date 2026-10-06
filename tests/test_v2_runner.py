@@ -1,4 +1,4 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaProgress, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Outcome, OutcomeType, Phase, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
 
 
@@ -54,3 +54,31 @@ def test_runner_exposes_media_blocker_as_pending_retry():
     assert result.blocker is BlockerCode.FEATURED_VISION
     assert store.state.phase is Phase.MEDIA
     assert store.state.state is WorkState().state
+
+
+def test_runner_clears_inline_progress_after_media_rejection():
+    inline = InlineMedia(10, "https://example.test/a.webp", 0)
+    previous = WorkState(media=MediaProgress(required=2, inline=(inline,)))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+    state = PipelineRunner._next_state(previous, {}, previous.media, outcome)
+    assert state.media.inline == ()
+    assert state.media.required == 2
+
+
+def test_runner_invalidates_only_featured_after_featured_vision_rejection():
+    inline = InlineMedia(10, "https://example.test/a.webp", 0)
+    featured = FeaturedProgress(FeaturedStatus.VALID, 20, "https://example.test/f.webp")
+    previous = WorkState(media=MediaProgress(required=2, inline=(inline,), featured=featured))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.FEATURED_VISION)
+    state = PipelineRunner._next_state(previous, {}, previous.media, outcome)
+    assert state.media.inline == (inline,)
+    assert state.media.featured.status is FeaturedStatus.VISION_REJECTED
+    assert state.media.featured.media_id is None
+
+
+def test_runner_preserves_inline_progress_for_inline_missing():
+    inline = InlineMedia(10, "https://example.test/a.webp", 0)
+    previous = WorkState(media=MediaProgress(required=2, inline=(inline,)))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.INLINE_MISSING)
+    state = PipelineRunner._next_state(previous, {}, previous.media, outcome)
+    assert state.media.inline == (inline,)
