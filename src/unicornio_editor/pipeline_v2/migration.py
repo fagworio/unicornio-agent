@@ -10,6 +10,13 @@ from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
 from .model import CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
 
 
+HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS = frozenset({
+    114835, 114847, 114851, 114855, 114885,
+    114937, 115025, 115027, 115035,
+})
+HISTORICAL_MEDIA_LOSS_IDS = frozenset({114949, 114984, 114987})
+
+
 def _as_utc(value: datetime | None) -> datetime:
     current = value or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -249,5 +256,99 @@ def rebase_editorial_retries(
         "candidates": len(candidates),
         "migrated": len(migrated_ids) if apply else 0,
         "post_ids": migrated_ids if apply else [item["post_id"] for item in candidates],
+        "next_at": current.isoformat(timespec="seconds"),
+    }
+
+
+def _repair_historical_media_state(state: WorkState, now: datetime) -> WorkState | None:
+    """Reopen only the known false terminal states from the v3 drain."""
+    if state.state is not LifecycleState.HUMAN_REQUIRED:
+        return None
+    if state.phase is not Phase.MEDIA or state.blocker not in MEDIA_BLOCKERS:
+        return None
+    if state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION:
+        return None
+    if state.retry.phase_attempts != 1 or state.retry.no_progress < 2:
+        return None
+    retry = RetryInfo(
+        attempts=state.retry.attempts,
+        no_progress=1,
+        next_at=now.isoformat(timespec="seconds"),
+        policy_version=CURRENT_RETRY_POLICY_VERSION,
+        phase_attempts=state.retry.phase_attempts,
+    )
+    return WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=state.blocker,
+        retry=retry,
+        relevance_approved=state.relevance_approved,
+        media=state.media,
+        version=state.version,
+    )
+
+
+def repair_historical_media_human_required(
+    client: Any,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Safely reopen the nine audited false HUMAN_REQUIRED media states.
+
+    This is intentionally allowlisted and idempotent. It refuses any post
+    outside the audited drain or whose current state no longer matches the
+    exact bug signature, so it cannot become a generic HUMAN_REQUIRED reset.
+    The three known media-loss posts are reported separately and are never
+    restored without an independently verified media identity.
+    """
+    current = _as_utc(now)
+    candidates: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    for post_id in sorted(HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS):
+        try:
+            post = client.get_post(post_id)
+        except Exception as exc:  # noqa: BLE001 - report one unavailable post
+            skipped.append({"post_id": post_id, "reason": f"read_error: {exc}"})
+            continue
+        state = _read_state(post)
+        migrated = _repair_historical_media_state(state, current) if state is not None else None
+        if migrated is None:
+            skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+            continue
+        candidates.append(post_id)
+
+    migrated_ids: list[int] = []
+    if apply:
+        for post_id in candidates:
+            post = client.get_post(post_id)
+            state = _read_state(post)
+            migrated = _repair_historical_media_state(state, current) if state is not None else None
+            if migrated is None:
+                skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
+                continue
+            meta = post.get("meta") if isinstance(post, dict) else None
+            if not isinstance(meta, dict):
+                raise RuntimeError(f"post {post_id} has no editable meta payload")
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            verified = _read_state(client.get_post(post_id))
+            if verified != migrated:
+                raise RuntimeError(f"historical media repair read-back mismatch for post {post_id}")
+            migrated_ids.append(post_id)
+
+    return {
+        "command": "v2-repair-historical-media",
+        "apply": bool(apply),
+        "policy_version": CURRENT_RETRY_POLICY_VERSION,
+        "audited_human_required_ids": sorted(HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS),
+        "candidates": len(candidates),
+        "migrated": len(migrated_ids) if apply else 0,
+        "post_ids": migrated_ids if apply else candidates,
+        "skipped": skipped,
+        "media_loss_requires_evidence": sorted(HISTORICAL_MEDIA_LOSS_IDS),
         "next_at": current.isoformat(timespec="seconds"),
     }

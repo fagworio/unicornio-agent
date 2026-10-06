@@ -541,6 +541,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rebase_editorial_parser.add_argument("--limit", type=int, default=0)
 
+    repair_historical_media_parser = subparsers.add_parser(
+        "v2-repair-historical-media",
+        help="reabre somente os 9 HUMAN_REQUIRED de MEDIA do bug histórico auditado "
+        "(dry-run por padrão; nunca restaura mídia sem evidência)",
+    )
+    repair_historical_media_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_historical_media_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="grava PENDING/MEDIA com no_progress=1 para os estados que passarem a assinatura",
+    )
+
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -1867,6 +1879,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client,
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),
+            )
+        elif args.command == "v2-repair-historical-media":
+            from .pipeline_v2.migration import repair_historical_media_human_required
+
+            result = repair_historical_media_human_required(
+                client,
+                apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "reconcile":
             from .reconcile import reconcile_state

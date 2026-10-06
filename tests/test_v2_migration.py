@@ -1,12 +1,17 @@
 import json
 from datetime import datetime, timezone
 
-from unicornio_editor.pipeline_v2.migration import rebase_editorial_retries, rebase_media_cooldowns
+from unicornio_editor.pipeline_v2.migration import (
+    repair_historical_media_human_required,
+    rebase_editorial_retries,
+    rebase_media_cooldowns,
+)
 from unicornio_editor.pipeline_v2.model import (
     BlockerCode,
     FeaturedProgress,
     FeaturedStatus,
     InlineMedia,
+    LifecycleState,
     MediaProgress,
     Phase,
     RetryInfo,
@@ -105,3 +110,46 @@ def test_rebase_editorial_retries_resets_only_phase_budget():
     assert migrated.retry.policy_version == 3
     assert migrated.retry.next_at == "2026-10-06T20:00:00+00:00"
     assert migrated.media == state.media
+
+
+def test_historical_repair_reopens_only_exact_audited_media_states():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(
+            attempts=8,
+            no_progress=2,
+            next_at="2026-10-07T01:00:00+00:00",
+            policy_version=3,
+            phase_attempts=1,
+        ),
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(InlineMedia(17, "https://cdn.test/a.webp", 0),)),
+    )
+    unrelated = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(attempts=8, no_progress=2, policy_version=3, phase_attempts=1),
+    )
+    client = Client([_post(114835, state), _post(1, unrelated)])
+
+    preview = repair_historical_media_human_required(client, now=now)
+    assert preview["post_ids"] == [114835]
+    assert preview["media_loss_requires_evidence"] == [114949, 114984, 114987]
+    assert client.updates == []
+
+    result = repair_historical_media_human_required(client, apply=True, now=now)
+    assert result["migrated"] == 1
+    repaired = WorkState.from_dict(json.loads(client.posts[114835]["meta"]["_hermes_work_state"]))
+    assert repaired.state.value == "pending"
+    assert repaired.phase is Phase.MEDIA
+    assert repaired.retry.attempts == 8
+    assert repaired.retry.no_progress == 1
+    assert repaired.media == state.media
+
+    second = repair_historical_media_human_required(client, apply=True, now=now)
+    assert second["migrated"] == 0
+    assert len(client.updates) == 1
