@@ -60,7 +60,11 @@ class ProductionMediaResolver:
         inline_needed = max(0, total_required - previous.accepted)
         featured_needed = 0 if previous.featured.status is FeaturedStatus.VALID else 1
         if inline_needed == 0 and featured_needed == 0:
-            return previous
+            return MediaProgress(
+                required=total_required,
+                inline=previous.inline,
+                featured=previous.featured,
+            )
 
         from ..cli import _resolve_media_batch
 

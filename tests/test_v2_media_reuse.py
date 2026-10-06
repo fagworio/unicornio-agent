@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from unicornio_editor.pipeline_v2.model import MediaProgress
+from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
 from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver
 
 
@@ -113,3 +113,24 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
     assert plan[1]["direct_image_url"] == "https://cdn.test/featured-alt.webp"
     assert any("Nana anime" in query for query in calls)
     assert result.featured.status is runtime.FeaturedStatus.VALID
+
+
+def test_media_resolver_refreshes_required_on_noop_retry(tmp_path):
+    inline = tuple(
+        InlineMedia(index, f"https://cdn.test/{index}.webp", index)
+        for index in range(1, 5)
+    )
+    previous = MediaProgress(
+        required=6,
+        inline=inline,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 1, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        previous,
+    )
+    assert result.required == 2
+    assert result.accepted == 4
+    assert result.missing == 0
