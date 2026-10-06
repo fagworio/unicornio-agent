@@ -49,7 +49,24 @@ class ProductionMediaResolver:
         batch = {"schema_version": 1, "batch_id": f"v2-{context['post_id']}", "posts": [{"post_id": int(context["post_id"]), "subject": subject, "query": subject, "needed": search_needed, "limit": max(search_needed, 1), "engine": "auto", "size": "xga", "ratio": "w"}]}
         resolved = _resolve_media_batch(self.client, self.config, self.root, batch, full=True)
         row = (resolved.get("posts") or [{}])[0]
+        vision_candidates = []
+        for candidate in row.get("audit_candidates") or []:
+            url = candidate.get("direct_image_url") or candidate.get("image_url")
+            verdict = (candidate.get("evidence") or {}).get("verdict")
+            if url and verdict in {"ambiguous", "needs_vision", "inconclusive"}:
+                vision_candidates.append({"candidate_id": str(candidate.get("candidate_id") or candidate.get("id") or len(vision_candidates)), "image_url": url, "subject": subject, "require_key_art": False})
+        if vision_candidates and getattr(self.config, "vision_enabled", False) and getattr(self.config, "vision_api_key", ""):
+            from ..media.vision_gate import verify_image_subject_batch
+            decisions = verify_image_subject_batch(items=vision_candidates, api_key=self.config.vision_api_key, base_url=self.config.vision_base_url, model=self.config.vision_model, timeout=self.config.http_timeout, detail=self.config.vision_detail, allow_high=True, root=self.root)
+            for candidate in row.get("audit_candidates") or []:
+                url = candidate.get("direct_image_url") or candidate.get("image_url")
+                match = next((item for item in vision_candidates if item["image_url"] == url), None)
+                decision = decisions.get(match["candidate_id"]) if match else None
+                if decision and decision.get("verdict") == "accept":
+                    candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
+                    candidate["needs_vision"] = False
         plan = []
+        used_slots = {item.slot for item in previous.inline}
         approved = []
         for reused in row.get("reuse") or []:
             if not isinstance(reused, dict):
@@ -58,21 +75,33 @@ class ProductionMediaResolver:
             # shape; _execute_media_plan consumes the canonical media-plan
             # names. Normalize here so valid library media participates in the
             # deficit instead of being silently discarded.
-            approved.append({
+            normalized = {
                 **reused,
                 "direct_image_url": reused.get("direct_image_url") or reused.get("url"),
                 "source_page_url": reused.get("source_page_url") or reused.get("source"),
                 "media_library_id": reused.get("media_library_id") or reused.get("media_id"),
                 "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
-            })
+            }
+            # Reuse is safe only when the persisted provenance contract is
+            # complete. Do not invent author/license fields; let web discovery
+            # supply a candidate when the old library record is incomplete.
+            if all(normalized.get(key) for key in ("source_page_url", "direct_image_url", "author", "license", "license_url", "captured_at", "credit_text", "alt_text")):
+                approved.append(normalized)
         approved.extend(candidate for candidate in (row.get("audit_candidates") or []) if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match")
         for index, candidate in enumerate(approved):
             if len(plan) >= search_needed:
                 break
             if not candidate.get("direct_image_url"):
                 continue
-            is_featured = previous.featured.status is not FeaturedStatus.VALID and len(plan) == 0
-            slot = 0 if is_featured else (max(0, len(plan) - (1 if previous.featured.status is not FeaturedStatus.VALID else 0)) * 3)
+            if previous.featured.status is not FeaturedStatus.VALID and len(plan) == 0:
+                is_featured = True
+                slot = 0
+            else:
+                is_featured = False
+                slot = 0
+                while slot in used_slots:
+                    slot += 3
+                used_slots.add(slot)
             plan.append({**candidate, "paragraph_index": slot, "is_featured": is_featured, "alt_text": candidate.get("alt_text") or subject, "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}", "width": 1200, "height": 800})
         checked = validate_media_plan(self.client, {**editorial, "media_plan": plan}, config=self.config, root=self.root, post_title=str(context.get("title") or ""))
         results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))

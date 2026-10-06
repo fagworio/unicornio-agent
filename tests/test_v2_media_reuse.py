@@ -18,7 +18,7 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     seen = {}
 
     def fake_resolve(*_args, **_kwargs):
-        return {"posts": [{"reuse": [{"url": "https://cdn.test/existing.webp", "source": "https://source.test/page", "media_id": 77}], "audit_candidates": []}]}
+        return {"posts": [{"reuse": [{"url": "https://cdn.test/existing.webp", "source": "https://source.test/page", "media_id": 77, "author": "Test", "license": "CC BY", "license_url": "https://license.test", "captured_at": "2026-01-01T00:00:00Z", "credit_text": "Crédito", "alt_text": "Existing"}], "audit_candidates": []}]}
 
     def fake_validate(_client, editorial, **_kwargs):
         seen["plan"] = editorial["media_plan"]
