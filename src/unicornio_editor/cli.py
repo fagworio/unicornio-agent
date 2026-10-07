@@ -1120,6 +1120,11 @@ def _emit_engine_health(
                 candidates=int(relatorio.get("candidates") or 0),
                 pair_unresolved=int(relatorio.get("pair_unresolved") or 0),
                 failure_kind=str(relatorio.get("failure_kind") or ""),
+                final_url=str(relatorio.get("final_url") or "")[:500],
+                consent_detected=bool(relatorio.get("consent_detected")),
+                consent_handled=bool(relatorio.get("consent_handled")),
+                captcha_detected=bool(relatorio.get("captcha_detected")),
+                unusual_traffic_detected=bool(relatorio.get("unusual_traffic_detected")),
                 parser_version=int(relatorio.get("parser_version") or 0),
             )
     except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
