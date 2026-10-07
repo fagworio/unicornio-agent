@@ -52,6 +52,12 @@ EDITORIAL_BLOCKERS = frozenset({
     BlockerCode.SCHEMA,
 })
 
+OPERATIONAL_BLOCKERS = frozenset({
+    BlockerCode.PROVIDER_ERROR,
+    BlockerCode.WORDPRESS_ERROR,
+    BlockerCode.INTERNAL_ERROR,
+})
+
 
 def blocker_for_gate(gate: str | None) -> BlockerCode | None:
     return GATE_TO_BLOCKER.get(str(gate or ""))
@@ -110,10 +116,10 @@ def _retry(
     if next_at is None:
         now = now or datetime.now(timezone.utc)
         attempts = previous.retry.attempts if backoff_attempts is None else max(0, backoff_attempts)
-        if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}:
-            # Provider/network failures are operational incidents. They get a
-            # longer window than a media/editorial correction and exponential
-            # growth is bounded so a transient outage does not hot-loop.
+        if blocker in OPERATIONAL_BLOCKERS:
+            # Operational failures get a longer window than a
+            # media/editorial correction and exponential growth is bounded so
+            # a transient outage or internal fault does not hot-loop.
             delay = max(cooldown_minutes, 120) * (2 ** min(attempts, 3))
         elif blocker in MEDIA_BLOCKERS:
             delay = max(cooldown_minutes, 1) * (2 ** min(attempts, 3))
@@ -147,7 +153,7 @@ def classify_stage_error(
     if max_rework_attempts is not None:
         max_attempts = max_rework_attempts
     detail = str(getattr(exc, "detail", "") or exc)
-    if getattr(exc, "blocker", None) in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}:
+    if getattr(exc, "blocker", None) in OPERATIONAL_BLOCKERS:
         return _retry(
             previous,
             exc.phase,
@@ -222,15 +228,17 @@ def classify(
         (
             (blocker, phase_override, failure_detail)
             for blocker, _gate, phase_override, failure_detail in failures
-            if blocker in {BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR}
+            if blocker in OPERATIONAL_BLOCKERS
         ),
         None,
     )
     if operational_failure is not None:
         blocker, phase_override, failure_detail = operational_failure
-        phase = phase_override or (
-            Phase.MEDIA if blocker is BlockerCode.PROVIDER_ERROR else Phase.PUBLISH
-        )
+        phase = phase_override or {
+            BlockerCode.PROVIDER_ERROR: Phase.MEDIA,
+            BlockerCode.WORDPRESS_ERROR: Phase.PUBLISH,
+            BlockerCode.INTERNAL_ERROR: Phase.VALIDATE,
+        }[blocker]
         return _retry(
             previous,
             phase,

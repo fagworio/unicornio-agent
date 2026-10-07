@@ -25,7 +25,10 @@ def test_expected_stage_error_becomes_retry_and_persists_cooldown_path():
     assert store.committed.blocker is BlockerCode.PROVIDER_ERROR
 
 
-@pytest.mark.parametrize("blocker", [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR])
+@pytest.mark.parametrize(
+    "blocker",
+    [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.INTERNAL_ERROR],
+)
 def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     store = Store()
     store.state = WorkState(
@@ -43,6 +46,7 @@ def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     result = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
     assert result.type is OutcomeType.RETRY
     assert result.blocker is blocker
+    assert store.state.state is LifecycleState.PENDING
     assert store.state.state.value == "pending"
     assert store.state.retry.no_progress == 1
 
@@ -91,7 +95,41 @@ def test_internal_media_error_does_not_consume_media_budget():
         "validate": lambda *args: {"passed": True, "failures": []},
     }
     result = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+    assert result.type is OutcomeType.RETRY
     assert result.blocker is BlockerCode.INTERNAL_ERROR
+    assert store.state.state is LifecycleState.PENDING
+    assert store.state.retry.no_progress == 1
+
+
+def test_structured_internal_error_with_high_attempts_remains_retry():
+    previous = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_INVALID,
+        retry=RetryInfo(attempts=100, no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(2, (InlineMedia(17, "https://cdn.test/old.webp", 0),)),
+    )
+    store = Store()
+    store.state = previous
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda _context, state, _editorial: state.media,
+        "compose": lambda *args: {"content": "candidate"},
+        "validate": lambda *args: {
+            "passed": False,
+            "failures": [{
+                "gate": "media_funnel",
+                "blocker": "internal_error",
+                "phase": "media",
+                "detail": "media candidate conservation violated",
+            }],
+        },
+    }
+    result = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+    assert result.type is OutcomeType.RETRY
+    assert result.blocker is BlockerCode.INTERNAL_ERROR
+    assert store.state.state is LifecycleState.PENDING
     assert store.state.retry.no_progress == 1
 
 

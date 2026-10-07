@@ -123,7 +123,10 @@ class PipelineRunner:
             )
         technical_media_error = any(
             isinstance(failure, dict)
-            and str(failure.get("blocker") or "") == BlockerCode.PROVIDER_ERROR.value
+            and str(failure.get("blocker") or "") in {
+                BlockerCode.PROVIDER_ERROR.value,
+                BlockerCode.INTERNAL_ERROR.value,
+            }
             and str(failure.get("phase") or "") == Phase.MEDIA.value
             for failure in (validation or {}).get("failures", [])
         )
