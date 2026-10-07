@@ -105,6 +105,7 @@ def prepare_vision_image_input(
     *,
     timeout: float = 30.0,
     max_bytes: int = 8 * 1024 * 1024,
+    url_policy: str = "audit",
 ) -> str:
     """Materialize an image locally and return a provider-safe data URL.
 
@@ -128,7 +129,8 @@ def prepare_vision_image_input(
                 value,
                 Path(directory) / "source-image",
                 max_bytes=max_bytes,
-                url_policy="audit",
+                url_policy=url_policy,
+                timeout=timeout,
             )
             return _image_data_url_from_bytes(Path(path).read_bytes())
     except VisionInputUnavailable:

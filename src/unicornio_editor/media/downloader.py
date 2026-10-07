@@ -58,6 +58,7 @@ def download_image(
     max_bytes: int = 8 * 1024 * 1024,
     max_attempts: int = _MAX_ATTEMPTS,
     url_policy: str = "audit",
+    timeout: float = 30.0,
     audit=None,
 ) -> Path:
     finding = enforce_remote_url(url, mode=url_policy)
@@ -71,7 +72,7 @@ def download_image(
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            with urlopen(request, timeout=30) as response:
+            with urlopen(request, timeout=timeout) as response:
                 content_type = response.headers.get_content_type()
                 if not content_type.startswith("image/"):
                     raise MediaDownloadError("remote resource is not an image")

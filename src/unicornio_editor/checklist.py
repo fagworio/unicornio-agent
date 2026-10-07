@@ -675,6 +675,7 @@ def run_pre_publish_checklist(
                 vision_input = prepare_vision_image_input(
                     url,
                     timeout=config.http_timeout,
+                    url_policy=config.remote_url_policy,
                 )
                 ok, reason = verify_image_subject(
                     image_url=vision_input,

@@ -2,6 +2,7 @@ import io
 import threading
 import tempfile
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -76,7 +77,25 @@ class MediaPipelineTests(unittest.TestCase):
             path = download_image(self.url, Path(directory) / "source.png", max_bytes=100000)
             self.assertGreater(path.stat().st_size, 0)
 
-    def test_download_rejects_too_small_limit(self):
+    def test_download_uses_configured_timeout(self):
+        class Response:
+            class Headers:
+                def get_content_type(self): return "image/png"
+                def get(self, key, default=None): return str(len(ImageHandler.payload)) if key == "Content-Length" else default
+            headers = Headers()
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, _size=-1):
+                if hasattr(self, "done"):
+                    return b""
+                self.done = True
+                return ImageHandler.payload
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.downloader.urlopen", return_value=Response()
+        ) as opener:
+            download_image(self.url, Path(directory) / "source.png", timeout=7.5)
+        self.assertEqual(opener.call_args.kwargs["timeout"], 7.5)
+
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(MediaDownloadError):
                 download_image(self.url, Path(directory) / "source.png", max_bytes=2)

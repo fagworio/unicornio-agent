@@ -108,6 +108,23 @@ class VisionGateTests(unittest.TestCase):
         ), self.assertRaises(VisionInputUnavailable):
             prepare_vision_image_input("https://cdn.test/missing.webp")
 
+    def test_external_image_uses_configured_policy_and_timeout(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(buffer, format="PNG")
+        with mock.patch("unicornio_editor.media.vision_gate.download_image") as download:
+            def fake_download(_url, destination, **kwargs):
+                self.assertEqual(kwargs["url_policy"], "enforce")
+                self.assertEqual(kwargs["timeout"], 7.5)
+                destination.write_bytes(buffer.getvalue())
+                return destination
+            download.side_effect = fake_download
+            prepared = prepare_vision_image_input(
+                "https://cdn.test/image.webp", url_policy="enforce", timeout=7.5
+            )
+        self.assertTrue(prepared.startswith("data:image/png;base64,"))
+
     def test_rejects_when_model_denies(self):
         VisionHandler.answer = '{"status": "UNRELATED", "confidence": 0.97, "visual_type": "animal"}'
         ok, reason = self._verify()

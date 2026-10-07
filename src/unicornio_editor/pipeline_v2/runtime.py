@@ -403,6 +403,7 @@ class ProductionMediaResolver:
                 vision_input = prepare_vision_image_input(
                     item["source_image_url"],
                     timeout=self.config.http_timeout,
+                    url_policy=getattr(self.config, "remote_url_policy", "audit"),
                 )
             except VisionInputUnavailable as exc:
                 candidate = next(
