@@ -1,11 +1,4 @@
-"""Google Images discovery through a real browser session.
-
-The browser is an optional discovery provider. It never becomes the source of
-truth: every candidate still needs a non-Google ``source_page_url`` and must
-pass the existing provenance/relevance gates. When Playwright is unavailable,
-Google blocks the session, or its DOM changes, this module fails closed and
-lets the normal Bing/Yandex fallback continue.
-"""
+"""Google Images discovery through a real browser session."""
 
 from __future__ import annotations
 
@@ -14,24 +7,22 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote_plus, urlparse
+from threading import Lock
+from typing import Any, Callable
+from urllib.parse import quote_plus, urlparse, urlunparse
+
+from .url_safety import URLSafetyError, enforce_remote_url
 
 
 _GOOGLE_SEARCH = "https://www.google.com/search?tbm=isch&q={}"
-_GOOGLE_HOST_MARKERS = (
-    "google.",
-    "googleusercontent.",
-    "gstatic.com",
-)
-_BLOCK_MARKERS = (
-    "unusual traffic",
-    "/sorry/",
-    "recaptcha",
-    "captcha",
-    "consent.google",
-)
+_GOOGLE_HOST_MARKERS = ("google.", "googleusercontent.", "gstatic.com")
+_BLOCK_MARKERS = ("unusual traffic", "/sorry/", "recaptcha", "captcha", "consent.google")
 _IMAGE_EXT = re.compile(r"\.(?:jpe?g|png|webp|gif|avif|bmp)(?:[?#]|$)", re.I)
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_BROWSER_LOCK = Lock()
+_TEMP_PATHS: set[str] = set()
+_TEMP_PATHS_LOCK = Lock()
+_BROWSER_DISABLED = False
 
 
 def _is_external_http(value: str) -> bool:
@@ -45,7 +36,23 @@ def _is_external_http(value: str) -> bool:
     )
 
 
-def _report(report: dict[str, Any] | None, *, kind: str, error: str = "", objects: int = 0, candidates: int = 0) -> None:
+def _normalized_url(value: str) -> str:
+    try:
+        parsed = urlparse(str(value or ""))
+        return urlunparse(parsed._replace(fragment=""))
+    except ValueError:
+        return str(value or "")
+
+
+def _report(
+    report: dict[str, Any] | None,
+    *,
+    kind: str,
+    error: str = "",
+    objects: int = 0,
+    candidates: int = 0,
+    pair_unresolved: int = 0,
+) -> None:
     if report is None:
         return
     report.update({
@@ -53,10 +60,25 @@ def _report(report: dict[str, Any] | None, *, kind: str, error: str = "", object
         "html_bytes": int(report.get("html_bytes") or 0),
         "objects_parsed": int(objects),
         "candidates": int(candidates),
+        "pair_unresolved": int(pair_unresolved),
         "failure_kind": kind,
         "error": error[:240],
-        "parser_version": 1,
+        "parser_version": 2,
     })
+
+
+def _audit_url(
+    url: str,
+    *,
+    mode: str,
+    audit: Callable[[Any], None] | None,
+) -> None:
+    finding = enforce_remote_url(url, mode=mode)
+    if finding is not None and audit is not None:
+        try:
+            audit(finding)
+        except Exception:  # noqa: BLE001 - audit telemetry cannot break discovery
+            pass
 
 
 def _candidate(query: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -90,84 +112,149 @@ def _candidate(query: str, data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_open_result(page) -> dict[str, Any]:
-    """Extract the opened Google result without relying on one CSS class."""
+    """Extract one opened result only when image and source share one scope."""
     return page.evaluate(
         """
         () => {
           const bad = /(^|\\.)google\\.|googleusercontent\\.|gstatic\\.com/i;
-          const images = [...document.images]
-            .map(img => ({
-              src: img.currentSrc || img.src || '',
-              alt: img.alt || '',
-              width: img.naturalWidth || img.width || 0,
-              height: img.naturalHeight || img.height || 0
-            }))
-            .filter(item => /^https?:/i.test(item.src) && !bad.test(item.src))
-            .sort((a, b) => (b.width * b.height) - (a.width * a.height));
-          const anchors = [...document.querySelectorAll('a[href]')]
-            .map(a => ({href: a.href || '', text: (a.innerText || '').trim()}))
-            .filter(item => /^https?:/i.test(item.href) && !bad.test(item.href));
-          const image = images[0] || {};
-          const source = anchors.find(item => !/\\.(jpe?g|png|webp|gif|avif|bmp)([?#]|$)/i.test(item.href));
-          return {
-            direct_image_url: image.src || '',
-            thumbnail_url: '',
-            source_page_url: source ? source.href : '',
-            title: image.alt || (source ? source.text : ''),
-            width: image.width || 0,
-            height: image.height || 0
+          const visible = (node) => {
+            const rect = node.getBoundingClientRect();
+            const style = window.getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
           };
+          const imageOk = (img) => {
+            const src = img.currentSrc || img.src || '';
+            return visible(img) && /^https?:/i.test(src) && !bad.test(src)
+              && (img.naturalWidth || img.width || 0) >= 80
+              && (img.naturalHeight || img.height || 0) >= 80;
+          };
+          const sourceOk = (anchor) => {
+            const href = anchor.href || '';
+            return visible(anchor) && /^https?:/i.test(href) && !bad.test(href)
+              && !/\\.(jpe?g|png|webp|gif|avif|bmp)([?#]|$)/i.test(href);
+          };
+          const roots = [...document.querySelectorAll(
+            '[role="dialog"], [aria-modal="true"], [data-result-panel="open"], [data-ri]'
+          )].filter(visible);
+          const pairs = [];
+          for (const root of roots) {
+            const images = [...root.querySelectorAll('img')].filter(imageOk);
+            const anchors = [...root.querySelectorAll('a[href]')].filter(sourceOk);
+            if (images.length !== 1 || anchors.length !== 1) continue;
+            const image = images[0];
+            const source = anchors[0];
+            pairs.push({
+              direct_image_url: image.currentSrc || image.src || '',
+              thumbnail_url: '',
+              source_page_url: source.href || '',
+              title: image.alt || (source.innerText || '').trim(),
+              width: image.naturalWidth || image.width || 0,
+              height: image.naturalHeight || image.height || 0
+            });
+          }
+          if (pairs.length !== 1) return {pair_error: 'google_pair_unresolved'};
+          return pairs[0];
         }
         """
-    ) or {}
+    ) or {"pair_error": "google_pair_unresolved"}
 
 
-def _save_loaded_image(context, data: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
-    """Persist the browser-loaded bytes for the current process only."""
+def _register_temp_path(path: str) -> None:
+    with _TEMP_PATHS_LOCK:
+        _TEMP_PATHS.add(path)
+
+
+def cleanup_browser_artifacts(candidates: list[dict[str, Any]] | None = None) -> int:
+    """Remove browser byte artifacts created by this process."""
+    paths = {
+        str(candidate.get("local_image_path"))
+        for candidate in (candidates or [])
+        if isinstance(candidate, dict) and candidate.get("local_image_path")
+    }
+    with _TEMP_PATHS_LOCK:
+        paths.update(_TEMP_PATHS)
+    removed = 0
+    for raw in paths:
+        try:
+            path = Path(raw)
+            if path.name.startswith("unicornio-google-browser-") and path.is_file():
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+        finally:
+            with _TEMP_PATHS_LOCK:
+                _TEMP_PATHS.discard(raw)
+    return removed
+
+
+def _save_loaded_image(
+    context,
+    data: dict[str, Any],
+    timeout_ms: int,
+    *,
+    response_cache: dict[str, Any] | None = None,
+    remote_url_policy: str = "audit",
+    audit: Callable[[Any], None] | None = None,
+) -> dict[str, Any]:
+    """Persist Chromium response bytes, with a gated request fallback."""
     direct = str(data.get("direct_image_url") or "")
-    request = getattr(context, "request", None)
-    if not direct or request is None:
+    if not direct:
         return data
     try:
-        response = request.get(direct, timeout=timeout_ms, fail_on_status_code=False)
-        if not getattr(response, "ok", False):
+        _audit_url(direct, mode=remote_url_policy, audit=audit)
+        response = (response_cache or {}).get(_normalized_url(direct))
+        body = response.body() if response is not None else None
+        headers = (getattr(response, "headers", {}) or {}) if response is not None else {}
+        if not body:
+            request = getattr(context, "request", None)
+            if request is None:
+                return data
+            response = request.get(direct, timeout=timeout_ms, fail_on_status_code=False)
+            if not getattr(response, "ok", False):
+                return data
+            body = response.body()
+            headers = getattr(response, "headers", {}) or {}
+        if not body or len(body) > _MAX_IMAGE_BYTES:
             return data
-        body = response.body()
-        if not body or len(body) > 8 * 1024 * 1024:
-            return data
-        mime = str((getattr(response, "headers", {}) or {}).get("content-type") or "").split(";", 1)[0]
+        mime = str(headers.get("content-type") or "").split(";", 1)[0]
         suffix = ".bin"
         if mime.startswith("image/"):
             suffix = "." + mime.split("/", 1)[1].replace("jpeg", "jpg")
-        handle = tempfile.NamedTemporaryFile(prefix="unicornio-google-browser-", suffix=suffix, delete=False)
+        handle = tempfile.NamedTemporaryFile(
+            prefix="unicornio-google-browser-", suffix=suffix, delete=False
+        )
         try:
             handle.write(body)
         finally:
             handle.close()
+        _register_temp_path(handle.name)
         data["local_image_path"] = handle.name
         data["sha256"] = hashlib.sha256(body).hexdigest()
         data["mime"] = mime
+    except URLSafetyError:
+        data["pair_error"] = "remote_url_blocked"
     except Exception:  # noqa: BLE001 - browser bytes are an optimization
         return data
     return data
 
 
-def search_google_browser_images(
+def _set_browser_disabled() -> None:
+    global _BROWSER_DISABLED
+    _BROWSER_DISABLED = True
+
+
+def _search_google_browser_images_locked(
     query: str,
     *,
-    size: str = "xga",
-    ratio: str = "w",
-    limit: int = 10,
-    timeout: float = 30.0,
-    report: dict[str, Any] | None = None,
+    size: str,
+    ratio: str,
+    limit: int,
+    timeout: float,
+    report: dict[str, Any] | None,
+    remote_url_policy: str,
+    audit: Callable[[Any], None] | None,
 ) -> list[dict[str, Any]]:
-    """Discover Google Images results through Playwright, fail-closed."""
-    query = str(query or "").strip()
-    if not query:
-        return []
-    if os.environ.get("EDITOR_GOOGLE_BROWSER_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
-        _report(report, kind="google_browser_unavailable", error="provider disabled")
-        return []
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001 - optional dependency
@@ -176,6 +263,8 @@ def search_google_browser_images(
 
     timeout_ms = max(1000, int(float(timeout) * 1000))
     results: list[dict[str, Any]] = []
+    unresolved = 0
+    browser = None
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
@@ -186,13 +275,35 @@ def search_google_browser_images(
                 ),
                 viewport={"width": 1440, "height": 1000},
             )
+
+            def route_guard(route) -> None:
+                try:
+                    _audit_url(route.request.url, mode=remote_url_policy, audit=audit)
+                except URLSafetyError:
+                    route.abort()
+                    return
+                route.continue_()
+
+            context.route("**/*", route_guard)
             page = context.new_page()
+            responses: dict[str, Any] = {}
+
+            def capture_response(response) -> None:
+                try:
+                    resource_type = str(getattr(response.request, "resource_type", "") or "")
+                    content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "")
+                    if resource_type == "image" or content_type.casefold().startswith("image/"):
+                        responses[_normalized_url(response.url)] = response
+                except Exception:  # noqa: BLE001 - capture is best effort
+                    pass
+
+            page.on("response", capture_response)
             page.goto(_GOOGLE_SEARCH.format(quote_plus(query)), wait_until="domcontentloaded", timeout=timeout_ms)
             body = (page.content() or "")[:500_000]
             lowered = body.casefold()
             if any(marker in lowered or marker in str(page.url).casefold() for marker in _BLOCK_MARKERS):
+                _set_browser_disabled()
                 _report(report, kind="google_browser_unavailable", error="captcha/consent/interstitial")
-                browser.close()
                 return []
             thumbnails = page.locator("img")
             count = min(int(thumbnails.count()), max(1, int(limit)) * 4)
@@ -204,22 +315,79 @@ def search_google_browser_images(
                     data = _extract_open_result(page)
                 except Exception:
                     continue
-                direct = str(data.get("direct_image_url") or "")
-                source = str(data.get("source_page_url") or "")
-                if not _is_external_http(direct) or direct in seen:
+                if data.get("pair_error"):
+                    unresolved += 1
                     continue
-                seen.add(direct)
-                if source:
-                    data = _save_loaded_image(context, data, timeout_ms)
+                direct = str(data.get("direct_image_url") or "")
+                normalized = _normalized_url(direct)
+                if not _is_external_http(direct) or normalized in seen:
+                    continue
+                seen.add(normalized)
+                data = _save_loaded_image(
+                    context,
+                    data,
+                    timeout_ms,
+                    response_cache=responses,
+                    remote_url_policy=remote_url_policy,
+                    audit=audit,
+                )
+                if data.get("pair_error") == "remote_url_blocked":
+                    continue
                 results.append(_candidate(query, data))
                 if len(results) >= int(limit):
                     break
-            browser.close()
     except Exception as exc:  # noqa: BLE001 - DOM/browser changes are fail-safe
-        _report(report, kind="google_browser_unavailable", error=f"{type(exc).__name__}: {exc}", candidates=len(results))
+        _report(
+            report,
+            kind="google_browser_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+            candidates=len(results),
+            pair_unresolved=unresolved,
+        )
         return results
-    _report(report, kind="ok" if results else "google_browser_unavailable", objects=count if 'count' in locals() else 0, candidates=len(results))
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - cleanup is best effort
+            pass
+    kind = "ok" if results else ("google_pair_unresolved" if unresolved else "google_browser_unavailable")
+    _report(report, kind=kind, objects=count if "count" in locals() else 0, candidates=len(results), pair_unresolved=unresolved)
     return results
 
 
-__all__ = ["search_google_browser_images"]
+def search_google_browser_images(
+    query: str,
+    *,
+    size: str = "xga",
+    ratio: str = "w",
+    limit: int = 10,
+    timeout: float = 30.0,
+    report: dict[str, Any] | None = None,
+    remote_url_policy: str = "audit",
+    audit: Callable[[Any], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Discover Google Images through one serialized Playwright session."""
+    query = str(query or "").strip()
+    if not query:
+        return []
+    if os.environ.get("EDITOR_GOOGLE_BROWSER_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
+        _report(report, kind="google_browser_unavailable", error="provider disabled")
+        return []
+    with _BROWSER_LOCK:
+        if _BROWSER_DISABLED:
+            _report(report, kind="google_browser_unavailable", error="browser disabled after prior block")
+            return []
+        return _search_google_browser_images_locked(
+            query,
+            size=size,
+            ratio=ratio,
+            limit=limit,
+            timeout=timeout,
+            report=report,
+            remote_url_policy=remote_url_policy,
+            audit=audit,
+        )
+
+
+__all__ = ["search_google_browser_images", "cleanup_browser_artifacts", "_extract_open_result"]

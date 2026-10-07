@@ -243,9 +243,15 @@ class ProductionMediaResolver:
                     },
                 }],
             }
-            resolved = _resolve_media_batch(
-                self.client, self.config, self.root, batch, full=True, allow_reuse=True
-            )
+            try:
+                resolved = _resolve_media_batch(
+                    self.client, self.config, self.root, batch, full=True, allow_reuse=True
+                )
+            except Exception:
+                from ..media.google_browser import cleanup_browser_artifacts
+
+                cleanup_browser_artifacts()
+                raise
             row = (resolved.get("posts") or [{}])[0]
             candidates: list[dict[str, Any]] = []
             for reused in row.get("reuse") or []:
@@ -348,33 +354,46 @@ class ProductionMediaResolver:
                 used_slots.add(slot)
             plan.append(self._plan_item(candidate, candidate.get("subject") or title, slot, False))
 
-        checked = validate_media_plan(
-            self.client,
-            {**editorial, "media_plan": plan},
-            config=self.config,
-            root=self.root,
-            post_title=title,
-            post_id=int(context["post_id"]),
-            existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
-        )
+        try:
+            checked = validate_media_plan(
+                self.client,
+                {**editorial, "media_plan": plan},
+                config=self.config,
+                root=self.root,
+                post_title=title,
+                post_id=int(context["post_id"]),
+                existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
+            )
+        except Exception:
+            from ..media.google_browser import cleanup_browser_artifacts
+
+            cleanup_browser_artifacts()
+            raise
         vision_errors = [
             row for row in checked.get("featured_vision", [])
             if isinstance(row, dict) and row.get("technical")
         ]
         if vision_errors:
             from ..media.vision_gate import VisionGateError
+            from ..media.google_browser import cleanup_browser_artifacts
 
+            cleanup_browser_artifacts()
             raise VisionGateError(
                 str(vision_errors[0].get("reason") or "vision provider error")
             )
-        results, _featured_id, _featured_credit = _execute_media_plan(
-            {**editorial, "media_plan": plan},
-            self.config,
-            self.client,
-            self.root,
-            preflight=checked,
-            post_id=int(context["post_id"]),
-        )
+        try:
+            results, _featured_id, _featured_credit = _execute_media_plan(
+                {**editorial, "media_plan": plan},
+                self.config,
+                self.client,
+                self.root,
+                preflight=checked,
+                post_id=int(context["post_id"]),
+            )
+        finally:
+            from ..media.google_browser import cleanup_browser_artifacts
+
+            cleanup_browser_artifacts()
         inline = list(previous.inline)
         featured = previous.featured
         for result in results:

@@ -725,6 +725,8 @@ def search_web_images(
     timeout: float = 30.0,
     engine: str = "auto",
     accept: Any = None,
+    remote_url_policy: str = "audit",
+    audit: Any = None,
     reports: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Busca AGREGADA entre as engines (Fase 3), com parada por capacidade.
@@ -777,7 +779,16 @@ def search_web_images(
                 reports[name] = dict(relatorio)
             continue
         try:
-            lote = _fns[name](query, size=size, ratio=ratio, limit=alvo, timeout=timeout, report=relatorio)
+            kwargs = {
+                "size": size,
+                "ratio": ratio,
+                "limit": alvo,
+                "timeout": timeout,
+                "report": relatorio,
+            }
+            if name == "google_browser":
+                kwargs.update(remote_url_policy=remote_url_policy, audit=audit)
+            lote = _fns[name](query, **kwargs)
         except Exception:  # noqa: BLE001 - rotate on any failure
             lote = []
             relatorio.setdefault("failure_kind", "network_error")
@@ -836,6 +847,8 @@ def search_web_images_batch(
     timeout: float = 30.0,
     engine: str = "auto",
     accept: Any = None,
+    remote_url_policy: str = "audit",
+    audit: Any = None,
 ) -> list[dict[str, Any]]:
     """Discover candidates for several distinct works concurrently.
 
@@ -870,6 +883,8 @@ def search_web_images_batch(
             query, size=size, ratio=ratio, limit=limit, timeout=timeout,
             engine=engine,
             accept=_accept_do_item if accept is not None else None,
+            remote_url_policy=remote_url_policy,
+            audit=audit,
             reports=relatorios,
         )
         return candidatos, relatorios

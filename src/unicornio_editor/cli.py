@@ -1118,6 +1118,7 @@ def _emit_engine_health(
                 html_bytes=int(relatorio.get("html_bytes") or 0),
                 objects_parsed=int(relatorio.get("objects_parsed") or 0),
                 candidates=int(relatorio.get("candidates") or 0),
+                pair_unresolved=int(relatorio.get("pair_unresolved") or 0),
                 failure_kind=str(relatorio.get("failure_kind") or ""),
                 parser_version=int(relatorio.get("parser_version") or 0),
             )
@@ -1201,6 +1202,10 @@ def _resolve_media_batch(
         timeout=config.http_timeout,
         engine=str(first.get("engine") or "auto"),
         accept=accept if searchable else None,
+        remote_url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+        audit=lambda finding: append_telemetry(
+            root, "remote_url_audit", url=finding.url, reason=finding.reason
+        ),
     )
     by_query = {str(row.get("query")): row.get("candidates") or [] for row in found}
     for row in found:
@@ -1269,11 +1274,12 @@ def _resolve_media_batch(
             vision_rejected=0,
             vision_input_unavailable=0,
             distinct=len(distinct),
-            discovery_accepted=len(reuso) + len(aprovados),
+            discovery_approved=len(reuso) + len(aprovados),
+            deterministic_match=verdicts.count("deterministic_match"),
+            ambiguous=verdicts.count("ambiguous"),
             downloaded=0,
             converted=0,
             uploaded=0,
-            accepted=len(reuso) + len(aprovados),
         )
         output.append({
             "post_id": post_id,
@@ -2560,6 +2566,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
                 engine=args.engine,
                 accept=_aceitar_item,
+                remote_url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+                audit=lambda finding: append_telemetry(
+                    args.root, "remote_url_audit", url=finding.url, reason=finding.reason
+                ),
             )
             items = []
             audit_items: list[dict] = []
@@ -2988,6 +2998,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client, config, args.root, batch, full=bool(args.full)
                 )
             finally:
+                from .media.google_browser import cleanup_browser_artifacts
+
+                cleanup_browser_artifacts()
                 if previous_batch is None:
                     os.environ.pop("UNICORNIO_BATCH_ID", None)
                 else:

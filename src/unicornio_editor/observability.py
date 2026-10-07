@@ -618,7 +618,8 @@ def read_telemetry_summary(
                         "source_mismatch", "missing_source_page", "relevance_match",
                         "relevance_ambiguous", "relevance_reject", "vision_approved",
                         "vision_rejected", "vision_input_unavailable", "duplicate_frame",
-                        "distinct", "downloaded", "converted", "uploaded", "accepted",
+                        "distinct", "discovery_approved", "deterministic_match", "ambiguous",
+                        "downloaded", "converted", "uploaded",
                     )
                     if key in record
                 })
