@@ -237,7 +237,15 @@ class ProductionMediaStage:
                         Phase.MEDIA,
                         str(vision_errors[0].get("reason") or "vision provider error"),
                     )
-                results, featured_id, featured_credit = _execute_media_plan({**editorial, "media_plan": plan}, self.config, self.client, self.root, preflight=checked, post_id=int(context["post_id"]))
+                results, featured_id, featured_credit = _execute_media_plan(
+                    {**editorial, "media_plan": plan},
+                    self.config,
+                    self.client,
+                    self.root,
+                    preflight=checked,
+                    post_id=int(context["post_id"]),
+                    previous_inline_phashes=tuple(item.phash for item in previous.inline if item.phash),
+                )
                 inline = tuple(
                     InlineMedia(
                         int(row["media_id"]),

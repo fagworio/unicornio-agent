@@ -1820,6 +1820,22 @@ def get_cleaned_content(
     }
 
 
+def _is_final_phash_duplicate(final_phash: str, baseline_phashes: list[str] | tuple[str, ...], *, threshold: int = 6) -> bool:
+    """Return whether a final WebP pHash repeats an accepted frame."""
+    if not final_phash:
+        return False
+    try:
+        import imagehash
+        candidate = imagehash.hex_to_hash(str(final_phash))
+        return any(
+            int(candidate - imagehash.hex_to_hash(str(previous))) <= threshold
+            for previous in baseline_phashes
+            if str(previous).strip()
+        )
+    except (ImportError, TypeError, ValueError):
+        return False
+
+
 def _execute_media_plan(
     editorial: dict[str, Any],
     config: Config,
@@ -1828,6 +1844,7 @@ def _execute_media_plan(
     *,
     preflight: dict[str, Any] | None = None,
     post_id: int | None = None,
+    previous_inline_phashes: list[str] | tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -1970,7 +1987,8 @@ def _execute_media_plan(
     page_cache: dict[str, list[str] | None] = {}
     page_cache_lock = Lock()
     seen_sources: set[str] = set()
-
+    accepted_final_phashes = {str(value) for value in previous_inline_phashes if str(value).strip()}
+    accepted_final_phashes_lock = Lock()
     # Pre-passe SERIAL: rejeicao (relevancia/reuso) + deteccao de duplicatas.
     # Duplicata depende da ORDEM (primeira ocorrencia vence) e o
     # attachment_cache e populado aqui (get_media), por isso fica fora do
@@ -2079,6 +2097,16 @@ def _execute_media_plan(
                     }
                 width, height = image_dimensions(webp)
                 _funnel("conversion", "passed", item, position, f"{width}x{height}")
+                with accepted_final_phashes_lock:
+                    if _is_final_phash_duplicate(final_phash, tuple(accepted_final_phashes)):
+                        _funnel("preflight", "rejected", item, position, "duplicate_existing_frame")
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "rejected",
+                            "detail": "duplicate_existing_frame",
+                        }
+                    if final_phash:
+                        accepted_final_phashes.add(final_phash)
                 media = upload_image(client, webp, evidence)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
@@ -2096,7 +2124,7 @@ def _execute_media_plan(
                 try:
                     _registrar_midia(
                         root,
-                        phash=str(item.get("phash") or ""),
+                        phash=str(final_phash or ""),
                         source_url=str(item.get("direct_image_url") or ""),
                         source_page=str(item.get("source_page_url") or ""),
                         subject=str(item.get("subject") or "") or subject_idx,

@@ -12,6 +12,8 @@ from unicornio_editor.workflow import (
     _load_partial_manifest,
     _partial_retry,
     _recover_partial_featured,
+    _execute_media_plan,
+    _is_final_phash_duplicate,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -2462,6 +2464,89 @@ class WorkflowTests(unittest.TestCase):
             report = migrate_legacy_state(client, self.config(False), Path(directory))
             self.assertEqual(report["legacy_found"], 250)
             self.assertEqual(report["scanned"], 250)
+
+
+def test_final_phash_matches_accepted_baseline():
+    assert _is_final_phash_duplicate("ccc04d9fb063ed1c", ["ccc04d9fb063ed1c"])
+
+
+def test_final_phash_different_frame_is_not_duplicate():
+    assert not _is_final_phash_duplicate("0000000000000000", ["ccc04d9fb063ed1c"])
+
+
+def test_execute_media_plan_rejects_final_duplicate_before_upload(tmp_path):
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/wolverine",
+        "direct_image_url": "https://source.example/wolverine.jpg",
+        "author": "Autor",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: Autor.",
+        "alt_text": "Wolverine",
+        "is_featured": False,
+    }
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Wolverine videogame.</p>",
+        "media_plan": [item],
+    }
+    client = object()
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="ccc04d9fb063ed1c"), \
+         mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        results, _, _ = _execute_media_plan(
+            editorial,
+            config,
+            client,
+            tmp_path,
+            preflight={"rejected": [], "featured_vision": []},
+            post_id=115088,
+            previous_inline_phashes=("ccc04d9fb063ed1c",),
+        )
+    upload.assert_not_called()
+    assert results == [{"paragraph_index": 0, "status": "rejected", "detail": "duplicate_existing_frame"}]
+
+
+def test_execute_media_plan_uploads_new_final_phash(tmp_path):
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/wolverine",
+        "direct_image_url": "https://source.example/wolverine-new.jpg",
+        "author": "Autor",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: Autor.",
+        "alt_text": "Wolverine novo",
+        "is_featured": False,
+    }
+    editorial = {"seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"}, "cleaned_html": "<p>Wolverine videogame.</p>", "media_plan": [item]}
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.workflow.upload_image", create=True) as upload:
+        upload.return_value = {"id": 115094, "source_url": "https://wp.test/115094.webp"}
+        results, _, _ = _execute_media_plan(editorial, config, object(), tmp_path, preflight={"rejected": [], "featured_vision": []}, post_id=115088, previous_inline_phashes=("ccc04d9fb063ed1c",))
+    upload.assert_called_once()
+    assert results[0]["media_id"] == 115094
+    index = json.loads((tmp_path / "work" / "media_index.json").read_text())
+    assert index["entries"][-1]["phash"] == "1111111111111111"
+
 
 
 if __name__ == "__main__":
