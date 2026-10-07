@@ -51,7 +51,7 @@ def test_google_browser_pairs_each_clicked_result_with_its_own_source(monkeypatc
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            if self.path == "/search":
+            if self.path.startswith("/search"):
                 body, content_type = html, "text/html"
             elif self.path.startswith(("/image-", "/thumb-")):
                 body, content_type = b"not-a-real-image", "image/png"
