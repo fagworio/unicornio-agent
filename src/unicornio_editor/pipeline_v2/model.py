@@ -130,6 +130,7 @@ class MediaSearchProgress:
     exhausted: bool = False
     queries_attempted: int = 0
     engines_attempted: tuple[str, ...] = ()
+    engines_disabled: tuple[str, ...] = ()
     candidates_seen: int = 0
     candidates_rejected: int = 0
     distinct_valid_frames: int = 0
@@ -149,6 +150,7 @@ class MediaSearchProgress:
             "exhausted": self.exhausted,
             "queries_attempted": self.queries_attempted,
             "engines_attempted": list(self.engines_attempted),
+            "engines_disabled": list(self.engines_disabled),
             "candidates_seen": self.candidates_seen,
             "candidates_rejected": self.candidates_rejected,
             "distinct_valid_frames": self.distinct_valid_frames,
@@ -160,14 +162,18 @@ class MediaSearchProgress:
         engines = value.get("engines_attempted") or ()
         if not isinstance(engines, (list, tuple)):
             engines = ()
+        disabled = value.get("engines_disabled") or ()
+        if not isinstance(disabled, (list, tuple)):
+            disabled = ()
         return cls(
-            bool(value.get("completed", False)),
-            bool(value.get("exhausted", False)),
-            int(value.get("queries_attempted", 0)),
-            tuple(str(item) for item in engines),
-            int(value.get("candidates_seen", 0)),
-            int(value.get("candidates_rejected", 0)),
-            int(value.get("distinct_valid_frames", 0)),
+            completed=bool(value.get("completed", False)),
+            exhausted=bool(value.get("exhausted", False)),
+            queries_attempted=int(value.get("queries_attempted", 0)),
+            engines_attempted=tuple(str(item) for item in engines),
+            engines_disabled=tuple(str(item) for item in disabled),
+            candidates_seen=int(value.get("candidates_seen", 0)),
+            candidates_rejected=int(value.get("candidates_rejected", 0)),
+            distinct_valid_frames=int(value.get("distinct_valid_frames", 0)),
         )
 
 

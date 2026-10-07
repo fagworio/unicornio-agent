@@ -35,6 +35,7 @@ def test_media_search_progress_round_trips_auditable_exhaustion():
             exhausted=True,
             queries_attempted=2,
             engines_attempted=("bing", "yandex"),
+            engines_disabled=("google_browser",),
             candidates_seen=8,
             candidates_rejected=7,
             distinct_valid_frames=1,

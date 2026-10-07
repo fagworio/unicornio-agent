@@ -626,6 +626,36 @@ class ChecklistTests(unittest.TestCase):
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         self.assertEqual(item["status"], "fail")
 
+    def test_search_exhaustion_does_not_waive_listicle_with_featured(self):
+        """A real search waiver must never remove a listicle's per-item gate."""
+        content = (
+            "<h2>1. Jogo: titulo</h2><p>Descricao do jogo.</p>"
+            "<h2>2. Jogo: titulo</h2><p>Descricao do jogo.</p>"
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(
+                title={"raw": "10 melhores jogos"},
+                featured_media=7,
+                meta={"original_link": "https://source.example/news"},
+            ),
+            content=content,
+            media_context={
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "queries_attempted": 2,
+                    "engines_attempted": ["bing", "yandex"],
+                    "candidates_seen": 8,
+                    "candidates_rejected": 8,
+                    "distinct_valid_frames": 1,
+                }
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "fail")
+
 
     # ---- Fase 1: o pHash NUNCA reduz o minimo 2/4/6 ----
 

@@ -1265,16 +1265,28 @@ def _resolve_media_batch(
         search_row = found_row_by_query.get(str(item["query"])) or {}
         engine_reports = search_row.get("engine_reports") or {}
         requested_engine = str(item.get("engine") or first.get("engine") or "auto")
-        expected_engines = (
-            [requested_engine]
-            if requested_engine != "auto"
-            else ["google_browser", "bing", "yandex", "google"]
-        )
+        engines_disabled: list[str] = []
+        if requested_engine == "auto":
+            expected_engines = ["google_browser", "bing", "yandex", "google"]
+            google_browser_enabled = os.environ.get(
+                "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
+            ).strip().lower() not in {"0", "false", "no", "off"}
+            if not google_browser_enabled:
+                expected_engines.remove("google_browser")
+                engines_disabled.append("google_browser")
+        elif requested_engine == "google_browser" and os.environ.get(
+            "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
+        ).strip().lower() in {"0", "false", "no", "off"}:
+            expected_engines = []
+            engines_disabled.append("google_browser")
+        else:
+            expected_engines = [requested_engine]
         engines_attempted = tuple(
             name for name in expected_engines if name in engine_reports
         )
         search_completed = bool(
             needed_web > 0
+            and expected_engines
             and all(name in engine_reports for name in expected_engines)
             and all(
                 str((engine_reports.get(name) or {}).get("failure_kind") or "")
@@ -1284,9 +1296,13 @@ def _resolve_media_batch(
         )
         search_progress = {
             "completed": search_completed,
-            "exhausted": bool(search_completed and len(distinct) < needed_web),
+            # This is discovery evidence only.  The runtime replaces
+            # ``exhausted`` after the media plan has been converted/uploaded
+            # and final pHashes are available.
+            "exhausted": False,
             "queries_attempted": 1 if needed_web > 0 else 0,
             "engines_attempted": list(engines_attempted),
+            "engines_disabled": engines_disabled,
             "candidates_seen": len(candidates),
             "candidates_rejected": len(rejeitados),
             "distinct_valid_frames": len(distinct),

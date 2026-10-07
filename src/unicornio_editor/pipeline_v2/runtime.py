@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -434,16 +435,34 @@ class ProductionMediaResolver:
             search_completed = all(run.get("completed") is True for run in search_runs)
             search_progress = MediaSearchProgress(
                 completed=search_completed,
-                exhausted=bool(search_completed and all(run.get("exhausted") is True for run in search_runs)),
+                # Exhaustion is finalized below, after the executable media
+                # plan has produced its final WebP pHashes.  Discovery-level
+                # candidates may collapse into duplicates during conversion.
+                exhausted=False,
                 queries_attempted=sum(int(run.get("queries_attempted") or 0) for run in search_runs),
                 engines_attempted=tuple(dict.fromkeys(
                     str(engine)
                     for run in search_runs
                     for engine in (run.get("engines_attempted") or [])
                 )),
+                engines_disabled=tuple(dict.fromkeys(
+                    str(engine)
+                    for run in search_runs
+                    for engine in (run.get("engines_disabled") or [])
+                )),
                 candidates_seen=sum(int(run.get("candidates_seen") or 0) for run in search_runs),
                 candidates_rejected=sum(int(run.get("candidates_rejected") or 0) for run in search_runs),
-                distinct_valid_frames=sum(int(run.get("distinct_valid_frames") or 0) for run in search_runs),
+                distinct_valid_frames=0,
+            )
+            final_distinct = {
+                str(item.phash or item.media_url)
+                for item in inline
+                if item.phash or item.media_url
+            }
+            search_progress = replace(
+                search_progress,
+                exhausted=bool(search_completed and len(final_distinct) < total_required),
+                distinct_valid_frames=len(final_distinct),
             )
         else:
             search_progress = previous.search
