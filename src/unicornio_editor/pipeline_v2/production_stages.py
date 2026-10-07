@@ -20,6 +20,7 @@ from ..media.evidence import post_subjects
 from ..media.inserter import insert_media
 from ..media.vision_gate import VisionGateError
 from ..workflow import (
+    MediaFunnelInvariantError,
     _execute_media_plan,
     compose_final_content,
     attach_trailer_audit,
@@ -264,6 +265,8 @@ class ProductionMediaStage:
             return media
         except StageError:
             raise
+        except MediaFunnelInvariantError as exc:
+            raise StageError(BlockerCode.INTERNAL_ERROR, Phase.MEDIA, str(exc)) from exc
         except VisionGateError as exc:
             raise StageError(BlockerCode.PROVIDER_ERROR, Phase.MEDIA, str(exc)) from exc
         except Exception as exc:

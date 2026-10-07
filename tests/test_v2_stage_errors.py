@@ -73,6 +73,28 @@ def test_provider_error_from_checklist_does_not_consume_media_budget():
     assert store.state.retry.no_progress == 1
 
 
+def test_internal_media_error_does_not_consume_media_budget():
+    store = Store()
+    store.state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_INVALID,
+        retry=RetryInfo(attempts=10, no_progress=1),
+        relevance_approved=True,
+    )
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: (_ for _ in ()).throw(
+            StageError(BlockerCode.INTERNAL_ERROR, Phase.MEDIA, "media candidate conservation violated")
+        ),
+        "compose": lambda *args: {},
+        "validate": lambda *args: {"passed": True, "failures": []},
+    }
+    result = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+    assert result.blocker is BlockerCode.INTERNAL_ERROR
+    assert store.state.retry.no_progress == 1
+
+
 def test_technical_media_error_preserves_previous_accepted_media():
     previous = WorkState(
         phase=Phase.MEDIA,

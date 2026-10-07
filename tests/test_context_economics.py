@@ -471,6 +471,34 @@ class EnrichmentMemoTests(unittest.TestCase):
         # MESMA decisao (o memo e o resultado, nao um atalho).
         self.assertEqual(vereditos[0], vereditos[1])
 
+    def test_memo_never_overwrites_discovery_identity(self):
+        from unicornio_editor import cli
+
+        memo: dict = {}
+        with mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
+        ):
+            first = self._candidate("https://a/1.jpg")
+            first.update({"candidate_id": "discovery-A", "discovery_image_url": "https://a/a.jpg"})
+            cli._enriquecer_candidatos(
+                [first], subject="Redfall", termo="redfall", enriched_cache=memo
+            )
+
+            second = self._candidate("https://a/1.jpg")
+            second.update({"candidate_id": "discovery-B", "discovery_image_url": "https://a/b.jpg"})
+            approved, rejected, deferred = cli._enriquecer_candidatos(
+                [second], subject="Redfall", termo="redfall", enriched_cache=memo
+            )
+
+        terminal = approved + rejected + deferred
+        assert len(terminal) == 1
+        assert terminal[0]["candidate_id"] == "discovery-B"
+        assert terminal[0]["discovery_image_url"] == "https://a/b.jpg"
+
     def test_capacity_stops_investigating_unneeded_candidates(self):
         from unicornio_editor import cli
 
@@ -546,6 +574,42 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert events[0]["query"] == "Redfall jogo"
         assert events[0]["subject"] == "Redfall"
         assert events[0]["candidate_id"] == "candidate-1"
+
+    def test_invariant_telemetry_exposes_identity_collisions(self):
+        from unicornio_editor import cli
+        from unicornio_editor.workflow import MediaFunnelInvariantError
+
+        candidates = [
+            {**self._candidate("https://a/1.jpg"), "candidate_id": "same"},
+            {**self._candidate("https://a/2.jpg"), "candidate_id": "same"},
+        ]
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+        ), mock.patch(
+            "unicornio_editor.media.evidence.evidence_score",
+            side_effect=lambda subject, **_kwargs: {
+                "subject": subject, "matched": ["subject"], "score": 9,
+                "local_score": 9, "gate": "relevance", "penalties": [],
+                "needs_vision": False, "verdict": "deterministic_match",
+            },
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
+        ):
+            with self.assertRaises(MediaFunnelInvariantError):
+                cli._enriquecer_candidatos(
+                    candidates, subject="Redfall", termo="redfall", root=Path(directory), post_id=42
+                )
+            events = [
+                json.loads(line)
+                for line in (Path(directory) / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "media_funnel_invariant_violation"
+            ]
+        assert events[0]["duplicate_discovered_ids"] == ["same"]
+        assert events[0]["duplicate_terminal_ids"] == ["same"]
+        assert events[0]["discovered_ids"] == ["same", "same"]
+        assert events[0]["terminal_ids"] == ["same", "same"]
 
     def test_existing_media_phash_is_rejected_before_capacity(self):
         from unicornio_editor import cli

@@ -2,8 +2,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from unicornio_editor.pipeline_v2.errors import StageError
 from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
+from unicornio_editor.workflow import MediaFunnelInvariantError
 
 
 class Config:
@@ -27,6 +31,21 @@ def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     result = stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=2, inline=(existing,))), {})
     assert result.accepted == 1
     assert (tmp_path / "backups/7/editorial.partial.json").exists()
+
+
+def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):
+    stage = ProductionMediaStage(
+        object(),
+        Config(),
+        tmp_path,
+        resolver=lambda *_args: (_ for _ in ()).throw(
+            MediaFunnelInvariantError("media candidate conservation violated")
+        ),
+    )
+    with pytest.raises(StageError) as error:
+        stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=1)), {})
+    assert error.value.blocker is BlockerCode.INTERNAL_ERROR
+    assert error.value.phase is Phase.MEDIA
 
 
 def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch):

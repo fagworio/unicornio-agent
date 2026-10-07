@@ -86,6 +86,10 @@ class WorkflowError(RuntimeError):
     """Raised when a post cannot safely enter a workflow step."""
 
 
+class MediaFunnelInvariantError(WorkflowError):
+    """Raised when media candidates lose their discovery identity."""
+
+
 def _acquire_post_lock(root: Path, config: Config, post_id: int):
     """Serialize every mutating operation for one post.
 

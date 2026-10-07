@@ -27,6 +27,7 @@ from .editorial_schema import validate_editorial
 from .editorial_provider import EditorialProviderError
 from .maintenance import generate_report
 from .workflow import (
+    MediaFunnelInvariantError,
     WorkflowError,
     apply_editorial,
     attach_trailer_audit,
@@ -1482,25 +1483,38 @@ def _enriquecer_candidatos(
             )
         )
 
-    # Campos que o enriquecimento produz (é o que o memo guarda/replica).
-    _CAMPOS = (
+    # Identidade de descoberta nunca pertence ao memo. O memo representa
+    # apenas o resultado reaproveitável do enriquecimento/resolução; copiar
+    # candidate_id entre candidatos corrompe a conservação do funil.
+    _ENRICHMENT_MEMO_FIELDS = (
         "source_page_url", "usable", "discovery_only", "rejected_reason",
-        "candidate_id", "discovery_image_url", "matched_image_url",
+        "matched_image_url",
         "verification_level", "verification_reason", "canonical_source_asset",
         "source_resolution", "source_resolution_query",
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "already_in_library", "library_media_id", "phash", "capacity_deferred",
     )
+    _DISCOVERY_IDENTITY_FIELDS = (
+        "candidate_id", "discovery_image_url", "engine", "query",
+    )
 
     def _aplicar_memo(cand: dict, memo: dict) -> None:
-        for campo in _CAMPOS:
+        identity = {
+            campo: cand[campo]
+            for campo in _DISCOVERY_IDENTITY_FIELDS
+            if campo in cand
+        }
+        for campo in _ENRICHMENT_MEMO_FIELDS:
             if campo in memo:
                 cand[campo] = memo[campo]
+        # Defesa estrutural contra um memo legado ou uma futura ampliação
+        # acidental da lista de campos enriquecidos.
+        cand.update(identity)
 
     def _guardar_memo(cand: dict, chave: str | None = None) -> None:
         cache_memo[chave or _memo_key(cand)] = {
-            campo: cand[campo] for campo in _CAMPOS if campo in cand
+            campo: cand[campo] for campo in _ENRICHMENT_MEMO_FIELDS if campo in cand
         }
 
     pendentes: list[dict] = []
@@ -1849,6 +1863,21 @@ def _enriquecer_candidatos(
                     )
             discovered_ids = [str(c["candidate_id"]) for c in candidates]
             terminal_ids = [str(c["candidate_id"]) for group in (aprovados, rejeitados, deferidos) for c in group]
+            discovered_counts = {
+                candidate_id: discovered_ids.count(candidate_id)
+                for candidate_id in set(discovered_ids)
+            }
+            terminal_counts = {
+                candidate_id: terminal_ids.count(candidate_id)
+                for candidate_id in set(terminal_ids)
+            }
+            missing_ids = sorted(set(discovered_ids) - set(terminal_ids))
+            duplicate_discovered_ids = sorted(
+                candidate_id for candidate_id, count in discovered_counts.items() if count > 1
+            )
+            duplicate_terminal_ids = sorted(
+                candidate_id for candidate_id, count in terminal_counts.items() if count > 1
+            )
             if (
                 len(discovered_ids) != len(set(discovered_ids))
                 or len(terminal_ids) != len(set(terminal_ids))
@@ -1858,10 +1887,14 @@ def _enriquecer_candidatos(
                     root, "media_funnel_invariant_violation",
                     post_id=int(post_id) if post_id else None,
                     discovered=len(discovered_ids), terminal=len(terminal_ids),
-                    missing=sorted(set(discovered_ids) - set(terminal_ids)),
+                    missing=missing_ids[:20],
                     duplicate_terminals=len(terminal_ids) - len(set(terminal_ids)),
+                    duplicate_terminal_ids=duplicate_terminal_ids[:20],
+                    duplicate_discovered_ids=duplicate_discovered_ids[:20],
+                    discovered_ids=discovered_ids[:20],
+                    terminal_ids=terminal_ids[:20],
                 )
-                raise WorkflowError("media candidate conservation violated")
+                raise MediaFunnelInvariantError("media candidate conservation violated")
         except WorkflowError:
             raise
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
