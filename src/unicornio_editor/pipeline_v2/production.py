@@ -115,6 +115,7 @@ class ProductionCandidateReader:
                 required=current_required,
                 inline=current_media.inline,
                 featured=current_media.featured,
+                search=current_media.search,
             )
         if not active_journal:
             return WorkState(
@@ -215,6 +216,7 @@ class ProductionCandidateReader:
                     required=current_required,
                     inline=inline,
                     featured=featured,
+                    search=candidate.search,
                 )
             except ValueError:
                 continue

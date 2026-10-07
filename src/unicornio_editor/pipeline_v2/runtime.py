@@ -17,7 +17,7 @@ from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
-from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
+from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress
 from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
@@ -196,6 +196,7 @@ class ProductionMediaResolver:
                 required=total_required,
                 inline=previous.inline,
                 featured=previous.featured,
+                search=previous.search,
             )
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
@@ -218,6 +219,8 @@ class ProductionMediaResolver:
             add_query(main_subject, item_query(focus_keyword, title))
         if not subject_queries and not is_listicle:
             add_query(title, item_query(title, title, extra=focus_keyword))
+
+        search_runs: list[dict[str, Any]] = []
 
         def resolve_query(subject: str, query: str, needed: int, role: str) -> list[dict[str, Any]]:
             if needed <= 0:
@@ -253,6 +256,8 @@ class ProductionMediaResolver:
                 cleanup_browser_artifacts()
                 raise
             row = (resolved.get("posts") or [{}])[0]
+            if role == "inline" and isinstance(row.get("search"), dict):
+                search_runs.append(dict(row["search"]))
             candidates: list[dict[str, Any]] = []
             for reused in row.get("reuse") or []:
                 if not isinstance(reused, dict):
@@ -425,10 +430,28 @@ class ProductionMediaResolver:
                     int(result["media_id"]),
                     str(result.get("media_url") or ""),
                 )
+        if search_runs:
+            search_completed = all(run.get("completed") is True for run in search_runs)
+            search_progress = MediaSearchProgress(
+                completed=search_completed,
+                exhausted=bool(search_completed and all(run.get("exhausted") is True for run in search_runs)),
+                queries_attempted=sum(int(run.get("queries_attempted") or 0) for run in search_runs),
+                engines_attempted=tuple(dict.fromkeys(
+                    str(engine)
+                    for run in search_runs
+                    for engine in (run.get("engines_attempted") or [])
+                )),
+                candidates_seen=sum(int(run.get("candidates_seen") or 0) for run in search_runs),
+                candidates_rejected=sum(int(run.get("candidates_rejected") or 0) for run in search_runs),
+                distinct_valid_frames=sum(int(run.get("distinct_valid_frames") or 0) for run in search_runs),
+            )
+        else:
+            search_progress = previous.search
         return MediaProgress(
             required=total_required,
             inline=tuple({item.media_id: item for item in inline}.values()),
             featured=featured,
+            search=search_progress,
         )
 
     @staticmethod

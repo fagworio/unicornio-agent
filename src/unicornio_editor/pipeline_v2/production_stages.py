@@ -27,7 +27,7 @@ from ..workflow import (
     resolve_editorial_defaults,
     validate_media_plan,)
 from .errors import StageError
-from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Phase
+from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
 
 
 def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> Path:
@@ -268,7 +268,7 @@ class ProductionMediaStage:
                 )
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
                 fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
-                media = MediaProgress(required=required, inline=inline, featured=fp)
+                media = MediaProgress(required=required, inline=inline, featured=fp, search=previous.search)
             _write_json(self.root, int(context["post_id"]), "editorial.partial.json", media.to_dict())
             return media
         except StageError:
@@ -284,7 +284,8 @@ class ProductionMediaStage:
     def _from_result(result: Any, required: int, accepted: dict[int, InlineMedia], featured: FeaturedProgress) -> MediaProgress:
         rows = result if isinstance(result, list) else (result.get("inline") or [])
         inline = tuple(accepted.values()) + tuple(InlineMedia.from_dict(row) for row in rows if int(row.get("media_id", 0)) not in accepted)
-        return MediaProgress(required=required, inline=inline, featured=featured)
+        search = MediaSearchProgress.from_dict(result.get("search")) if isinstance(result, dict) else MediaSearchProgress()
+        return MediaProgress(required=required, inline=inline, featured=featured, search=search)
 
 
 class ProductionComposeStage:

@@ -1,4 +1,4 @@
-from unicornio_editor.pipeline_v2.model import FeaturedProgress, InlineMedia, MediaProgress
+from unicornio_editor.pipeline_v2.model import FeaturedProgress, InlineMedia, MediaProgress, MediaSearchProgress
 
 
 def test_media_progress_round_trips_inline_identity_and_counts_from_assets():
@@ -25,3 +25,22 @@ def test_media_progress_rejects_duplicate_media_or_slots():
         assert "duplicate" in str(exc)
     else:
         raise AssertionError("duplicate media must be rejected")
+
+
+def test_media_search_progress_round_trips_auditable_exhaustion():
+    progress = MediaProgress(
+        required=4,
+        search=MediaSearchProgress(
+            completed=True,
+            exhausted=True,
+            queries_attempted=2,
+            engines_attempted=("bing", "yandex"),
+            candidates_seen=8,
+            candidates_rejected=7,
+            distinct_valid_frames=1,
+        ),
+    )
+
+    restored = MediaProgress.from_dict(progress.to_dict())
+
+    assert restored.search == progress.search

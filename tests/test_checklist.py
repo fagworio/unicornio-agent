@@ -580,6 +580,31 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertNotIn("waived", item.get("detail") or "")
 
+    def test_deterministic_search_exhaustion_waives_inline_for_non_listicle(self):
+        content = (
+            "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
+            "<p>Mais informações sobre videogame para o leitor.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(featured_media=7),
+            content=content,
+            media_context={
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "queries_attempted": 2,
+                    "engines_attempted": ["bing", "yandex"],
+                    "candidates_seen": 8,
+                    "candidates_rejected": 7,
+                    "distinct_valid_frames": 1,
+                }
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "pass")
+        self.assertIn("waived", item["detail"])
+
     def test_media_exhausted_does_not_waive_listicle(self):
         # Listicle (Top N) NAO dispensa o minimo: continua exigindo imagem por
         # item (vai para awaiting_human no apply, decisao manual).

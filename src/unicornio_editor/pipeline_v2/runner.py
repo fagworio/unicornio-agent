@@ -232,6 +232,7 @@ class PipelineRunner:
                 required=media.required,
                 inline=media.inline,
                 featured=FeaturedProgress(status, None, None),
+                search=media.search,
             )
 
         inline_blockers = {
@@ -257,7 +258,7 @@ class PipelineRunner:
             # A blocker without an asset identity cannot authorize destructive
             # reconciliation. Keep the last known-good assets and discard only
             # the untrusted delta from this attempt.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured)
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search)
 
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:
@@ -297,12 +298,12 @@ class PipelineRunner:
         if not matched_any:
             # An unrecognized descriptor is not a safe identity. Discard only
             # the current untrusted delta and preserve the previous baseline.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured)
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search)
         remaining = tuple(
             item for item in all_inline.values()
             if not any(same_asset(item, invalid) for invalid in invalid_media)
         )
-        return MediaProgress(required=media.required, inline=remaining, featured=media.featured)
+        return MediaProgress(required=media.required, inline=remaining, featured=media.featured, search=media.search)
 
     @staticmethod
     def _next_state(

@@ -7,6 +7,7 @@ from .model import (
     InlineMedia,
     LifecycleState,
     MediaProgress,
+    MediaSearchProgress,
     Outcome,
     OutcomeType,
     Phase,
@@ -15,6 +16,6 @@ from .model import (
 )
 
 __all__ = [
-    "BlockerCode", "FeaturedProgress", "FeaturedStatus", "InlineMedia", "LifecycleState", "MediaProgress",
+    "BlockerCode", "FeaturedProgress", "FeaturedStatus", "InlineMedia", "LifecycleState", "MediaProgress", "MediaSearchProgress",
     "Outcome", "OutcomeType", "Phase", "RetryInfo", "WorkState",
 ]

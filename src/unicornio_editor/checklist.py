@@ -222,26 +222,28 @@ def run_pre_publish_checklist(
     # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
     required_effective = required
 
-    # Waiver "media_exhausted": quando a busca de imagens foi honestamente
-    # esgotada (media-search-web devolveu count=0) E existe featured E NAO e
-    # listicle, dispensa o minimo de imagens inline — artigo publica com
-    # featured + texto. Listicle NAO dispensa (vai para awaiting_human no
-    # apply, decisao manual). A featured segue validada pelos gates destaque_*
-    # e pela visao.
+    # Waiver "media_exhausted": quando o resolver persistiu uma busca completa
+    # e esgotada, existe featured e o artigo não é listicle, dispensa o mínimo
+    # de imagens inline — artigo publica com featured + texto. Listicle não
+    # dispensa. A featured segue validada pelos gates destaque_* e pela visão.
     from .list_quality import detect_list_format
 
     # P1 (auditoria): o editorial/LLM NUNCA declara exaustao da busca — só o
     # código pode, contando buscas completas de verdade. Aceitar o flag do JSON
     # dispensaria o mínimo 2/4/6 sem nenhuma evidência de busca esgotada.
-    media_exhausted = False
+    search_progress = media_context.get("search") if isinstance(media_context, Mapping) else None
+    media_exhausted = bool(
+        isinstance(search_progress, Mapping)
+        and search_progress.get("completed") is True
+        and search_progress.get("exhausted") is True
+    )
     # Deterministico: apos N applies falhando em imagens (cada apply = 1 busca
     # completa), decide SEM depender do campo do LLM. O media_exhausted do
     # modelo vira apenas uma dica que adianta a decisao (economiza 1 ciclo).
     # P1 (auditoria): `attempts` conta APPLYs (SEO falhou, trailer
     # falhou...), não buscas de imagem esgotadas — usá-lo como exaustão
     # declarava "busca esgotada" sem nenhuma busca ter sido feita.
-    deterministic_exhausted = False
-    exhausted = media_exhausted or deterministic_exhausted
+    exhausted = media_exhausted
     featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
     is_list = detect_list_format(title_str, content) is not None
     waive_inline = exhausted and featured_exists and not is_list

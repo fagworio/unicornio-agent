@@ -123,6 +123,55 @@ class FeaturedProgress:
 
 
 @dataclass(frozen=True)
+class MediaSearchProgress:
+    """Auditable result of the deterministic media search for this post."""
+
+    completed: bool = False
+    exhausted: bool = False
+    queries_attempted: int = 0
+    engines_attempted: tuple[str, ...] = ()
+    candidates_seen: int = 0
+    candidates_rejected: int = 0
+    distinct_valid_frames: int = 0
+
+    def __post_init__(self) -> None:
+        if min(
+            self.queries_attempted,
+            self.candidates_seen,
+            self.candidates_rejected,
+            self.distinct_valid_frames,
+        ) < 0:
+            raise ValueError("media search counters cannot be negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "completed": self.completed,
+            "exhausted": self.exhausted,
+            "queries_attempted": self.queries_attempted,
+            "engines_attempted": list(self.engines_attempted),
+            "candidates_seen": self.candidates_seen,
+            "candidates_rejected": self.candidates_rejected,
+            "distinct_valid_frames": self.distinct_valid_frames,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> "MediaSearchProgress":
+        value = value or {}
+        engines = value.get("engines_attempted") or ()
+        if not isinstance(engines, (list, tuple)):
+            engines = ()
+        return cls(
+            bool(value.get("completed", False)),
+            bool(value.get("exhausted", False)),
+            int(value.get("queries_attempted", 0)),
+            tuple(str(item) for item in engines),
+            int(value.get("candidates_seen", 0)),
+            int(value.get("candidates_rejected", 0)),
+            int(value.get("distinct_valid_frames", 0)),
+        )
+
+
+@dataclass(frozen=True)
 class InlineMedia:
     media_id: int
     media_url: str
@@ -187,6 +236,7 @@ class MediaProgress:
     inline: tuple[InlineMedia, ...] = ()
     featured: FeaturedProgress = field(default_factory=FeaturedProgress)
     accepted_count: int | None = None
+    search: MediaSearchProgress = field(default_factory=MediaSearchProgress)
 
     def __post_init__(self) -> None:
         if self.required < 0:
@@ -209,7 +259,16 @@ class MediaProgress:
         return max(0, self.required - self.accepted)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"inline": {"required": self.required, "accepted": [item.to_dict() for item in self.inline], "accepted_count": self.accepted, "missing": self.missing}, "featured": self.featured.to_dict()}
+        return {
+            "inline": {
+                "required": self.required,
+                "accepted": [item.to_dict() for item in self.inline],
+                "accepted_count": self.accepted,
+                "missing": self.missing,
+            },
+            "featured": self.featured.to_dict(),
+            "search": self.search.to_dict(),
+        }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "MediaProgress":
@@ -222,7 +281,13 @@ class MediaProgress:
         parsed_count = int(accepted_count) if accepted_count is not None else None
         if parsed_count is not None and parsed_count == len(assets):
             parsed_count = None
-        return cls(int(inline.get("required", 0)), tuple(InlineMedia.from_dict(item) for item in assets), FeaturedProgress.from_dict(value.get("featured")), parsed_count)
+        return cls(
+            int(inline.get("required", 0)),
+            tuple(InlineMedia.from_dict(item) for item in assets),
+            FeaturedProgress.from_dict(value.get("featured")),
+            parsed_count,
+            MediaSearchProgress.from_dict(value.get("search")),
+        )
 
 
 @dataclass(frozen=True)

@@ -1213,6 +1213,7 @@ def _resolve_media_batch(
         ),
     )
     by_query = {str(row.get("query")): row.get("candidates") or [] for row in found}
+    found_row_by_query = {str(row.get("query")): row for row in found}
     for row in found:
         _emit_engine_health(
             root, row.get("engine_reports") or {}, query=str(row.get("query") or "")
@@ -1261,6 +1262,35 @@ def _resolve_media_batch(
             for candidate in aprovados
             if candidate.get("phash") or candidate.get("direct_image_url")
         }
+        search_row = found_row_by_query.get(str(item["query"])) or {}
+        engine_reports = search_row.get("engine_reports") or {}
+        requested_engine = str(item.get("engine") or first.get("engine") or "auto")
+        expected_engines = (
+            [requested_engine]
+            if requested_engine != "auto"
+            else ["google_browser", "bing", "yandex", "google"]
+        )
+        engines_attempted = tuple(
+            name for name in expected_engines if name in engine_reports
+        )
+        search_completed = bool(
+            needed_web > 0
+            and all(name in engine_reports for name in expected_engines)
+            and all(
+                str((engine_reports.get(name) or {}).get("failure_kind") or "")
+                != "cooldown_skip"
+                for name in expected_engines
+            )
+        )
+        search_progress = {
+            "completed": search_completed,
+            "exhausted": bool(search_completed and len(distinct) < needed_web),
+            "queries_attempted": 1 if needed_web > 0 else 0,
+            "engines_attempted": list(engines_attempted),
+            "candidates_seen": len(candidates),
+            "candidates_rejected": len(rejeitados),
+            "distinct_valid_frames": len(distinct),
+        }
         append_telemetry(
             root,
             "media_search_summary",
@@ -1296,6 +1326,7 @@ def _resolve_media_batch(
             "deferred": len(deferidos),
             "rejected": len(rejeitados),
             "audit_candidates": aprovados + rejeitados + deferidos,
+            "search": search_progress,
         })
     result = {
         "schema_version": batch["schema_version"],
