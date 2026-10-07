@@ -395,6 +395,9 @@ class ProductionMediaResolver:
                 self.root,
                 preflight=checked,
                 post_id=int(context["post_id"]),
+                previous_inline_phashes=tuple(
+                    item.phash for item in previous.inline if item.phash
+                ),
             )
         finally:
             from ..media.google_browser import cleanup_browser_artifacts

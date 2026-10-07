@@ -1149,6 +1149,7 @@ def _resolve_media_batch(
     or mutates WordPress.
     """
     from .media.search import (
+        FAILURE_KINDS_TRANSITORIOS,
         http_request_count,
         reset_http_request_count,
         search_web_images_batch,
@@ -1290,7 +1291,7 @@ def _resolve_media_batch(
             and all(name in engine_reports for name in expected_engines)
             and all(
                 str((engine_reports.get(name) or {}).get("failure_kind") or "")
-                != "cooldown_skip"
+                not in FAILURE_KINDS_TRANSITORIOS | {"cooldown_skip"}
                 for name in expected_engines
             )
         )

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest import mock
 
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
 from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver
@@ -134,6 +135,157 @@ def test_media_resolver_refreshes_required_on_noop_retry(tmp_path):
     assert result.required == 2
     assert result.accepted == 4
     assert result.missing == 0
+
+
+def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    captured = {}
+
+    candidate = {
+        "candidate_id": "new-frame",
+        "direct_image_url": "https://cdn.test/new.webp",
+        "source_page_url": "https://source.test/page",
+        "subject": "Test",
+        "author": "Test",
+        "license": "CC BY",
+        "license_url": "https://license.test",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+
+    def fake_resolve(*_args, **_kwargs):
+        return {"posts": [{"reuse": [], "audit_candidates": [candidate]}]}
+
+    def fake_validate(*_args, **_kwargs):
+        return {"valid": True, "rejected": []}
+
+    def fake_execute(_editorial, *_args, **kwargs):
+        captured["previous_inline_phashes"] = kwargs["previous_inline_phashes"]
+        return ([], None, None)
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(runtime, "validate_media_plan", fake_validate)
+    monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
+
+    previous = MediaProgress(
+        required=2,
+        inline=(InlineMedia(77, "https://cdn.test/old.webp", 0, phash="baseline"),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 1, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        previous,
+    )
+
+    assert captured["previous_inline_phashes"] == ("baseline",)
+    assert result.accepted == 1
+
+
+def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.workflow as workflow
+
+    candidate = {
+        "candidate_id": "new-frame",
+        "direct_image_url": "https://source.test/new.jpg",
+        "source_page_url": "https://source.test/page",
+        "subject": "Test",
+        "author": "Test",
+        "license": "CC BY",
+        "license_url": "https://license.test",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+
+    monkeypatch.setattr(
+        cli,
+        "_resolve_media_batch",
+        lambda *_args, **_kwargs: {"posts": [{"reuse": [], "audit_candidates": [candidate]}]},
+    )
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(workflow, "_media_item_rejection", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(workflow, "download_image", lambda *_args, **_kwargs: tmp_path / "source.jpg")
+    monkeypatch.setattr(workflow, "convert_to_webp", lambda *_args, **_kwargs: tmp_path / "inline.webp")
+    monkeypatch.setattr(workflow, "verify_downloaded_against_source", lambda *_args, **_kwargs: (True, "verified"))
+    monkeypatch.setattr(workflow, "image_dimensions", lambda *_args, **_kwargs: (1280, 720))
+    monkeypatch.setattr(workflow, "image_has_transparency", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(workflow, "image_is_mostly_flat", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "unicornio_editor.media.visual_hash.phash_from_path",
+        lambda *_args, **_kwargs: "baseline",
+    )
+    upload = mock.Mock()
+    monkeypatch.setattr(workflow, "upload_image", upload)
+
+    previous = MediaProgress(
+        required=2,
+        inline=(InlineMedia(77, "https://cdn.test/old.webp", 0, phash="baseline"),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115088, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        previous,
+    )
+
+    upload.assert_not_called()
+    assert result.accepted == 1
+
+
+def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
+
+    def fake_search(*_args, **_kwargs):
+        return [{
+            "query": "test query",
+            "candidates": [],
+            "engine_reports": {
+                "google_browser": {"failure_kind": "ok"},
+                "bing": {"failure_kind": "rate_limited"},
+                "yandex": {"failure_kind": "ok"},
+                "google": {"failure_kind": "ok"},
+            },
+        }]
+
+    monkeypatch.setattr(search, "search_web_images_batch", fake_search)
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "test-transient-search",
+            "posts": [{
+                "post_id": 115088,
+                "subject": "Test",
+                "query": "test query",
+                "needed": 1,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=False,
+    )
+
+    assert result["posts"][0]["search"]["completed"] is False
 
 
 def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(monkeypatch, tmp_path):
