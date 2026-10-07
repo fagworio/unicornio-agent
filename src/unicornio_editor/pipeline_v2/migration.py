@@ -21,6 +21,7 @@ HISTORICAL_MEDIA_DUPLICATE_ID = 114840
 HISTORICAL_EDITORIAL_QUALITY_IDS = frozenset({115002, 115004})
 HISTORICAL_VISION_PROVIDER_ID = 115025
 HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS = frozenset({115025})
+VISION_PROVIDER_RETRY_RELEASE_ID = 115025
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -600,8 +601,6 @@ def repair_media_provider_terminal_states(
         "skipped": skipped,
         "next_at": current.isoformat(timespec="seconds"),
     }
-
-
 def repair_media_funnel_invariant_state(
     client: Any,
     *,
@@ -686,6 +685,75 @@ def repair_media_funnel_invariant_state(
         "candidates": 1 if prepared is not None else 0,
         "migrated": len(migrated_ids),
         "post_ids": migrated_ids if apply else ([post_id] if prepared is not None else []),
+        "skipped": skipped,
+        "next_at": current.isoformat(timespec="seconds"),
+    }
+def release_vision_provider_retry(
+    client: Any,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Advance only the audited 115025 provider retry without resetting state."""
+    current = _as_utc(now)
+    post_id = VISION_PROVIDER_RETRY_RELEASE_ID
+    skipped: list[dict[str, Any]] = []
+    prepared: WorkState | None = None
+    original: WorkState | None = None
+    try:
+        post = client.get_post(post_id)
+    except Exception as exc:  # noqa: BLE001 - preserve audit output
+        skipped.append({"post_id": post_id, "reason": f"read_error: {exc}"})
+    else:
+        state = _read_state(post)
+        if (
+            state is None
+            or state.state is not LifecycleState.PENDING
+            or state.phase is not Phase.MEDIA
+            or state.blocker is not BlockerCode.PROVIDER_ERROR
+            or state.retry.policy_version != CURRENT_RETRY_POLICY_VERSION
+            or state.retry.attempts != 8
+            or state.retry.phase_attempts != 3
+            or state.retry.no_progress != 0
+            or state.media.required != 4
+            or state.media.accepted != 0
+            or not _is_future(state.retry.next_at, current)
+        ):
+            skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+        else:
+            original = state
+            prepared = replace(
+                state,
+                retry=replace(state.retry, next_at=current.isoformat(timespec="seconds")),
+            )
+
+    migrated = False
+    if apply and prepared is not None and original is not None:
+        post = client.get_post(post_id)
+        state = _read_state(post)
+        if state != original:
+            skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
+        else:
+            meta = post.get("meta") if isinstance(post, dict) else None
+            if not isinstance(meta, dict):
+                raise RuntimeError(f"post {post_id} has no editable meta payload")
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                prepared.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            if _read_state(client.get_post(post_id)) != prepared:
+                raise RuntimeError(f"Vision provider retry release read-back mismatch for post {post_id}")
+            migrated = True
+
+    return {
+        "command": "v2-release-vision-provider-retry",
+        "apply": bool(apply),
+        "policy_version": CURRENT_RETRY_POLICY_VERSION,
+        "allowlisted_post_ids": [post_id],
+        "candidates": 1 if prepared is not None else 0,
+        "migrated": 1 if migrated else 0,
+        "post_ids": [post_id] if prepared is not None else [],
         "skipped": skipped,
         "next_at": current.isoformat(timespec="seconds"),
     }

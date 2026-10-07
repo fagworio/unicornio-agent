@@ -235,7 +235,7 @@ class ProductionMediaResolver:
                     break
 
         all_candidates = self._unique_candidates(featured_candidates + inline_candidates)
-        self._resolve_ambiguous_vision(all_candidates)
+        self._resolve_ambiguous_vision(all_candidates, post_id=int(context["post_id"]))
         featured_approved = [
             candidate for candidate in self._approved_unique(featured_candidates)
             if candidate.get("direct_image_url")
@@ -376,7 +376,7 @@ class ProductionMediaResolver:
                 result.append(candidate)
         return result
 
-    def _resolve_ambiguous_vision(self, candidates: list[dict[str, Any]]) -> None:
+    def _resolve_ambiguous_vision(self, candidates: list[dict[str, Any]], *, post_id: int | None = None) -> None:
         vision_candidates = []
         for index, candidate in enumerate(candidates):
             url = candidate.get("direct_image_url") or candidate.get("image_url")
@@ -384,18 +384,68 @@ class ProductionMediaResolver:
             if url and verdict in {"ambiguous", "needs_vision", "inconclusive"}:
                 vision_candidates.append({
                     "candidate_id": str(candidate.get("candidate_id") or f"v2-{index}"),
-                    "image_url": url,
+                    "source_image_url": str(url),
                     "subject": str(candidate.get("subject") or ""),
                     "require_key_art": bool(candidate.get("role") == "featured"),
                 })
         if not vision_candidates or not getattr(self.config, "vision_enabled", False) or not getattr(self.config, "vision_api_key", ""):
             return
-        from ..media.vision_gate import verify_image_subject_batch
+        from ..media.vision_gate import (
+            VisionInputUnavailable,
+            prepare_vision_image_input,
+            verify_image_subject_batch,
+        )
         from ..observability import append_telemetry
 
+        prepared_candidates = []
+        for item in vision_candidates:
+            try:
+                vision_input = prepare_vision_image_input(
+                    item["source_image_url"],
+                    timeout=self.config.http_timeout,
+                )
+            except VisionInputUnavailable as exc:
+                candidate = next(
+                    (
+                        value for value in candidates
+                        if str(value.get("candidate_id") or "") == item["candidate_id"]
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    candidate["rejected_reason"] = "vision_input_unavailable"
+                    candidate["evidence"] = {
+                        **(candidate.get("evidence") or {}),
+                        "score": 0,
+                        "local_score": 0,
+                        "gate": "vision_input",
+                        "verdict": "vision_input_unavailable",
+                        "needs_vision": False,
+                        "reason": "imagem indisponível para validação visual",
+                    }
+                    candidate["evidence_score"] = 0
+                    candidate["needs_vision"] = False
+                append_telemetry(
+                    self.root,
+                    "media_vision_input_unavailable",
+                    post_id=post_id,
+                    candidate_id=item["candidate_id"],
+                    source_image_url=item["source_image_url"],
+                    reason_code="vision_input_unavailable",
+                    detail=str(exc)[:200],
+                )
+                continue
+            prepared_candidates.append({
+                **item,
+                "image_url": vision_input,
+            })
+
+        if not prepared_candidates:
+            return
+
         budget = max(0, int(getattr(self.config, "vision_max_low", 0)))
-        low_items = vision_candidates[:budget]
-        skipped = max(0, len(vision_candidates) - len(low_items))
+        low_items = prepared_candidates[:budget]
+        skipped = max(0, len(prepared_candidates) - len(low_items))
         if skipped:
             append_telemetry(
                 self.root,
@@ -437,17 +487,17 @@ class ProductionMediaResolver:
                 root=self.root,
             ))
         from ..media.vision_cache import set_cached_decision
-        by_url = {str(item["image_url"]): item for item in low_items}
+        by_candidate_id = {str(item["candidate_id"]): item for item in low_items}
         for candidate in candidates:
-            url = str(candidate.get("direct_image_url") or "")
-            item = by_url.get(url)
+            source_url = str(candidate.get("direct_image_url") or "")
+            item = by_candidate_id.get(str(candidate.get("candidate_id") or ""))
             decision = low_decisions.get(item["candidate_id"]) if item else None
             if item and item["candidate_id"] in high_decisions:
                 decision = high_decisions[item["candidate_id"]]
             if decision and decision.get("verdict") == "accept":
                 set_cached_decision(
                     self.root,
-                    url,
+                    source_url,
                     str(candidate.get("subject") or ""),
                     {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"},
                 )

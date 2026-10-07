@@ -20,7 +20,13 @@ from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
 from .editorial_schema import EditorialValidationError, validate_editorial
 from .list_quality import ListContentError, validate_list_content
-from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
+from .media.vision_gate import (
+    VisionGateError,
+    VisionInputUnavailable,
+    prepare_vision_image_input,
+    verify_image_subject,
+    vision_config_ready,
+)
 from .wordpress import WordPressClient
 
 _CTA_MARKER = "Confira mais novidades em nosso Portal de"
@@ -666,8 +672,12 @@ def run_pre_publish_checklist(
                 return
             calls_low += 1
             try:
+                vision_input = prepare_vision_image_input(
+                    url,
+                    timeout=config.http_timeout,
+                )
                 ok, reason = verify_image_subject(
-                    image_url=url,
+                    image_url=vision_input,
                     subject=subject,
                     api_key=config.vision_api_key,
                     base_url=config.vision_base_url,
@@ -692,6 +702,8 @@ def run_pre_publish_checklist(
                 if is_featured and "high" in str(config.vision_detail):
                     calls_high += 1
                 vision_failures.append(f"{url[:60]}: {reason}")
+            except VisionInputUnavailable as exc:
+                vision_failures.append(f"{url[:60]}: vision_input_unavailable ({exc})")
             except VisionGateError as exc:
                 vision_provider_errors.append(str(exc))
                 vision_failures.append(f"{url[:60]}: {exc}")

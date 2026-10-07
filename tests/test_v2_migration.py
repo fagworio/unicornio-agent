@@ -7,6 +7,7 @@ from unicornio_editor.pipeline_v2.migration import (
     repair_historical_media_human_required,
     repair_media_provider_terminal_states,
     repair_media_funnel_invariant_state,
+    release_vision_provider_retry,
     rebase_editorial_retries,
     rebase_media_cooldowns,
 )
@@ -272,8 +273,6 @@ def test_media_provider_repair_does_not_reopen_without_complete_baseline_phash()
         result = repair_media_provider_terminal_states(client, now=now)
     assert result["post_ids"] == []
     assert {"post_id": 114840, "reason": "baseline_phash_unavailable"} in result["skipped"]
-
-
 def test_media_funnel_invariant_repair_is_allowlisted_idempotent_and_preserves_history(tmp_path):
     now = datetime(2026, 10, 6, 22, 0, tzinfo=timezone.utc)
     state = WorkState(
@@ -324,3 +323,38 @@ def test_media_funnel_invariant_repair_never_touches_114840(tmp_path):
     assert result["post_ids"] == []
     assert result["skipped"] == []
     assert client.updates == []
+def test_release_vision_provider_retry_changes_only_next_at():
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.PROVIDER_ERROR,
+        retry=RetryInfo(
+            attempts=8,
+            no_progress=0,
+            next_at="2026-10-07T20:00:00+00:00",
+            phase_attempts=3,
+            policy_version=3,
+        ),
+        relevance_approved=True,
+        media=MediaProgress(required=4),
+    )
+    client = Client([_post(115025, state)])
+
+    preview = release_vision_provider_retry(client, now=now)
+    assert preview["post_ids"] == [115025]
+    assert preview["migrated"] == 0
+    assert client.updates == []
+
+    result = release_vision_provider_retry(client, apply=True, now=now)
+    assert result["migrated"] == 1
+    migrated = WorkState.from_dict(json.loads(client.posts[115025]["meta"]["_hermes_work_state"]))
+    assert migrated.state is state.state
+    assert migrated.phase is state.phase
+    assert migrated.blocker is state.blocker
+    assert migrated.media == state.media
+    assert migrated.retry.attempts == state.retry.attempts
+    assert migrated.retry.phase_attempts == state.retry.phase_attempts
+    assert migrated.retry.no_progress == state.retry.no_progress
+    assert migrated.retry.policy_version == state.retry.policy_version
+    assert migrated.retry.next_at == "2026-10-06T20:00:00+00:00"

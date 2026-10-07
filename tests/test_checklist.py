@@ -417,6 +417,9 @@ class ChecklistTests(unittest.TestCase):
         with mock.patch(
             "unicornio_editor.checklist.verify_image_subject",
             return_value=(False, "modelo de visao NEGOU o assunto"),
+        ), mock.patch(
+            "unicornio_editor.checklist.prepare_vision_image_input",
+            return_value="data:image/png;base64,AAAA",
         ):
             with tempfile.TemporaryDirectory() as directory:
                 backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
@@ -456,6 +459,9 @@ class ChecklistTests(unittest.TestCase):
         with mock.patch(
             "unicornio_editor.checklist.verify_image_subject",
             side_effect=VisionGateError("API de visao respondeu HTTP 400"),
+        ), mock.patch(
+            "unicornio_editor.checklist.prepare_vision_image_input",
+            return_value="data:image/png;base64,AAAA",
         ):
             with tempfile.TemporaryDirectory() as directory:
                 backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
@@ -502,7 +508,10 @@ class ChecklistTests(unittest.TestCase):
         )
         with mock.patch(
             "unicornio_editor.checklist.verify_image_subject", return_value=(True, "ok")
-        ) as verify:
+        ) as verify, mock.patch(
+            "unicornio_editor.checklist.prepare_vision_image_input",
+            return_value="data:image/png;base64,AAAA",
+        ):
             with tempfile.TemporaryDirectory() as directory:
                 backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
                 backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -516,7 +525,7 @@ class ChecklistTests(unittest.TestCase):
                     client=FakeClient(),
                 )
         self.assertEqual(verify.call_count, 1)
-        self.assertIn("redfall-1280x720", verify.call_args.kwargs["image_url"])
+        self.assertTrue(verify.call_args.kwargs["image_url"].startswith("data:image/"))
 
     def test_vision_gate_skipped_when_earlier_gate_failed(self):
         content = "<p>Texto sobre videogame sem imagem.</p>"

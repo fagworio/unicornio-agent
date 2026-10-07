@@ -1,5 +1,6 @@
 import io
 import json
+import base64
 import tempfile
 import threading
 import unittest
@@ -10,6 +11,8 @@ from urllib.error import HTTPError
 
 from unicornio_editor.media.vision_gate import (
     VisionGateError,
+    VisionInputUnavailable,
+    prepare_vision_image_input,
     verify_image_subject,
     verify_image_subject_batch,
     vision_config_ready,
@@ -69,6 +72,41 @@ class VisionGateTests(unittest.TestCase):
     def test_confirms_subject(self):
         ok, reason = self._verify()
         self.assertTrue(ok, reason)
+
+    def test_data_url_is_sent_to_vision_and_not_telemetry(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        data_url = f"data:image/png;base64,{encoded}"
+        with tempfile.TemporaryDirectory() as directory:
+            ok, reason = self._verify(image_url=data_url, root=Path(directory))
+            self.assertTrue(ok, reason)
+            payload_url = VisionHandler.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
+            self.assertTrue(payload_url.startswith("data:image/png;base64,"))
+            telemetry = (Path(directory) / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn(encoded, telemetry)
+
+    def test_external_image_is_downloaded_and_invalid_input_is_candidate_scoped(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(buffer, format="PNG")
+
+        def fake_download(_url, destination, **_kwargs):
+            destination.write_bytes(buffer.getvalue())
+            return destination
+
+        with mock.patch("unicornio_editor.media.vision_gate.download_image", side_effect=fake_download):
+            prepared = prepare_vision_image_input("https://cdn.test/image.webp")
+        self.assertTrue(prepared.startswith("data:image/png;base64,"))
+
+        with mock.patch(
+            "unicornio_editor.media.vision_gate.download_image",
+            side_effect=RuntimeError("HTTP 404"),
+        ), self.assertRaises(VisionInputUnavailable):
+            prepare_vision_image_input("https://cdn.test/missing.webp")
 
     def test_rejects_when_model_denies(self):
         VisionHandler.answer = '{"status": "UNRELATED", "confidence": 0.97, "visual_type": "animal"}'
@@ -245,6 +283,28 @@ class VisionGateTests(unittest.TestCase):
         self.assertEqual(len(VisionHandler.calls), 1)
         content = self.server.last_payload["messages"][1]["content"]
         self.assertEqual(sum(1 for item in content if item["type"] == "image_url"), 2)
+
+    def test_batch_accepts_internal_data_url(self):
+        data_url = "data:image/png;base64,aGVsbG8="
+        VisionHandler.answer = json.dumps({
+            "items": [{
+                "candidate_id": "A1",
+                "status": "MATCH",
+                "confidence": 0.97,
+                "visual_type": "key_art",
+            }],
+        })
+        result = verify_image_subject_batch(
+            items=[{"candidate_id": "A1", "image_url": data_url, "subject": "Obra A"}],
+            api_key="test-key",
+            base_url=self.base,
+            model="vision-test",
+        )
+        self.assertTrue(result["A1"]["ok"])
+        self.assertEqual(
+            self.server.last_payload["messages"][1]["content"][2]["image_url"]["url"],
+            data_url,
+        )
 
     def test_batch_exige_um_resultado_por_candidato(self):
         VisionHandler.answer = json.dumps(

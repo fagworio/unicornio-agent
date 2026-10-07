@@ -580,6 +580,12 @@ def build_parser() -> argparse.ArgumentParser:
     repair_media_funnel_parser.add_argument("--root", type=Path, default=Path("."))
     repair_media_funnel_parser.add_argument("--apply", action="store_true")
 
+    release_vision_retry_parser = subparsers.add_parser(
+        "v2-release-vision-provider-retry",
+        help="antecipa somente o next_at do retry allowlistado de 115025",
+    )
+    release_vision_retry_parser.add_argument("--root", type=Path, default=Path("."))
+    release_vision_retry_parser.add_argument("--apply", action="store_true")
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -2024,6 +2030,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = repair_media_funnel_invariant_state(
                 client,
                 root=args.root,
+                apply=bool(getattr(args, "apply", False)),
+            )
+
+        elif args.command == "v2-release-vision-provider-retry":
+            from .pipeline_v2.migration import release_vision_provider_retry
+
+            result = release_vision_provider_retry(
+                client,
                 apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "reconcile":

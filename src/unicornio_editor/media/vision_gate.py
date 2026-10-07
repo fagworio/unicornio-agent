@@ -22,15 +22,26 @@ Any OpenAI-compatible vision endpoint works (OpenAI, Gemini via
 
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import json
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .downloader import download_image
+
 
 class VisionGateError(RuntimeError):
     """Raised when the vision model cannot confirm the image subject."""
+
+
+class VisionInputUnavailable(RuntimeError):
+    """Raised when one candidate cannot be materialized for vision."""
 
 
 # status allowed by the model.
@@ -60,6 +71,77 @@ _BATCH_SYSTEM_PROMPT = (
     "contain candidate_id, status, confidence and visual_type. Never move a "
     "decision from one candidate to another."
 )
+
+
+def _image_data_url_from_bytes(data: bytes) -> str:
+    if not data:
+        raise VisionInputUnavailable("empty image payload")
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+            mime = Image.MIME.get(image.format or "", "")
+    except Exception as exc:  # noqa: BLE001 - invalid candidate bytes
+        raise VisionInputUnavailable("image bytes are not decodable") from exc
+    if not mime.startswith("image/"):
+        raise VisionInputUnavailable("image MIME type is unsupported")
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _data_url_bytes(value: str) -> bytes | None:
+    match = re.fullmatch(r"data:(image/[^;]+);base64,(.+)", value.strip(), re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    try:
+        return base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        raise VisionInputUnavailable("invalid base64 image input")
+
+
+def prepare_vision_image_input(
+    image_url: str,
+    *,
+    timeout: float = 30.0,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> str:
+    """Materialize an image locally and return a provider-safe data URL.
+
+    External URLs are fetched by this process, so the vision provider never
+    has to fetch a CDN, signed URL, or anti-hotlink resource itself. The
+    returned Base64 is an in-memory API payload and must not be logged.
+    """
+    value = str(image_url or "").strip()
+    if not value:
+        raise VisionInputUnavailable("empty image URL")
+    if value.lower().startswith("data:"):
+        data = _data_url_bytes(value)
+        if data is None:
+            raise VisionInputUnavailable("invalid data URL image input")
+        return _image_data_url_from_bytes(data)
+    if not value.startswith(("http://", "https://")):
+        raise VisionInputUnavailable("image URL must use HTTP(S) or a data URL")
+    try:
+        with tempfile.TemporaryDirectory(prefix="unicornio-vision-") as directory:
+            path = download_image(
+                value,
+                Path(directory) / "source-image",
+                max_bytes=max_bytes,
+                url_policy="audit",
+            )
+            return _image_data_url_from_bytes(Path(path).read_bytes())
+    except VisionInputUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - candidate-specific download failure
+        raise VisionInputUnavailable(f"image download unavailable: {type(exc).__name__}") from exc
+
+
+def _valid_image_input(value: str) -> bool:
+    text = str(value or "").strip()
+    if text.startswith(("http://", "https://")):
+        return True
+    return bool(re.fullmatch(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\\r\\n]+", text, re.IGNORECASE))
 
 
 def _http_error_context(exc: HTTPError) -> dict[str, str]:
@@ -524,8 +606,8 @@ def verify_image_subject(
     """
     if not api_key:
         raise VisionGateError("chave de visao ausente (gate habilitado sem chave)")
-    if not image_url or not image_url.startswith(("http://", "https://")):
-        raise VisionGateError(f"imagem sem URL valida para verificacao: {image_url or 'vazio'}")
+    if not _valid_image_input(image_url):
+        raise VisionGateError(f"imagem sem input valido para verificacao: {image_url or 'vazio'}")
     if not subject or not subject.strip():
         raise VisionGateError("assunto (alt) vazio; impossivel verificar a imagem")
 
@@ -588,8 +670,8 @@ def verify_image_subject_batch(
         subject = str(item.get("subject") or "").strip()
         if not candidate_id or candidate_id in seen:
             raise VisionGateError(f"candidate_id ausente ou duplicado: {candidate_id!r}")
-        if not image_url.startswith(("http://", "https://")):
-            raise VisionGateError(f"imagem sem URL valida: {candidate_id}")
+        if not _valid_image_input(image_url):
+            raise VisionGateError(f"imagem sem input valido: {candidate_id}")
         if not subject:
             raise VisionGateError(f"assunto vazio: {candidate_id}")
         seen.add(candidate_id)
@@ -672,6 +754,8 @@ def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
 __all__ = [
     "verify_image_subject",
     "verify_image_subject_batch",
+    "prepare_vision_image_input",
     "vision_config_ready",
     "VisionGateError",
+    "VisionInputUnavailable",
 ]
