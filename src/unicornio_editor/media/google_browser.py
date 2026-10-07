@@ -14,9 +14,11 @@ from urllib.parse import quote_plus, urlparse, urlunparse
 from .url_safety import URLSafetyError, enforce_remote_url
 
 
-_GOOGLE_SEARCH = "https://www.google.com/search?tbm=isch&q={}"
+_GOOGLE_SEARCH = "https://www.google.com/search?q={}&udm=2&hl=pt-BR"
 _GOOGLE_HOST_MARKERS = ("google.", "googleusercontent.", "gstatic.com")
-_BLOCK_MARKERS = ("unusual traffic", "/sorry/", "recaptcha", "captcha", "consent.google")
+_CONSENT_MARKERS = ("consent.google",)
+_CAPTCHA_MARKERS = ("captcha", "recaptcha", "/sorry/")
+_UNUSUAL_TRAFFIC_MARKERS = ("unusual traffic",)
 _IMAGE_EXT = re.compile(r"\.(?:jpe?g|png|webp|gif|avif|bmp)(?:[?#]|$)", re.I)
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _BROWSER_LOCK = Lock()
@@ -66,6 +68,46 @@ def _report(
         "error": error[:240],
         "parser_version": 2,
     })
+
+
+def _classify_google_interstitial(*, url: str, title: str, body: str) -> str | None:
+    """Classify Google blocks without conflating consent and anti-bot pages."""
+    haystack = "\n".join((str(url or ""), str(title or ""), str(body or ""))).casefold()
+    if any(marker in haystack for marker in _CAPTCHA_MARKERS):
+        return "google_captcha"
+    if any(marker in haystack for marker in _UNUSUAL_TRAFFIC_MARKERS):
+        return "google_unusual_traffic"
+    if any(marker in haystack for marker in _CONSENT_MARKERS):
+        return "google_consent_required"
+    return None
+
+
+def _handle_google_consent(page, *, report: dict[str, Any] | None, timeout_ms: int) -> bool:
+    """Handle one normal cookie-consent screen; never attempt anti-bot flows."""
+    if report is not None:
+        report["consent_detected"] = True
+    selectors = (
+        "button:has-text('Reject all')",
+        "button:has-text('Rejeitar tudo')",
+        "#W0wltc",
+        "[aria-label='Reject all']",
+        "[aria-label='Rejeitar tudo']",
+    )
+    for selector in selectors:
+        try:
+            button = page.locator(selector).first
+            if not button.is_visible(timeout=500):
+                continue
+            button.click(timeout=min(timeout_ms, 3000), no_wait_after=True)
+            page.wait_for_timeout(500)
+            if report is not None:
+                report["consent_handled"] = True
+            return True
+        except Exception:  # noqa: BLE001 - selectors vary by locale/DOM
+            continue
+    if report is not None:
+        report["consent_handled"] = False
+    return False
 
 
 def _audit_url(
@@ -304,10 +346,24 @@ def _search_google_browser_images_locked(
             page.on("response", capture_response)
             page.goto(_GOOGLE_SEARCH.format(quote_plus(query)), wait_until="domcontentloaded", timeout=timeout_ms)
             body = (page.content() or "")[:500_000]
-            lowered = body.casefold()
-            if any(marker in lowered or marker in str(page.url).casefold() for marker in _BLOCK_MARKERS):
-                _set_browser_disabled()
-                _report(report, kind="google_browser_unavailable", error="captcha/consent/interstitial")
+            title = page.title()
+            if report is not None:
+                report["final_url"] = page.url
+            block_kind = _classify_google_interstitial(url=page.url, title=title, body=body)
+            if block_kind == "google_consent_required":
+                _handle_google_consent(page, report=report, timeout_ms=timeout_ms)
+                body = (page.content() or "")[:500_000]
+                title = page.title()
+                if report is not None:
+                    report["final_url"] = page.url
+                block_kind = _classify_google_interstitial(url=page.url, title=title, body=body)
+            if block_kind:
+                if report is not None:
+                    report["captcha_detected"] = block_kind == "google_captcha"
+                    report["unusual_traffic_detected"] = block_kind == "google_unusual_traffic"
+                if block_kind in {"google_captcha", "google_unusual_traffic"}:
+                    _set_browser_disabled()
+                _report(report, kind=block_kind, error=block_kind)
                 return []
             thumbnails = page.locator("img")
             count = min(int(thumbnails.count()), max(1, int(limit)) * 4)

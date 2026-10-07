@@ -6,7 +6,12 @@ from unittest.mock import patch
 import pytest
 
 from unicornio_editor.media import google_browser
-from unicornio_editor.media.google_browser import _save_loaded_image, cleanup_browser_artifacts, search_google_browser_images
+from unicornio_editor.media.google_browser import (
+    _classify_google_interstitial,
+    _save_loaded_image,
+    cleanup_browser_artifacts,
+    search_google_browser_images,
+)
 from unicornio_editor.media.url_safety import URLSafetyError
 
 
@@ -18,6 +23,24 @@ def test_google_browser_fails_safe_when_playwright_is_unavailable():
     assert result == []
     assert report["failure_kind"] == "google_browser_unavailable"
     assert "playwright" in report["error"].lower()
+
+
+@pytest.mark.parametrize(
+    ("url", "title", "body", "expected"),
+    [
+        ("https://www.google.com/sorry/index", "", "captcha", "google_captcha"),
+        ("https://www.google.com/search", "", "Our systems have detected unusual traffic", "google_unusual_traffic"),
+        ("https://consent.google.com/", "", "", "google_consent_required"),
+        ("https://www.google.com/search", "", "ordinary results", None),
+    ],
+)
+def test_google_interstitials_are_classified_separately(url, title, body, expected):
+    assert _classify_google_interstitial(url=url, title=title, body=body) == expected
+
+
+def test_google_browser_uses_modern_images_url():
+    assert "udm=2" in google_browser._GOOGLE_SEARCH
+    assert "tbm=isch" not in google_browser._GOOGLE_SEARCH
 
 
 def test_google_browser_pairs_each_clicked_result_with_its_own_source(monkeypatch):
