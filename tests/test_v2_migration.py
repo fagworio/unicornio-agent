@@ -6,6 +6,7 @@ from unicornio_editor.pipeline_v2.migration import (
     repair_known_terminal_states,
     repair_historical_media_human_required,
     repair_media_provider_terminal_states,
+    repair_media_funnel_invariant_state,
     rebase_editorial_retries,
     rebase_media_cooldowns,
 )
@@ -271,3 +272,55 @@ def test_media_provider_repair_does_not_reopen_without_complete_baseline_phash()
         result = repair_media_provider_terminal_states(client, now=now)
     assert result["post_ids"] == []
     assert {"post_id": 114840, "reason": "baseline_phash_unavailable"} in result["skipped"]
+
+
+def test_media_funnel_invariant_repair_is_allowlisted_idempotent_and_preserves_history(tmp_path):
+    now = datetime(2026, 10, 6, 22, 0, tzinfo=timezone.utc)
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_INVALID,
+        retry=RetryInfo(attempts=7, phase_attempts=2, no_progress=1, policy_version=3),
+        relevance_approved=True,
+        media=MediaProgress(required=4),
+    )
+    client = Client([_post(115025, state), _post(114840, state)])
+    journal = tmp_path / "work" / "v2-journal"
+    journal.mkdir(parents=True)
+    (journal / "115025.json").write_text(json.dumps({"detail": "media candidate conservation violated"}))
+
+    preview = repair_media_funnel_invariant_state(client, root=tmp_path, now=now)
+    assert preview["post_ids"] == [115025]
+    assert preview["skipped"] == []
+    assert client.updates == []
+
+    result = repair_media_funnel_invariant_state(client, root=tmp_path, apply=True, now=now)
+    assert result["migrated"] == 1
+    repaired = WorkState.from_dict(json.loads(client.posts[115025]["meta"]["_hermes_work_state"]))
+    assert repaired.blocker is BlockerCode.INTERNAL_ERROR
+    assert repaired.retry.attempts == 7
+    assert repaired.retry.phase_attempts == 2
+    assert repaired.retry.no_progress == 0
+    assert repaired.retry.next_at == "2026-10-06T22:00:00+00:00"
+    assert repaired.media == state.media
+    assert len(client.updates) == 1
+
+    assert repair_media_funnel_invariant_state(client, root=tmp_path, now=now)["candidates"] == 0
+    assert repair_media_funnel_invariant_state(client, root=tmp_path, apply=True, now=now)["migrated"] == 0
+    assert len(client.updates) == 1
+
+
+def test_media_funnel_invariant_repair_never_touches_114840(tmp_path):
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.MEDIA_INVALID,
+        retry=RetryInfo(attempts=7, phase_attempts=2, no_progress=1, policy_version=3),
+        media=MediaProgress(required=4),
+    )
+    client = Client([_post(114840, state)])
+    result = repair_media_funnel_invariant_state(client, root=tmp_path)
+    assert result["candidates"] == 0
+    assert result["post_ids"] == []
+    assert result["skipped"] == []
+    assert client.updates == []

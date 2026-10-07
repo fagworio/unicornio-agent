@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
@@ -19,6 +20,7 @@ HISTORICAL_MEDIA_LOSS_IDS = frozenset({114949, 114984, 114987})
 HISTORICAL_MEDIA_DUPLICATE_ID = 114840
 HISTORICAL_EDITORIAL_QUALITY_IDS = frozenset({115002, 115004})
 HISTORICAL_VISION_PROVIDER_ID = 115025
+HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS = frozenset({115025})
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -595,6 +597,95 @@ def repair_media_provider_terminal_states(
         "candidates": len(candidates),
         "migrated": len(migrated_ids) if apply else 0,
         "post_ids": migrated_ids if apply else candidates,
+        "skipped": skipped,
+        "next_at": current.isoformat(timespec="seconds"),
+    }
+
+
+def repair_media_funnel_invariant_state(
+    client: Any,
+    *,
+    root: Path | str = ".",
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Reopen only the audited 115025 funnel-invariant terminalization."""
+    current = _as_utc(now)
+    post_id = 115025
+    root_path = Path(root)
+    skipped: list[dict[str, Any]] = []
+    try:
+        post = client.get_post(post_id)
+    except Exception:  # noqa: BLE001 - absent allowlisted post is not a candidate
+        return {
+            "command": "v2-repair-media-funnel-invariant",
+            "apply": bool(apply),
+            "policy_version": CURRENT_RETRY_POLICY_VERSION,
+            "allowlisted_post_ids": sorted(HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS),
+            "candidates": 0,
+            "migrated": 0,
+            "post_ids": [],
+            "skipped": [],
+            "next_at": current.isoformat(timespec="seconds"),
+        }
+    state = _read_state(post)
+    signature_ok = (
+        state is not None
+        and state.state is LifecycleState.PENDING
+        and state.phase is Phase.MEDIA
+        and state.blocker is BlockerCode.MEDIA_INVALID
+        and state.retry.policy_version == CURRENT_RETRY_POLICY_VERSION
+        and state.retry.attempts == 7
+        and state.retry.phase_attempts == 2
+        and state.retry.no_progress == 1
+        and state.media.required == 4
+        and state.media.accepted == 0
+    )
+    evidence: list[str] = []
+    journal_path = root_path / "work" / "v2-journal" / f"{post_id}.json"
+    if journal_path.exists():
+        try:
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            evidence.append(str(payload.get("detail") or ""))
+        except (OSError, ValueError):
+            evidence.append("")
+    if signature_ok and evidence and evidence[0] and evidence[0] != "media candidate conservation violated":
+        signature_ok = False
+        skipped.append({"post_id": post_id, "reason": "historical_detail_mismatch"})
+    elif not signature_ok:
+        skipped.append({"post_id": post_id, "reason": "state_signature_mismatch"})
+    prepared = None
+    if signature_ok and state is not None:
+        prepared = replace(
+            state,
+            blocker=BlockerCode.INTERNAL_ERROR,
+            retry=replace(state.retry, no_progress=0, next_at=current.isoformat(timespec="seconds")),
+        )
+    migrated_ids: list[int] = []
+    if apply and prepared is not None:
+        reread = _read_state(client.get_post(post_id))
+        if reread != state:
+            skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
+        else:
+            meta = post.get("meta") if isinstance(post, dict) else None
+            if not isinstance(meta, dict):
+                raise RuntimeError(f"post {post_id} has no editable meta payload")
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                prepared.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            if _read_state(client.get_post(post_id)) != prepared:
+                raise RuntimeError(f"media funnel invariant repair read-back mismatch for post {post_id}")
+            migrated_ids.append(post_id)
+    return {
+        "command": "v2-repair-media-funnel-invariant",
+        "apply": bool(apply),
+        "policy_version": CURRENT_RETRY_POLICY_VERSION,
+        "allowlisted_post_ids": sorted(HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS),
+        "candidates": 1 if prepared is not None else 0,
+        "migrated": len(migrated_ids),
+        "post_ids": migrated_ids if apply else ([post_id] if prepared is not None else []),
         "skipped": skipped,
         "next_at": current.isoformat(timespec="seconds"),
     }
