@@ -45,6 +45,26 @@ Depois de revisar varios dry-runs:
 EDITOR_DRY_RUN=false
 ```
 
+## Admissão do V2 editorial
+
+O cron do V2 só processa posts cuja data original do WordPress seja igual ou
+posterior ao marco fixo configurado em `EDITOR_V2_ADMISSION_AFTER`. O filtro é
+aplicado antes de cooldown e scheduler; portanto um post admitido continua
+normalmente pelos retries de `RELEVANCE`, `EDITORIAL`, `MEDIA` e `VALIDATE`.
+
+Configure o marco com data e fuso explícitos:
+
+```env
+EDITOR_V2_ADMISSION_AFTER=2026-10-06T22:30:00-03:00
+```
+
+Se a variável estiver ausente ou inválida, a fila fecha com segurança e nenhum
+post é selecionado. Posts anteriores permanecem intactos e aparecem no
+relatório como `historical_excluded`; não têm cooldown, tentativas ou estado
+alterados. O relatório do `v2-run` também expõe `pending_total`,
+`admitted_pending`, `eligible_ids`, `cooldown_ids` e
+`historical_excluded_ids` para auditoria.
+
 ## Instalar cron Hermes
 Copie/linke `hermes/SKILL.md` para a pasta de skills do Hermes com o nome `unicorniohater-editor` e rode:
 

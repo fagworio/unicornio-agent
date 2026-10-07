@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -82,6 +83,9 @@ class Config:
     rework_cooldown_minutes: int = 30  # 1a falha +30m; 2a +2h (30m * 4)
     policy_version: int = 2  # versao da politica editorial do READY manifest
     uncertain_second_pass_limit: int = 5  # EDITOR_UNCERTAIN_SECOND_PASS_LIMIT
+    # Marco fixo de admissão do V2 em produção. Ausente/inválido mantém a fila
+    # fechada para evitar que o backlog histórico seja processado por acidente.
+    v2_admission_after: datetime | None = None  # EDITOR_V2_ADMISSION_AFTER
 
     def __repr__(self) -> str:
         return (
@@ -98,7 +102,8 @@ class Config:
             f"publish_enabled={self.publish_enabled!r}, "
             f"publish_limit={self.publish_limit!r}, "
             f"vision_enabled={self.vision_enabled!r}, vision_detail={self.vision_detail!r}, "
-            f"vision_mode={self.vision_mode!r}, vision_model={self.vision_model!r})"
+            f"vision_mode={self.vision_mode!r}, vision_model={self.vision_model!r}, "
+            f"v2_admission_after={self.v2_admission_after!r})"
         )
 
 
@@ -151,6 +156,20 @@ def _choice(name: str, default: str, choices: set[str]) -> str:
     if value not in choices:
         raise ConfigError(f"{name} must be one of {', '.join(sorted(choices))}")
     return value
+
+
+def _datetime_or_none(name: str) -> datetime | None:
+    """Parse a fixed ISO-8601 cutoff; invalid/missing values fail closed."""
+    value = _env(name)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _preco(name: str) -> float:
@@ -293,6 +312,7 @@ def load_config() -> Config:
         rework_cooldown_minutes=_int("EDITOR_REWORK_COOLDOWN_MINUTES", 30, 1, 1440),
         policy_version=_int("EDITOR_POLICY_VERSION", 2, 1, 100),
         uncertain_second_pass_limit=_int("EDITOR_UNCERTAIN_SECOND_PASS_LIMIT", 5, 0, 5),
+        v2_admission_after=_datetime_or_none("EDITOR_V2_ADMISSION_AFTER"),
     )
 
 

@@ -35,6 +35,79 @@ class BufferedStateStore:
         self.state = state
 
 
+def _parse_admission_datetime(value: Any) -> datetime | None:
+    """Return an aware UTC datetime or ``None`` for an unusable value."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _original_post_datetime(context: dict[str, Any]) -> datetime | None:
+    """Read the immutable WordPress publication date used for admission."""
+    post = context.get("post")
+    values = []
+    if isinstance(post, dict):
+        values.extend((post.get("date_gmt"), post.get("date")))
+    values.append(context.get("date"))
+    for value in values:
+        parsed = _parse_admission_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def admit_v2_candidates(
+    snapshot: list[tuple[int, dict[str, Any]]],
+    admission_after: Any,
+) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+    """Admit only posts created at/after the fixed V2 production cutoff.
+
+    The decision deliberately ignores phase and lifecycle state. Once a post
+    crosses the cutoff it remains eligible for its normal V2 retry lifecycle;
+    terminal/cooldown handling is left to the scheduler. Missing configuration
+    or post dates fail closed and are exposed in the audit report.
+    """
+    cutoff = _parse_admission_datetime(admission_after)
+    admitted: list[tuple[int, dict[str, Any]]] = []
+    historical_ids: list[int] = []
+    blocked_ids: list[int] = []
+    missing_date_ids: list[int] = []
+
+    for post_id, context in snapshot:
+        if cutoff is None:
+            blocked_ids.append(post_id)
+            continue
+        post_date = _original_post_datetime(context)
+        if post_date is None:
+            missing_date_ids.append(post_id)
+            continue
+        if post_date >= cutoff:
+            admitted.append((post_id, context))
+        else:
+            historical_ids.append(post_id)
+
+    return admitted, {
+        "admission_configured": cutoff is not None,
+        "admission_after": cutoff.isoformat() if cutoff is not None else None,
+        "historical_excluded": len(historical_ids),
+        "historical_excluded_ids": historical_ids,
+        "admission_blocked": len(blocked_ids),
+        "admission_blocked_ids": blocked_ids,
+        "admission_missing_date": len(missing_date_ids),
+        "admission_missing_date_ids": missing_date_ids,
+    }
+
+
 def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -> None:
     """Persist only the reconciled V2 media state for crash recovery."""
     target = Path(root) / "backups" / str(post_id) / "editorial.partial.json"
@@ -587,8 +660,16 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
         reader = ProductionCandidateReader(client, root)
         snapshot = reader.snapshot(page_size=max(10, limit))
         now = datetime.now(timezone.utc)
+        admitted, admission = admit_v2_candidates(
+            snapshot, getattr(config, "v2_admission_after", None)
+        )
+        admitted_pending = [
+            (post_id, context)
+            for post_id, context in admitted
+            if context["v2_state"].state.value == "pending"
+        ]
         candidates = [
-            (post_id, context) for post_id, context in snapshot
+            (post_id, context) for post_id, context in admitted_pending
             if context["v2_state"].state.value == "pending"
             and _cooldown_expired(context["v2_state"].retry.next_at, now)
         ]
@@ -601,13 +682,10 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
                 return self.states[post_id]
 
         selected = select(candidates, _SnapshotStore(candidates), limit=limit)
-        pending = [
-            context for _post_id, context in snapshot
-            if context["v2_state"].state.value == "pending"
-        ]
+        pending = [context for _post_id, context in admitted_pending]
         eligible_ids = {post_id for post_id, _context in candidates}
         cooldown = [
-            (post_id, context) for post_id, context in snapshot
+            (post_id, context) for post_id, context in admitted_pending
             if context["v2_state"].state.value == "pending"
             and post_id not in eligible_ids
         ]
@@ -617,9 +695,24 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             blockers[blocker] = blockers.get(blocker, 0) + 1
         queue = {
             "scanned": len(snapshot),
+            "pending_total": len(snapshot),
+            "admitted_pending": len(admitted_pending),
+            "admitted_total": len(admitted),
             "pending": len(pending),
+            **admission,
             "eligible": len(candidates),
             "cooldown": len(cooldown),
+            "ready": sum(
+                1 for _post_id, context in admitted
+                if context["v2_state"].state.value == "ready"
+            ),
+            "human_required": sum(
+                1 for _post_id, context in admitted
+                if context["v2_state"].state.value == "human_required"
+            ),
+            "eligible_ids": sorted(eligible_ids),
+            "cooldown_ids": [post_id for post_id, _context in cooldown],
+            "selected_ids": [post_id for post_id, _context in selected],
             "by_blocker": blockers,
             "next_eligible_at": min(
                 (
@@ -631,7 +724,7 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             ),
             "no_progress": {
                 str(post_id): context["v2_state"].retry.no_progress
-                for post_id, context in snapshot
+                for post_id, context in admitted
                 if context["v2_state"].retry.no_progress
             },
             "media": {
@@ -641,7 +734,7 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
                     "missing": context["v2_state"].media.missing,
                     "featured": context["v2_state"].media.featured.status.value,
                 }
-                for post_id, context in snapshot
+                for post_id, context in admitted
                 if context["v2_state"].state.value == "pending"
             },
         }

@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from unicornio_editor.config import ConfigError, load_config
@@ -18,6 +19,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
         self.assertEqual(config.uncertain_second_pass_limit, 5)
+        self.assertIsNone(config.v2_admission_after)
+
+    def test_v2_admission_cutoff_is_normalized_to_utc(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_V2_ADMISSION_AFTER": "2026-10-06T22:30:00-03:00",
+            },
+            clear=True,
+        ):
+            config = load_config()
+        self.assertEqual(
+            config.v2_admission_after,
+            datetime(2026, 10, 7, 1, 30, tzinfo=timezone.utc),
+        )
+
+    def test_invalid_v2_admission_cutoff_fails_closed(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_V2_ADMISSION_AFTER": "not-a-date",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(load_config().v2_admission_after)
 
     def test_uncertain_second_pass_limit_parses_env(self):
         with patch.dict(
