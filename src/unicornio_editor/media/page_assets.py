@@ -7,10 +7,11 @@ assets and their local HTML context.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlparse
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,12 @@ class _AssetParser(HTMLParser):
         self._pending_context: dict[str, str] = {}
         self._script_type = ""
         self._script_text: list[str] = []
+        self._heading = ""
+        self._heading_tag = ""
+        self._heading_text: list[str] = []
+        self._figure_assets: list[int] | None = None
+        self._figcaption = False
+        self._figcaption_text: list[str] = []
 
     def _add(self, raw: str, attr: str, attrs: dict[str, str], **context: str) -> None:
         raw = (raw or "").strip()
@@ -49,12 +56,23 @@ class _AssetParser(HTMLParser):
                 alt=attrs.get("alt", "").strip(),
                 width=attrs.get("width", "").strip(),
                 height=attrs.get("height", "").strip(),
+                heading=self._heading,
                 **context,
             ))
+            if self._figure_assets is not None:
+                self._figure_assets.append(len(self.assets) - 1)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {k.lower(): v or "" for k, v in attrs}
         tag = tag.lower()
+        if tag in {"h1", "h2", "h3", "h4"}:
+            self._heading_tag = tag
+            self._heading_text = []
+        elif tag == "figure":
+            self._figure_assets = []
+        elif tag == "figcaption":
+            self._figcaption = True
+            self._figcaption_text = []
         if tag in {"img", "source"}:
             for key in ("src", "data-src", "data-lazy-src", "data-original", "srcset", "data-srcset"):
                 if attr_map.get(key):
@@ -73,9 +91,32 @@ class _AssetParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._script_type == "application/ld+json":
             self._script_text.append(data)
+        if self._heading_tag:
+            self._heading_text.append(data)
+        if self._figcaption:
+            self._figcaption_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "script" or self._script_type != "application/ld+json":
+        tag = tag.lower()
+        if tag == self._heading_tag:
+            self._heading = " ".join("".join(self._heading_text).split())
+            self._heading_tag = ""
+            self._heading_text = []
+        elif tag == "figcaption" and self._figcaption:
+            caption = " ".join("".join(self._figcaption_text).split())
+            for index in self._figure_assets:
+                asset = self.assets[index]
+                self.assets[index] = PageAsset(
+                    url=asset.url, original_url=asset.original_url,
+                    source_attribute=asset.source_attribute, alt=asset.alt,
+                    width=asset.width, height=asset.height,
+                    figcaption=caption, heading=asset.heading,
+                )
+            self._figcaption = False
+            self._figcaption_text = []
+        elif tag == "figure":
+            self._figure_assets = None
+        if tag != "script" or self._script_type != "application/ld+json":
             return
         try:
             value: Any = json.loads("".join(self._script_text))
@@ -118,4 +159,54 @@ def extract_page_assets(html: str, base_url: str = "") -> list[PageAsset]:
     return out
 
 
-__all__ = ["PageAsset", "extract_page_assets"]
+def rank_page_assets(
+    assets: list[PageAsset],
+    candidate_url: str,
+    *,
+    subject: str = "",
+    limit: int = 10,
+) -> list[PageAsset]:
+    """Rank likely source assets before visual comparison.
+
+    This keeps logos, avatars and related-post thumbnails from consuming the
+    bounded verification budget before the actual candidate asset is tested.
+    Exact URL/filename matches remain deterministic; contextual signals only
+    decide the order of the bounded visual checks.
+    """
+    target = urlparse(unquote(str(candidate_url or "")))
+    target_path = target.path.rstrip("/").casefold()
+    target_name = target_path.rsplit("/", 1)[-1]
+    target_stem = re.sub(r"\.[a-z0-9]{2,5}$", "", target_name, flags=re.I)
+    subject_tokens = {token for token in re.findall(r"[\wÀ-ÿ]+", str(subject).casefold()) if len(token) >= 3}
+    generic_tokens = {"logo", "avatar", "banner", "ad", "advert", "related", "author"}
+
+    def score(asset: PageAsset) -> tuple[int, int, int]:
+        parsed = urlparse(asset.url)
+        path = unquote(parsed.path.rstrip("/")).casefold()
+        name = path.rsplit("/", 1)[-1]
+        stem = re.sub(r"\.[a-z0-9]{2,5}$", "", name, flags=re.I)
+        text = " ".join((asset.alt, asset.figcaption, asset.heading)).casefold()
+        points = 0
+        if path == target_path:
+            points += 1000
+        if name == target_name or (target_stem and stem == target_stem):
+            points += 500
+        if target.hostname and parsed.hostname and target.hostname.casefold() == parsed.hostname.casefold():
+            points += 30
+        if target_stem and target_stem in stem:
+            points += 40
+        points += 25 * sum(1 for token in subject_tokens if token in text)
+        if any(token in generic_tokens for token in re.split(r"[-_ .]+", stem)):
+            points -= 300
+        if asset.source_attribute.startswith(("meta", "jsonld", "link")):
+            points += 10
+        try:
+            area = int(asset.width or 0) * int(asset.height or 0)
+        except ValueError:
+            area = 0
+        return points, area, -len(path)
+
+    return sorted(assets, key=score, reverse=True)[: max(1, int(limit))]
+
+
+__all__ = ["PageAsset", "extract_page_assets", "rank_page_assets"]

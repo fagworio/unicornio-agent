@@ -272,8 +272,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     media_search_web_parser = subparsers.add_parser(
         "media-search-web",
-        help="descobre candidatos de imagem via buscadores (Bing primario, Google/Yandex "
-        "fallback) com filtro de tamanho (somente leitura; index de descoberta, a fonte "
+        help="descobre candidatos via Google Browser, Bing e Yandex "
+        "com fallback fail-safe (somente leitura; index de descoberta, a fonte "
         "e a pagina original)",
     )
     media_search_web_parser.add_argument("termo", type=str, help="termo de busca (ex.: redfall xbox series)")
@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     media_search_web_parser.add_argument(
         "--engine", default="auto",
-        help="buscador: auto (rotaciona Bing->Google->Yandex), bing, google, yandex "
+        help="buscador: auto (Google Browser->Bing/Yandex), google_browser, bing, google, yandex "
         "(default: auto)",
     )
     media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
@@ -1242,6 +1242,39 @@ def _resolve_media_batch(
                     "subject": subject,
                     "require_key_art": False,
                 })
+        # Relatório por post: a contagem deixa explícito em qual gate o funil
+        # perdeu candidatos, sem expor bytes ou o payload completo da imagem.
+        all_examined = aprovados + rejeitados + deferidos
+        verdicts = [str((candidate.get("evidence") or {}).get("verdict") or "") for candidate in all_examined]
+        distinct = {
+            str(candidate.get("phash") or candidate.get("direct_image_url") or "")
+            for candidate in aprovados
+            if candidate.get("phash") or candidate.get("direct_image_url")
+        }
+        append_telemetry(
+            root,
+            "media_search_summary",
+            post_id=post_id,
+            required=needed,
+            found=len(candidates),
+            with_source=sum(bool(str(candidate.get("source_page_url") or "").strip()) for candidate in all_examined),
+            source_verified=sum(bool(candidate.get("valid")) for candidate in all_examined),
+            source_mismatch=verdicts.count("source_mismatch"),
+            missing_source_page=verdicts.count("unresolved_source") + verdicts.count("missing_source_page"),
+            relevance_match=verdicts.count("deterministic_match"),
+            relevance_ambiguous=verdicts.count("ambiguous"),
+            relevance_reject=verdicts.count("reject"),
+            duplicate_frame=verdicts.count("duplicate_frame") + verdicts.count("duplicate_existing_frame"),
+            vision_approved=0,
+            vision_rejected=0,
+            vision_input_unavailable=0,
+            distinct=len(distinct),
+            discovery_accepted=len(reuso) + len(aprovados),
+            downloaded=0,
+            converted=0,
+            uploaded=0,
+            accepted=len(reuso) + len(aprovados),
+        )
         output.append({
             "post_id": post_id,
             "subject": subject,
@@ -1507,6 +1540,7 @@ def _enriquecer_candidatos(
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "already_in_library", "library_media_id", "phash", "capacity_deferred",
+        "local_image_path", "sha256", "mime", "width", "height",
     )
     _DISCOVERY_IDENTITY_FIELDS = (
         "candidate_id", "discovery_image_url", "engine", "query",
@@ -1635,7 +1669,7 @@ def _enriquecer_candidatos(
             return
         if verify:
             veredito = validate_discovered_candidate(
-                cand, cache=cache_paginas, cache_html=cache_html
+                cand, cache=cache_paginas, cache_html=cache_html, subject=subject
             )
             cand["valid"] = bool(veredito["valid"])
             cand["valid_reason"] = str(veredito.get("reason") or "")
@@ -1736,7 +1770,7 @@ def _enriquecer_candidatos(
                     cand,
                     subject,
                     verifier=lambda c: validate_discovered_candidate(
-                        c, cache=cache_paginas, cache_html=cache_html
+                        c, cache=cache_paginas, cache_html=cache_html, subject=subject
                     ),
                 )
             except Exception:  # noqa: BLE001 - resolver é best-effort

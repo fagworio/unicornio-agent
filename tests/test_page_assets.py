@@ -1,6 +1,6 @@
 import unittest
 
-from unicornio_editor.media.page_assets import extract_page_assets
+from unicornio_editor.media.page_assets import extract_page_assets, rank_page_assets
 
 
 class PageAssetTests(unittest.TestCase):
@@ -20,6 +20,25 @@ class PageAssetTests(unittest.TestCase):
         self.assertIn("https://example.test/hero/456?w=1200", urls)
         self.assertIn("https://example.test/jsonld/789", urls)
         self.assertEqual(next(a for a in assets if a.url.endswith("/lazy/123")).alt, "Arte")
+
+    def test_ranks_asset_in_late_page_position_by_context(self):
+        html = """
+        <h1>Jujutsu Kaisen</h1>
+        <img src="https://cdn.test/logo.png" width="1200" height="800">
+        <figure>
+          <img src="https://cdn.test/key-art-other-url.jpg" alt="Jujutsu Kaisen key art">
+          <figcaption>Arte oficial de Jujutsu Kaisen</figcaption>
+        </figure>
+        """
+        assets = extract_page_assets(html, "https://source.test/article")
+        ranked = rank_page_assets(
+            assets,
+            "https://cdn.test/unrelated-cdn-copy.jpg",
+            subject="Jujutsu Kaisen",
+            limit=2,
+        )
+        assert ranked[0].url.endswith("key-art-other-url.jpg")
+        assert ranked[0].figcaption == "Arte oficial de Jujutsu Kaisen"
 
 
 if __name__ == "__main__":

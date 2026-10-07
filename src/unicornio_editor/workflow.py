@@ -8,6 +8,7 @@ from threading import Lock
 import datetime
 import json
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -2022,16 +2023,22 @@ def _execute_media_plan(
                 download_url = (
                     attachment.get("source_url") if attachment is not None else item["direct_image_url"]
                 )
-                source = download_image(
-                    str(download_url),
-                    tmp / f"source_{position}{suffix}",
-                    max_attempts=config.max_source_retries + 1,
-                    url_policy=config.remote_url_policy,
-                    audit=lambda finding: append_telemetry(
-                        root, "remote_url_audit", url=finding.url, reason=finding.reason
-                    ),
-                )
-                _funnel("download", "passed", item, position)
+                browser_path = Path(str(item.get("local_image_path") or ""))
+                if browser_path.is_file() and browser_path.stat().st_size <= 8 * 1024 * 1024:
+                    source = tmp / f"source_{position}{suffix}"
+                    shutil.copyfile(browser_path, source)
+                    _funnel("download", "passed", item, position, "google_browser_local_bytes")
+                else:
+                    source = download_image(
+                        str(download_url),
+                        tmp / f"source_{position}{suffix}",
+                        max_attempts=config.max_source_retries + 1,
+                        url_policy=config.remote_url_policy,
+                        audit=lambda finding: append_telemetry(
+                            root, "remote_url_audit", url=finding.url, reason=finding.reason
+                        ),
+                    )
+                    _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
                 ok, verify_reason = verify_downloaded_against_source(
@@ -2176,6 +2183,36 @@ def _execute_media_plan(
         if result.get("featured"):
             featured_id = result.get("media_id")
             featured_credit = result.get("credit_text")
+    # Resumo por post da etapa que realmente baixa/converte/envia. O resumo de
+    # discovery é emitido separadamente pelo resolver; manter os dois eventos
+    # evita confundir candidato aprovado com mídia efetivamente aceita.
+    accepted_results = [
+        result for result in results
+        if result.get("status") in {"accepted", "ok"} and result.get("media_id")
+    ]
+    append_telemetry(
+        root,
+        "media_post_summary",
+        post_id=post_id,
+        required=len(plan),
+        found=len(plan),
+        with_source=sum(bool(str(item.get("source_page_url") or "").strip()) for item in plan),
+        source_verified=sum(result.get("status") not in {"rejected", "error"} for result in results),
+        source_mismatch=sum("mismatch" in str(result.get("detail") or "").casefold() for result in results),
+        missing_source_page=sum("origem" in str(result.get("detail") or "").casefold() for result in results if result.get("status") == "rejected"),
+        relevance_match=sum(bool((item.get("evidence") or {}).get("verdict") == "deterministic_match") for item in plan),
+        relevance_ambiguous=sum(bool((item.get("evidence") or {}).get("verdict") == "ambiguous") for item in plan),
+        relevance_reject=sum(bool(result.get("status") == "rejected") for result in results),
+        vision_approved=sum(bool(row.get("status") == "passed") for row in preflight_vision.values()),
+        vision_rejected=sum(bool(row.get("status") == "rejected") for row in preflight_vision.values()),
+        vision_input_unavailable=sum(bool(row.get("status") == "unavailable") for row in preflight_vision.values()),
+        duplicate_frame=sum("duplicate" in str(result.get("detail") or "").casefold() for result in results),
+        distinct=len({str(result.get("phash") or result.get("media_id") or "") for result in accepted_results}),
+        downloaded=sum(result.get("status") not in {"error"} for result in results),
+        converted=sum(bool(result.get("width") and result.get("height")) for result in results),
+        uploaded=sum(bool(result.get("media_id")) for result in results),
+        accepted=len(accepted_results),
+    )
     return results, featured_id, featured_credit
 
 

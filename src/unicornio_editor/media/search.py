@@ -16,12 +16,12 @@ transitória e não podem renovar cooldown (era o que deixava o Google fora do a
 para sempre, contado como 18 "falhas" seguidas). O Google permanece na ordem
 (último), é sempre tentado e sempre deixa telemetria do motivo.
 
-``search_web_images`` alterna a engine PRIMÁRIA por hash da query (~50/50
-Bing/Yandex) e usa a outra, depois o Google, quando a capacidade não é atendida:
+``search_web_images`` tenta primeiro o Google via navegador real. Se o browser
+estiver indisponível, usa Bing e depois Yandex em ordem fixa:
 
-  1. Bing Images  or  Yandex Images  (primary, alternates by query)
-  2. the other of the two (fallback)
-  3. Google Images (last resort - index only, never the source)
+  1. Google Browser (discovery + página exibida, nunca a fonte)
+  2. Bing Images or Yandex Images (fallback, alternates by query)
+  3. the other of the two
 
 IMPORTANT policy: the search engine is only a DISCOVERY INDEX, never the source.
 The direct_image_url returned is the real image URL found in the result
@@ -745,15 +745,21 @@ def search_web_images(
     if not query:
         return []
     if engine == "auto":
-        first = _primary_engine(query)
-        second = "yandex" if first == "bing" else "bing"
-        order = [first, second, "google"]
+        # Google browser is attempted first. When Playwright/Chromium is not
+        # installed or Google blocks the session, the existing deterministic
+        # Bing/Yandex fallback remains active.
+        # Keep the legacy HTML parser as a last-resort compatibility path for
+        # environments where browser installation is still rolling out.
+        order = ["google_browser", "bing", "yandex", "google"]
     else:
         order = [engine]
+    from .google_browser import search_google_browser_images
+
     _fns = {
         "bing": search_bing_images,
         "yandex": search_yandex_images,
         "google": search_google_images,
+        "google_browser": search_google_browser_images,
     }
     alvo = max(1, int(limit or 1))
     acumulado: list[dict[str, Any]] = []

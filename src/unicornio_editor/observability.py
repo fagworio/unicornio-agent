@@ -433,6 +433,8 @@ def read_telemetry_summary(
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
     media_by_domain: dict[str, dict[str, int]] = {}
+    media_search_summaries: list[dict[str, Any]] = []
+    media_post_summaries: list[dict[str, Any]] = []
     # Economia de midia (unidade: por BUSCA e por READY). `deferred` e contado
     # SEPARADO de `rejected`: candidato dispensado por capacidade ja atendida
     # nao foi investigado, entao nao e rejeicao — somar os dois faria a busca
@@ -608,6 +610,30 @@ def read_telemetry_summary(
                                                             "examined"} else campo] += valor
                 if isinstance(record.get("engines_queried"), int) and record["engines_queried"] > 0:
                     midia["searches_with_web"] += 1
+            if event == "media_search_summary":
+                media_search_summaries.append({
+                    key: record[key]
+                    for key in (
+                        "post_id", "required", "found", "with_source", "source_verified",
+                        "source_mismatch", "missing_source_page", "relevance_match",
+                        "relevance_ambiguous", "relevance_reject", "vision_approved",
+                        "vision_rejected", "vision_input_unavailable", "duplicate_frame",
+                        "distinct", "downloaded", "converted", "uploaded", "accepted",
+                    )
+                    if key in record
+                })
+            if event == "media_post_summary":
+                media_post_summaries.append({
+                    key: record[key]
+                    for key in (
+                        "post_id", "required", "found", "with_source", "source_verified",
+                        "source_mismatch", "missing_source_page", "relevance_match",
+                        "relevance_ambiguous", "relevance_reject", "vision_approved",
+                        "vision_rejected", "vision_input_unavailable", "duplicate_frame",
+                        "distinct", "downloaded", "converted", "uploaded", "accepted",
+                    )
+                    if key in record
+                })
             if event == "vision_api_request":
                 # UMA requisição HTTP = UM evento (low e high contam): é a
                 # unidade que reconcilia com o custo de visão do provedor.
@@ -777,6 +803,8 @@ def read_telemetry_summary(
         },
         "media_funnel": media_funnel,
         "media_by_domain": media_by_domain,
+        "media_search_summary": media_search_summaries,
+        "media_post_summary": media_post_summaries,
         "media_economy": {
             **midia,
             "local_reuse_rate": (

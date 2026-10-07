@@ -77,6 +77,28 @@ def _slug_do_filename(image_url: str) -> str:
     return " ".join(re.sub(r"[-_+.]+", " ", nome).split())
 
 
+_GENERIC_FILENAME_TOKENS = frozenset({
+    "image", "img", "photo", "picture", "pic", "large", "small", "medium",
+    "thumb", "thumbnail", "default", "original", "optimized", "resized",
+    "copy", "final", "new", "hero", "banner", "avatar", "logo", "download",
+})
+
+
+def significant_filename(image_url: str) -> str:
+    """Return meaningful filename words, ignoring CDN boilerplate/hash noise."""
+    slug = _slug_do_filename(image_url)
+    tokens = []
+    for token in slug.split():
+        if token in _GENERIC_FILENAME_TOKENS:
+            continue
+        if token.isdigit() or (len(token) >= 8 and re.fullmatch(r"[a-f0-9]+", token)):
+            continue
+        if len(token) < 3:
+            continue
+        tokens.append(token)
+    return " ".join(tokens)
+
+
 def _host(image_url: str) -> str:
     try:
         return (urlparse(str(image_url or "")).hostname or "").lower()
@@ -122,17 +144,31 @@ def _buscador_padrao(query: str) -> list[dict[str, Any]]:
 
 
 def _queries(candidate: dict[str, Any], subject: str, extra: str = "") -> list[str]:
-    """Queries de localização, da mais forte para a mais fraca."""
+    """Queries de localização em cascata, da mais forte para a mais fraca."""
     imagem = str(candidate.get("direct_image_url") or "")
     queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        value = " ".join(str(value or "").split()).strip()
+        if value and value.casefold() not in seen:
+            seen.add(value.casefold())
+            queries.append(value)
+
     for dominio in dominios_oficiais(subject, extra=extra)[:3]:
-        queries.append(f"site:{dominio} \"{subject}\"")
-    slug = _slug_do_filename(imagem)
-    if slug and len(slug) >= 8:
-        queries.append(f"\"{slug}\"")
-        queries.append(f"{subject} {slug.split()[0]}")
-    if not queries and subject:
-        queries.append(f"{subject} key art")
+        add(f"site:{dominio} \"{subject}\"")
+    host = _host(imagem)
+    if host.startswith("www."):
+        host = host[4:]
+    if host:
+        add(f"site:{host} \"{subject}\"")
+    slug = significant_filename(imagem)
+    if slug:
+        add(f'"{slug}"')
+        add(f'"{subject}" "{slug}"')
+    if subject:
+        for suffix in ("key art", "official image", "screenshot"):
+            add(f"{subject} {suffix}")
     return queries
 
 
@@ -238,7 +274,7 @@ def resolve_candidate_source(
     return resultado
 
 
-__all__ = ["resolve_candidate_source", "resolve_batch"]
+__all__ = ["resolve_candidate_source", "resolve_batch", "significant_filename"]
 
 
 def resolve_batch(

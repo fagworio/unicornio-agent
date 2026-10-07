@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from .url_safety import inspect_remote_url
-from .page_assets import extract_page_assets
+from .page_assets import extract_page_assets, rank_page_assets
 
 _PAGE_MAX_BYTES = 2 * 1024 * 1024
 _IMG_MAX_BYTES = 8 * 1024 * 1024
@@ -145,6 +145,7 @@ def validate_discovered_candidate(
     *,
     cache: dict[str, list[str] | None] | None = None,
     cache_html: dict[str, str] | None = None,
+    subject: str = "",
     audit=None,
 ) -> dict[str, Any]:
     """Valida um candidato ANTES do media_plan (Fase 5).
@@ -219,10 +220,31 @@ def validate_discovered_candidate(
     # asset listado pela página. A origem continua sendo obrigatória: baixamos o
     # candidato e os assets listados e promovemos somente o correspondente
     # visual conservador para a URL canônica da página.
+    page_html = (cache_html or {}).get(page_url, "")
+    if page_html:
+        ranked_assets = rank_page_assets(
+            extract_page_assets(page_html, page_url), image_url, subject=subject, limit=10
+        )
+        ranked_urls = [asset.url for asset in ranked_assets]
+        # Keep any parser/HTML representation not understood by PageAsset in
+        # the bounded list, without reverting to the old first-six policy.
+        ranked_urls.extend(url for url in listadas if url not in ranked_urls)
+    else:
+        ranked_urls = list(listadas)
     try:
-        candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        candidate_bytes: bytes | None = None
+        local_path = str(candidate.get("local_image_path") or "")
+        if local_path:
+            try:
+                path = Path(local_path)
+                if path.is_file() and path.stat().st_size <= _IMG_MAX_BYTES:
+                    candidate_bytes = path.read_bytes()
+            except OSError:
+                candidate_bytes = None
+        if candidate_bytes is None:
+            candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if candidate_bytes is not None:
-            for listed_url in listadas[:_MAX_DOWNLOADS]:
+            for listed_url in ranked_urls[: max(_MAX_DOWNLOADS, 10)]:
                 asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit)
                 if asset_bytes is None:
                     continue

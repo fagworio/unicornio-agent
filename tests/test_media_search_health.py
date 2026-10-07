@@ -206,8 +206,9 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
             resultado = search.search_web_images("qualquer coisa", limit=3, reports=relatorios)
 
         self.assertEqual(resultado, [])
-        # Tentou as três engines — o Google não foi retirado da ordem.
-        self.assertEqual(set(relatorios), {"bing", "yandex", "google"})
+        # Tentou o Google Browser e as três rotas HTTP; o Google não foi
+        # retirado da ordem quando o browser está indisponível.
+        self.assertEqual(set(relatorios), {"google_browser", "bing", "yandex", "google"})
         self.assertEqual(relatorios["google"]["failure_kind"], "js_required")
         # O motivo permanente não virou cooldown...
         self.assertTrue(search.engine_disponivel("google"))
@@ -264,16 +265,18 @@ class TelemetriaPorEngineTests(unittest.TestCase):
 
         self.assertEqual(len(linhas), 1)
         self.assertIn("engine_reports", linhas[0])
-        # Com limit=1 a parada por capacidade encerra na engine primária (a ordem
-        # alterna por hash da query), mas o relatório dela está lá.
+        # Com limit=1 a parada por capacidade encerra na engine primária depois
+        # do diagnóstico fail-safe do Google Browser.
         primeira = linhas[0]["engine_reports"]
-        self.assertEqual(len(primeira), 1)
-        engine_primaria = next(iter(primeira))
+        self.assertEqual(len(primeira), 2)
+        self.assertIn("google_browser", primeira)
+        engine_primaria = next(engine for engine in primeira if engine != "google_browser")
         self.assertIn(engine_primaria, {"bing", "yandex"})
         self.assertEqual(primeira[engine_primaria]["failure_kind"], "ok")
 
         self.assertEqual(
-            set(linhas_duas[0]["engine_reports"]), {"bing", "yandex", "google"}
+            set(linhas_duas[0]["engine_reports"]),
+            {"google_browser", "bing", "yandex", "google"},
         )
         self.assertEqual(
             linhas_duas[0]["engine_reports"]["bing"]["objects_parsed"], 1

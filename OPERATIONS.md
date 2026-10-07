@@ -65,6 +65,31 @@ alterados. O relatório do `v2-run` também expõe `pending_total`,
 `admitted_pending`, `eligible_ids`, `cooldown_ids` e
 `historical_excluded_ids` para auditoria.
 
+## Discovery de mídia via navegador
+
+O `media-search-web --engine auto` tenta Google Images em Chromium real antes de
+Bing/Yandex. O Google é somente índice: `source_page_url` continua obrigatório
+e todos os gates determinísticos permanecem ativos. Para instalar o provider em
+um host de produção:
+
+```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
+Se Playwright/Chromium estiver ausente, houver CAPTCHA, consentimento ou
+mudança de DOM, o provider registra `google_browser_unavailable` e o fallback
+continua sem tentar contornar o bloqueio. Para um POC somente leitura:
+
+```bash
+EDITOR_GOOGLE_BROWSER_ENABLED=true \
+unicornio-editor media-search-web "SUBJECT REAL" --engine=google_browser --full
+```
+
+Os bytes carregados pelo browser são mantidos localmente durante o fluxo e
+reutilizados no download quando disponíveis; a telemetria registra apenas
+metadados e `sha256`, nunca Base64.
+
 ## Instalar cron Hermes
 Copie/linke `hermes/SKILL.md` para a pasta de skills do Hermes com o nome `unicorniohater-editor` e rode:
 
