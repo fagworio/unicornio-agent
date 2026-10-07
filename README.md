@@ -144,15 +144,16 @@ cd /opt/unicorniohater-editorial-agent
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[browser]'
-python -m playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH="$PWD/.playwright-browsers" \
+  python -m playwright install chromium
 cp .env.example .env
 ```
 
 O extra `browser` instala o provider Google Browser. O Chromium do Playwright
-e instalado separadamente no cache do usuario que executa o agente; em
-producao, use o mesmo usuario do Hermes/cron. Se o runtime reclamar de
-bibliotecas do sistema, execute `python -m playwright install-deps chromium`
-com privilegios de root.
+fica em `.playwright-browsers/` dentro do projeto e o provider usa esse
+diretorio automaticamente, sem depender do cache do usuario que executa o
+Hermes/cron. Se o runtime reclamar de bibliotecas do sistema, execute
+`python -m playwright install-deps chromium` com privilegios de root.
 
 Preencha `.env` com um usuario WordPress de automacao e Application Password.
 

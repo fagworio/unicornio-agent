@@ -23,6 +23,7 @@ _BROWSER_LOCK = Lock()
 _TEMP_PATHS: set[str] = set()
 _TEMP_PATHS_LOCK = Lock()
 _BROWSER_DISABLED = False
+_PROJECT_BROWSER_PATH = Path(__file__).resolve().parents[3] / ".playwright-browsers"
 
 
 def _is_external_http(value: str) -> bool:
@@ -255,6 +256,9 @@ def _search_google_browser_images_locked(
     remote_url_policy: str,
     audit: Callable[[Any], None] | None,
 ) -> list[dict[str, Any]]:
+    # Keep the browser alongside the agent instead of depending on a
+    # user-specific ~/.cache/ms-playwright path used by cron or Hermes.
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_PROJECT_BROWSER_PATH))
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001 - optional dependency
