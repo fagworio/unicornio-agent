@@ -21,7 +21,7 @@ from .batch import (
     load_vision_batch,
     prepare_batch,
 )
-from .checklist import required_image_count, run_pre_publish_checklist
+from .checklist import required_image_count, required_image_count_for_content, run_pre_publish_checklist
 from .config import ConfigError, _carregar_env_do_projeto, load_config
 from .editorial_schema import validate_editorial
 from .editorial_provider import EditorialProviderError
@@ -572,6 +572,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair_media_provider_parser.add_argument("--root", type=Path, default=Path("."))
     repair_media_provider_parser.add_argument("--apply", action="store_true")
+
+    audit_human_required_parser = subparsers.add_parser(
+        "v2-audit-human-required",
+        help="classifica um inventario local de HUMAN_REQUIRED sem alterar estados",
+    )
+    audit_human_required_parser.add_argument(
+        "--inventory",
+        type=Path,
+        required=True,
+        help="JSON local: lista de posts ou objeto com a chave posts",
+    )
+
+    cohort_report_parser = subparsers.add_parser(
+        "v2-cohort-report",
+        help="consolida coorte congelada e estados V2 de um inventario local",
+    )
+    cohort_report_parser.add_argument("--cohort", type=Path, required=True)
+    cohort_report_parser.add_argument("--inventory", type=Path, required=True)
+    cohort_report_parser.add_argument(
+        "--allowlist",
+        default="",
+        help="IDs explicitamente allowlisted, separados por virgula",
+    )
 
     repair_media_funnel_parser = subparsers.add_parser(
         "v2-repair-media-funnel-invariant",
@@ -2056,6 +2079,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "v2-audit-human-required":
+            from .pipeline_v2.audit import audit_human_required_inventory
+
+            result = audit_human_required_inventory(args.inventory)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "v2-cohort-report":
+            from .pipeline_v2.audit import historical_cohort_report
+
+            allowlist = tuple(
+                int(value.strip())
+                for value in str(args.allowlist or "").split(",")
+                if value.strip()
+            )
+            result = historical_cohort_report(
+                args.cohort,
+                args.inventory,
+                allowlist=allowlist,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):
@@ -3504,12 +3548,10 @@ def _compact_media_validate(
     quanto falta. O relatório completo fica em ``work/media-validate/*.json``
     (e em ``--full``).
     """
-    from .content_quality import word_count
-
     plano = editorial.get("media_plan") or []
     html = str(editorial.get("cleaned_html") or "")
     titulo = post_title or str((editorial.get("seo") or {}).get("title") or "")
-    required = required_image_count(word_count(html), title=titulo, content=html)
+    required = required_image_count_for_content(html, title=titulo)
     rejeitados_idx = {
         int(row.get("index"))
         for row in (result.get("rejected") or [])

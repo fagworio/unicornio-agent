@@ -89,6 +89,7 @@ class Config:
     # Explicit historical backfill allowlist. It bypasses only the date cutoff;
     # lifecycle, cooldown, and scheduler gates still apply.
     v2_admission_allowlist: tuple[int, ...] = ()  # EDITOR_V2_ADMISSION_ALLOWLIST
+    v2_historical_cohort_file: Path | None = None  # EDITOR_V2_HISTORICAL_COHORT_FILE
 
     def __repr__(self) -> str:
         return (
@@ -249,6 +250,7 @@ def _carregar_env_do_projeto() -> None:
 
 def load_config() -> Config:
     content_source = _env("CONTENT_SOURCE", "mock").lower()
+    historical_cohort_file = _env("EDITOR_V2_HISTORICAL_COHORT_FILE")
     if content_source not in {"mock", "wordpress"}:
         raise ConfigError("CONTENT_SOURCE must be mock or wordpress")
 
@@ -317,6 +319,7 @@ def load_config() -> Config:
         uncertain_second_pass_limit=_int("EDITOR_UNCERTAIN_SECOND_PASS_LIMIT", 5, 0, 5),
         v2_admission_after=_datetime_or_none("EDITOR_V2_ADMISSION_AFTER"),
         v2_admission_allowlist=_post_id_allowlist("EDITOR_V2_ADMISSION_ALLOWLIST"),
+        v2_historical_cohort_file=Path(historical_cohort_file) if historical_cohort_file else None,
     )
 
 

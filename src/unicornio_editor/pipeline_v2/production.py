@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..checklist import required_image_count
-from ..content_quality import word_count
+# Keep the legacy symbol available to integrations that patch this module;
+# production execution uses the canonical HTML-aware helper below.
+from ..checklist import required_image_count, required_image_count_for_content
 from .legacy import LegacyStateLoader
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
@@ -104,11 +105,7 @@ class ProductionCandidateReader:
         title = str(context.get("title") or "")
         editorial = context.get("editorial") or context.get("draft") or {}
         html = str(editorial.get("cleaned_html") or context.get("content") or "")
-        current_required = required_image_count(
-            word_count(html),
-            title=title,
-            content=html,
-        )
+        current_required = required_image_count_for_content(html, title=title)
         current_media = state.media
         if current_media.required != current_required:
             current_media = MediaProgress(

@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from ..checklist import required_image_count
+# Keep the legacy symbol imported: existing integrations/tests patch this
+# module-level name while the production path uses the canonical HTML helper.
+from ..checklist import required_image_count, required_image_count_for_content
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import editorial_subjects, item_query, post_subjects
@@ -23,6 +25,22 @@ from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
 from .scheduler import _cooldown_expired, select
+
+
+_DEFAULT_REQUIRED_IMAGE_COUNT = required_image_count
+
+
+def _required_image_count_for_editorial(content: str, *, title: str = "") -> int:
+    """Use the canonical helper while honoring legacy test integrations.
+
+    A few callers patch ``runtime.required_image_count`` to model a fixed
+    editorial quota.  Keep that seam working; normal production execution
+    goes through the HTML-aware canonical helper.
+    """
+    body = str(content or "")
+    if required_image_count is not _DEFAULT_REQUIRED_IMAGE_COUNT:
+        return required_image_count(word_count(body), title=title, content=body)
+    return required_image_count_for_content(body, title=title)
 
 
 class BufferedStateStore:
@@ -67,10 +85,56 @@ def _original_post_datetime(context: dict[str, Any]) -> datetime | None:
     return None
 
 
+def load_historical_cohort(path: str | Path | None) -> tuple[dict[int, dict[str, Any]], str | None]:
+    """Load an optional frozen admission cohort without touching WordPress.
+
+    Schema v1 is intentionally small and auditable::
+
+        {"version": 1, "posts": [{"post_id": 123,
+          "original_datetime": "...", "classification": "historical"}]}
+
+    A malformed configured manifest is an admission error, not a reason to
+    fall back to mutable WordPress dates.
+    """
+    if not path:
+        return {}, None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {}, f"historical cohort could not be read: {exc}"
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return {}, "historical cohort schema version must be 1"
+    rows = payload.get("posts")
+    if not isinstance(rows, list):
+        return {}, "historical cohort posts must be a list"
+    result: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return {}, "historical cohort contains a non-object post"
+        try:
+            post_id = int(row["post_id"])
+        except (KeyError, TypeError, ValueError):
+            return {}, "historical cohort post_id must be an integer"
+        if post_id < 1 or post_id in result:
+            return {}, "historical cohort has duplicate or invalid post_id"
+        original = _parse_admission_datetime(row.get("original_datetime"))
+        classification = str(row.get("classification") or "").strip().lower()
+        if original is None or classification not in {"historical", "admitted"}:
+            return {}, "historical cohort row has invalid date or classification"
+        result[post_id] = {
+            "original_datetime": original,
+            "classification": classification,
+        }
+    return result, None
+
+
 def admit_v2_candidates(
     snapshot: list[tuple[int, dict[str, Any]]],
     admission_after: Any,
     admission_allowlist: tuple[int, ...] = (),
+    historical_cohort: dict[int, dict[str, Any]] | None = None,
+    cohort_error: str | None = None,
+    cohort_configured: bool | None = None,
 ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
     """Admit only posts created at/after the fixed V2 production cutoff.
 
@@ -86,22 +150,39 @@ def admit_v2_candidates(
     allowlisted_ids: list[int] = []
     blocked_ids: list[int] = []
     missing_date_ids: list[int] = []
+    admission_reasons: list[dict[str, Any]] = []
 
     for post_id, context in snapshot:
-        if cutoff is None:
-            blocked_ids.append(post_id)
-            continue
-        post_date = _original_post_datetime(context)
         if post_id in allowlist:
             admitted.append((post_id, context))
             allowlisted_ids.append(post_id)
+            admission_reasons.append({"post_id": post_id, "decision": "admitted", "reason": "explicit_allowlist"})
+            continue
+        if cohort_error:
+            blocked_ids.append(post_id)
+            admission_reasons.append({"post_id": post_id, "decision": "blocked", "reason": "invalid_historical_cohort"})
+            continue
+        if cutoff is None:
+            blocked_ids.append(post_id)
+            admission_reasons.append({"post_id": post_id, "decision": "blocked", "reason": "cutoff_missing"})
+            continue
+        frozen = (historical_cohort or {}).get(post_id)
+        post_date = frozen.get("original_datetime") if frozen else _original_post_datetime(context)
+        if frozen and frozen.get("classification") == "historical":
+            historical_ids.append(post_id)
+            admission_reasons.append({"post_id": post_id, "decision": "excluded", "reason": "frozen_historical_cohort"})
         elif post_date is None:
             missing_date_ids.append(post_id)
+            admission_reasons.append({"post_id": post_id, "decision": "blocked", "reason": "date_missing"})
             continue
         elif post_date >= cutoff:
             admitted.append((post_id, context))
+            reason = "frozen_cohort" if frozen else "wordpress_date"
+            admission_reasons.append({"post_id": post_id, "decision": "admitted", "reason": reason})
         else:
             historical_ids.append(post_id)
+            reason = "frozen_historical_cohort" if frozen else "wordpress_date_before_cutoff"
+            admission_reasons.append({"post_id": post_id, "decision": "excluded", "reason": reason})
 
     return admitted, {
         "admission_configured": cutoff is not None,
@@ -114,6 +195,13 @@ def admit_v2_candidates(
         "admission_blocked_ids": blocked_ids,
         "admission_missing_date": len(missing_date_ids),
         "admission_missing_date_ids": missing_date_ids,
+        "admission_reasons": admission_reasons,
+        "historical_cohort_configured": (
+            bool(historical_cohort) or bool(cohort_error)
+            if cohort_configured is None
+            else bool(cohort_configured)
+        ),
+        "historical_cohort_error": cohort_error,
     }
 
 
@@ -201,7 +289,7 @@ class ProductionMediaResolver:
         html = str(editorial.get("cleaned_html") or "")
         title = str(context.get("title") or "")
         focus_keyword = str((editorial.get("seo") or {}).get("focus_keyword") or "")
-        total_required = required_image_count(word_count(html), title=title, content=html)
+        total_required = _required_image_count_for_editorial(html, title=title)
         inline_needed = max(0, total_required - previous.accepted)
         featured = self._recover_existing_featured(context, editorial, previous)
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
@@ -974,10 +1062,15 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
         reader = ProductionCandidateReader(client, root)
         snapshot = reader.snapshot(page_size=max(10, limit))
         now = datetime.now(timezone.utc)
+        cohort_path = getattr(config, "v2_historical_cohort_file", None)
+        historical_cohort, cohort_error = load_historical_cohort(cohort_path)
         admitted, admission = admit_v2_candidates(
             snapshot,
             getattr(config, "v2_admission_after", None),
             getattr(config, "v2_admission_allowlist", ()),
+            historical_cohort=historical_cohort,
+            cohort_error=cohort_error,
+            cohort_configured=bool(cohort_path),
         )
         admitted_pending = [
             (post_id, context)

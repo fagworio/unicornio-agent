@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -10,7 +11,7 @@ from unicornio_editor.pipeline_v2.model import (
     RetryInfo,
     WorkState,
 )
-from unicornio_editor.pipeline_v2.runtime import admit_v2_candidates
+from unicornio_editor.pipeline_v2.runtime import admit_v2_candidates, load_historical_cohort
 from unicornio_editor.pipeline_v2.scheduler import select
 
 
@@ -78,6 +79,65 @@ def test_historical_media_is_excluded_even_if_cooldown_expired():
 
     assert admitted == []
     assert audit["historical_excluded_ids"] == [11]
+
+
+def test_frozen_historical_cohort_wins_over_mutated_wordpress_date(tmp_path):
+    manifest = tmp_path / "historical-cohort.json"
+    manifest.write_text(
+        json.dumps({
+            "version": 1,
+            "posts": [{
+                "post_id": 115025,
+                "original_datetime": "2026-10-07T01:29:59+00:00",
+                "classification": "historical",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    cohort, error = load_historical_cohort(manifest)
+    assert error is None
+    admitted, audit = admit_v2_candidates(
+        [candidate(115025, "2026-10-08T18:00:00+00:00")],
+        CUTOFF,
+        historical_cohort=cohort,
+    )
+    assert admitted == []
+    assert audit["historical_excluded_ids"] == [115025]
+    assert audit["admission_reasons"] == [{
+        "post_id": 115025,
+        "decision": "excluded",
+        "reason": "frozen_historical_cohort",
+    }]
+
+
+def test_invalid_frozen_cohort_fails_closed(tmp_path):
+    manifest = tmp_path / "invalid-cohort.json"
+    manifest.write_text("{not-json", encoding="utf-8")
+    cohort, error = load_historical_cohort(manifest)
+    assert cohort == {}
+    assert error
+    admitted, audit = admit_v2_candidates(
+        [candidate(12, "2026-10-08T18:00:00+00:00")],
+        CUTOFF,
+        cohort_error=error,
+    )
+    assert admitted == []
+    assert audit["admission_reasons"][0]["reason"] == "invalid_historical_cohort"
+
+
+def test_allowlist_remains_explicit_escape_hatch_when_cohort_is_invalid():
+    admitted, audit = admit_v2_candidates(
+        [candidate(12, "2026-10-08T18:00:00+00:00")],
+        CUTOFF,
+        admission_allowlist=(12,),
+        cohort_error="invalid historical cohort",
+    )
+    assert [post_id for post_id, _context in admitted] == [12]
+    assert audit["admission_reasons"] == [{
+        "post_id": 12,
+        "decision": "admitted",
+        "reason": "explicit_allowlist",
+    }]
 
 
 def test_explicit_historical_allowlist_bypasses_only_date_cutoff():

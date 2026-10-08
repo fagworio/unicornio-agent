@@ -62,6 +62,17 @@ def required_image_count(words: int, *, title: str = "", content: str = "") -> i
     return _required_image_count(words, title=title, content=content)
 
 
+def required_image_count_for_content(content: str, *, title: str = "") -> int:
+    """Canonical image minimum for one editorial body.
+
+    Callers that possess HTML should use this helper instead of independently
+    counting words. Auxiliary blocks added later by composition therefore do
+    not silently move the article into another 2/4/6 band.
+    """
+    body = str(content or "")
+    return required_image_count(word_count(body), title=title, content=body)
+
+
 def _required_image_count(words: int, *, title: str, content: str) -> int:
     """Minimum body images for the post.
 

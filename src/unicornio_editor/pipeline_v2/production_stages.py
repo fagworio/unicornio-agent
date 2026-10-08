@@ -12,8 +12,10 @@ from typing import Any, Callable
 
 from ..batch import load_editorial_batch, prepare_batch
 from ..checklist import run_pre_publish_checklist
-from ..checklist import required_image_count
-from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes, word_count
+# Preserve the module-level seam used by older integrations while all stage
+# calculations use the canonical HTML-aware helper.
+from ..checklist import required_image_count, required_image_count_for_content
+from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..list_quality import detect_list_format
@@ -208,10 +210,9 @@ class ProductionMediaStage:
 
     def __call__(self, context: dict[str, Any], state: Any, editorial: dict[str, Any]) -> MediaProgress:
         previous = state.media
-        required = required_image_count(
-            word_count(str(editorial.get("cleaned_html") or "")),
+        required = required_image_count_for_content(
+            str(editorial.get("cleaned_html") or ""),
             title=str(context.get("title") or ""),
-            content=str(editorial.get("cleaned_html") or ""),
         )
         accepted = {item.media_id: item for item in previous.inline}
         featured = previous.featured

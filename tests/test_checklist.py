@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from unicornio_editor.checklist import required_image_count, run_pre_publish_checklist
+from unicornio_editor.checklist import required_image_count, required_image_count_for_content, run_pre_publish_checklist
 from unicornio_editor.config import Config
 from unicornio_editor.media.vision_gate import VisionGateError
 
@@ -65,6 +65,20 @@ class ChecklistTests(unittest.TestCase):
             for index in range(1, 6)
         )
         self.assertEqual(required_image_count(1200, title="Top 5 jogos", content=content), 6)
+
+    def test_required_image_count_for_content_is_the_canonical_body_contract(self):
+        def body(words):
+            return "<p>" + " ".join("palavra" for _ in range(words)) + "</p>"
+
+        self.assertEqual(required_image_count_for_content(body(599)), 2)
+        self.assertEqual(required_image_count_for_content(body(600)), 2)
+        self.assertEqual(required_image_count_for_content(body(601)), 4)
+        self.assertEqual(required_image_count_for_content(body(1000)), 4)
+        self.assertEqual(required_image_count_for_content(body(1001)), 6)
+
+    def test_required_image_count_for_content_preserves_listicle_floor(self):
+        content = "<h2>1. Jogo A</h2><h2>2. Jogo B</h2><h2>3. Jogo C</h2>"
+        self.assertEqual(required_image_count_for_content(content, title="Top jogos"), 3)
 
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
