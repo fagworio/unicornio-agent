@@ -30,7 +30,7 @@ from typing import Any
 from .page_assets import extract_page_assets
 from urllib.parse import unquote, urlparse
 
-from .relevance import extract_entities, normalize
+from .relevance import CONCEPT_WORDS, STOPWORDS, extract_entities, normalize
 
 _H2_RE = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.IGNORECASE | re.DOTALL)
 _TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -119,6 +119,76 @@ def post_subjects(
             return []
         principal = max(sorted(entidades), key=len)
     return [{"item": None, "heading": principal, "subject": principal}]
+
+
+def editorial_subjects(
+    title: str = "",
+    content_html: str = "",
+    *,
+    focus_keyword: str = "",
+    game_name: str | None = None,
+    limit: int = 8,
+) -> list[str]:
+    """Return a small ordered set of concrete subjects for acquisition.
+
+    A single subject is too brittle for an article that names a work, platform
+    and product in the same headline.  This helper deliberately reuses the
+    deterministic entity extraction already used by the relevance gate; it
+    does not invent subjects with an LLM and it keeps the first, most specific
+    post subject as the primary value for legacy consumers.
+    """
+    values: list[str] = []
+    generic_terms = {
+        "adiciona", "adicionam", "atualizacao", "atualizacoes", "emulacao",
+        "emulador", "emuladores", "emulation", "emulator", "suporte", "supports",
+        "recebe", "receber", "novo", "nova", "noticia", "software", "hardware",
+    }
+
+    def add(value: str) -> None:
+        normalized = " ".join(str(value or "").split()).strip()
+        if not normalized:
+            return
+        words = [word for word in normalized.split() if normalize(word) not in generic_terms]
+        if not words:
+            return
+        normalized = " ".join(words)
+        key = normalize(normalized)
+        if key in _GENERIC_PLATFORM_SUBJECTS:
+            return
+        tokens = set(re.findall(r"[a-z0-9]+", key))
+        meaningful = tokens - CONCEPT_WORDS - STOPWORDS - generic_terms
+        if not meaningful:
+            return
+        if key not in {normalize(item) for item in values}:
+            values.append(normalized)
+
+    for row in post_subjects(
+        title=title,
+        content_html=content_html,
+        focus_keyword=focus_keyword,
+        game_name=game_name,
+    ):
+        add(str(row.get("subject") or ""))
+    add(str(game_name or ""))
+    add(str(focus_keyword or ""))
+
+    # Proper-name groups are useful acquisition terms even when the title also
+    # contains generic editorial wording such as "recebe suporte".
+    for group in _NOME_PROPRIO_RE.findall(_TAG_RE.sub(" ", str(title or ""))):
+        add(group)
+
+    entities = extract_entities(
+        title=title,
+        content_html=content_html,
+        focus_keyword=focus_keyword,
+        game_name=game_name,
+    )
+    for entity in sorted(entities, key=lambda item: (-len(item.split()), -len(item))):
+        # The complete headline is useful as a query in other paths, but is
+        # too broad to be a source-image identity. Prefer its concrete parts.
+        if len(entity.split()) <= 5:
+            add(entity)
+    return values[: max(1, int(limit))]
 
 
 _NOME_PROPRIO_RE = re.compile(
@@ -522,6 +592,7 @@ __all__ = [
     "LIMIAR_MATCH",
     "LIMIAR_AMBIGUO",
     "post_subjects",
+    "editorial_subjects",
     "source_context",
     "evidence_score",
     "subject_for_image",

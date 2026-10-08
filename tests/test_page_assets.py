@@ -40,6 +40,20 @@ class PageAssetTests(unittest.TestCase):
         assert ranked[0].url.endswith("key-art-other-url.jpg")
         assert ranked[0].figcaption == "Arte oficial de Jujutsu Kaisen"
 
+    def test_marks_related_sidebar_and_article_assets_with_dom_context(self):
+        html = """
+        <article><main>
+          <figure><img src="https://cdn.test/hero.jpg" width="1200" height="675"></figure>
+          <div class="related-news"><img src="https://cdn.test/gta-6.jpg" width="1200" height="675"></div>
+        </main></article>
+        <aside><img src="https://cdn.test/avatar.jpg" width="500" height="500"></aside>
+        """
+        assets = extract_page_assets(html, "https://source.test/article")
+        by_url = {asset.url: asset for asset in assets}
+        assert by_url["https://cdn.test/hero.jpg"].context_kind == "article_body"
+        assert by_url["https://cdn.test/gta-6.jpg"].context_kind == "excluded"
+        assert by_url["https://cdn.test/avatar.jpg"].context_kind == "excluded"
+
 
 if __name__ == "__main__":
     unittest.main()

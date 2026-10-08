@@ -136,6 +136,7 @@ class MediaSearchProgress:
     distinct_valid_frames: int = 0
     queries_planned: int = 0
     queries_completed: int = 0
+    completion_reason: str = ""
 
     def __post_init__(self) -> None:
         if min(
@@ -160,6 +161,7 @@ class MediaSearchProgress:
             "distinct_valid_frames": self.distinct_valid_frames,
             "queries_planned": self.queries_planned,
             "queries_completed": self.queries_completed,
+            "completion_reason": self.completion_reason,
         }
 
     @classmethod
@@ -182,6 +184,7 @@ class MediaSearchProgress:
             distinct_valid_frames=int(value.get("distinct_valid_frames", 0)),
             queries_planned=int(value.get("queries_planned", 0)),
             queries_completed=int(value.get("queries_completed", 0)),
+            completion_reason=str(value.get("completion_reason") or ""),
         )
 
 

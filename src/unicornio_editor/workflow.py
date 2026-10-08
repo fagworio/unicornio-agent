@@ -1327,6 +1327,14 @@ def _item_entities(
     if declarado:
         locais = {declarado}
         locais.update(e for e in entities if e and e.lower() in declarado)
+        extras = item.get("subjects") or ()
+        if isinstance(extras, str):
+            extras = (extras,)
+        locais.update(
+            " ".join(str(value).split()).casefold()
+            for value in extras
+            if str(value or "").strip()
+        )
         return locais
     return set(entities)
 

@@ -71,6 +71,25 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         self.assertTrue(all(item["source_origin_type"] == "article_source" for item in candidates))
         self.assertTrue(all(item["evidence"]["verdict"] == "deterministic_match" for item in candidates))
 
+    def test_fonte_ignora_related_e_preserva_subjects_editoriais(self):
+        html = """
+        <article><main>
+          <img src="https://cdn.example/rpcs3.jpg" width="1200" height="675" alt="RPCS3">
+          <div class="related-news"><img src="https://cdn.example/gta-6.jpg" width="1200" height="675"></div>
+        </main></article>
+        """
+        with mock.patch.object(source_verify, "_fetch", return_value=html.encode("utf-8")):
+            candidates = source_verify.discover_article_source_candidates(
+                "https://source.example/news",
+                subject="RPCS3",
+                subjects=["RPCS3", "PlayStation 5", "emulação"],
+            )
+        assert [item["direct_image_url"] for item in candidates] == [
+            "https://cdn.example/rpcs3.jpg"
+        ]
+        assert candidates[0]["subjects"] == ["RPCS3", "PlayStation 5", "emulação"]
+        assert candidates[0]["source_context_kind"] == "article_body"
+
 
 if __name__ == "__main__":
     unittest.main()

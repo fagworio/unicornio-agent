@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from ..checklist import required_image_count
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
-from ..media.evidence import item_query, post_subjects
+from ..media.evidence import editorial_subjects, item_query, post_subjects
 from ..list_quality import detect_list_format
 from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
@@ -201,6 +201,12 @@ class ProductionMediaResolver:
         from ..cli import _resolve_media_batch
 
         subject_rows = post_subjects(
+            title=title,
+            content_html=html,
+            focus_keyword=focus_keyword,
+            game_name=editorial.get("game_name"),
+        )
+        source_subjects = editorial_subjects(
             title=title,
             content_html=html,
             focus_keyword=focus_keyword,
@@ -488,7 +494,8 @@ class ProductionMediaResolver:
 
                     source_candidates = discover_article_source_candidates(
                         source_url,
-                        subject=(subject_queries[0][0] if subject_queries else title),
+                        subject=(source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)),
+                        subjects=source_subjects,
                         limit=max(8, inline_remaining() * 4),
                     )
                 except Exception:
@@ -496,7 +503,7 @@ class ProductionMediaResolver:
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
-                    subject = str(candidate.get("subject") or (subject_queries[0][0] if subject_queries else title))
+                    subject = str(candidate.get("subject") or (source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)))
                     candidate["subject"] = subject
                     metadata = subject_meta.get(subject) or {}
                     candidate["item_number"] = metadata.get("item")
@@ -576,6 +583,19 @@ class ProductionMediaResolver:
             queries_completed = sum(
                 run.get("completed") is True for run in search_runs
             )
+            completion_reasons = [
+                str(run.get("completion_reason") or "")
+                for run in search_runs
+                if str(run.get("completion_reason") or "")
+            ]
+            if completion_reasons and all(reason == "TARGET_REACHED" for reason in completion_reasons):
+                completion_reason = "TARGET_REACHED"
+            elif any(reason == "PROVIDER_ERROR" for reason in completion_reasons):
+                completion_reason = "PROVIDER_ERROR"
+            elif completion_reasons and all(reason == "EXHAUSTED" for reason in completion_reasons):
+                completion_reason = "EXHAUSTED"
+            else:
+                completion_reason = "INTERRUPTED" if completion_reasons else ""
             search_completed = bool(
                 queries_planned > 0
                 and queries_attempted >= queries_planned
@@ -603,6 +623,7 @@ class ProductionMediaResolver:
                 distinct_valid_frames=0,
                 queries_planned=queries_planned,
                 queries_completed=queries_completed,
+                completion_reason=completion_reason,
             )
             final_distinct = {
                 str(item.phash or item.media_url)

@@ -1285,16 +1285,35 @@ def _resolve_media_batch(
         engines_attempted = tuple(
             name for name in expected_engines if name in engine_reports
         )
-        search_completed = bool(
-            needed_web > 0
-            and expected_engines
+        accepted_count = len(accepted_urls_by_query.get(str(item["query"]), set()))
+        all_engines_reported = bool(
+            expected_engines
             and all(name in engine_reports for name in expected_engines)
-            and all(
-                str((engine_reports.get(name) or {}).get("failure_kind") or "")
-                not in FAILURE_KINDS_TRANSITORIOS | {"cooldown_skip"}
-                for name in expected_engines
-            )
         )
+        transient_engine_failure = any(
+            str((engine_reports.get(name) or {}).get("failure_kind") or "")
+            in FAILURE_KINDS_TRANSITORIOS | {"cooldown_skip"}
+            for name in expected_engines
+        )
+        if needed_web > 0 and accepted_count >= needed_web:
+            completion_reason = "TARGET_REACHED"
+            search_completed = True
+        elif transient_engine_failure:
+            completion_reason = "PROVIDER_ERROR"
+            search_completed = False
+        elif all_engines_reported:
+            # All planned engines returned, including the case where every
+            # candidate was rejected by provenance/relevance/diversity.
+            completion_reason = "EXHAUSTED"
+            search_completed = True
+        elif expected_engines:
+            completion_reason = "INTERRUPTED"
+            search_completed = False
+        else:
+            completion_reason = "PROVIDER_ERROR"
+            search_completed = False
+        candidates_attempted = len(aprovados) + len(rejeitados)
+        candidates_remaining = max(0, len(candidates) - candidates_attempted)
         search_progress = {
             "completed": search_completed,
             # This is discovery evidence only.  The runtime replaces
@@ -1307,7 +1326,20 @@ def _resolve_media_batch(
             "candidates_seen": len(candidates),
             "candidates_rejected": len(rejeitados),
             "distinct_valid_frames": len(distinct),
+            "completion_reason": completion_reason,
         }
+        append_telemetry(
+            root,
+            "media_search_query_summary",
+            post_id=post_id,
+            query=str(item["query"])[:200],
+            results_found=len(candidates),
+            candidates_attempted=candidates_attempted,
+            candidates_remaining=candidates_remaining,
+            accepted=accepted_count,
+            completion_reason=completion_reason,
+            completed=search_completed,
+        )
         append_telemetry(
             root,
             "media_search_summary",

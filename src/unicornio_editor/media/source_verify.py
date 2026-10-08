@@ -45,6 +45,7 @@ def discover_article_source_candidates(
     page_url: str,
     *,
     subject: str = "",
+    subjects: list[str] | tuple[str, ...] | None = None,
     limit: int = 32,
     audit=None,
 ) -> list[dict[str, Any]]:
@@ -60,13 +61,23 @@ def discover_article_source_candidates(
     if payload is None:
         return []
     html = payload.decode("utf-8", "ignore")
+    editorial_subjects = []
+    for value in (subjects or (subject,)):
+        normalized = " ".join(str(value or "").split()).strip()
+        if normalized and normalized.casefold() not in {item.casefold() for item in editorial_subjects}:
+            editorial_subjects.append(normalized)
+    primary_subject = editorial_subjects[0] if editorial_subjects else subject
     assets = rank_page_assets(
         extract_page_assets(html, page_url),
-        subject or page_url,
-        subject=subject,
+        primary_subject or page_url,
+        subject=" ".join(editorial_subjects),
         limit=max(1, int(limit)),
     )
-    generic = {"logo", "avatar", "favicon", "icon", "pixel", "tracking", "spacer"}
+    generic = {
+        "logo", "avatar", "favicon", "icon", "pixel", "tracking", "spacer",
+        "audio", "podcast", "soundcloud", "spotify", "artwork", "related",
+        "recommend", "sidebar", "author",
+    }
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for asset in assets:
@@ -74,6 +85,8 @@ def discover_article_source_candidates(
         if not _valid_http(url) or url in seen:
             continue
         seen.add(url)
+        if asset.context_kind == "excluded":
+            continue
         parsed = urlparse(unquote(url))
         stem = re.sub(r"\.[a-z0-9]{2,5}$", "", parsed.path.rsplit("/", 1)[-1], flags=re.I)
         if generic.intersection(set(re.split(r"[-_. ]+", stem.casefold()))):
@@ -109,9 +122,11 @@ def discover_article_source_candidates(
             "evidence_score": 100,
             "valid": True,
             "verification_level": "ARTICLE_SOURCE",
-            "alt_text": asset.alt or asset.figcaption or asset.heading or subject,
+            "alt_text": asset.alt or asset.figcaption or asset.heading or primary_subject,
             "credit_text": f"Crédito da imagem: {(parsed.hostname or 'fonte original').lower()}",
-            "subject": subject,
+            "subject": primary_subject,
+            "subjects": list(editorial_subjects),
+            "source_context_kind": asset.context_kind,
             "role": "inline",
         })
     return result

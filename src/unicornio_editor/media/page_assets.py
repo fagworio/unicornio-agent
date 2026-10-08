@@ -24,6 +24,7 @@ class PageAsset:
     height: str = ""
     figcaption: str = ""
     heading: str = ""
+    context_kind: str = "unknown"
 
 
 class _AssetParser(HTMLParser):
@@ -40,6 +41,42 @@ class _AssetParser(HTMLParser):
         self._figure_assets: list[int] | None = None
         self._figcaption = False
         self._figcaption_text: list[str] = []
+        self._scope_stack: list[tuple[str, str]] = []
+
+    def _context_kind(self) -> str:
+        markers = " ".join(
+            f"{tag} {marker}" for tag, marker in self._scope_stack
+        ).casefold()
+        tokens = set(re.findall(r"[a-z0-9]+", markers))
+        excluded = {
+            "aside", "footer", "nav", "sidebar", "related", "recommend",
+            "recommended", "author", "avatar", "comment", "comments",
+            "advert", "advertising", "banner", "sponsor", "podcast", "audio",
+        }
+        if tokens & excluded or any(
+            token.startswith("ad-") or token.endswith("-ad") for token in tokens
+        ):
+            return "excluded"
+        if any(tag in {"main", "article", "figure"} for tag, _marker in self._scope_stack):
+            return "article_body"
+        if any(tag == "header" for tag, _marker in self._scope_stack):
+            return "article_header"
+        return "unknown"
+
+    def _push_scope(self, tag: str, attrs: dict[str, str]) -> None:
+        if tag not in {"main", "article", "header", "aside", "footer", "nav", "section", "div", "figure"}:
+            return
+        marker = " ".join(
+            value for key in ("id", "class", "role")
+            if (value := attrs.get(key, "").strip())
+        )
+        self._scope_stack.append((tag, marker))
+
+    def _pop_scope(self, tag: str) -> None:
+        for index in range(len(self._scope_stack) - 1, -1, -1):
+            if self._scope_stack[index][0] == tag:
+                del self._scope_stack[index:]
+                return
 
     def _add(self, raw: str, attr: str, attrs: dict[str, str], **context: str) -> None:
         raw = (raw or "").strip()
@@ -57,6 +94,7 @@ class _AssetParser(HTMLParser):
                 width=attrs.get("width", "").strip(),
                 height=attrs.get("height", "").strip(),
                 heading=self._heading,
+                context_kind=context.pop("context_kind", self._context_kind()),
                 **context,
             ))
             if self._figure_assets is not None:
@@ -65,6 +103,7 @@ class _AssetParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {k.lower(): v or "" for k, v in attrs}
         tag = tag.lower()
+        self._push_scope(tag, attr_map)
         if tag in {"h1", "h2", "h3", "h4"}:
             self._heading_tag = tag
             self._heading_text = []
@@ -81,9 +120,14 @@ class _AssetParser(HTMLParser):
             attr_map.get("property", "").lower() in {"og:image", "twitter:image"}
             or attr_map.get("name", "").lower() == "twitter:image"
         ):
-            self._add(attr_map["content"], attr_map.get("property") or attr_map.get("name", "meta"), attr_map)
+            self._add(
+                attr_map["content"],
+                attr_map.get("property") or attr_map.get("name", "meta"),
+                attr_map,
+                context_kind="metadata",
+            )
         elif tag == "link" and attr_map.get("href") and attr_map.get("rel", "").lower() == "image_src":
-            self._add(attr_map["href"], "link:image_src", attr_map)
+            self._add(attr_map["href"], "link:image_src", attr_map, context_kind="metadata")
         elif tag == "script":
             self._script_type = attr_map.get("type", "").lower()
             self._script_text = []
@@ -111,12 +155,14 @@ class _AssetParser(HTMLParser):
                     source_attribute=asset.source_attribute, alt=asset.alt,
                     width=asset.width, height=asset.height,
                     figcaption=caption, heading=asset.heading,
+                    context_kind=asset.context_kind,
                 )
             self._figcaption = False
             self._figcaption_text = []
         elif tag == "figure":
             self._figure_assets = None
         if tag != "script" or self._script_type != "application/ld+json":
+            self._pop_scope(tag)
             return
         try:
             value: Any = json.loads("".join(self._script_text))
@@ -127,7 +173,7 @@ class _AssetParser(HTMLParser):
                 for key in ("contentUrl", "thumbnailUrl", "image"):
                     value = node.get(key)
                     if isinstance(value, str):
-                        self._add(value, f"jsonld:{key}", {})
+                        self._add(value, f"jsonld:{key}", {}, context_kind="metadata")
                     elif isinstance(value, dict):
                         walk(value)
                     elif isinstance(value, list):
@@ -139,6 +185,7 @@ class _AssetParser(HTMLParser):
         walk(value)
         self._script_type = ""
         self._script_text = []
+        self._pop_scope(tag)
 
 
 def extract_page_assets(html: str, base_url: str = "") -> list[PageAsset]:
@@ -178,7 +225,10 @@ def rank_page_assets(
     target_name = target_path.rsplit("/", 1)[-1]
     target_stem = re.sub(r"\.[a-z0-9]{2,5}$", "", target_name, flags=re.I)
     subject_tokens = {token for token in re.findall(r"[\wÀ-ÿ]+", str(subject).casefold()) if len(token) >= 3}
-    generic_tokens = {"logo", "avatar", "banner", "ad", "advert", "related", "author"}
+    generic_tokens = {
+        "logo", "avatar", "banner", "ad", "advert", "related", "author",
+        "audio", "podcast", "soundcloud", "spotify", "artwork",
+    }
 
     def score(asset: PageAsset) -> tuple[int, int, int]:
         parsed = urlparse(asset.url)
@@ -195,6 +245,14 @@ def rank_page_assets(
             points += 30
         if target_stem and target_stem in stem:
             points += 40
+        if asset.context_kind == "excluded":
+            points -= 10000
+        elif asset.context_kind == "article_body":
+            points += 500
+        elif asset.context_kind == "article_header":
+            points += 200
+        elif asset.context_kind == "metadata":
+            points += 100
         points += 25 * sum(1 for token in subject_tokens if token in text)
         if any(token in generic_tokens for token in re.split(r"[-_ .]+", stem)):
             points -= 300
