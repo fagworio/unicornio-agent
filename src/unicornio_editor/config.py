@@ -86,6 +86,9 @@ class Config:
     # Marco fixo de admissão do V2 em produção. Ausente/inválido mantém a fila
     # fechada para evitar que o backlog histórico seja processado por acidente.
     v2_admission_after: datetime | None = None  # EDITOR_V2_ADMISSION_AFTER
+    # Explicit historical backfill allowlist. It bypasses only the date cutoff;
+    # lifecycle, cooldown, and scheduler gates still apply.
+    v2_admission_allowlist: tuple[int, ...] = ()  # EDITOR_V2_ADMISSION_ALLOWLIST
 
     def __repr__(self) -> str:
         return (
@@ -313,6 +316,7 @@ def load_config() -> Config:
         policy_version=_int("EDITOR_POLICY_VERSION", 2, 1, 100),
         uncertain_second_pass_limit=_int("EDITOR_UNCERTAIN_SECOND_PASS_LIMIT", 5, 0, 5),
         v2_admission_after=_datetime_or_none("EDITOR_V2_ADMISSION_AFTER"),
+        v2_admission_allowlist=_post_id_allowlist("EDITOR_V2_ADMISSION_ALLOWLIST"),
     )
 
 
@@ -323,3 +327,21 @@ def _topics(name: str) -> tuple[str, ...]:
         for topic in _env(name).split(",")
         if topic.strip()
     )
+
+
+def _post_id_allowlist(name: str) -> tuple[int, ...]:
+    """Parse a comma-separated historical post allowlist."""
+    values: list[int] = []
+    for raw in _env(name).split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            post_id = int(raw)
+        except ValueError as exc:
+            raise ConfigError(f"{name} must contain only integer post IDs") from exc
+        if post_id < 1:
+            raise ConfigError(f"{name} must contain positive post IDs")
+        if post_id not in values:
+            values.append(post_id)
+    return tuple(values)

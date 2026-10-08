@@ -80,6 +80,23 @@ def test_historical_media_is_excluded_even_if_cooldown_expired():
     assert audit["historical_excluded_ids"] == [11]
 
 
+def test_explicit_historical_allowlist_bypasses_only_date_cutoff():
+    state = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(2),
+    )
+    admitted, audit = admit_v2_candidates(
+        [candidate(11, "2026-10-07T01:29:59+00:00", state)],
+        CUTOFF,
+        (11,),
+    )
+    assert [post_id for post_id, _context in admitted] == [11]
+    assert audit["historical_allowlisted_ids"] == [11]
+    assert audit["historical_excluded_ids"] == []
+
+
 def test_missing_admission_configuration_fails_closed():
     admitted, audit = admit_v2_candidates(
         [candidate(1, "2026-10-07T01:31:00+00:00")], None

@@ -70,6 +70,7 @@ def _original_post_datetime(context: dict[str, Any]) -> datetime | None:
 def admit_v2_candidates(
     snapshot: list[tuple[int, dict[str, Any]]],
     admission_after: Any,
+    admission_allowlist: tuple[int, ...] = (),
 ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
     """Admit only posts created at/after the fixed V2 production cutoff.
 
@@ -79,8 +80,10 @@ def admit_v2_candidates(
     or post dates fail closed and are exposed in the audit report.
     """
     cutoff = _parse_admission_datetime(admission_after)
+    allowlist = {int(post_id) for post_id in admission_allowlist}
     admitted: list[tuple[int, dict[str, Any]]] = []
     historical_ids: list[int] = []
+    allowlisted_ids: list[int] = []
     blocked_ids: list[int] = []
     missing_date_ids: list[int] = []
 
@@ -89,10 +92,13 @@ def admit_v2_candidates(
             blocked_ids.append(post_id)
             continue
         post_date = _original_post_datetime(context)
-        if post_date is None:
+        if post_id in allowlist:
+            admitted.append((post_id, context))
+            allowlisted_ids.append(post_id)
+        elif post_date is None:
             missing_date_ids.append(post_id)
             continue
-        if post_date >= cutoff:
+        elif post_date >= cutoff:
             admitted.append((post_id, context))
         else:
             historical_ids.append(post_id)
@@ -102,6 +108,8 @@ def admit_v2_candidates(
         "admission_after": cutoff.isoformat() if cutoff is not None else None,
         "historical_excluded": len(historical_ids),
         "historical_excluded_ids": historical_ids,
+        "historical_allowlisted": len(allowlisted_ids),
+        "historical_allowlisted_ids": allowlisted_ids,
         "admission_blocked": len(blocked_ids),
         "admission_blocked_ids": blocked_ids,
         "admission_missing_date": len(missing_date_ids),
@@ -967,7 +975,9 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
         snapshot = reader.snapshot(page_size=max(10, limit))
         now = datetime.now(timezone.utc)
         admitted, admission = admit_v2_candidates(
-            snapshot, getattr(config, "v2_admission_after", None)
+            snapshot,
+            getattr(config, "v2_admission_after", None),
+            getattr(config, "v2_admission_allowlist", ()),
         )
         admitted_pending = [
             (post_id, context)
