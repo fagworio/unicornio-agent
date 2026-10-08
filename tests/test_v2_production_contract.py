@@ -22,7 +22,7 @@ def test_media_retry_does_not_call_editorial_stage():
         phase=Phase.MEDIA,
         blocker=BlockerCode.INLINE_MISSING,
         relevance_approved=True,
-        media=MediaProgress(2),
+        media=MediaProgress(2, enrichment_round=1),
     )
     calls = []
     stages = {
@@ -36,22 +36,22 @@ def test_media_retry_does_not_call_editorial_stage():
     assert calls == [("media", {"decision": "process"})]
 
 
-def test_two_consecutive_media_no_progress_escalates_human():
+def test_two_consecutive_media_no_progress_keeps_normal_article_pending():
     previous = WorkState(
         phase=Phase.MEDIA,
         blocker=BlockerCode.INLINE_MISSING,
         retry=RetryInfo(no_progress=1),
         relevance_approved=True,
-        media=MediaProgress(2),
+        media=MediaProgress(2, enrichment_round=1),
     )
     outcome = classify(
         previous,
         {"decision": "process"},
-        MediaProgress(2),
+        previous.media,
         {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
         no_progress=2,
     )
-    assert outcome.type.value == "human_required"
+    assert outcome.type.value == "retry"
     assert outcome.blocker is BlockerCode.INLINE_MISSING
 
 
@@ -69,8 +69,31 @@ def test_runner_counts_two_real_media_no_progress_attempts():
     assert first.type.value == "retry"
     assert store.state.retry.no_progress == 1
     second = runner.run_one(42, context)
-    assert second.type.value == "human_required"
+    assert second.type.value == "retry"
     assert store.state.retry.no_progress == 2
+
+
+def test_listicle_can_terminalize_after_second_completed_enrichment_round():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(2, enrichment_round=2),
+    )
+    outcome = classify(
+        previous,
+        {"decision": "process"},
+        previous.media,
+        {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+            "checklist": {"media_decision": {"is_listicle": True}},
+        },
+        no_progress=2,
+    )
+    assert outcome.type.value == "human_required"
+    assert outcome.blocker is BlockerCode.INLINE_MISSING
 
 
 def test_missing_persisted_artifact_fails_closed():

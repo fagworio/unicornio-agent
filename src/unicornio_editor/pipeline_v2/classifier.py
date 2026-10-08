@@ -314,7 +314,23 @@ def classify(
                     else None
                 ),
             )
-    if effective_no_progress >= max(1, max_media_no_progress):
+    media_decision = {}
+    if isinstance(validation, dict):
+        checklist = validation.get("checklist") or {}
+        media_decision = checklist.get("media_decision") or validation.get("media_decision") or {}
+    try:
+        enrichment_round = int(getattr(media, "enrichment_round", 0) or 0)
+    except (TypeError, ValueError):
+        enrichment_round = 0
+    # no_progress remains telemetry/backoff only. A listicle can become
+    # HUMAN_REQUIRED after its second completed enrichment round, but an
+    # incomplete normal article must keep the V2 retry sequence even when the
+    # media round had no progress.
+    if (
+        first_blocker in MEDIA_BLOCKERS
+        and bool(media_decision.get("is_listicle"))
+        and enrichment_round >= 2
+    ):
         return Outcome.human_required(Phase.MEDIA, first_blocker, detail=detail)
     return _retry(
         previous,

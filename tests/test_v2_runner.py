@@ -155,7 +155,7 @@ def test_media_no_progress_continues_only_within_media_phase():
 
     outcome = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
 
-    assert outcome.type is OutcomeType.HUMAN_REQUIRED
+    assert outcome.type is OutcomeType.RETRY
     assert store.state.retry.no_progress == 2
 
 

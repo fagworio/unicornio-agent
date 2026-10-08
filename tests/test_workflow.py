@@ -2548,6 +2548,48 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
     assert index["entries"][-1]["phash"] == "1111111111111111"
 
 
+def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://news.example/article",
+        "direct_image_url": "https://cdn.other.example/frame.webp",
+        "origin_type": "article_source",
+        "provenance_verified": True,
+        "author": "Fonte",
+        "license": "Uso com crédito",
+        "license_url": "https://news.example/article",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: fonte.example",
+        "alt_text": "Wolverine",
+        "is_featured": False,
+    }
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Wolverine videogame.</p>",
+        "media_plan": [item],
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source") as verify, \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="2222222222222222"), \
+         mock.patch("unicornio_editor.workflow.upload_image", return_value={"id": 115095, "source_url": "https://wp.test/115095.webp"}):
+        results, _, _ = _execute_media_plan(
+            editorial,
+            config,
+            object(),
+            tmp_path,
+            preflight={"rejected": [], "featured_vision": []},
+            post_id=115100,
+        )
+    verify.assert_not_called()
+    assert results[0]["media_id"] == 115095
+
+
 
 if __name__ == "__main__":
     unittest.main()

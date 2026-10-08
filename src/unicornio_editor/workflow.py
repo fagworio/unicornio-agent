@@ -2059,16 +2059,28 @@ def _execute_media_plan(
                     _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
-                ok, verify_reason = verify_downloaded_against_source(
-                    source_page_url=str(item.get("source_page_url") or ""),
-                    downloaded=source,
-                    direct_image_url=str(download_url),
-                    cache=page_cache,
-                    cache_lock=page_cache_lock,
-                    audit=lambda finding: append_telemetry(
-                        root, "remote_url_audit", url=finding.url, reason=finding.reason
-                    ),
-                )
+                if (
+                    str(item.get("origin_type") or item.get("source_origin_type") or "")
+                    == "article_source"
+                    and bool(item.get("provenance_verified") or item.get("source_verified"))
+                ):
+                    # The candidate was extracted from this exact article
+                    # document. Re-fetching the source page here reintroduces
+                    # the old resolver gate (and can fail on a CDN/hotlink),
+                    # while the remaining download, format, relevance,
+                    # dimension, WebP and pHash gates still run normally.
+                    ok, verify_reason = True, "article_source_extracted"
+                else:
+                    ok, verify_reason = verify_downloaded_against_source(
+                        source_page_url=str(item.get("source_page_url") or ""),
+                        downloaded=source,
+                        direct_image_url=str(download_url),
+                        cache=page_cache,
+                        cache_lock=page_cache_lock,
+                        audit=lambda finding: append_telemetry(
+                            root, "remote_url_audit", url=finding.url, reason=finding.reason
+                        ),
+                    )
                 if not ok:
                     _funnel("source_verify", "rejected", item, position, verify_reason)
                     return position, {
