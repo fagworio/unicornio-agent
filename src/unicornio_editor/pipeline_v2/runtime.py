@@ -161,6 +161,8 @@ class ProductionMediaResolver:
         """Normalize a relevant WordPress featured into V2 media state."""
         if previous.featured.status is FeaturedStatus.VALID:
             return previous.featured
+        if previous.featured.status is FeaturedStatus.VISION_REJECTED:
+            return FeaturedProgress(FeaturedStatus.VISION_REJECTED, None, None)
         unavailable = FeaturedProgress(previous.featured.status, None, None)
         post = context.get("post") or {}
         existing_id = post.get("featured_media") if isinstance(post, dict) else None

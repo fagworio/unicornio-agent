@@ -323,6 +323,46 @@ def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_p
     assert result.featured.media_url.endswith("featured-1280x720.webp")
 
 
+def test_vision_rejected_featured_is_not_recovered_from_wordpress(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.workflow as workflow
+
+    normalize = mock.Mock(side_effect=AssertionError("rejected featured must not return"))
+    search_calls = []
+    monkeypatch.setattr(workflow, "_normalize_existing_featured", normalize)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+
+    def fake_resolve(*_args, **_kwargs):
+        search_calls.append(True)
+        return {"posts": [{"reuse": [], "audit_candidates": []}]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", lambda *_args, **_kwargs: ([], None, None))
+
+    previous = MediaProgress(
+        required=0,
+        featured=FeaturedProgress(FeaturedStatus.VISION_REJECTED, None, None),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {
+            "post_id": 115102,
+            "title": "Test",
+            "post": {"id": 115102, "featured_media": 777},
+        },
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        previous,
+    )
+
+    normalize.assert_not_called()
+    assert search_calls
+    assert result.featured.status is FeaturedStatus.VISION_REJECTED
+    assert result.featured.media_id is None
+
+
 def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(monkeypatch, tmp_path):
     import unicornio_editor.media.vision_gate as vision_gate
     config = SimpleNamespace(
