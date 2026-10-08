@@ -160,9 +160,9 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
             pass
 
     def test_degradada_registra_motivo_sem_cooldown(self):
-        search.engine_degradada("google", "js_required")
-        self.assertTrue(search.engine_disponivel("google"))
-        estado = search.engines_status()["google"]
+        search.engine_degradada("google_images", "js_required")
+        self.assertTrue(search.engine_disponivel("google_images"))
+        estado = search.engines_status()["google_images"]
         self.assertEqual(estado["failure_kind"], "js_required")
         self.assertEqual(estado["blocked_until"], 0)
         self.assertEqual(estado["failures"], 0)
@@ -173,17 +173,18 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
             json.dumps({"google": {"failures": 18, "blocked_until": 9_999_999_999.0}}),
             encoding="utf-8",
         )
-        self.assertFalse(search.engine_disponivel("google"))
-        search.engine_degradada("google", "js_required")
-        self.assertTrue(search.engine_disponivel("google"))
-        self.assertEqual(search.engines_status()["google"]["failures"], 0)
+        # O estado legado não é reutilizado pela nova chave operacional.
+        self.assertTrue(search.engine_disponivel("google_images"))
+        search.engine_degradada("google_images", "js_required")
+        self.assertTrue(search.engine_disponivel("google_images"))
+        self.assertEqual(search.engines_status()["google_images"]["failures"], 0)
 
     def test_falha_transitoria_continua_abrindo_o_circuito(self):
         for _ in range(3):
-            espera = search.engine_falhou("bing")
+            espera = search.engine_falhou("bing_images")
         self.assertGreaterEqual(espera, 600)
-        self.assertFalse(search.engine_disponivel("bing"))
-        self.assertEqual(search.engines_status()["bing"]["failures"], 3)
+        self.assertFalse(search.engine_disponivel("bing_images"))
+        self.assertEqual(search.engines_status()["bing_images"]["failures"], 3)
 
     def test_agregador_mantem_o_google_na_arquitetura(self):
         def _vazio_transitorio(query, **kwargs):
@@ -211,10 +212,10 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
         self.assertEqual(set(relatorios), {"google_browser", "bing", "yandex", "google"})
         self.assertEqual(relatorios["google"]["failure_kind"], "js_required")
         # O motivo permanente não virou cooldown...
-        self.assertTrue(search.engine_disponivel("google"))
-        self.assertEqual(search.engines_status()["google"]["failures"], 0)
+        self.assertTrue(search.engine_disponivel("google_images"))
+        self.assertEqual(search.engines_status()["google_images"]["failures"], 0)
         # ...e o transitório das outras duas continua contando.
-        self.assertGreaterEqual(search.engines_status()["bing"]["failures"], 1)
+        self.assertGreaterEqual(search.engines_status()["bing_images"]["failures"], 1)
 
 
 class TelemetriaPorEngineTests(unittest.TestCase):

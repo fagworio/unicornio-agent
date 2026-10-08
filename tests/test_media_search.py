@@ -199,6 +199,73 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["direct_image_url"], "https://i.pinimg.com/x.jpg")
 
+    def test_yandex_img_url_decodes_once_and_preserves_inner_query(self):
+        html = (
+            '<a href="https://yandex.com/images/search?img_url='
+            'https%3A%2F%2Fimages.example%2Fpreview.jpeg%3Ftoken%3Da%2526b'
+            '&amp;rpt=simage">resultado</a>'
+        )
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_yandex_images("bleach ichigo", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0]["direct_image_url"],
+            "https://images.example/preview.jpeg?token=a%26b",
+        )
+        self.assertEqual(results[0]["discovery_method"], "yandex_img_url_param")
+        self.assertFalse(results[0]["usable"])
+
+    def test_yandex_ignora_img_url_fora_do_yandex_e_hosts_privados(self):
+        html = (
+            '<a href="https://evil.example/images/search?img_url=https%3A%2F%2Fcdn.example%2Fa.jpg">x</a>'
+            '<a href="/images/search?img_url=http%3A%2F%2F127.0.0.1%2Fa.jpg">y</a>'
+        )
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            self.assertEqual(search_yandex_images("bleach", limit=5), [])
+
+    def test_yandex_data_state_preserva_imagem_e_origem_do_mesmo_resultado(self):
+        html = (
+            '<div data-state=\'{"viewerData":{"snippet":'
+            '{"url":"https://source.example/bleach","title":"Bleach key art"},'
+            '"dups":[{"url":"https://cdn.example/small.jpg","width":640,"height":360},'
+            '{"url":"https://cdn.example/original.jpg","width":1920,"height":1080}],'
+            '"preview":{"url":"https://thumb.example/bleach.jpg"}}}\'></div>'
+        )
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_yandex_images("bleach", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/original.jpg")
+        self.assertEqual(results[0]["source_page_url"], "https://source.example/bleach")
+        self.assertTrue(results[0]["usable"])
+        self.assertEqual(results[0]["discovery_method"], "yandex_data_state")
+
     def test_search_web_images_uses_fixed_bing_then_yandex_fallback(self):
         # Google Browser é tentado antes; com Playwright ausente, Bing é sempre
         # o primeiro fallback e Yandex fica reservado para recall.

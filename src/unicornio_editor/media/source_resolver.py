@@ -109,23 +109,29 @@ def _host(image_url: str) -> str:
 def _buscador_padrao(query: str) -> list[dict[str, Any]]:
     """Busca de PÁGINAS candidatas (não de imagens) via Bing.
 
-    Usa o mesmo circuit breaker das engines de imagem: se o Bing está em
-    cooldown, o resolver simplesmente não encontra nada agora e o candidato
-    permanece discovery_only (nunca vira ACCEPT sem prova de origem).
+    Usa um circuit breaker próprio de ``bing_web``. Uma falha no parser ou
+    rate-limit do Bing Images não pode impedir a resolução de páginas de
+    origem, e vice-versa.
     """
     from . import search as _search
     from urllib.parse import quote_plus
 
-    if not _search.engine_disponivel("bing"):
+    if not _search.engine_disponivel("bing_web"):
         return []
     try:
         # Busca WEB (não de imagens): o resolver procura PÁGINAS candidatas.
-        html = _search._fetch(
+        html, report = _search._fetch_report(
             f"https://www.bing.com/search?q={quote_plus(query)}", 25.0
         )
     except Exception:  # noqa: BLE001 - resolver é best-effort
+        _search.engine_falhou("bing_web")
         return []
     if not html:
+        kind = str(report.get("failure_kind") or "network_error")
+        if kind in _search.FAILURE_KINDS_TRANSITORIOS:
+            _search.engine_falhou("bing_web")
+        else:
+            _search.engine_degradada("bing_web", kind)
         return []
     paginas: list[dict[str, Any]] = []
     vistos: set[str] = set()
@@ -140,6 +146,22 @@ def _buscador_padrao(query: str) -> list[dict[str, Any]]:
             continue
         vistos.add(alvo)
         paginas.append({"source_page_url": alvo})
+    # HTML recebido não significa que o provider entregou resultados úteis.
+    # Classificar o documento depois do parse mantém o breaker de Bing Web
+    # independente e evita registrar schema drift/JS/captcha como sucesso.
+    if paginas:
+        _search.engine_ok("bing_web")
+    else:
+        kind = _search.classify_failure(
+            html,
+            http_status=int(report.get("http_status") or 200),
+            objects_parsed=0,
+        )
+        report["failure_kind"] = kind
+        if kind in _search.FAILURE_KINDS_TRANSITORIOS:
+            _search.engine_falhou("bing_web")
+        else:
+            _search.engine_degradada("bing_web", kind)
     return paginas
 
 

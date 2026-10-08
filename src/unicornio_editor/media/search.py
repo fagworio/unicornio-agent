@@ -33,6 +33,8 @@ must still open source_page_url and confirm the image is listed there
 from __future__ import annotations
 
 import hashlib
+import html as html_lib
+import ipaddress
 import json
 import os
 import random
@@ -45,7 +47,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 _GOOGLE_IMAGES_BASE = "https://www.google.com/search"
@@ -127,6 +129,21 @@ _MARKERS_RESULTADOS = (
 # Último relatório por engine (conveniência para o caminho de busca única; o
 # caminho em lote recebe o relatório explícito por query).
 _ULTIMO_RELATORIO: dict[str, dict[str, Any]] = {}
+
+# O nome da engine no relatório não precisa ser a chave operacional do
+# circuit breaker. Bing Images e Bing Web Search são serviços independentes.
+_PROVIDER_KEYS = {
+    "bing": "bing_images",
+    "yandex": "yandex_images",
+    "google": "google_images",
+    "google_browser": "google_browser",
+}
+
+
+def provider_key(engine: str) -> str:
+    """Retorna a chave operacional do breaker para uma engine de busca."""
+    name = str(engine or "").strip()
+    return _PROVIDER_KEYS.get(name, name)
 
 
 def classify_failure(
@@ -279,7 +296,17 @@ def _valid_http(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
-def _candidate(query, size_filter, direct, page, title, thumb, *, engine=""):
+def _candidate(
+    query,
+    size_filter,
+    direct,
+    page,
+    title,
+    thumb,
+    *,
+    engine="",
+    discovery_method="",
+):
     """Candidato normalizado — com `usable` explicito (Fase 4).
 
     A cadeia verificavel e query -> pagina de origem -> URL da imagem -> bytes.
@@ -309,6 +336,7 @@ def _candidate(query, size_filter, direct, page, title, thumb, *, engine=""):
         "source_page_url": page_clean,
         "thumbnail_url": thumb,
         "engine": engine,
+        "discovery_method": discovery_method,
         "usable": usable,
         "discovery_only": not usable,
         "rejected_reason": motivo,
@@ -412,6 +440,7 @@ def search_bing_images(
                 str(obj.get("t") or ""),
                 str(obj.get("turl") or ""),
                 engine="bing",
+                discovery_method="bing_result",
             )
         )
         if len(results) >= limit:
@@ -502,6 +531,7 @@ def search_google_images(
                 query, f"{_SIZE_LABEL.get(size, size)}|{ratio}", direct,
                 str(obj.get("purl") or ""), str(obj.get("t") or ""),
                 str(obj.get("turl") or ""), engine="google",
+                discovery_method="google_result",
             )
         )
         if len(results) >= limit:
@@ -516,6 +546,145 @@ def search_google_images(
 # ---------------------------------------------------------------------------
 # Yandex Images
 # ---------------------------------------------------------------------------
+
+_YANDEX_STATE_RE = re.compile(
+    r'''\bdata-state\s*=\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)')''',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _public_http_url(url: str) -> bool:
+    """Valida a forma da URL sem fazer DNS durante o parsing."""
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        host = parsed.hostname or ""
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not host:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    if host.casefold() in {"localhost", "localhost.localdomain"}:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return bool(address.is_global)
+
+
+def _yandex_img_url_links(page: str) -> list[str]:
+    """Extrai ``img_url`` apenas de links pertencentes ao Yandex Images.
+
+    ``parse_qs`` decodifica o parâmetro uma única vez. Isso é deliberado: a
+    query string da imagem interna pode conter ``%`` e ``&`` próprios, e um
+    segundo ``unquote`` corromperia essa URL.
+    """
+    encontrados: list[str] = []
+    vistos: set[str] = set()
+    for match in re.finditer(r'''\b(?:href|data-href)\s*=\s*(?:"([^"]+)"|'([^']+)')''', page, re.IGNORECASE):
+        raw = html_lib.unescape(str(match.group(1) or match.group(2) or "")).strip()
+        if not raw:
+            continue
+        href = urljoin(_YANDEX_IMAGES_BASE, raw)
+        try:
+            parsed = urlsplit(href)
+            host = (parsed.hostname or "").casefold()
+        except ValueError:
+            continue
+        if not (host == "yandex.com" or host.endswith(".yandex.com") or host == "yandex.ru" or host.endswith(".yandex.ru")):
+            continue
+        if "/images/" not in (parsed.path or ""):
+            continue
+        value = (parse_qs(parsed.query, keep_blank_values=True).get("img_url") or [""])[0]
+        if not _public_http_url(value) or not _real_image_url(value) or value in vistos:
+            continue
+        vistos.add(value)
+        encontrados.append(value)
+    return encontrados
+
+
+def _yandex_json_values(value: Any):
+    """Percorre estruturas ``data-state`` sem depender de um schema único."""
+    if isinstance(value, dict):
+        yield value
+        # ``viewerData``/``dups``/``preview`` são payload do próprio item,
+        # não novos resultados. Não descê-los evita reemitir a mesma imagem
+        # menor quando o item pai já foi processado.
+        payload_keys = {"viewerData", "dups", "preview", "images"}
+        for key, child in value.items():
+            if key in payload_keys:
+                continue
+            yield from _yandex_json_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _yandex_json_values(child)
+
+
+def _yandex_url(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip() if _public_http_url(value) else ""
+    if isinstance(value, dict):
+        for key in ("url", "href", "src", "original", "imageUrl"):
+            candidate = _yandex_url(value.get(key))
+            if candidate:
+                return candidate
+    return ""
+
+
+def _yandex_result_objects(page: str) -> list[dict[str, Any]]:
+    """Extrai imagem e origem do MESMO item moderno do Yandex.
+
+    O parser é defensivo: se o provider alterar ``data-state``, nenhum URL é
+    associado por posição entre listas independentes. O fallback ``img_url``
+    continua sendo tratado separadamente como descoberta sem proveniência.
+    """
+    objetos: list[dict[str, Any]] = []
+    vistos: set[str] = set()
+
+    def _area(value: Any) -> int:
+        if not isinstance(value, dict):
+            return 0
+        try:
+            return max(0, int(value.get("width") or 0)) * max(0, int(value.get("height") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    for match in _YANDEX_STATE_RE.finditer(page):
+        bruto = match.group(1) or match.group(2) or ""
+        bruto = html_lib.unescape(bruto)
+        try:
+            estado = json.loads(bruto)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        for item in _yandex_json_values(estado):
+            viewer = item.get("viewerData") if isinstance(item.get("viewerData"), dict) else {}
+            snippet = viewer.get("snippet") if isinstance(viewer.get("snippet"), dict) else {}
+            if not snippet and isinstance(item.get("snippet"), dict):
+                snippet = item["snippet"]
+            source = _yandex_url(snippet.get("url") or snippet.get("href"))
+            title = str(snippet.get("title") or item.get("title") or "")
+            thumbnail = _yandex_url(viewer.get("preview") or item.get("preview"))
+            imagens: list[tuple[int, str]] = []
+            for field in (viewer.get("dups"), viewer.get("preview"), item.get("dups"), item.get("images")):
+                values = field if isinstance(field, list) else [field]
+                for candidate in values:
+                    direct = _yandex_url(candidate)
+                    if not direct or not _real_image_url(direct):
+                        continue
+                    imagens.append((_area(candidate), direct))
+            for _, direct in sorted(imagens, reverse=True):
+                if direct in vistos:
+                    continue
+                vistos.add(direct)
+                objetos.append({
+                    "direct_image_url": direct,
+                    "source_page_url": source,
+                    "title": title,
+                    "thumbnail_url": thumbnail,
+                })
+                break
+    return objetos
 
 def build_yandex_url(query: str) -> str:
     return f"{_YANDEX_IMAGES_BASE}?{urlencode({'text': query})}"
@@ -538,32 +707,38 @@ def search_yandex_images(
     if page is None:
         _finalizar_relatorio(relatorio, report, engine="yandex", objects=0, candidates=0)
         return []
-    html = page.replace("&quot;", '"')
-    # O Yandex embute a URL real da imagem no parametro img_url= (URL-encoded)
-    # dos itens de resultado — exatamente o que o botao "Open" da UI usa. Um
-    # unquote revela a URL direta (ex.: i.pinimg.com/...jpg).
-    img_urls: list[str] = []
-    for raw in re.findall(r'img_url=([^&]+)', page):
-        decoded = unquote(raw)
-        if decoded.startswith("http"):
-            img_urls.append(decoded)
-    if not img_urls:
-        img_urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', page)
+    objetos = _yandex_result_objects(page)
+    img_urls = _yandex_img_url_links(page)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for direct in img_urls:
+    for objeto in objetos:
+        direct = str(objeto.get("direct_image_url") or "")
         if not direct or not _real_image_url(direct) or direct in seen:
             continue
         seen.add(direct)
-        # Fase 4: o Yandex entrega a imagem SEM a pagina de origem. O
-        # candidato nasce `discovery_only` (usable=False) — serve de pista,
-        # nunca entra no media_plan.
-        results.append(_candidate(query, "1024x768|w", direct, "", "", "", engine="yandex"))
+        results.append(_candidate(
+            query, "1024x768|w", direct,
+            str(objeto.get("source_page_url") or ""),
+            str(objeto.get("title") or ""),
+            str(objeto.get("thumbnail_url") or ""),
+            engine="yandex", discovery_method="yandex_data_state",
+        ))
+        if len(results) >= limit:
+            break
+    for direct in img_urls:
+        if direct in seen:
+            continue
+        seen.add(direct)
+        # ``img_url`` representa a imagem pesquisada, não a sua origem.
+        results.append(_candidate(
+            query, "1024x768|w", direct, "", "", "", engine="yandex",
+            discovery_method="yandex_img_url_param",
+        ))
         if len(results) >= limit:
             break
     _finalizar_relatorio(
         relatorio, report, engine="yandex",
-        objects=len(img_urls), candidates=len(results), html=page,
+        objects=max(len(objetos), len(img_urls)), candidates=len(results), html=page,
     )
     return results
 
@@ -767,10 +942,11 @@ def search_web_images(
     acumulado: list[dict[str, Any]] = []
     vistos: set[str] = set()
     for name in order:
+        breaker_name = provider_key(name)
         relatorio: dict[str, Any] = {}
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
-        if not engine_disponivel(name):
+        if not engine_disponivel(breaker_name):
             relatorio = {
                 "http_status": 0, "html_bytes": 0, "objects_parsed": 0, "candidates": 0,
                 "failure_kind": "cooldown_skip", "parser_version": PARSER_VERSION,
@@ -800,18 +976,18 @@ def search_web_images(
                 # Motivo PERMANENTE (schema mudou, página exige JS, captcha):
                 # cooldown de 12 min aqui só esconderia a engine para sempre.
                 # Registra o motivo e segue — ela continua na arquitetura.
-                engine_degradada(name, kind)
+                engine_degradada(breaker_name, kind)
                 continue
             # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
             # cooldown da engine (Bing degradado não deve segurar o ciclo).
-            espera = engine_falhou(name)
+            espera = engine_falhou(breaker_name)
             if espera:
                 try:
                     time.sleep(min(float(espera), 8.0))
                 except Exception:  # noqa: BLE001 - sleep interrompido não quebra
                     pass
             continue
-        engine_ok(name)
+        engine_ok(breaker_name)
         novos: list[dict[str, Any]] = []
         for cand in lote or []:
             url = str(cand.get("direct_image_url") or "")
@@ -921,5 +1097,5 @@ __all__ = [
     "reset_http_request_count", "http_request_count",
     # Saúde por engine (classificação da falha + relatório da tentativa)
     "PARSER_VERSION", "FAILURE_KINDS", "FAILURE_KINDS_TRANSITORIOS",
-    "classify_failure", "engine_degradada", "engine_last_report", "engines_status",
+    "classify_failure", "provider_key", "engine_degradada", "engine_last_report", "engines_status",
 ]

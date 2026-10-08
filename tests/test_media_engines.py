@@ -48,32 +48,39 @@ class CircuitBreakerTests(unittest.TestCase):
             pass
 
     def test_backoff_cresce_e_terceira_falha_abre_o_circuito(self):
-        self.assertTrue(search.engine_disponivel("bing"))
-        e1 = search.engine_falhou("bing")
+        self.assertTrue(search.engine_disponivel("bing_images"))
+        e1 = search.engine_falhou("bing_images")
         self.assertGreater(e1, 0)
         self.assertLessEqual(e1, 8.0)
-        self.assertFalse(search.engine_disponivel("bing"))
-        e2 = search.engine_falhou("bing")
+        self.assertFalse(search.engine_disponivel("bing_images"))
+        e2 = search.engine_falhou("bing_images")
         self.assertGreater(e2, 8.0)
-        e3 = search.engine_falhou("bing")
+        e3 = search.engine_falhou("bing_images")
         self.assertGreaterEqual(e3, 600)  # cooldown 10-15 min
-        self.assertFalse(search.engine_disponivel("bing"))
+        self.assertFalse(search.engine_disponivel("bing_images"))
 
     def test_sucesso_fecha_o_circuito(self):
-        search.engine_falhou("yandex")
-        search.engine_falhou("yandex")
-        search.engine_falhou("yandex")
-        self.assertFalse(search.engine_disponivel("yandex"))
-        search.engine_ok("yandex")
-        self.assertTrue(search.engine_disponivel("yandex"))
-        self.assertEqual(search.engines_status().get("yandex"), None)
+        search.engine_falhou("yandex_images")
+        search.engine_falhou("yandex_images")
+        search.engine_falhou("yandex_images")
+        self.assertFalse(search.engine_disponivel("yandex_images"))
+        search.engine_ok("yandex_images")
+        self.assertTrue(search.engine_disponivel("yandex_images"))
+        self.assertEqual(search.engines_status().get("yandex_images"), None)
 
     def test_engines_sao_independentes(self):
-        search.engine_falhou("bing")
-        search.engine_falhou("bing")
-        search.engine_falhou("bing")
-        self.assertFalse(search.engine_disponivel("bing"))
-        self.assertTrue(search.engine_disponivel("yandex"))
+        search.engine_falhou("bing_images")
+        search.engine_falhou("bing_images")
+        search.engine_falhou("bing_images")
+        self.assertFalse(search.engine_disponivel("bing_images"))
+        self.assertTrue(search.engine_disponivel("bing_web"))
+
+    def test_bing_images_e_bing_web_nao_compartilham_estado(self):
+        search.engine_falhou("bing_images")
+        search.engine_falhou("bing_images")
+        search.engine_falhou("bing_images")
+        self.assertFalse(search.engine_disponivel("bing_images"))
+        self.assertTrue(search.engine_disponivel("bing_web"))
 
 
 class OfficialSourcesTests(unittest.TestCase):

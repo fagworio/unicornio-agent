@@ -68,7 +68,11 @@ class DesembrulhoDoRedirectDoBingTests(unittest.TestCase):
 class BuscadorDePaginasDoResolverTests(unittest.TestCase):
     def test_buscador_le_a_fixture_e_nao_devolve_link_do_bing(self):
         html = FIXTURE.read_text(encoding="utf-8")
-        with mock.patch.object(search, "_fetch", return_value=html):
+        with mock.patch.object(
+            search,
+            "_fetch_report",
+            return_value=(html, {"failure_kind": "ok"}),
+        ):
             paginas = source_resolver._buscador_padrao("site:invenglobal.com Obsidian Entertainment")
         urls = [p["source_page_url"] for p in paginas]
         self.assertTrue(urls)
@@ -87,8 +91,49 @@ class BuscadorDePaginasDoResolverTests(unittest.TestCase):
             if "bing.com" not in trecho
         ]
         self.assertEqual(antigos, [])
-        with mock.patch.object(search, "_fetch", return_value=html):
+        with mock.patch.object(
+            search,
+            "_fetch_report",
+            return_value=(html, {"failure_kind": "ok"}),
+        ):
             self.assertTrue(source_resolver._buscador_padrao("qualquer coisa"))
+
+    def test_bing_images_bloqueado_nao_bloqueia_bing_web(self):
+        html = FIXTURE.read_text(encoding="utf-8")
+        with mock.patch.object(search, "engine_disponivel", return_value=True) as disponivel, \
+             mock.patch.object(search, "_fetch_report", return_value=(html, {"failure_kind": "ok"})), \
+             mock.patch.object(search, "engine_ok") as engine_ok:
+            paginas = source_resolver._buscador_padrao("qualquer coisa")
+        self.assertTrue(paginas)
+        disponivel.assert_called_once_with("bing_web")
+        engine_ok.assert_called_once_with("bing_web")
+
+    def test_falha_transitoria_do_bing_web_abre_apenas_seu_breaker(self):
+        with mock.patch.object(search, "engine_disponivel", return_value=True), \
+             mock.patch.object(
+                 search,
+                 "_fetch_report",
+                 return_value=(None, {"failure_kind": "rate_limited", "http_status": 429}),
+             ), \
+             mock.patch.object(search, "engine_falhou") as engine_falhou, \
+             mock.patch.object(search, "engine_degradada") as engine_degradada:
+            self.assertEqual(source_resolver._buscador_padrao("qualquer coisa"), [])
+        engine_falhou.assert_called_once_with("bing_web")
+        engine_degradada.assert_not_called()
+
+    def test_schema_invalido_do_bing_web_nao_e_registrado_como_sucesso(self):
+        html = '<html><body><script>enablejs</script></body></html>'
+        with mock.patch.object(search, "engine_disponivel", return_value=True), \
+             mock.patch.object(
+                 search,
+                 "_fetch_report",
+                 return_value=(html, {"failure_kind": "network_error", "http_status": 200}),
+             ), \
+             mock.patch.object(search, "engine_degradada") as engine_degradada, \
+             mock.patch.object(search, "engine_ok") as engine_ok:
+            self.assertEqual(source_resolver._buscador_padrao("qualquer coisa"), [])
+        engine_degradada.assert_called_once_with("bing_web", "js_required")
+        engine_ok.assert_not_called()
 
 
 if __name__ == "__main__":

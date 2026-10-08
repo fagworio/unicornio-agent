@@ -134,6 +134,7 @@ def _candidate(query: str, data: dict[str, Any]) -> dict[str, Any]:
         "candidate_id": candidate_id,
         "query": query,
         "engine": "google_browser",
+        "discovery_method": "google_browser_result",
         "title": str(data.get("title") or "")[:200],
         "thumbnail_url": str(data.get("thumbnail_url") or ""),
         "direct_image_url": direct,
