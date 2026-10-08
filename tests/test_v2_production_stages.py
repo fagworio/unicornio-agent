@@ -180,6 +180,102 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     assert result["readback"] is True
 
 
+def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tmp_path):
+    inline_url = "https://example.test/partial.webp"
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 14,
+                "status": "pending",
+                "content": {"raw": "<p>texto</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.updates = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            self.post.update(update)
+
+    client = Client()
+    backup = tmp_path / "backups" / "14"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(
+        json.dumps({"content": f'<p>texto</p><img src="{inline_url}" />'}),
+        encoding="utf-8",
+    )
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            inline=(InlineMedia(14, inline_url, 0, "Imagem", "Crédito da imagem: Fonte"),),
+        ),
+    )
+    outcome = Outcome.retry(Phase.MEDIA, BlockerCode.INLINE_MISSING)
+
+    first = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
+    assert first["readback"] is True
+    assert client.post["content"]["raw"].count(inline_url) == 1
+    assert len(client.updates) == 1
+    assert client.updates[0]["content"]["raw"].count(inline_url) == 1
+
+    second = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
+    assert second["readback"] is True
+    assert len(client.updates) == 1
+    assert client.post["content"]["raw"].count(inline_url) == 1
+
+
+def test_writer_reports_partial_apply_readback_failure_as_technical_error(tmp_path):
+    inline_url = "https://example.test/not-persisted.webp"
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 15,
+                "status": "pending",
+                "content": {"raw": "<p>texto</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.post["meta"] = update.get("meta") or {}
+
+    backup = tmp_path / "backups" / "15"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(
+        json.dumps({"content": f'<p>texto</p><img src="{inline_url}" />'}),
+        encoding="utf-8",
+    )
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            inline=(InlineMedia(15, inline_url, 0, "Imagem", "Crédito da imagem: Fonte"),),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="inline media read-back mismatch"):
+        WordPressWriterV2(Client(), tmp_path).commit(
+            15,
+            {"post_id": 15},
+            state,
+            Outcome.retry(Phase.MEDIA, BlockerCode.INLINE_MISSING),
+        )
+
+
 def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkeypatch):
     seen_keywords = []
     candidate = {

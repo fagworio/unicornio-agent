@@ -878,11 +878,34 @@ class WordPressWriterV2:
         intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": outcome.detail or context.get("provider_reason")}
         journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
-        if outcome.type.value == "ready" and content:
+        import html as _html
+
+        current_content = _html.unescape(str((post.get("content") or {}).get("raw") or ""))
+        expected_inline_urls = [
+            str(item.media_url or "").strip()
+            for item in getattr(getattr(proposed_state, "media", None), "inline", ())
+            if str(item.media_url or "").strip()
+        ]
+        pending_inline_urls = [
+            url for url in expected_inline_urls
+            if url not in current_content
+        ]
+        # Accepted media must reach the post at the end of the acquisition
+        # round even when the post remains PARTIAL/PENDING.  A later retry
+        # derives ``pending_inline_urls`` from WordPress again, making this
+        # write idempotent and preventing duplicate insertions.
+        apply_inline = bool(content) and (
+            outcome.type.value == "ready" or bool(pending_inline_urls)
+        )
+        if apply_inline:
             update["content"] = {"raw": content}
+        if outcome.type.value == "ready" and content:
             update["featured_media"] = candidate.get("featured_media")
         current = post.get("content") or {}
-        if update.get("content", {}).get("raw") == current.get("raw") and meta.get("_hermes_work_state") == state_json:
+        if (
+            (not apply_inline or update.get("content", {}).get("raw") == current.get("raw"))
+            and meta.get("_hermes_work_state") == state_json
+        ):
             readback = post
             changed = False
         else:
@@ -898,18 +921,7 @@ class WordPressWriterV2:
         readback_meta = readback.get("meta") or {}
         if readback_meta.get("_hermes_work_state") != state_json:
             raise RuntimeError("V2 state read-back mismatch")
-        if outcome.type.value == "ready":
-            if (readback.get("content") or {}).get("raw") != content:
-                raise RuntimeError("candidate content read-back mismatch")
-            if readback_meta.get("_hermes_ready_hash") != ready_hash:
-                raise RuntimeError("ready hash read-back mismatch")
-            import html as _html
-
-            expected_inline_urls = [
-                str(item.media_url or "").strip()
-                for item in getattr(getattr(proposed_state, "media", None), "inline", ())
-                if str(item.media_url or "").strip()
-            ]
+        if apply_inline or outcome.type.value == "ready":
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
             missing_inline = [
                 url for url in expected_inline_urls
@@ -931,9 +943,15 @@ class WordPressWriterV2:
                     inline_applied=sum(url in _html.unescape(content) for url in expected_inline_urls),
                     inline_readback=sum(url in readback_content for url in expected_inline_urls),
                     readback=True,
+                    partial=outcome.type.value != "ready",
                 )
             except Exception:
                 pass
+        if outcome.type.value == "ready":
+            if (readback.get("content") or {}).get("raw") != content:
+                raise RuntimeError("candidate content read-back mismatch")
+            if readback_meta.get("_hermes_ready_hash") != ready_hash:
+                raise RuntimeError("ready hash read-back mismatch")
         journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"wordpress_changed": changed, "readback": True, "ready_hash": ready_hash}
 
