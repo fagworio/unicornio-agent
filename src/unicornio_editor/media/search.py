@@ -646,7 +646,9 @@ def _yandex_result_objects(page: str) -> list[dict[str, Any]]:
         if not isinstance(value, dict):
             return 0
         try:
-            return max(0, int(value.get("width") or 0)) * max(0, int(value.get("height") or 0))
+            width = value.get("w") or value.get("width") or 0
+            height = value.get("h") or value.get("height") or 0
+            return max(0, int(width)) * max(0, int(height))
         except (TypeError, ValueError):
             return 0
 
@@ -664,7 +666,12 @@ def _yandex_result_objects(page: str) -> list[dict[str, Any]]:
                 snippet = item["snippet"]
             source = _yandex_url(snippet.get("url") or snippet.get("href"))
             title = str(snippet.get("title") or item.get("title") or "")
-            thumbnail = _yandex_url(viewer.get("preview") or item.get("preview"))
+            thumbnail = _yandex_url(
+                viewer.get("preview")
+                or viewer.get("image")
+                or item.get("preview")
+                or item.get("image")
+            )
             imagens: list[tuple[int, str]] = []
             for field in (viewer.get("dups"), viewer.get("preview"), item.get("dups"), item.get("images")):
                 values = field if isinstance(field, list) else [field]

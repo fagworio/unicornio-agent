@@ -266,6 +266,29 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertTrue(results[0]["usable"])
         self.assertEqual(results[0]["discovery_method"], "yandex_data_state")
 
+    def test_yandex_data_state_prefere_w_h_e_usa_image_como_thumbnail(self):
+        html = (
+            '<div data-state=\'{"viewerData":{"snippet":'
+            '{"url":"https://source.example/bleach","title":"Bleach"},'
+            '"dups":[{"url":"https://cdn.example/small.jpg","w":640,"h":360},'
+            '{"url":"https://cdn.example/original.jpg","w":1920,"h":1080}],'
+            '"image":{"url":"https://thumb.example/bleach.jpg"}}}\'></div>'
+        )
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return html.encode()
+
+        with mock.patch("unicornio_editor.media.search.urlopen", return_value=FakeResp()):
+            results = search_yandex_images("bleach", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["direct_image_url"], "https://cdn.example/original.jpg")
+        self.assertEqual(results[0]["thumbnail_url"], "https://thumb.example/bleach.jpg")
+
     def test_search_web_images_uses_fixed_bing_then_yandex_fallback(self):
         # Google Browser é tentado antes; com Playwright ausente, Bing é sempre
         # o primeiro fallback e Yandex fica reservado para recall.
