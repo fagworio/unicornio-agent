@@ -15,7 +15,9 @@ from unicornio_editor.media.google_browser import (
 from unicornio_editor.media.url_safety import URLSafetyError
 
 
-def test_google_browser_fails_safe_when_playwright_is_unavailable():
+def test_google_browser_fails_safe_when_playwright_is_unavailable(monkeypatch):
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(google_browser, "_BROWSER_DISABLED", False)
     report = {}
     with patch.dict("sys.modules", {"playwright": None}):
         result = search_google_browser_images("Jujutsu Kaisen", report=report)
@@ -44,6 +46,12 @@ def test_google_browser_uses_modern_images_url():
 
 
 def test_google_browser_pairs_each_clicked_result_with_its_own_source(monkeypatch):
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        str(google_browser._PROJECT_BROWSER_PATH),
+    )
+    monkeypatch.setattr(google_browser, "_BROWSER_DISABLED", False)
     pytest.importorskip("playwright")
     try:
         from playwright.sync_api import sync_playwright

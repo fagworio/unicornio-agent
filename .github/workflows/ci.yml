@@ -27,6 +27,8 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q src tests scripts
       - name: Run tests
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
         run: python -m pytest -q
       - name: Check repository safety
         run: python scripts/check_repository.py
