@@ -55,19 +55,23 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
     def test_fonte_extrai_multiplos_assets_sem_resolver_nova_origem(self):
         html = '''
         <meta property="og:image" content="https://cdn.example/hero.jpg">
-        <img src="https://cdn.example/frame-a.webp" width="1200" height="675" alt="Jogo">
-        <img src="https://cdn.example/logo.png" width="1200" height="800">
-        <img src="https://cdn.example/frame-b.webp" width="1280" height="720" alt="Jogo">
+        <article>
+          <img src="https://cdn.example/frame-a.webp" width="1200" height="675" alt="Jogo">
+          <img src="https://cdn.example/logo.png" width="1200" height="800">
+          <img src="https://cdn.example/frame-b.webp" width="1280" height="720" alt="Jogo">
+        </article>
         '''
+        stats = {}
         with mock.patch.object(source_verify, "_fetch", return_value=html.encode("utf-8")):
             candidates = source_verify.discover_article_source_candidates(
-                "https://source.example/news", subject="Jogo"
+                "https://source.example/news", subject="Jogo", stats=stats
             )
         urls = {item["direct_image_url"] for item in candidates}
         self.assertIn("https://cdn.example/hero.jpg", urls)
         self.assertIn("https://cdn.example/frame-a.webp", urls)
         self.assertIn("https://cdn.example/frame-b.webp", urls)
         self.assertNotIn("https://cdn.example/logo.png", urls)
+        self.assertEqual(stats, {"raw_assets": 4, "editorial_assets": 4, "filtered_assets": 0})
         self.assertTrue(all(item["source_origin_type"] == "article_source" for item in candidates))
         self.assertTrue(all(item["evidence"]["verdict"] == "deterministic_match" for item in candidates))
 
@@ -89,6 +93,14 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         ]
         assert candidates[0]["subjects"] == ["RPCS3", "PlayStation 5", "emulação"]
         assert candidates[0]["source_context_kind"] == "article_body"
+
+    def test_fonte_descarta_asset_sem_contexto_editorial(self):
+        html = '<img src="https://cdn.example/card.jpg" width="1200" height="675">'
+        with mock.patch.object(source_verify, "_fetch", return_value=html.encode("utf-8")):
+            candidates = source_verify.discover_article_source_candidates(
+                "https://source.example/news", subject="Jogo"
+            )
+        assert candidates == []
 
 
 if __name__ == "__main__":

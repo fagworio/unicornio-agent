@@ -304,21 +304,32 @@ class ProductionComposeStage:
                 str(context.get("title") or ""),
                 str(editorial.get("cleaned_html") or ""),
             ) is not None
-            placements: list[dict[str, Any]] = [
-                {
+            existing_html = str(editorial.get("cleaned_html") or "")
+            featured_url = str(media.featured.media_url or "").strip()
+            seen_urls: set[str] = set()
+            placements: list[dict[str, Any]] = []
+            for index, item in enumerate(media.inline):
+                media_url = str(item.media_url or "").strip()
+                if (
+                    not media_url
+                    or media_url in existing_html
+                    or media_url == featured_url
+                    or media_url in seen_urls
+                ):
+                    continue
+                seen_urls.add(media_url)
+                placements.append({
                     "paragraph_index": (
                         item.section_slot
                         if is_listicle and item.section_slot is not None
                         else (index if is_listicle else item.slot)
                     ),
-                    "media_url": item.media_url,
+                    "media_url": media_url,
                     "alt_text": item.alt_text,
                     "credit_text": item.credit_text,
                     "width": item.width,
                     "height": item.height,
-                }
-                for index, item in enumerate(media.inline)
-            ]
+                })
             working = dict(editorial)
             working["cleaned_html"] = insert_media(
                 str(editorial["cleaned_html"]),

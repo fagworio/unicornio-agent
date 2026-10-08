@@ -48,6 +48,7 @@ def discover_article_source_candidates(
     subjects: list[str] | tuple[str, ...] | None = None,
     limit: int = 32,
     audit=None,
+    stats: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract candidates directly from the article's ``Fonte`` page.
 
@@ -67,15 +68,26 @@ def discover_article_source_candidates(
         if normalized and normalized.casefold() not in {item.casefold() for item in editorial_subjects}:
             editorial_subjects.append(normalized)
     primary_subject = editorial_subjects[0] if editorial_subjects else subject
+    extracted_assets = extract_page_assets(html, page_url)
+    editorial_assets = [
+        asset for asset in extracted_assets
+        if asset.context_kind in {"article_body", "article_header", "metadata"}
+    ]
+    if stats is not None:
+        stats.update({
+            "raw_assets": len(extracted_assets),
+            "editorial_assets": len(editorial_assets),
+            "filtered_assets": len(extracted_assets) - len(editorial_assets),
+        })
     assets = rank_page_assets(
-        extract_page_assets(html, page_url),
+        editorial_assets,
         primary_subject or page_url,
         subject=" ".join(editorial_subjects),
         limit=max(1, int(limit)),
     )
     generic = {
         "logo", "avatar", "favicon", "icon", "pixel", "tracking", "spacer",
-        "audio", "podcast", "soundcloud", "spotify", "artwork", "related",
+        "audio", "podcast", "soundcloud", "spotify", "related",
         "recommend", "sidebar", "author",
     }
     result: list[dict[str, Any]] = []
@@ -110,6 +122,7 @@ def discover_article_source_candidates(
             "origin_type": "article_source",
             "source_verified": True,
             "provenance_verified": True,
+            "source_verification": "verified_by_extraction",
             "usable": True,
             "discovery_only": False,
             "engine": "article_source",

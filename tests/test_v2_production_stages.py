@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.pipeline_v2.errors import StageError
-from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
+from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2
 from unicornio_editor.workflow import MediaFunnelInvariantError
 
 
@@ -106,6 +107,77 @@ def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
         {"post_id": 8, "post": post, "v2_state": None}, candidate
     )
     assert set(validation) >= {"passed", "failures", "checklist"}
+
+
+def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
+    existing = "https://example.test/existing.webp"
+    featured = "https://example.test/featured.webp"
+    new = "https://example.test/new.webp"
+    editorial = {
+        "cleaned_html": f'<p>one</p><img src="{existing}" /><p>two</p><p>three</p><p>four</p>',
+        "seo": {},
+    }
+    media = MediaProgress(
+        required=2,
+        inline=(
+            InlineMedia(10, existing, 0, "Existing", "Crédito da imagem: Existing"),
+            InlineMedia(11, featured, 3, "Featured", "Crédito da imagem: Featured"),
+            InlineMedia(12, new, 2, "New", "Crédito da imagem: New"),
+        ),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 11, featured),
+    )
+    candidate = ProductionComposeStage(Config(), tmp_path)(
+        {"post_id": 12, "original_link": None}, editorial, media
+    )
+    content = candidate["content"]
+    assert content.count(existing) == 1
+    assert content.count(featured) == 0
+    assert content.count(new) == 1
+
+
+def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
+    inline_url = "https://example.test/accepted.webp"
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 13,
+                "status": "pending",
+                "content": {"raw": "old"},
+                "featured_media": 0,
+                "meta": {},
+            }
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.post.update(update)
+
+    client = Client()
+    backup = tmp_path / "backups" / "13"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(
+        json.dumps({
+            "content": f'<p>texto</p><img src="{inline_url}" />',
+                        "editorial": {"cleaned_html": "<p>texto</p>", "seo": {"title": "Título", "meta_description": "Descrição editorial com contexto e informações essenciais para o leitor entender a notícia e acompanhar os principais pontos desta publicação.", "focus_keyword": "título"}},
+                        "seo": {"title": "Título", "meta_description": "Descrição editorial com contexto e informações essenciais para o leitor entender a notícia e acompanhar os principais pontos desta publicação.", "focus_keyword": "título"},
+            "featured_media": None,
+        }),
+        encoding="utf-8",
+    )
+    media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(13, inline_url, 0, "Imagem", "Crédito da imagem: Fonte"),),
+    )
+    state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+        media=media,
+    )
+    result = WordPressWriterV2(client, tmp_path).commit(13, {"post_id": 13}, state, Outcome.ready())
+    assert result["readback"] is True
 
 
 def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkeypatch):

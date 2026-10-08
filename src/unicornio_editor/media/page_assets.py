@@ -51,15 +51,23 @@ class _AssetParser(HTMLParser):
         excluded = {
             "aside", "footer", "nav", "sidebar", "related", "recommend",
             "recommended", "author", "avatar", "comment", "comments",
-            "advert", "advertising", "banner", "sponsor", "podcast", "audio",
+            "advert", "advertising", "sponsor", "podcast", "audio",
         }
         if tokens & excluded or any(
             token.startswith("ad-") or token.endswith("-ad") for token in tokens
         ):
             return "excluded"
-        if any(tag in {"main", "article", "figure"} for tag, _marker in self._scope_stack):
+        editorial_markers = (
+            "entry-content", "post-content", "article-content", "content-body",
+            "main-content", "single-content", "story-body", "article-body",
+        )
+        if any(marker in markers for marker in editorial_markers):
+            return "article_body"
+        if any(tag in {"main", "article"} for tag, _marker in self._scope_stack):
             return "article_body"
         if any(tag == "header" for tag, _marker in self._scope_stack):
+            if any(marker in markers for marker in ("site-header", "global-header", "masthead", "navigation")):
+                return "excluded"
             return "article_header"
         return "unknown"
 

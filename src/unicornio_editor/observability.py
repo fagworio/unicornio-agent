@@ -435,6 +435,8 @@ def read_telemetry_summary(
     media_by_domain: dict[str, dict[str, int]] = {}
     media_search_summaries: list[dict[str, Any]] = []
     media_post_summaries: list[dict[str, Any]] = []
+    media_source_summaries: list[dict[str, Any]] = []
+    media_apply_readbacks: list[dict[str, Any]] = []
     # Economia de midia (unidade: por BUSCA e por READY). `deferred` e contado
     # SEPARADO de `rejected`: candidato dispensado por capacidade ja atendida
     # nao foi investigado, entao nao e rejeicao — somar os dois faria a busca
@@ -635,6 +637,25 @@ def read_telemetry_summary(
                     )
                     if key in record
                 })
+            if event == "media_source_summary":
+                media_source_summaries.append({
+                    key: record[key]
+                    for key in (
+                        "post_id", "source_page", "source_raw_found",
+                        "source_after_dom_filter", "source_filtered", "source_attempted",
+                        "source_accepted", "reused", "uploaded",
+                    )
+                    if key in record
+                })
+            if event == "media_apply_readback":
+                media_apply_readbacks.append({
+                    key: record[key]
+                    for key in (
+                        "post_id", "accepted_media", "inline_applied",
+                        "inline_readback", "readback",
+                    )
+                    if key in record
+                })
             if event == "vision_api_request":
                 # UMA requisição HTTP = UM evento (low e high contam): é a
                 # unidade que reconcilia com o custo de visão do provedor.
@@ -806,6 +827,8 @@ def read_telemetry_summary(
         "media_by_domain": media_by_domain,
         "media_search_summary": media_search_summaries,
         "media_post_summary": media_post_summaries,
+        "media_source_summary": media_source_summaries,
+        "media_apply_readback": media_apply_readbacks,
         "media_economy": {
             **midia,
             "local_reuse_rate": (

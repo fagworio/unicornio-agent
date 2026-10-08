@@ -489,6 +489,10 @@ class ProductionMediaResolver:
                     else ""
                 )
             if source_url:
+                source_stats: dict[str, int] = {}
+                source_attempted = 0
+                source_accepted = 0
+                source_reused = 0
                 try:
                     from ..media.source_verify import discover_article_source_candidates
 
@@ -497,12 +501,14 @@ class ProductionMediaResolver:
                         subject=(source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)),
                         subjects=source_subjects,
                         limit=max(8, inline_remaining() * 4),
+                        stats=source_stats,
                     )
                 except Exception:
                     source_candidates = []
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
+                    source_attempted += 1
                     subject = str(candidate.get("subject") or (source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)))
                     candidate["subject"] = subject
                     metadata = subject_meta.get(subject) or {}
@@ -533,7 +539,25 @@ class ProductionMediaResolver:
                             self._plan_item(source_candidate, subject, slot, False)
                         ])
                         if len(current_inline) > before:
+                            source_accepted += 1
+                            if source_candidate.get("media_library_id"):
+                                source_reused += 1
                             covered_item_keys.add(str(subject).casefold())
+                from ..observability import append_telemetry
+
+                append_telemetry(
+                    self.root,
+                    "media_source_summary",
+                    post_id=int(context["post_id"]),
+                    source_page=source_url[:500],
+                    source_raw_found=int(source_stats.get("raw_assets") or 0),
+                    source_after_dom_filter=int(source_stats.get("editorial_assets") or 0),
+                    source_filtered=int(source_stats.get("filtered_assets") or 0),
+                    source_attempted=source_attempted,
+                    source_accepted=source_accepted,
+                    reused=source_reused,
+                    uploaded=max(0, source_accepted - source_reused),
+                )
             # External acquisition is only used for the residual deficit.
             for subject, query in subject_queries:
                 remaining = inline_remaining()
@@ -879,6 +903,37 @@ class WordPressWriterV2:
                 raise RuntimeError("candidate content read-back mismatch")
             if readback_meta.get("_hermes_ready_hash") != ready_hash:
                 raise RuntimeError("ready hash read-back mismatch")
+            import html as _html
+
+            expected_inline_urls = [
+                str(item.media_url or "").strip()
+                for item in getattr(getattr(proposed_state, "media", None), "inline", ())
+                if str(item.media_url or "").strip()
+            ]
+            readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
+            missing_inline = [
+                url for url in expected_inline_urls
+                if url not in readback_content
+            ]
+            if missing_inline:
+                raise RuntimeError(
+                    "inline media read-back mismatch: "
+                    + ", ".join(missing_inline[:5])
+                )
+            try:
+                from .observability import append_telemetry
+
+                append_telemetry(
+                    self.root,
+                    "media_apply_readback",
+                    post_id=int(post_id),
+                    accepted_media=len(expected_inline_urls),
+                    inline_applied=sum(url in _html.unescape(content) for url in expected_inline_urls),
+                    inline_readback=sum(url in readback_content for url in expected_inline_urls),
+                    readback=True,
+                )
+            except Exception:
+                pass
         journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"wordpress_changed": changed, "readback": True, "ready_hash": ready_hash}
 
