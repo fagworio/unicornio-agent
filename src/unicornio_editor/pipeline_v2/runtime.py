@@ -260,6 +260,8 @@ class ProductionMediaResolver:
             add_query(title, item_query(title, title, extra=focus_keyword))
 
         search_runs: list[dict[str, Any]] = []
+        current_inline = list(previous.inline)
+        current_featured = featured
 
         def resolve_query(subject: str, query: str, needed: int, role: str) -> list[dict[str, Any]]:
             if needed <= 0:
@@ -277,10 +279,10 @@ class ProductionMediaResolver:
                     "engine": "auto",
                     "size": "xga",
                     "ratio": "w",
-                    "existing_media_urls": [item.media_url for item in previous.inline],
+                    "existing_media_urls": [item.media_url for item in current_inline],
                     "existing_media_phashes": {
                         item.media_url: item.phash
-                        for item in previous.inline
+                        for item in current_inline
                         if item.phash
                     },
                 }],
@@ -328,158 +330,185 @@ class ProductionMediaResolver:
                 candidates.append(candidate)
             return candidates
 
-        featured_candidates: list[dict[str, Any]] = []
+        def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """Execute one candidate batch and merge only final accepted media."""
+            nonlocal current_featured
+            if not plan:
+                return []
+            try:
+                checked = validate_media_plan(
+                    self.client,
+                    {**editorial, "media_plan": plan},
+                    config=self.config,
+                    root=self.root,
+                    post_title=title,
+                    post_id=int(context["post_id"]),
+                    existing_featured_id=(
+                        current_featured.media_id
+                        if current_featured.status is FeaturedStatus.VALID
+                        else None
+                    ),
+                )
+            except Exception:
+                from ..media.google_browser import cleanup_browser_artifacts
+
+                cleanup_browser_artifacts()
+                raise
+            vision_errors = [
+                row for row in checked.get("featured_vision", [])
+                if isinstance(row, dict) and row.get("technical")
+            ]
+            if vision_errors:
+                from ..media.vision_gate import VisionGateError
+                from ..media.google_browser import cleanup_browser_artifacts
+
+                cleanup_browser_artifacts()
+                raise VisionGateError(
+                    str(vision_errors[0].get("reason") or "vision provider error")
+                )
+            try:
+                results, _featured_id, _featured_credit = _execute_media_plan(
+                    {**editorial, "media_plan": plan},
+                    self.config,
+                    self.client,
+                    self.root,
+                    preflight=checked,
+                    post_id=int(context["post_id"]),
+                    previous_inline_phashes=tuple(
+                        item.phash for item in current_inline if item.phash
+                    ),
+                )
+            finally:
+                from ..media.google_browser import cleanup_browser_artifacts
+
+                cleanup_browser_artifacts()
+            for result in results:
+                status = result.get("status")
+                if status and status not in {"accepted", "ok"}:
+                    continue
+                plan_item = plan[0]
+                if result.get("media_id") and result.get("media_url") and not result.get("featured"):
+                    current_inline.append(InlineMedia(
+                        int(result["media_id"]),
+                        str(result["media_url"]),
+                        int(result.get("paragraph_index", 0)),
+                        str(result.get("alt_text", "")),
+                        str(result.get("credit_text", "")),
+                        str(plan_item.get("subject") or ""),
+                        plan_item.get("item_number"),
+                        str(plan_item.get("section_heading") or ""),
+                        plan_item.get("section_slot"),
+                        int(result.get("width") or 1200),
+                        int(result.get("height") or 800),
+                        str(result.get("phash") or ""),
+                    ))
+                if result.get("featured") and result.get("media_id"):
+                    current_featured = FeaturedProgress(
+                        FeaturedStatus.VALID,
+                        int(result["media_id"]),
+                        str(result.get("media_url") or ""),
+                    )
+            return results
+
+        featured_queries: list[tuple[str, str]] = []
         if featured_needed:
             featured_row = subject_rows[0] if subject_rows else {}
             featured_subject = str(featured_row.get("subject") or title)
             featured_query = item_query(featured_subject, title, extra=focus_keyword)
-            # Key-art is a separate search role.  If the contextual query has
-            # no usable result, the explicit key-art query provides a second
-            # pool without ever turning an inline candidate into the featured.
             featured_queries = [
                 (featured_subject, f"{featured_query} key art"),
                 (featured_subject, featured_query),
             ]
             for subject, query in featured_queries:
-                featured_candidates.extend(resolve_query(subject, query, 1, "featured"))
-                if any(self._is_approved(candidate) for candidate in featured_candidates):
+                if current_featured.status is FeaturedStatus.VALID:
                     break
+                candidates = resolve_query(subject, query, 1, "featured")
+                self._resolve_ambiguous_vision(candidates, post_id=int(context["post_id"]))
+                for candidate in self._approved_unique(candidates):
+                    if current_featured.status is FeaturedStatus.VALID:
+                        break
+                    execute_plan([
+                        self._plan_item(candidate, candidate.get("subject") or title, 0, True)
+                    ])
 
-        inline_candidates: list[dict[str, Any]] = []
+        covered_item_keys = {
+            str(item.item_number or item.subject).casefold()
+            for item in current_inline
+            if item.item_number is not None or item.subject
+        }
+        used_slots = {item.slot for item in current_inline}
+
+        def inline_remaining() -> int:
+            if is_listicle:
+                return sum(
+                    1
+                    for _index, row in missing_rows
+                    if str(row.get("item") or row.get("subject") or "").casefold()
+                    not in covered_item_keys
+                )
+            return max(0, total_required - len(current_inline))
+
         if inline_needed:
             for subject, query in subject_queries:
-                inline_candidates.extend(
-                    resolve_query(subject, query, 1 if is_listicle else inline_needed, "inline")
-                )
-                # A listicle has an explicit subject identity per numbered
-                # section. Search every item independently; do not let the
-                # first item consume the whole article quota.
-                if not is_listicle and len(self._approved_unique(inline_candidates)) >= inline_needed:
+                remaining = inline_remaining()
+                if remaining <= 0:
                     break
-
-        all_candidates = self._unique_candidates(featured_candidates + inline_candidates)
-        self._resolve_ambiguous_vision(all_candidates, post_id=int(context["post_id"]))
-        featured_approved = [
-            candidate for candidate in self._approved_unique(featured_candidates)
-            if candidate.get("direct_image_url")
-        ]
-        featured_selected = featured_approved[0] if featured_approved else None
-        featured_keys = {
-            str(featured_selected.get("media_library_id") or featured_selected.get("direct_image_url") or "")
-        } if featured_selected else set()
-        inline_approved = [
-            candidate for candidate in self._approved_unique(inline_candidates)
-            if candidate.get("direct_image_url")
-            and str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "") not in featured_keys
-        ]
-        if is_listicle:
-            per_item: list[dict[str, Any]] = []
-            seen_items: set[str] = set()
-            for candidate in inline_approved:
-                item_key = str(candidate.get("item_number") or candidate.get("subject") or "")
-                if item_key and item_key not in seen_items:
-                    seen_items.add(item_key)
-                    per_item.append(candidate)
-            inline_approved = per_item + [
-                candidate for candidate in inline_approved if candidate not in per_item
-            ]
-
-        plan: list[dict[str, Any]] = []
-        if featured_needed and featured_selected:
-            plan.append(self._plan_item(featured_selected, featured_selected.get("subject") or title, 0, True))
-        used_slots = {item.slot for item in previous.inline}
-        for candidate in inline_approved[:inline_needed]:
-            if is_listicle:
-                slot = int(candidate.get("section_slot", 0))
-            else:
-                slot = 0
-                while slot in used_slots:
-                    slot += 3
-                used_slots.add(slot)
-            plan.append(self._plan_item(candidate, candidate.get("subject") or title, slot, False))
-
-        try:
-            checked = validate_media_plan(
-                self.client,
-                {**editorial, "media_plan": plan},
-                config=self.config,
-                root=self.root,
-                post_title=title,
-                post_id=int(context["post_id"]),
-                existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None,
-            )
-        except Exception:
-            from ..media.google_browser import cleanup_browser_artifacts
-
-            cleanup_browser_artifacts()
-            raise
-        vision_errors = [
-            row for row in checked.get("featured_vision", [])
-            if isinstance(row, dict) and row.get("technical")
-        ]
-        if vision_errors:
-            from ..media.vision_gate import VisionGateError
-            from ..media.google_browser import cleanup_browser_artifacts
-
-            cleanup_browser_artifacts()
-            raise VisionGateError(
-                str(vision_errors[0].get("reason") or "vision provider error")
-            )
-        try:
-            results, _featured_id, _featured_credit = _execute_media_plan(
-                {**editorial, "media_plan": plan},
-                self.config,
-                self.client,
-                self.root,
-                preflight=checked,
-                post_id=int(context["post_id"]),
-                previous_inline_phashes=tuple(
-                    item.phash for item in previous.inline if item.phash
-                ),
-            )
-        finally:
-            from ..media.google_browser import cleanup_browser_artifacts
-
-            cleanup_browser_artifacts()
-        inline = list(previous.inline)
-        for result in results:
-            status = result.get("status")
-            if status and status not in {"accepted", "ok"}:
-                continue
-            if result.get("media_id") and result.get("media_url") and not result.get("featured"):
-                plan_item = next(
-                    (item for item in plan if int(item.get("paragraph_index", -1)) == int(result.get("paragraph_index", -2))),
-                    {},
+                candidates = resolve_query(
+                    subject,
+                    query,
+                    1 if is_listicle else remaining,
+                    "inline",
                 )
-                inline.append(InlineMedia(
-                    int(result["media_id"]),
-                    str(result["media_url"]),
-                    int(result.get("paragraph_index", 0)),
-                    str(result.get("alt_text", "")),
-                    str(result.get("credit_text", "")),
-                    str(plan_item.get("subject") or ""),
-                    plan_item.get("item_number"),
-                    str(plan_item.get("section_heading") or ""),
-                    plan_item.get("section_slot"),
-                    int(result.get("width") or 1200),
-                    int(result.get("height") or 800),
-                    str(result.get("phash") or ""),
-                ))
-            if result.get("featured") and result.get("media_id"):
-                featured = FeaturedProgress(
-                    FeaturedStatus.VALID,
-                    int(result["media_id"]),
-                    str(result.get("media_url") or ""),
-                )
+                self._resolve_ambiguous_vision(candidates, post_id=int(context["post_id"]))
+                for candidate in self._approved_unique(candidates):
+                    if inline_remaining() <= 0:
+                        break
+                    candidate_key = str(
+                        candidate.get("item_number") or candidate.get("subject") or ""
+                    ).casefold()
+                    if is_listicle and candidate_key in covered_item_keys:
+                        continue
+                    media_key = str(
+                        candidate.get("media_library_id")
+                        or candidate.get("direct_image_url")
+                        or ""
+                    )
+                    if media_key in {
+                        str(item.media_id) for item in current_inline
+                    }:
+                        continue
+                    if is_listicle:
+                        slot = int(candidate.get("section_slot", 0))
+                    else:
+                        slot = 0
+                        while slot in used_slots:
+                            slot += 3
+                        used_slots.add(slot)
+                    before = len(current_inline)
+                    execute_plan([
+                        self._plan_item(candidate, candidate.get("subject") or title, slot, False)
+                    ])
+                    if len(current_inline) > before:
+                        covered_item_keys.add(candidate_key)
         if search_runs:
-            search_completed = all(run.get("completed") is True for run in search_runs)
+            capacity_reached = inline_remaining() <= 0
+            queries_planned = len(search_runs) if capacity_reached else len(subject_queries)
+            queries_attempted = len(search_runs)
+            queries_completed = sum(
+                run.get("completed") is True for run in search_runs
+            )
+            search_completed = bool(
+                queries_planned > 0
+                and queries_attempted >= queries_planned
+                and queries_completed == queries_planned
+            )
             search_progress = MediaSearchProgress(
                 completed=search_completed,
                 # Exhaustion is finalized below, after the executable media
                 # plan has produced its final WebP pHashes.  Discovery-level
                 # candidates may collapse into duplicates during conversion.
                 exhausted=False,
-                queries_attempted=sum(int(run.get("queries_attempted") or 0) for run in search_runs),
+                queries_attempted=queries_attempted,
                 engines_attempted=tuple(dict.fromkeys(
                     str(engine)
                     for run in search_runs
@@ -493,10 +522,12 @@ class ProductionMediaResolver:
                 candidates_seen=sum(int(run.get("candidates_seen") or 0) for run in search_runs),
                 candidates_rejected=sum(int(run.get("candidates_rejected") or 0) for run in search_runs),
                 distinct_valid_frames=0,
+                queries_planned=queries_planned,
+                queries_completed=queries_completed,
             )
             final_distinct = {
                 str(item.phash or item.media_url)
-                for item in inline
+                for item in current_inline
                 if item.phash or item.media_url
             }
             search_progress = replace(
@@ -508,8 +539,8 @@ class ProductionMediaResolver:
             search_progress = previous.search
         return MediaProgress(
             required=total_required,
-            inline=tuple({item.media_id: item for item in inline}.values()),
-            featured=featured,
+            inline=tuple({item.media_id: item for item in current_inline}.values()),
+            featured=current_featured,
             search=search_progress,
         )
 

@@ -39,6 +39,8 @@ def test_media_search_progress_round_trips_auditable_exhaustion():
             candidates_seen=8,
             candidates_rejected=7,
             distinct_valid_frames=1,
+            queries_planned=3,
+            queries_completed=3,
         ),
     )
 

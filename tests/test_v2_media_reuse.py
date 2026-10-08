@@ -16,13 +16,13 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
 
-    seen = {}
+    seen = {"plans": []}
 
     def fake_resolve(*_args, **_kwargs):
         return {"posts": [{"reuse": [{"url": "https://cdn.test/existing.webp", "source": "https://source.test/page", "media_id": 77, "author": "Test", "license": "CC BY", "license_url": "https://license.test", "captured_at": "2026-01-01T00:00:00Z", "credit_text": "Crédito", "alt_text": "Existing"}], "audit_candidates": []}]}
 
     def fake_validate(_client, editorial, **_kwargs):
-        seen["plan"] = editorial["media_plan"]
+        seen["plans"].append(editorial["media_plan"])
         return {"valid": True, "rejected": []}
 
     def fake_execute(editorial, *_args, **_kwargs):
@@ -35,8 +35,8 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test"}, SimpleNamespace(media=previous), {"cleaned_html": "<p>one</p>", "seo": {}}, previous
     )
-    assert seen["plan"][0]["direct_image_url"] == "https://cdn.test/existing.webp"
-    assert seen["plan"][0]["source_page_url"] == "https://source.test/page"
+    assert seen["plans"][0][0]["direct_image_url"] == "https://cdn.test/existing.webp"
+    assert seen["plans"][0][0]["source_page_url"] == "https://source.test/page"
     assert result.accepted == 1
 
 
@@ -45,7 +45,7 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
     import unicornio_editor.pipeline_v2.runtime as runtime
 
     calls = []
-    seen = {}
+    seen = {"plans": []}
 
     def candidate(url, subject, candidate_id):
         return {
@@ -77,7 +77,7 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
         return {"posts": [{"audit_candidates": audit, "reuse": []}]}
 
     def fake_validate(_client, editorial, **_kwargs):
-        seen["plan"] = editorial["media_plan"]
+        seen["plans"].append(editorial["media_plan"])
         return {"valid": True, "rejected": []}
 
     def fake_execute(editorial, *_args, **_kwargs):
@@ -108,10 +108,9 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
         previous,
     )
 
-    plan = seen["plan"]
-    assert [item["is_featured"] for item in plan] == [True, False]
-    assert plan[0]["direct_image_url"] == "https://cdn.test/featured.webp"
-    assert plan[1]["direct_image_url"] == "https://cdn.test/featured-alt.webp"
+    assert [[item["is_featured"] for item in plan] for plan in seen["plans"]] == [[True], [False]]
+    assert seen["plans"][0][0]["direct_image_url"] == "https://cdn.test/featured.webp"
+    assert seen["plans"][1][0]["direct_image_url"] == "https://cdn.test/featured-alt.webp"
     assert any("Nana anime" in query for query in calls)
     assert result.featured.status is runtime.FeaturedStatus.VALID
 
@@ -321,6 +320,155 @@ def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_p
     assert result.featured.status is FeaturedStatus.VALID
     assert result.featured.media_id == 88
     assert result.featured.media_url.endswith("featured-1280x720.webp")
+
+
+def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    def candidate(url, candidate_id):
+        return {
+            "candidate_id": candidate_id,
+            "direct_image_url": url,
+            "source_page_url": f"https://source.test/{candidate_id}",
+            "subject": "Test",
+            "author": "Test",
+            "license": "CC BY",
+            "license_url": "https://license.test",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "credit_text": "Crédito",
+            "alt_text": "Test",
+            "evidence": {"verdict": "deterministic_match", "score": 9},
+        }
+
+    queries = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        query = batch["posts"][0]["query"]
+        queries.append(query)
+        candidates = (
+            [candidate("https://cdn.test/rejected-a.webp", "a1"), candidate("https://cdn.test/rejected-b.webp", "a2")]
+            if "Alpha" in query
+            else [candidate("https://cdn.test/accepted.webp", "b1")]
+        )
+        return {"posts": [{
+            "reuse": [],
+            "audit_candidates": candidates,
+            "search": {
+                "completed": True,
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": len(candidates),
+            },
+        }]}
+
+    def fake_execute(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        if "rejected" in item["direct_image_url"]:
+            return ([{"paragraph_index": item["paragraph_index"], "status": "rejected", "detail": "source_mismatch"}], None, None)
+        return ([{
+            "media_id": 88,
+            "media_url": item["direct_image_url"],
+            "paragraph_index": item["paragraph_index"],
+            "alt_text": item["alt_text"],
+            "credit_text": item["credit_text"],
+            "featured": False,
+            "phash": "accepted",
+            "status": "accepted",
+        }], None, None)
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [
+        {"subject": "Alpha"}, {"subject": "Beta"}
+    ])
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
+
+    baseline = InlineMedia(77, "https://cdn.test/baseline.webp", 0, phash="baseline")
+    previous = MediaProgress(
+        required=3,
+        inline=(baseline,),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115108, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        previous,
+    )
+
+    assert len(queries) == 2
+    assert result.accepted == 2
+    assert result.inline[0].media_id == 77
+    assert result.search.queries_planned == 2
+    assert result.search.queries_attempted == 2
+    assert result.search.queries_completed == 2
+    assert result.search.completed is True
+    assert result.search.exhausted is True
+
+
+def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    def candidate(url, candidate_id):
+        return {
+            "candidate_id": candidate_id,
+            "direct_image_url": url,
+            "source_page_url": f"https://source.test/{candidate_id}",
+            "subject": "Test",
+            "author": "Test",
+            "license": "CC BY",
+            "license_url": "https://license.test",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "credit_text": "Crédito",
+            "alt_text": "Test",
+            "evidence": {"verdict": "deterministic_match", "score": 9},
+        }
+
+    queries = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        query = batch["posts"][0]["query"]
+        queries.append(query)
+        return {"posts": [{
+            "reuse": [],
+            "audit_candidates": [candidate(
+                "https://cdn.test/feature-a.webp" if len(queries) == 1 else "https://cdn.test/feature-b.webp",
+                f"feature-{len(queries)}",
+            )],
+        }]}
+
+    def fake_execute(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        if item["direct_image_url"].endswith("feature-a.webp"):
+            return ([{"paragraph_index": 0, "status": "rejected", "detail": "vision_rejected"}], None, None)
+        return ([{
+            "media_id": 91,
+            "media_url": item["direct_image_url"],
+            "paragraph_index": 0,
+            "featured": True,
+            "status": "accepted",
+        }], 91, "Crédito")
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
+
+    previous = MediaProgress(required=0, featured=FeaturedProgress(FeaturedStatus.MISSING))
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115102, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        previous,
+    )
+
+    assert len(queries) == 2
+    assert result.featured.status is FeaturedStatus.VALID
+    assert result.featured.media_id == 91
 
 
 def test_vision_rejected_featured_is_not_recovered_from_wordpress(monkeypatch, tmp_path):

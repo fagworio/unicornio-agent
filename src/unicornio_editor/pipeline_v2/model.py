@@ -134,6 +134,8 @@ class MediaSearchProgress:
     candidates_seen: int = 0
     candidates_rejected: int = 0
     distinct_valid_frames: int = 0
+    queries_planned: int = 0
+    queries_completed: int = 0
 
     def __post_init__(self) -> None:
         if min(
@@ -141,6 +143,8 @@ class MediaSearchProgress:
             self.candidates_seen,
             self.candidates_rejected,
             self.distinct_valid_frames,
+            self.queries_planned,
+            self.queries_completed,
         ) < 0:
             raise ValueError("media search counters cannot be negative")
 
@@ -154,6 +158,8 @@ class MediaSearchProgress:
             "candidates_seen": self.candidates_seen,
             "candidates_rejected": self.candidates_rejected,
             "distinct_valid_frames": self.distinct_valid_frames,
+            "queries_planned": self.queries_planned,
+            "queries_completed": self.queries_completed,
         }
 
     @classmethod
@@ -174,6 +180,8 @@ class MediaSearchProgress:
             candidates_seen=int(value.get("candidates_seen", 0)),
             candidates_rejected=int(value.get("candidates_rejected", 0)),
             distinct_valid_frames=int(value.get("distinct_valid_frames", 0)),
+            queries_planned=int(value.get("queries_planned", 0)),
+            queries_completed=int(value.get("queries_completed", 0)),
         )
 
 
