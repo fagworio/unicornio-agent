@@ -233,3 +233,39 @@ def test_validate_uses_candidate_featured_before_wordpress_projection(tmp_path, 
     persisted = tmp_path / "backups" / "11" / "editorial.candidate.json"
     assert persisted.is_file()
     assert "—" not in persisted.read_text(encoding="utf-8")
+
+
+def test_validate_does_not_resurrect_stale_wordpress_featured(tmp_path, monkeypatch):
+    seen_featured = []
+
+    def fake_checklist(**kwargs):
+        seen_featured.append(kwargs["post"]["featured_media"])
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        fake_checklist,
+    )
+    candidate = {
+        "content": "<p>Texto.</p>",
+        "editorial": {"cleaned_html": "<p>Texto.</p>", "seo": {}},
+        "seo": {},
+        "featured_media": None,
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {
+            "post_id": 12,
+            "post": {
+                "id": 12,
+                "status": "pending",
+                "title": {"raw": "Test"},
+                "meta": {},
+                "featured_media": 777,
+            },
+            "v2_state": None,
+        },
+        candidate,
+    )
+
+    assert result["passed"] is True
+    assert seen_featured == [None]

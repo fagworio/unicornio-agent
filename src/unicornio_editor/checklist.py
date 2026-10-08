@@ -188,7 +188,22 @@ def run_pre_publish_checklist(
     #    never conflicts with the one-image-per-item structural rule.
     words = word_count(content)
     title_str = str((post.get("title") or {}).get("raw") or "")
-    required = _required_image_count(words, title=title_str, content=content)
+    media_required = None
+    if isinstance(media_context, Mapping):
+        inline_context = media_context.get("inline")
+        if isinstance(inline_context, Mapping):
+            raw_required = inline_context.get("required")
+            if (
+                isinstance(raw_required, int)
+                and not isinstance(raw_required, bool)
+                and raw_required >= 0
+            ):
+                media_required = raw_required
+    required = (
+        media_required
+        if media_required is not None
+        else _required_image_count(words, title=title_str, content=content)
+    )
     inline_images = _IMG_RE.findall(content)
     image_count = len(inline_images)
 

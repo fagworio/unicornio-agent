@@ -140,6 +140,15 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
         self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
 
+    def test_media_required_is_canonical_after_compose_changes_word_count(self):
+        content = "<p>" + ("palavra videogame noticia lancamento " * 155) + "</p>"
+        result = self._run_checklist(
+            content=content,
+            media_context={"inline": {"required": 2, "accepted": []}},
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertIn(">= 2 imagens", item["detail"])
+
     def test_irrelevant_image_fails_relevance_gate(self):
         # A real bat is NOT a valid image for a videogame news post.
         content = (

@@ -152,13 +152,49 @@ class ProductionMediaResolver:
     def __init__(self, client, config, root: Path):
         self.client, self.config, self.root = client, config, Path(root)
 
+    def _recover_existing_featured(
+        self,
+        context: dict[str, Any],
+        editorial: dict[str, Any],
+        previous: MediaProgress,
+    ) -> FeaturedProgress:
+        """Normalize a relevant WordPress featured into V2 media state."""
+        if previous.featured.status is FeaturedStatus.VALID:
+            return previous.featured
+        unavailable = FeaturedProgress(previous.featured.status, None, None)
+        post = context.get("post") or {}
+        existing_id = post.get("featured_media") if isinstance(post, dict) else None
+        if not isinstance(existing_id, int) or existing_id <= 0:
+            return unavailable
+        try:
+            from ..workflow import _normalize_existing_featured
+
+            normalized_id = _normalize_existing_featured(
+                self.client,
+                self.config,
+                post,
+                editorial,
+                root=self.root,
+            )
+        except Exception:
+            return unavailable
+        if not isinstance(normalized_id, int) or normalized_id <= 0:
+            return unavailable
+        media_url = ""
+        try:
+            media_url = str(self.client.get_media(normalized_id).get("source_url") or "")
+        except Exception:
+            pass
+        return FeaturedProgress(FeaturedStatus.VALID, normalized_id, media_url)
+
     def __call__(self, context, state, editorial, previous):
         html = str(editorial.get("cleaned_html") or "")
         title = str(context.get("title") or "")
         focus_keyword = str((editorial.get("seo") or {}).get("focus_keyword") or "")
         total_required = required_image_count(word_count(html), title=title, content=html)
         inline_needed = max(0, total_required - previous.accepted)
-        featured_needed = 0 if previous.featured.status is FeaturedStatus.VALID else 1
+        featured = self._recover_existing_featured(context, editorial, previous)
+        featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
 
         from ..cli import _resolve_media_batch
 
@@ -196,7 +232,7 @@ class ProductionMediaResolver:
             return MediaProgress(
                 required=total_required,
                 inline=previous.inline,
-                featured=previous.featured,
+                featured=featured,
                 search=previous.search,
             )
         subject_queries: list[tuple[str, str]] = []
@@ -368,7 +404,7 @@ class ProductionMediaResolver:
                 root=self.root,
                 post_title=title,
                 post_id=int(context["post_id"]),
-                existing_featured_id=previous.featured.media_id if previous.featured.status is FeaturedStatus.VALID else None,
+                existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None,
             )
         except Exception:
             from ..media.google_browser import cleanup_browser_artifacts
@@ -404,7 +440,6 @@ class ProductionMediaResolver:
 
             cleanup_browser_artifacts()
         inline = list(previous.inline)
-        featured = previous.featured
         for result in results:
             status = result.get("status")
             if status and status not in {"accepted", "ok"}:

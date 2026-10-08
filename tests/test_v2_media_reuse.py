@@ -288,6 +288,41 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     assert result["posts"][0]["search"]["completed"] is False
 
 
+def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_path):
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.workflow as workflow
+
+    calls = []
+
+    def normalize(client, config, post, editorial, *, root):
+        calls.append((post["featured_media"], root))
+        return 88
+
+    class Client:
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": "https://cdn.test/featured-1280x720.webp"}
+
+    monkeypatch.setattr(workflow, "_normalize_existing_featured", normalize)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 0)
+    previous = MediaProgress(required=0, featured=FeaturedProgress(FeaturedStatus.MISSING))
+
+    result = ProductionMediaResolver(Client(), Config(), tmp_path)(
+        {
+            "post_id": 115102,
+            "title": "Test",
+            "post": {"id": 115102, "featured_media": 7},
+        },
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        previous,
+    )
+
+    assert calls == [(7, tmp_path)]
+    assert result.featured.status is FeaturedStatus.VALID
+    assert result.featured.media_id == 88
+    assert result.featured.media_url.endswith("featured-1280x720.webp")
+
+
 def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(monkeypatch, tmp_path):
     import unicornio_editor.media.vision_gate as vision_gate
     config = SimpleNamespace(

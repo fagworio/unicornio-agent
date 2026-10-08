@@ -345,8 +345,11 @@ class ProductionValidateStage:
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             post_for_checklist = dict(post)
             candidate_featured = candidate.get("featured_media")
-            if isinstance(candidate_featured, int) and candidate_featured > 0:
-                post_for_checklist["featured_media"] = candidate_featured
+            post_for_checklist["featured_media"] = (
+                candidate_featured
+                if isinstance(candidate_featured, int) and candidate_featured > 0
+                else None
+            )
             seo = dict(checklist_editorial.get("seo") or {})
             checklist = run_pre_publish_checklist(post=post_for_checklist, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)), media_context=candidate.get("media"))
             raw_failures = [item for item in checklist.get("items", []) if item.get("status") == "fail"]
