@@ -52,6 +52,25 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         )
         self.assertFalse(out["valid"])
 
+    def test_fonte_extrai_multiplos_assets_sem_resolver_nova_origem(self):
+        html = '''
+        <meta property="og:image" content="https://cdn.example/hero.jpg">
+        <img src="https://cdn.example/frame-a.webp" width="1200" height="675" alt="Jogo">
+        <img src="https://cdn.example/logo.png" width="1200" height="800">
+        <img src="https://cdn.example/frame-b.webp" width="1280" height="720" alt="Jogo">
+        '''
+        with mock.patch.object(source_verify, "_fetch", return_value=html.encode("utf-8")):
+            candidates = source_verify.discover_article_source_candidates(
+                "https://source.example/news", subject="Jogo"
+            )
+        urls = {item["direct_image_url"] for item in candidates}
+        self.assertIn("https://cdn.example/hero.jpg", urls)
+        self.assertIn("https://cdn.example/frame-a.webp", urls)
+        self.assertIn("https://cdn.example/frame-b.webp", urls)
+        self.assertNotIn("https://cdn.example/logo.png", urls)
+        self.assertTrue(all(item["source_origin_type"] == "article_source" for item in candidates))
+        self.assertTrue(all(item["evidence"]["verdict"] == "deterministic_match" for item in candidates))
+
 
 if __name__ == "__main__":
     unittest.main()

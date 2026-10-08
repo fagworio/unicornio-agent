@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from unicornio_editor.checklist import run_pre_publish_checklist
+from unicornio_editor.checklist import required_image_count, run_pre_publish_checklist
 from unicornio_editor.config import Config
 from unicornio_editor.media.vision_gate import VisionGateError
 
@@ -59,6 +59,13 @@ def make_post(**overrides):
 
 
 class ChecklistTests(unittest.TestCase):
+    def test_listicle_required_is_maximum_of_word_and_item_requirements(self):
+        content = "".join(
+            f"<h2>{index}. Item {index}</h2><p>Descrição do item {index}.</p>"
+            for index in range(1, 6)
+        )
+        self.assertEqual(required_image_count(1200, title="Top 5 jogos", content=content), 6)
+
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
 
@@ -613,6 +620,27 @@ class ChecklistTests(unittest.TestCase):
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         self.assertEqual(item["status"], "pass")
         self.assertIn("waived", item["detail"])
+
+    def test_second_enrichment_round_waives_normal_article_without_faking_missing(self):
+        content = (
+            "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
+            "<p>Mais informações sobre videogame para o leitor.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(featured_media=7),
+            content=content,
+            media_context={
+                "enrichment_round": 2,
+                "inline": {"required": 2, "accepted": []},
+                "search": {"completed": False, "exhausted": False},
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "pass")
+        self.assertIn("enrichment_retries_exhausted", item["detail"])
+        self.assertEqual(result["media_decision"]["missing"], 2)
+        self.assertTrue(result["media_decision"]["waiver_applied"])
 
     def test_media_exhausted_does_not_waive_listicle(self):
         # Listicle (Top N) NAO dispensa o minimo: continua exigindo imagem por

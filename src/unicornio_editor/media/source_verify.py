@@ -41,6 +41,80 @@ _OG_IMAGE_RE = re.compile(
 )
 
 
+def discover_article_source_candidates(
+    page_url: str,
+    *,
+    subject: str = "",
+    limit: int = 32,
+    audit=None,
+) -> list[dict[str, Any]]:
+    """Extract candidates directly from the article's ``Fonte`` page.
+
+    This is intentionally only HTTP/parser discovery. The normal V2
+    media-plan gates still validate and execute every candidate.
+    """
+    if not _valid_http(page_url):
+        return []
+    budget = [_VERIFY_TOTAL_MAX_BYTES]
+    payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+    if payload is None:
+        return []
+    html = payload.decode("utf-8", "ignore")
+    assets = rank_page_assets(
+        extract_page_assets(html, page_url),
+        subject or page_url,
+        subject=subject,
+        limit=max(1, int(limit)),
+    )
+    generic = {"logo", "avatar", "favicon", "icon", "pixel", "tracking", "spacer"}
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for asset in assets:
+        url = str(asset.url or "").strip()
+        if not _valid_http(url) or url in seen:
+            continue
+        seen.add(url)
+        parsed = urlparse(unquote(url))
+        stem = re.sub(r"\.[a-z0-9]{2,5}$", "", parsed.path.rsplit("/", 1)[-1], flags=re.I)
+        if generic.intersection(set(re.split(r"[-_. ]+", stem.casefold()))):
+            continue
+        try:
+            width = int(asset.width or 0)
+            height = int(asset.height or 0)
+        except ValueError:
+            width = height = 0
+        if (width and width < 180) or (height and height < 100):
+            continue
+        candidate_id = hashlib.sha256(
+            f"article_source|{page_url}|{url}".encode("utf-8", "ignore")
+        ).hexdigest()[:20]
+        result.append({
+            "candidate_id": candidate_id,
+            "discovery_image_url": url,
+            "direct_image_url": url,
+            "source_page_url": page_url,
+            "source_origin_type": "article_source",
+            "source_verified": True,
+            "usable": True,
+            "discovery_only": False,
+            "engine": "article_source",
+            "query": "article_source",
+            "evidence": {
+                "verdict": "deterministic_match",
+                "gate": "article_source",
+                "reason": "asset declarado pela página Fonte da matéria",
+            },
+            "evidence_score": 100,
+            "valid": True,
+            "verification_level": "ARTICLE_SOURCE",
+            "alt_text": asset.alt or asset.figcaption or asset.heading or subject,
+            "credit_text": f"Crédito da imagem: {(parsed.hostname or 'fonte original').lower()}",
+            "subject": subject,
+            "role": "inline",
+        })
+    return result
+
+
 def _fetch(url: str, accept: str, max_bytes: int, budget: list[int], audit=None) -> bytes | None:
     if budget[0] <= 0:
         return None

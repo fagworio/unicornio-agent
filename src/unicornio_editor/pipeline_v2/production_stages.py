@@ -6,6 +6,7 @@ These adapters deliberately reuse the mature V1 functions.  They do not call
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -269,6 +270,11 @@ class ProductionMediaStage:
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
                 fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
                 media = MediaProgress(required=required, inline=inline, featured=fp, search=previous.search)
+            if getattr(state, "phase", None) is Phase.MEDIA and media.enrichment_round <= previous.enrichment_round:
+                media = replace(
+                    media,
+                    enrichment_round=previous.enrichment_round + 1,
+                )
             _write_json(self.root, int(context["post_id"]), "editorial.partial.json", media.to_dict())
             return media
         except StageError:
@@ -384,6 +390,16 @@ class ProductionValidateStage:
                     )
                     _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
                     checklist = run_pre_publish_checklist(post=post_for_checklist, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)), media_context=candidate.get("media"))
+            media_decision = checklist.get("media_decision") if isinstance(checklist, dict) else None
+            if isinstance(media_decision, dict) and isinstance(candidate.get("media"), dict):
+                candidate_media = dict(candidate["media"])
+                candidate_media["enrichment_round"] = int(media_decision.get("enrichment_round") or 0)
+                candidate_media["waiver"] = {
+                    "applied": bool(media_decision.get("waiver_applied")),
+                    "reason": str(media_decision.get("waiver_reason") or ""),
+                }
+                candidate["media"] = candidate_media
+                _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             failures = []
             for item in checklist.get("items", []):
                 if item.get("status") != "fail":

@@ -1,5 +1,6 @@
 """V2 orchestration over injected stages; no provider or WP imports."""
 
+from dataclasses import replace
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -90,6 +91,14 @@ class PipelineRunner:
                 elif candidate is None:
                     candidate = context.get("draft") or {}
                 validation = self.stages["validate"](context, candidate)
+                media_decision = ((validation.get("checklist") or {}).get("media_decision")
+                                  if isinstance(validation, dict) else None)
+                if isinstance(media_decision, dict) and media_decision.get("waiver_applied"):
+                    media = replace(
+                        media,
+                        waiver_applied=True,
+                        waiver_reason=str(media_decision.get("waiver_reason") or ""),
+                    )
                 progress = self._media_progressed(previous.media, media) if media_completed else False
                 current_no_progress = (
                     (0 if progress else media_base_no_progress + 1)
@@ -233,6 +242,9 @@ class PipelineRunner:
                 inline=media.inline,
                 featured=FeaturedProgress(status, None, None),
                 search=media.search,
+                enrichment_round=media.enrichment_round,
+                waiver_applied=media.waiver_applied,
+                waiver_reason=media.waiver_reason,
             )
 
         inline_blockers = {
@@ -258,7 +270,7 @@ class PipelineRunner:
             # A blocker without an asset identity cannot authorize destructive
             # reconciliation. Keep the last known-good assets and discard only
             # the untrusted delta from this attempt.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search)
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
 
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:
@@ -298,12 +310,12 @@ class PipelineRunner:
         if not matched_any:
             # An unrecognized descriptor is not a safe identity. Discard only
             # the current untrusted delta and preserve the previous baseline.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search)
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
         remaining = tuple(
             item for item in all_inline.values()
             if not any(same_asset(item, invalid) for invalid in invalid_media)
         )
-        return MediaProgress(required=media.required, inline=remaining, featured=media.featured, search=media.search)
+        return MediaProgress(required=media.required, inline=remaining, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
 
     @staticmethod
     def _next_state(

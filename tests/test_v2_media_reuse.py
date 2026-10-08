@@ -511,6 +511,50 @@ def test_vision_rejected_featured_is_not_recovered_from_wordpress(monkeypatch, t
     assert result.featured.media_id is None
 
 
+def test_media_resolver_uses_article_source_before_external_search(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.source_verify as source_verify
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    source_candidate = {
+        "candidate_id": "article-source-1",
+        "direct_image_url": "https://cdn.test/article.webp",
+        "source_page_url": "https://source.test/article",
+        "author": "Source",
+        "license": "Uso com crédito",
+        "license_url": "https://source.test/article",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: source.test",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match"},
+    }
+
+    monkeypatch.setattr(source_verify, "discover_article_source_candidates", lambda *_args, **_kwargs: [dict(source_candidate)])
+    monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("external search must not run")))
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", lambda editorial, *_args, **_kwargs: ([{
+        "status": "accepted",
+        "media_id": 44,
+        "media_url": "https://cdn.test/article.webp",
+        "paragraph_index": editorial["media_plan"][0]["paragraph_index"],
+        "alt_text": "Test",
+        "credit_text": "Crédito",
+        "featured": False,
+    }], None, None))
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+
+    previous = MediaProgress(required=1, featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"))
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 1, "title": "Test", "original_link": "https://source.test/article"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        previous,
+    )
+    assert result.accepted == 1
+    assert result.inline[0].media_id == 44
+
+
 def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(monkeypatch, tmp_path):
     import unicornio_editor.media.vision_gate as vision_gate
     config = SimpleNamespace(

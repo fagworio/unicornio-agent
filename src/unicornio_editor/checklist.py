@@ -65,17 +65,14 @@ def required_image_count(words: int, *, title: str = "", content: str = "") -> i
 def _required_image_count(words: int, *, title: str, content: str) -> int:
     """Minimum body images for the post.
 
-    Plain articles follow the 2/4/6 SEO rule (by word count). Listicles
-    follow their structural rule of one image per numbered item instead:
-    ``max(2, item_count)`` — so a 5-item list with 5 images passes even
-    though 2/4/6 would demand 6, and the image rule never conflicts with
-    ``estrutura_lista``.
+    Plain articles follow the 2/4/6 SEO rule (by word count). Listicles must
+    satisfy both the word-count minimum and one image per numbered item.
     """
     from .list_quality import detect_list_format
 
     promised = detect_list_format(title or "", content or "")
     if promised is not None:
-        return max(2, promised)
+        return max(minimum_image_count(words), promised)
     return minimum_image_count(words)
 
 
@@ -261,14 +258,27 @@ def run_pre_publish_checklist(
     exhausted = media_exhausted
     featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
     is_list = detect_list_format(title_str, content) is not None
-    waive_inline = exhausted and featured_exists and not is_list
+    enrichment_round = 0
+    if isinstance(media_context, Mapping):
+        try:
+            enrichment_round = int(media_context.get("enrichment_round") or 0)
+        except (TypeError, ValueError):
+            enrichment_round = 0
+    # A normal article may publish after the second complete enrichment round
+    # when a valid featured exists.  Search exhaustion remains an equivalent
+    # deterministic waiver, but the LLM cannot assert either condition.
+    waiver_reason = (
+        "search_exhausted" if media_exhausted else
+        "enrichment_retries_exhausted" if enrichment_round >= 2 else ""
+    )
+    waive_inline = bool(waiver_reason and featured_exists and not is_list)
 
     if waive_inline:
         check(
             "imagens_no_corpo",
             True,
             f"waived: busca de imagens esgotada e featured presente "
-            f"({image_count} inline; minimo {required} dispensado)",
+            f"({image_count} inline; minimo {required} dispensado; reason={waiver_reason})",
         )
     else:
         _motivo = f"{words} palavras exigem >= {required_effective} imagens"
@@ -776,4 +786,13 @@ def run_pre_publish_checklist(
         "skipped": skipped,
         "failed": failed,
         "all_passed": failed == 0,
+        "media_decision": {
+            "required": required,
+            "accepted": image_count,
+            "missing": max(0, required - image_count),
+            "enrichment_round": enrichment_round,
+            "waiver_applied": waive_inline,
+            "waiver_reason": waiver_reason,
+            "is_listicle": is_list,
+        },
     }

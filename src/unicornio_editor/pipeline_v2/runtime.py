@@ -18,7 +18,7 @@ from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
-from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress
+from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
 from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
@@ -227,15 +227,18 @@ class ProductionMediaResolver:
         ]
         if is_listicle:
             # A migrated listicle may have accepted media without item_number.
-            # Its deficit is the number of uncovered subjects, not the global
-            # article quota minus a positional count.
-            inline_needed = len(missing_rows)
+            # It must cover every item and still satisfy the word-count
+            # minimum when that is larger than the item count.
+            inline_needed = max(total_required - previous.accepted, len(missing_rows))
         if inline_needed == 0 and featured_needed == 0:
             return MediaProgress(
                 required=total_required,
                 inline=previous.inline,
                 featured=featured,
                 search=previous.search,
+                enrichment_round=previous.enrichment_round,
+                waiver_applied=previous.waiver_applied,
+                waiver_reason=previous.waiver_reason,
             )
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
@@ -262,6 +265,11 @@ class ProductionMediaResolver:
         search_runs: list[dict[str, Any]] = []
         current_inline = list(previous.inline)
         current_featured = featured
+        enrichment_round = (
+            previous.enrichment_round + 1
+            if getattr(state, "phase", None) is Phase.MEDIA
+            else previous.enrichment_round
+        )
 
         def resolve_query(subject: str, query: str, needed: int, role: str) -> list[dict[str, Any]]:
             if needed <= 0:
@@ -408,6 +416,19 @@ class ProductionMediaResolver:
                         int(result["media_id"]),
                         str(result.get("media_url") or ""),
                     )
+            # Crash-safe incremental progress: an accepted asset is durable
+            # before the resolver moves on to the next candidate/query.
+            _write_v2_media_checkpoint(
+                self.root,
+                int(context["post_id"]),
+                MediaProgress(
+                    required=total_required,
+                    inline=tuple({item.media_id: item for item in current_inline}.values()),
+                    featured=current_featured,
+                    search=previous.search,
+                    enrichment_round=enrichment_round,
+                ),
+            )
             return results
 
         featured_queries: list[tuple[str, str]] = []
@@ -440,15 +461,73 @@ class ProductionMediaResolver:
 
         def inline_remaining() -> int:
             if is_listicle:
-                return sum(
+                uncovered = sum(
                     1
                     for _index, row in missing_rows
                     if str(row.get("item") or row.get("subject") or "").casefold()
                     not in covered_item_keys
                 )
+                return max(uncovered, total_required - len(current_inline))
             return max(0, total_required - len(current_inline))
 
         if inline_needed:
+            # The article's own Fonte is the first acquisition strategy.  Its
+            # assets already have provenance by construction; they still pass
+            # through the regular executable media-plan gates below.
+            source_url = str(context.get("original_link") or "").strip()
+            if not source_url:
+                post = context.get("post") or {}
+                source_url = (
+                    str((post.get("meta") or {}).get("original_link") or "").strip()
+                    if isinstance(post, dict)
+                    else ""
+                )
+            if source_url:
+                try:
+                    from ..media.source_verify import discover_article_source_candidates
+
+                    source_candidates = discover_article_source_candidates(
+                        source_url,
+                        subject=(subject_queries[0][0] if subject_queries else title),
+                        limit=max(8, inline_remaining() * 4),
+                    )
+                except Exception:
+                    source_candidates = []
+                for candidate in source_candidates:
+                    if inline_remaining() <= 0:
+                        break
+                    subject = str(candidate.get("subject") or (subject_queries[0][0] if subject_queries else title))
+                    candidate["subject"] = subject
+                    metadata = subject_meta.get(subject) or {}
+                    candidate["item_number"] = metadata.get("item")
+                    candidate["section_heading"] = metadata.get("heading") or subject
+                    candidate["section_slot"] = metadata.get("section_slot")
+                    try:
+                        from ..media.library_index import find_by_source_url
+
+                        existing = find_by_source_url(self.root, str(candidate.get("direct_image_url") or ""))
+                        if existing and existing.get("media_id"):
+                            candidate["media_library_id"] = int(existing["media_id"])
+                            candidate["already_in_library"] = True
+                    except Exception:
+                        # The library index is an optimization; source
+                        # acquisition remains correct when it is unavailable.
+                        pass
+                    approved = self._approved_unique([candidate])
+                    for source_candidate in approved:
+                        if inline_remaining() <= 0:
+                            break
+                        slot = 0
+                        while slot in used_slots:
+                            slot += 3
+                        used_slots.add(slot)
+                        before = len(current_inline)
+                        execute_plan([
+                            self._plan_item(source_candidate, subject, slot, False)
+                        ])
+                        if len(current_inline) > before:
+                            covered_item_keys.add(str(subject).casefold())
+            # External acquisition is only used for the residual deficit.
             for subject, query in subject_queries:
                 remaining = inline_remaining()
                 if remaining <= 0:
@@ -542,6 +621,7 @@ class ProductionMediaResolver:
             inline=tuple({item.media_id: item for item in current_inline}.values()),
             featured=current_featured,
             search=search_progress,
+            enrichment_round=enrichment_round,
         )
 
     @staticmethod

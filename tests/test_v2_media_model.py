@@ -47,3 +47,13 @@ def test_media_search_progress_round_trips_auditable_exhaustion():
     restored = MediaProgress.from_dict(progress.to_dict())
 
     assert restored.search == progress.search
+
+
+def test_media_progress_round_trips_enrichment_round_and_waiver():
+    progress = MediaProgress(
+        required=4,
+        enrichment_round=2,
+        waiver_applied=True,
+        waiver_reason="enrichment_retries_exhausted",
+    )
+    assert MediaProgress.from_dict(progress.to_dict()) == progress

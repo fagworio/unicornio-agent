@@ -116,6 +116,9 @@ class ProductionCandidateReader:
                 inline=current_media.inline,
                 featured=current_media.featured,
                 search=current_media.search,
+                enrichment_round=current_media.enrichment_round,
+                waiver_applied=current_media.waiver_applied,
+                waiver_reason=current_media.waiver_reason,
             )
         if not active_journal:
             return WorkState(
@@ -217,6 +220,9 @@ class ProductionCandidateReader:
                     inline=inline,
                     featured=featured,
                     search=candidate.search,
+                    enrichment_round=candidate.enrichment_round,
+                    waiver_applied=candidate.waiver_applied,
+                    waiver_reason=candidate.waiver_reason,
                 )
             except ValueError:
                 continue

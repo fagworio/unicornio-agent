@@ -251,6 +251,9 @@ class MediaProgress:
     featured: FeaturedProgress = field(default_factory=FeaturedProgress)
     accepted_count: int | None = None
     search: MediaSearchProgress = field(default_factory=MediaSearchProgress)
+    enrichment_round: int = 0
+    waiver_applied: bool = False
+    waiver_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.required < 0:
@@ -263,6 +266,8 @@ class MediaProgress:
             self.accepted_count < len(self.inline)
         ):
             raise ValueError("accepted_count must cover inline assets")
+        if self.enrichment_round < 0:
+            raise ValueError("enrichment_round cannot be negative")
 
     @property
     def accepted(self) -> int:
@@ -282,6 +287,11 @@ class MediaProgress:
             },
             "featured": self.featured.to_dict(),
             "search": self.search.to_dict(),
+            "enrichment_round": self.enrichment_round,
+            "waiver": {
+                "applied": self.waiver_applied,
+                "reason": self.waiver_reason,
+            },
         }
 
     @classmethod
@@ -295,12 +305,16 @@ class MediaProgress:
         parsed_count = int(accepted_count) if accepted_count is not None else None
         if parsed_count is not None and parsed_count == len(assets):
             parsed_count = None
+        waiver = value.get("waiver") or {}
         return cls(
             int(inline.get("required", 0)),
             tuple(InlineMedia.from_dict(item) for item in assets),
             FeaturedProgress.from_dict(value.get("featured")),
             parsed_count,
             MediaSearchProgress.from_dict(value.get("search")),
+            int(value.get("enrichment_round", 0)),
+            bool(waiver.get("applied", value.get("waiver_applied", False))),
+            str(waiver.get("reason", value.get("waiver_reason", "")) or ""),
         )
 
 
