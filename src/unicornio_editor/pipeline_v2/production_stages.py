@@ -227,11 +227,11 @@ class ProductionEditorialStage:
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             if isinstance(localization, dict):
-                editorial["localization"] = {
+                _write_json(self.root, post_id, "editorial.localization.json", {
                     "required": must_localize,
                     "reason": str(localization.get("reason") or ""),
                     "source_language": input_post.get("source_language") or {},
-                }
+                })
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
             return editorial
         except StageError:
@@ -390,6 +390,9 @@ class ProductionComposeStage:
                 for item in placements
             ]
             working = dict(editorial)
+            # Drop legacy operational localization context before creating the
+            # candidate; the canonical editorial document remains schema-only.
+            working.pop("localization", None)
             working["cleaned_html"] = insert_media(
                 str(editorial["cleaned_html"]),
                 placements,
@@ -421,6 +424,10 @@ class ProductionValidateStage:
             post = _post(context)
             checklist_editorial = dict(candidate["editorial"])
             checklist_editorial.pop("decision", None)
+            # Localization is preparation context, not part of the strict
+            # model/editorial schema. Older drafts may still contain it.
+            checklist_editorial.pop("localization", None)
+            candidate["editorial"] = dict(checklist_editorial)
             candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
             checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
             candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]

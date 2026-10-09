@@ -109,6 +109,40 @@ def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
     assert set(validation) >= {"passed", "failures", "checklist"}
 
 
+def test_localization_context_is_not_sent_back_to_strict_editorial_schema(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_checklist(**kwargs):
+        captured["editorial"] = kwargs["editorial"]
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        fake_checklist,
+    )
+    candidate = {
+        "content": "<p>Texto em português.</p>",
+        "editorial": {
+            "site_relevance": {"decision": "process", "confidence": 0.95, "reason": "ok", "matched_topics": ["games"]},
+            "cleaned_html": "<p>Texto em português.</p>",
+            "media_plan": [],
+            "needs_trailer": False,
+            "trailer_url": None,
+            "game_name": None,
+            "localization": {"required": False, "source_language": {}},
+        },
+        "featured_media": None,
+        "media": {},
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {"post_id": 91, "post": {"id": 91, "status": "pending", "title": {"raw": "Teste"}, "meta": {}}},
+        candidate,
+    )
+    assert result["passed"] is True
+    assert "localization" not in captured["editorial"]
+    assert "localization" not in candidate["editorial"]
+
+
 def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     existing = "https://example.test/existing.webp"
     featured = "https://example.test/featured.webp"
