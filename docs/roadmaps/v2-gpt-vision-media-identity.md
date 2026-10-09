@@ -22,6 +22,9 @@ materialização não prova diversidade e bloqueia apenas o novo candidato.
 4. `UNCERTAIN` escala uma vez de low para high. `ERROR`/inconclusivo nunca é
    interpretado como `DIFFERENT`.
 
+O baseline contém a featured somente quando ela é realmente `VALID` e possui
+attachment/URL. Uma featured ausente nunca bloqueia a primeira aquisição.
+
 O cache de comparações fica em `work/visual_comparison_cache.json`, indexado
 somente por fingerprints e versão do comparador. O cache de relevância continua
 em `work/vision_cache.json`.
@@ -37,8 +40,16 @@ unicornio-editor v2-reconcile-visual-media --post-id ID --root . --apply
 ```
 
 O primeiro não escreve. O segundo é dry-run por padrão; com `--apply` atualiza
-somente `_hermes_work_state` após materializar todos os fingerprints e confirmar
-readback. Não faz upload, não altera conteúdo e não publica.
+somente `_hermes_work_state` após materializar todos os fingerprints, comparar
+featured/inline e confirmar readback. Ele remove somente inline com decisão
+`SAME_IMAGE` ou `SAME_ART_CROP`, preserva a featured, tentativas e attachments
+globais. Um journal local e lock por post protegem o apply; o COMPOSE normal
+reconstrói o HTML pendente a partir da mídia restante. Não faz upload nem
+publica.
+
+`EDITOR_VISUAL_COMPARISON_MAX_CALLS` limita pares não cacheados por post (12
+por padrão). Ao atingir o orçamento, a decisão é inconclusiva e o candidato
+não é aprovado.
 
 ## Policy
 

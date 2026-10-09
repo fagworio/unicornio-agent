@@ -291,7 +291,12 @@ class ProductionMediaStage:
                     post_id=int(context["post_id"]),
                     previous_inline_phashes=tuple(item.phash for item in previous.inline if item.phash),
                     previous_inline_visual_assets=[item.to_dict() for item in previous.inline],
-                    featured_visual_asset=previous.featured.to_dict(),
+                    featured_visual_asset=(
+                        previous.featured.to_dict()
+                        if previous.featured.status is FeaturedStatus.VALID
+                        and previous.featured.media_id and previous.featured.media_url
+                        else None
+                    ),
                 )
                 inline = tuple(
                     InlineMedia(

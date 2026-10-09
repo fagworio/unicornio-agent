@@ -46,6 +46,7 @@ def fingerprint_path(path: str | Path) -> VisualIdentity:
 def verify_candidate_identity(
     candidate_path: str | Path,
     *, candidate_id: str, baseline: Iterable[dict[str, Any]], config: Any, root: str | Path,
+    comparison_budget: list[int] | None = None,
 ) -> tuple[VisualIdentity, VisualIdentityDecision]:
     """Compare final candidate bytes with every materialised baseline asset.
 
@@ -74,6 +75,10 @@ def verify_candidate_identity(
             return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "baseline_identity_unavailable")
         cached = get_cached_visual_comparison(root, ref_sha, identity.sha256)
         if cached is None:
+            if comparison_budget is not None:
+                if comparison_budget[0] >= max(0, int(getattr(config, "visual_comparison_max_calls", 0))):
+                    return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "visual_comparison_budget_exhausted", tuple(comparisons))
+                comparison_budget[0] += 1
             candidate_input = prepare_vision_image_input_from_path(candidate_path)
             comparison = compare_visual_assets(
                 prepare_vision_image_input_from_path(reference_path), candidate_input,

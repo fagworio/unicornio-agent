@@ -26,6 +26,7 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
         return {"valid": True, "rejected": []}
 
     def fake_execute(editorial, *_args, **_kwargs):
+        seen["featured_visual_asset"] = _kwargs.get("featured_visual_asset")
         return ([{"media_id": 77, "media_url": "https://cdn.test/existing.webp", "paragraph_index": 0, "alt_text": "existing", "credit_text": "Crédito da imagem: Existing", "featured": False}], None, None)
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
@@ -37,6 +38,7 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     )
     assert seen["plans"][0][0]["direct_image_url"] == "https://cdn.test/existing.webp"
     assert seen["plans"][0][0]["source_page_url"] == "https://source.test/page"
+    assert seen["featured_visual_asset"] is None
     assert result.accepted == 1
 
 

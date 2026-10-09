@@ -13,7 +13,7 @@ from unicornio_editor.media.vision_cache import (
 )
 from unicornio_editor.media.visual_identity import fingerprint_path, verify_candidate_identity
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
-from unicornio_editor.media.vision_gate import VisionGateError, _parse_visual_comparison
+from unicornio_editor.media.vision_gate import VisionGateError, VisualComparison, _parse_visual_comparison
 
 
 def _image(path: Path, color: str) -> Path:
@@ -67,3 +67,29 @@ def test_visual_comparison_parser_is_strict_about_decision_and_confidence():
     assert parsed.duplicate
     with __import__("pytest").raises(VisionGateError):
         _parse_visual_comparison('{"decision":"MAYBE","confidence":1}', reference_id="a", candidate_id="b")
+
+
+def test_crop_decision_from_gpt_rejects_candidate(monkeypatch, tmp_path: Path):
+    import unicornio_editor.media.visual_identity as identity_module
+
+    base = _image(tmp_path / "base.webp", "red")
+    candidate = _image(tmp_path / "candidate.webp", "blue")
+    baseline = fingerprint_path(base).to_dict() | {"media_id": 115130, "phash": "", "local_path": str(base)}
+    config = Config("x", "https://example.test", "https://example.test/wp-json/wp/v2", vision_enabled=True, vision_api_key="test", visual_comparison_max_calls=1)
+    monkeypatch.setattr(identity_module, "compare_visual_assets", lambda *_args, **_kwargs: VisualComparison("SAME_ART_CROP", 0.97, "115130", "115131", "same crop"))
+    _, decision = verify_candidate_identity(candidate, candidate_id="115131", baseline=[baseline], config=config, root=tmp_path, comparison_budget=[0])
+    assert decision.decision == "SAME_ART_CROP"
+    assert decision.duplicate_of == "115130"
+
+
+def test_visual_comparison_budget_is_fail_closed(monkeypatch, tmp_path: Path):
+    import unicornio_editor.media.visual_identity as identity_module
+
+    base = _image(tmp_path / "base.webp", "red")
+    candidate = _image(tmp_path / "candidate.webp", "blue")
+    baseline = fingerprint_path(base).to_dict() | {"media_id": 1, "phash": "", "local_path": str(base)}
+    config = Config("x", "https://example.test", "https://example.test/wp-json/wp/v2", vision_enabled=True, vision_api_key="test", visual_comparison_max_calls=0)
+    monkeypatch.setattr(identity_module, "compare_visual_assets", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not call")))
+    _, decision = verify_candidate_identity(candidate, candidate_id="2", baseline=[baseline], config=config, root=tmp_path, comparison_budget=[0])
+    assert decision.decision == "UNVERIFIED"
+    assert decision.reason == "visual_comparison_budget_exhausted"

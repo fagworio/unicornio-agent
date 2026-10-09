@@ -509,7 +509,13 @@ class ProductionMediaResolver:
                 )
             try:
                 baseline_inline_assets = [item.to_dict() for item in current_inline]
-                baseline_featured_asset = current_featured.to_dict()
+                baseline_featured_asset = (
+                    current_featured.to_dict()
+                    if current_featured.status is FeaturedStatus.VALID
+                    and current_featured.media_id
+                    and current_featured.media_url
+                    else None
+                )
                 results, _featured_id, _featured_credit = _execute_media_plan(
                     {**editorial, "media_plan": plan},
                     self.config,
@@ -572,7 +578,7 @@ class ProductionMediaResolver:
                     dict(by_id[item.media_id].get("visual_verification") or item.visual_verification),
                 ) for item in current_inline
             ]
-            if current_featured.status is FeaturedStatus.VALID:
+            if current_featured.status is FeaturedStatus.VALID and baseline_featured_asset is not None:
                 current_featured = FeaturedProgress(
                     current_featured.status, current_featured.media_id, current_featured.media_url,
                     str(baseline_featured_asset.get("sha256") or current_featured.sha256),

@@ -2037,10 +2037,15 @@ def _execute_media_plan(
             # baseline fingerprints in the V2 state after this run.
             visual_baseline: list[dict[str, Any]] = []
             visual_baseline_unavailable = False
+            visual_comparison_budget = [0]
             for asset in [*(previous_inline_visual_assets or []), *([featured_visual_asset] if featured_visual_asset else [])]:
                 if not isinstance(asset, dict):
                     continue
                 row = asset
+                # A missing/invalid featured is not a visual baseline.  It
+                # must not make the first legitimate acquisition fail closed.
+                if not row.get("media_id") or not str(row.get("media_url") or "").strip():
+                    continue
                 try:
                     if not row.get("sha256") or not row.get("phash"):
                         url = str(row.get("media_url") or "")
@@ -2164,6 +2169,7 @@ def _execute_media_plan(
                         identity, visual = verify_candidate_identity(
                             webp, candidate_id=str(item.get("candidate_id") or position),
                             baseline=visual_baseline, config=config, root=root,
+                            comparison_budget=visual_comparison_budget,
                         )
                     except Exception as exc:
                         # A first asset has no duplicate baseline.  Keep the

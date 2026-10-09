@@ -2202,9 +2202,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command in {"v2-audit-visual-media", "v2-reconcile-visual-media"}:
             from .pipeline_v2.visual_media import audit_visual_media, reconcile_visual_media
             if args.command == "v2-audit-visual-media":
-                result = audit_visual_media(client, args.root, int(args.post_id))
+                result = audit_visual_media(client, config, args.root, int(args.post_id))
             else:
-                result = reconcile_visual_media(client, args.root, int(args.post_id), apply=bool(args.apply))
+                result = reconcile_visual_media(client, config, args.root, int(args.post_id), apply=bool(args.apply))
         elif args.command == "v2-repair-lost-ready-hash":
             from .pipeline_v2.publication import repair_lost_ready_hash
 

@@ -7,6 +7,8 @@ from unicornio_editor.pipeline_v2.model import BlockerCode, OutcomeType, Phase, 
 def test_gate_map_is_explicit_not_substring_matching():
     assert blocker_for_gate("imagens_no_corpo") is BlockerCode.INLINE_MISSING
     assert blocker_for_gate("imagens_visao") is BlockerCode.FEATURED_VISION
+    assert blocker_for_gate("media_duplicate_confirmed") is BlockerCode.MEDIA_DUPLICATE
+    assert blocker_for_gate("visual_identity_verified") is BlockerCode.MEDIA_INVALID
     assert blocker_for_gate("qualidade_texto") is BlockerCode.TEXT_QUALITY
     assert blocker_for_gate("imagem_inventada") is None
 

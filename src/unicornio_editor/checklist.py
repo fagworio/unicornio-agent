@@ -276,9 +276,19 @@ def run_pre_publish_checklist(
     img_items = iter_content_images(content)
     inline_images = [str(item.get("src") or "").strip() for item in img_items]
     inline_images = [url for url in inline_images if url]
+    inline_assets: list[Mapping[str, Any]] = []
+    if isinstance(media_context, Mapping):
+        inline_payload = media_context.get("inline")
+        if isinstance(inline_payload, Mapping):
+            inline_assets = [item for item in (inline_payload.get("accepted") or []) if isinstance(item, Mapping)]
+    confirmed_duplicate_urls = {
+        _canonical_image_url(str(asset.get("media_url") or ""))
+        for asset in inline_assets
+        if str((asset.get("visual_verification") or {}).get("decision") or "") in {"SAME_IMAGE", "SAME_ART_CROP"}
+    }
     # The quota is based on final, canonical frames. WordPress size variants
     # of the same attachment do not inflate the 2/4/6 count.
-    image_count = len({_canonical_image_url(url) for url in inline_images})
+    image_count = len({_canonical_image_url(url) for url in inline_images} - confirmed_duplicate_urls)
 
     # Opcao A: o minimo e dimensionado pela DISPONIBILIDADE REAL de frames
     # visualmente distintos. O gate imagens_similares bloqueia as repetidas; o
@@ -330,15 +340,6 @@ def run_pre_publish_checklist(
     from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 
     content_images = iter_content_images(content)
-    inline_assets = []
-    if isinstance(media_context, Mapping):
-        inline_payload = media_context.get("inline")
-        if isinstance(inline_payload, Mapping):
-            inline_assets = [
-                item for item in (inline_payload.get("accepted") or [])
-                if isinstance(item, Mapping)
-            ]
-
     # Policy v4: media accepted after visual-identity rollout must carry a
     # durable identity and a positive (INITIAL/DIFFERENT) verification.  The
     # marker keeps historical serialized states backward compatible until the
@@ -359,6 +360,33 @@ def run_pre_publish_checklist(
             "visual_identity_verified",
             not missing_identity,
             "identidade visual persistida" if not missing_identity else "mídia sem identidade visual verificável: " + ", ".join(missing_identity),
+        )
+
+        confirmed_duplicates = [
+            asset for asset in inline_assets
+            if str((asset.get("visual_verification") or {}).get("decision") or "") in {"SAME_IMAGE", "SAME_ART_CROP"}
+        ]
+        # A list may repeat its featured only as its final editorial image; it
+        # is still excluded from the inline quota above.
+        permitted_list_repeat = False
+        if is_list and len(confirmed_duplicates) == 1 and img_items:
+            duplicate_url = _canonical_image_url(str(confirmed_duplicates[0].get("media_url") or ""))
+            permitted_list_repeat = duplicate_url == _canonical_image_url(str(img_items[-1].get("src") or ""))
+        check(
+            "media_duplicate_confirmed",
+            not confirmed_duplicates or permitted_list_repeat,
+            "sem duplicatas visuais confirmadas" if not confirmed_duplicates else
+            "repetição de featured permitida apenas ao final da lista" if permitted_list_repeat else
+            "duplicatas visuais confirmadas: " + ", ".join(str(item.get("media_id") or "?") for item in confirmed_duplicates),
+            invalid_media=[
+                {
+                    "media_id": item.get("media_id"), "media_url": item.get("media_url"),
+                    "duplicate_of": (item.get("visual_verification") or {}).get("duplicate_of"),
+                    "method": (item.get("visual_verification") or {}).get("method"),
+                    "confidence": (item.get("visual_verification") or {}).get("confidence"),
+                }
+                for item in confirmed_duplicates
+            ],
         )
 
     def _asset_descriptor(url: str, ordinal: int) -> dict[str, Any]:
