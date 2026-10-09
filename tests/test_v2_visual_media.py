@@ -9,6 +9,7 @@ from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus,
 from unicornio_editor.pipeline_v2.operational import WordPressStateBackend
 from unicornio_editor.pipeline_v2.state_store import StateStore
 from unicornio_editor.pipeline_v2.visual_media import audit_visual_media, reconcile_visual_media
+from unicornio_editor.media.inserter import remove_media_urls
 
 
 class Client:
@@ -76,3 +77,11 @@ def test_reconcile_is_dry_run_by_default(monkeypatch, tmp_path: Path):
     report = reconcile_visual_media(client, Config("x", "https://example.test", "https://example.test/wp-json/wp/v2"), tmp_path, 114838)
     assert report["writes"] == 0
     assert StateStore(WordPressStateBackend(client)).load(114838) == original
+
+
+def test_controlled_html_cleanup_removes_only_explicit_duplicate_url():
+    html = '<p>Texto.</p><figure><img src="https://wp.test/115131.webp"><figcaption>dup</figcaption></figure><p>Fim.</p><img src="https://wp.test/keep.webp">'
+    output = remove_media_urls(html, {"https://wp.test/115131.webp"})
+    assert "115131.webp" not in output
+    assert "keep.webp" in output
+    assert "Texto." in output and "Fim." in output

@@ -75,21 +75,34 @@ def verify_candidate_identity(
             return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "baseline_identity_unavailable")
         cached = get_cached_visual_comparison(root, ref_sha, identity.sha256)
         if cached is None:
-            if comparison_budget is not None:
-                if comparison_budget[0] >= max(0, int(getattr(config, "visual_comparison_max_calls", 0))):
-                    return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "visual_comparison_budget_exhausted", tuple(comparisons))
-                comparison_budget[0] += 1
+            if comparison_budget is not None and comparison_budget[0] >= max(0, int(getattr(config, "visual_comparison_max_calls", 0))):
+                return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "visual_comparison_budget_exhausted", tuple(comparisons))
             candidate_input = prepare_vision_image_input_from_path(candidate_path)
             comparison = compare_visual_assets(
                 prepare_vision_image_input_from_path(reference_path), candidate_input,
                 reference_id=ref_id, candidate_id=candidate_id,
                 api_key=str(config.vision_api_key), base_url=str(config.vision_base_url),
                 model=str(config.vision_model), root=root,
+                call_budget=comparison_budget,
+                max_calls=max(0, int(getattr(config, "visual_comparison_max_calls", 0))),
             )
             cached = comparison.to_dict()
-            set_cached_visual_comparison(root, ref_sha, identity.sha256, cached)
+            # Transient provider/budget states are deliberately not durable:
+            # a later retry may have a healthy provider or fresh budget.
+            if (
+                comparison.decision in {"SAME_IMAGE", "SAME_ART_CROP", "DIFFERENT"}
+                and comparison.confidence >= float(getattr(config, "visual_comparison_min_confidence", 0.85))
+            ):
+                set_cached_visual_comparison(root, ref_sha, identity.sha256, cached)
         comparisons.append(dict(cached))
         decision = str(cached.get("decision") or "ERROR")
+        try:
+            confidence = float(cached.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        minimum = float(getattr(config, "visual_comparison_min_confidence", 0.85))
+        if decision in {"SAME_IMAGE", "SAME_ART_CROP", "DIFFERENT"} and confidence < minimum:
+            return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "visual_comparison_low_confidence", tuple(comparisons))
         if decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
             return identity, VisualIdentityDecision(decision, True, ref_id, "gpt_visual_comparison", tuple(comparisons))
         if decision != "DIFFERENT":

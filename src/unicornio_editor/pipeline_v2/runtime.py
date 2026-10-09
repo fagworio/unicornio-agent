@@ -398,6 +398,9 @@ class ProductionMediaResolver:
         search_runs: list[dict[str, Any]] = []
         current_inline = list(previous.inline)
         current_featured = featured
+        # One shared allowance for every query/plan of this post.  The visual
+        # comparator itself increments per HTTP call (LOW and optional HIGH).
+        visual_comparison_budget = [0]
         enrichment_round = (
             previous.enrichment_round + 1
             if getattr(state, "phase", None) is Phase.MEDIA
@@ -528,6 +531,7 @@ class ProductionMediaResolver:
                     ),
                     previous_inline_visual_assets=baseline_inline_assets,
                     featured_visual_asset=baseline_featured_asset,
+                    visual_comparison_budget=visual_comparison_budget,
                 )
             finally:
                 from ..media.google_browser import cleanup_browser_artifacts

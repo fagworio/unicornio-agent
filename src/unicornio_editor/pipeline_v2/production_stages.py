@@ -22,7 +22,7 @@ from ..language import editorial_language_report
 from ..html_cleaner import normalize_h1_headings
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
-from ..media.inserter import MediaInsertionError, insert_media, plan_normal_media_insertions
+from ..media.inserter import MediaInsertionError, insert_media, plan_normal_media_insertions, remove_media_urls
 from ..media.vision_gate import VisionGateError
 from ..workflow import (
     MediaFunnelInvariantError,
@@ -42,6 +42,17 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
+
+
+def _visual_reconcile_urls(root: Path, post_id: int) -> list[str]:
+    """Explicit URLs invalidated by a completed local visual reconciliation."""
+    path = Path(root) / "work" / "v2-visual-reconcile" / f"{post_id}.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = value.get("duplicates") if isinstance(value, dict) else []
+    return [str(row.get("media_url") or "") for row in rows if isinstance(row, dict) and row.get("media_url")]
 
 
 def _persist_draft_repairs(
@@ -376,6 +387,10 @@ class ProductionComposeStage:
             existing_html = normalize_h1_headings(
                 str(editorial.get("cleaned_html") or ""),
                 post_title=str(context.get("title") or ""),
+            )
+            existing_html = remove_media_urls(
+                existing_html,
+                _visual_reconcile_urls(self.root, int(context["post_id"])),
             )
             featured_url = str(media.featured.media_url or "").strip()
             seen_urls: set[str] = set()

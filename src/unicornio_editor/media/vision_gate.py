@@ -469,25 +469,28 @@ def _call_visual_comparison(
 def compare_visual_assets(
     reference_image: str, candidate_image: str, *, reference_id: str = "", candidate_id: str = "",
     api_key: str, base_url: str, model: str, timeout: float = 30.0, root: Any = None,
+    call_budget: list[int] | None = None, max_calls: int | None = None,
 ) -> VisualComparison:
     """Compare two materialised images; LOW first and HIGH only if uncertain.
 
     API/JSON failures are represented as ``ERROR`` so callers cannot mistake a
     technical failure for proof that assets are distinct.
     """
-    try:
-        result = _call_visual_comparison(
-            reference_image=reference_image, candidate_image=candidate_image,
-            reference_id=reference_id, candidate_id=candidate_id, api_key=api_key,
-            base_url=base_url, model=model, detail="low", timeout=timeout, root=root,
-        )
-        if result.decision != "UNCERTAIN":
-            return result
+    def call(detail: str) -> VisualComparison:
+        if call_budget is not None:
+            if max_calls is not None and call_budget[0] >= max_calls:
+                return VisualComparison("ERROR", 0.0, reference_id, candidate_id, "visual_comparison_budget_exhausted")
+            call_budget[0] += 1
         return _call_visual_comparison(
             reference_image=reference_image, candidate_image=candidate_image,
             reference_id=reference_id, candidate_id=candidate_id, api_key=api_key,
-            base_url=base_url, model=model, detail="high", timeout=timeout, root=root,
+            base_url=base_url, model=model, detail=detail, timeout=timeout, root=root,
         )
+    try:
+        result = call("low")
+        if result.decision != "UNCERTAIN":
+            return result
+        return call("high")
     except (VisionGateError, VisionInputUnavailable) as exc:
         return VisualComparison("ERROR", 0.0, reference_id, candidate_id, str(exc)[:500])
 

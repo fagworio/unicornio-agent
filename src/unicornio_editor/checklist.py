@@ -349,11 +349,28 @@ def run_pre_publish_checklist(
         featured_payload = media_context.get("featured")
         if isinstance(featured_payload, Mapping) and featured_payload.get("status") == "valid":
             identity_assets.append(featured_payload)
+        confirmed_duplicates = [
+            asset for asset in inline_assets
+            if str((asset.get("visual_verification") or {}).get("decision") or "") in {"SAME_IMAGE", "SAME_ART_CROP"}
+        ]
+        # A list may repeat its featured only as its final editorial image; it
+        # remains outside the image quota but is not an identity-gate failure.
+        permitted_list_repeat = False
+        permitted_duplicate_ids: set[int] = set()
+        if is_list and len(confirmed_duplicates) == 1 and img_items:
+            duplicate = confirmed_duplicates[0]
+            duplicate_url = _canonical_image_url(str(duplicate.get("media_url") or ""))
+            permitted_list_repeat = duplicate_url == _canonical_image_url(str(img_items[-1].get("src") or ""))
+            if permitted_list_repeat and duplicate.get("media_id") is not None:
+                permitted_duplicate_ids.add(int(duplicate["media_id"]))
         missing_identity = [
             str(asset.get("media_id") or "?") for asset in identity_assets
             if not (
                 asset.get("sha256") and asset.get("phash") and asset.get("visual_group_id")
-                and str((asset.get("visual_verification") or {}).get("decision") or "") in {"INITIAL", "DIFFERENT"}
+                and (
+                    str((asset.get("visual_verification") or {}).get("decision") or "") in {"INITIAL", "DIFFERENT"}
+                    or asset.get("media_id") in permitted_duplicate_ids
+                )
             )
         ]
         check(
@@ -362,16 +379,6 @@ def run_pre_publish_checklist(
             "identidade visual persistida" if not missing_identity else "mídia sem identidade visual verificável: " + ", ".join(missing_identity),
         )
 
-        confirmed_duplicates = [
-            asset for asset in inline_assets
-            if str((asset.get("visual_verification") or {}).get("decision") or "") in {"SAME_IMAGE", "SAME_ART_CROP"}
-        ]
-        # A list may repeat its featured only as its final editorial image; it
-        # is still excluded from the inline quota above.
-        permitted_list_repeat = False
-        if is_list and len(confirmed_duplicates) == 1 and img_items:
-            duplicate_url = _canonical_image_url(str(confirmed_duplicates[0].get("media_url") or ""))
-            permitted_list_repeat = duplicate_url == _canonical_image_url(str(img_items[-1].get("src") or ""))
         check(
             "media_duplicate_confirmed",
             not confirmed_duplicates or permitted_list_repeat,

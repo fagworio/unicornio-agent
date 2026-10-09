@@ -13,7 +13,7 @@ from unicornio_editor.media.vision_cache import (
 )
 from unicornio_editor.media.visual_identity import fingerprint_path, verify_candidate_identity
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
-from unicornio_editor.media.vision_gate import VisionGateError, VisualComparison, _parse_visual_comparison
+from unicornio_editor.media.vision_gate import VisionGateError, VisualComparison, _parse_visual_comparison, compare_visual_assets
 
 
 def _image(path: Path, color: str) -> Path:
@@ -93,3 +93,31 @@ def test_visual_comparison_budget_is_fail_closed(monkeypatch, tmp_path: Path):
     _, decision = verify_candidate_identity(candidate, candidate_id="2", baseline=[baseline], config=config, root=tmp_path, comparison_budget=[0])
     assert decision.decision == "UNVERIFIED"
     assert decision.reason == "visual_comparison_budget_exhausted"
+
+
+def test_low_confidence_different_is_not_proof_of_distinction(monkeypatch, tmp_path: Path):
+    import unicornio_editor.media.visual_identity as identity_module
+
+    base = _image(tmp_path / "base.webp", "red")
+    candidate = _image(tmp_path / "candidate.webp", "blue")
+    baseline = fingerprint_path(base).to_dict() | {"media_id": 1, "phash": "", "local_path": str(base)}
+    config = Config("x", "https://example.test", "https://example.test/wp-json/wp/v2", vision_enabled=True, vision_api_key="test")
+    monkeypatch.setattr(identity_module, "compare_visual_assets", lambda *_args, **_kwargs: VisualComparison("DIFFERENT", 0.20, "1", "2", "unclear"))
+    _, decision = verify_candidate_identity(candidate, candidate_id="2", baseline=[baseline], config=config, root=tmp_path, comparison_budget=[0])
+    assert decision.decision == "UNVERIFIED"
+    assert decision.reason == "visual_comparison_low_confidence"
+    assert get_cached_visual_comparison(tmp_path, baseline["sha256"], fingerprint_path(candidate).sha256) is None
+
+
+def test_low_and_high_each_consume_global_call_budget(monkeypatch):
+    import unicornio_editor.media.vision_gate as gate
+
+    responses = iter([
+        VisualComparison("UNCERTAIN", 0.5, "a", "b", "low"),
+        VisualComparison("DIFFERENT", 0.99, "a", "b", "high"),
+    ])
+    monkeypatch.setattr(gate, "_call_visual_comparison", lambda **_kwargs: next(responses))
+    budget = [0]
+    result = compare_visual_assets("data:image/png;base64,AA==", "data:image/png;base64,AA==", api_key="x", base_url="https://api.test", model="x", call_budget=budget, max_calls=2)
+    assert result.decision == "DIFFERENT"
+    assert budget == [2]

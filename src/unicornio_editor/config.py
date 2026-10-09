@@ -37,6 +37,7 @@ class Config:
     vision_mode: str = "ambiguous"  # ambiguous = pula apenas fontes oficiais fortemente evidenciadas
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
     visual_comparison_max_calls: int = 12  # calls low/high for identity pairs per post
+    visual_comparison_min_confidence: float = 0.85
     # Modelo editorial direto: uma chamada estruturada por microbatch, fora do
     # loop agentic do Hermes.
     editorial_api_key: str = field(default="", repr=False)
@@ -299,6 +300,7 @@ def load_config() -> Config:
         vision_mode=_choice("EDITOR_VISION_MODE", "ambiguous", {"always", "ambiguous"}),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
         visual_comparison_max_calls=_int("EDITOR_VISUAL_COMPARISON_MAX_CALLS", 12, 0, 40),
+        visual_comparison_min_confidence=_float("EDITOR_VISUAL_COMPARISON_MIN_CONFIDENCE", 0.85, 0.0, 1.0),
         editorial_api_key=_env("EDITORIAL_API_KEY") or _env("OPENAI_API_KEY"),
         editorial_base_url=_validate_url(
             "EDITORIAL_BASE_URL", _env("EDITORIAL_BASE_URL", "https://api.openai.com/v1")

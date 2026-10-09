@@ -22,6 +22,11 @@ materialização não prova diversidade e bloqueia apenas o novo candidato.
 4. `UNCERTAIN` escala uma vez de low para high. `ERROR`/inconclusivo nunca é
    interpretado como `DIFFERENT`.
 
+Resultados GPT abaixo de `EDITOR_VISUAL_COMPARISON_MIN_CONFIDENCE` (0.85 por
+padrão) também são inconclusivos; somente SHA/pHash determinísticos ignoram
+esse limiar. `ERROR`, `UNCERTAIN`, orçamento esgotado e baixa confiança não
+entram no cache, para que uma nova execução possa reavaliá-los.
+
 O baseline contém a featured somente quando ela é realmente `VALID` e possui
 attachment/URL. Uma featured ausente nunca bloqueia a primeira aquisição.
 
@@ -48,8 +53,14 @@ reconstrói o HTML pendente a partir da mídia restante. Não faz upload nem
 publica.
 
 `EDITOR_VISUAL_COMPARISON_MAX_CALLS` limita pares não cacheados por post (12
-por padrão). Ao atingir o orçamento, a decisão é inconclusiva e o candidato
-não é aprovado.
+por padrão), contando cada request LOW e a eventual escalada HIGH, e é
+compartilhado entre todos os planos/queries do mesmo post. Ao atingir o
+orçamento, a decisão é inconclusiva e o candidato não é aprovado.
+
+No COMPOSE, um journal de reconciliação remove do HTML pendente somente URLs
+explicitamente invalidadas antes de reposicionar a mídia válida. Isso impede a
+reinserção de uma figura já comprovadamente duplicada, sem alterar posts
+publicados ou a Media Library.
 
 ## Policy
 

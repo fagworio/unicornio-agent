@@ -43,6 +43,37 @@ def append_featured_credit(html: str, credit_text: str) -> str:
     return html[: match.end()] + figure + html[match.end() :]
 
 
+def remove_media_urls(html: str, urls: list[str] | tuple[str, ...] | set[str]) -> str:
+    """Remove only figures/images whose exact source URL was invalidated.
+
+    Used by the V2 visual-reconciliation journal before a pending post is
+    recomposed.  It never guesses by slot, ALT or filename; unrelated images
+    and editorial text remain intact.
+    """
+    if not isinstance(html, str):
+        raise MediaInsertionError("HTML must be a string")
+    targets = {str(url).strip() for url in urls if str(url).strip()}
+    if not targets:
+        return html
+
+    def contains_target(fragment: str) -> bool:
+        return any(re.search(r"\bsrc\s*=\s*(['\"])" + re.escape(url) + r"\1", fragment, re.IGNORECASE) for url in targets)
+
+    output = re.sub(
+        r"<figure\b[^>]*>[\s\S]*?</figure>\s*",
+        lambda match: "" if contains_target(match.group(0)) else match.group(0),
+        html,
+        flags=re.IGNORECASE,
+    )
+    output = re.sub(
+        r"<img\b[^>]*>\s*",
+        lambda match: "" if contains_target(match.group(0)) else match.group(0),
+        output,
+        flags=re.IGNORECASE,
+    )
+    return output
+
+
 def plan_normal_media_insertions(
     html: str,
     plan: list[Mapping[str, Any]],
