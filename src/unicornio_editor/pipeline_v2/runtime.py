@@ -1160,6 +1160,7 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             "validate": ProductionValidateStage(client, config, root),
         }
         for post_id, context in selected:
+            context["root"] = root
             initial = context["v2_state"]
             buffered = BufferedStateStore(initial)
             try:

@@ -193,3 +193,54 @@ def test_cohort_report_joins_frozen_ids_with_current_state_without_mutation(tmp_
     assert report["posts"][0]["next_action"] == "v2-reconcile-publication"
     assert report["posts"][0]["media"]["checklist_approved"] is True
     assert report["posts"][1]["next_action"] == "capture_complete_v2_state"
+
+
+def test_cohort_report_separates_admission_from_scheduler_processability(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({
+        "version": 1,
+        "posts": [
+            {"post_id": 1, "original_datetime": "2026-10-01T00:00:00Z", "classification": "historical"},
+            {"post_id": 2, "original_datetime": "2026-10-01T00:00:00Z", "classification": "historical"},
+            {"post_id": 3, "original_datetime": "2026-10-08T00:00:00Z", "classification": "admitted"},
+            {"post_id": 4, "original_datetime": "2026-10-08T00:00:00Z", "classification": "admitted"},
+            {"post_id": 5, "original_datetime": "2026-10-08T00:00:00Z", "classification": "admitted"},
+        ],
+    }), encoding="utf-8")
+    pending = WorkState(state=LifecycleState.PENDING, phase=Phase.RELEVANCE)
+    cooldown = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.RELEVANCE,
+        retry=RetryInfo(next_at="2026-10-09T00:00:00+00:00"),
+    )
+    ready = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    )
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"posts": [
+        {"post_id": 1, "status": "pending", "state": pending.to_dict()},
+        {"post_id": 2, "status": "pending", "state": pending.to_dict()},
+        {"post_id": 3, "status": "pending", "state": pending.to_dict()},
+        {"post_id": 4, "status": "pending", "state": cooldown.to_dict()},
+        {"post_id": 5, "status": "publish", "state": ready.to_dict()},
+    ]}), encoding="utf-8")
+
+    report = historical_cohort_report(
+        cohort,
+        inventory,
+        allowlist=(2,),
+        now=datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc),
+    )
+    by_id = {post["post_id"]: post for post in report["posts"]}
+
+    assert by_id[1]["eligibility_real"]["admission_authorized"] is False
+    assert by_id[1]["eligibility_real"]["processable"] is False
+    assert by_id[1]["eligibility_real"]["reason"] == "historical_not_allowlisted"
+    assert by_id[2]["eligibility_real"]["processable"] is True
+    assert by_id[3]["eligibility_real"]["processable"] is True
+    assert by_id[4]["eligibility_real"]["processable"] is False
+    assert by_id[4]["eligibility_real"]["reason"] == "cooldown_active"
+    assert by_id[5]["eligibility_real"]["processable"] is False
+    assert by_id[5]["eligibility_real"]["reason"] == "wordpress_not_pending"

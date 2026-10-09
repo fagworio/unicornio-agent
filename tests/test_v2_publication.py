@@ -16,6 +16,7 @@ from unicornio_editor.pipeline_v2.model import (
 )
 from unicornio_editor.pipeline_v2.publication import (
     audit_publication_posts,
+    repair_lost_ready_hash,
     reconcile_published_v2,
 )
 from unicornio_editor.workflow import _publish_now
@@ -145,6 +146,60 @@ def test_publication_reconciliation_rejects_invalid_manifest(tmp_path):
     assert result["skipped"] == [{"post_id": 114840, "reason": "precondition_not_eligible"}]
     assert client.updates == []
     assert client.publish_calls == []
+
+
+def test_lost_ready_hash_repair_requires_committed_independent_journal_and_is_idempotent(tmp_path):
+    post = _ready_post()
+    original_hash = post["meta"]["_hermes_ready_hash"]
+    manifest = json.loads(post["meta"]["_hermes_ready_manifest"])
+    post["meta"]["_hermes_ready_hash"] = ""
+    client = FakePublicationClient(post)
+    journal_path = tmp_path / "work" / "v2-journal" / "114840.json"
+    journal_path.parent.mkdir(parents=True)
+    journal_path.write_text(json.dumps({
+        "status": "committed",
+        "post_id": 114840,
+        "state": json.loads(post["meta"]["_hermes_work_state"]),
+        "ready_hash": original_hash,
+        "candidate_hash": manifest["content_hash"],
+        "readback": True,
+    }), encoding="utf-8")
+
+    preview = repair_lost_ready_hash(client, _config(), tmp_path, [114840])
+    assert preview["candidates"] == 1
+    assert preview["posts"][0]["recovered_ready_hash"] == original_hash
+    assert client.updates == []
+
+    result = repair_lost_ready_hash(client, _config(), tmp_path, [114840], apply=True)
+    assert result["repaired"] == [114840]
+    assert client.publish_calls == []
+    assert set(client.updates[-1]["meta"]) == {"_hermes_ready_hash", "_hermes_work_state"}
+    assert client.post["meta"]["_hermes_ready_hash"] == original_hash
+
+    second = repair_lost_ready_hash(client, _config(), tmp_path, [114840], apply=True)
+    assert second["candidates"] == 0
+    assert second["repaired"] == []
+    assert len(client.updates) == 1
+
+
+def test_lost_ready_hash_repair_rejects_incompatible_journal(tmp_path):
+    post = _ready_post()
+    post["meta"]["_hermes_ready_hash"] = ""
+    client = FakePublicationClient(post)
+    journal_path = tmp_path / "work" / "v2-journal" / "114840.json"
+    journal_path.parent.mkdir(parents=True)
+    journal_path.write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "state": json.loads(post["meta"]["_hermes_work_state"]),
+        "ready_hash": "not-the-manifest-hash",
+        "candidate_hash": "not-the-content-hash",
+    }), encoding="utf-8")
+
+    result = repair_lost_ready_hash(client, _config(), tmp_path, [114840], apply=True)
+
+    assert result["repaired"] == []
+    assert client.updates == []
 
 
 def test_publish_failure_after_wordpress_success_is_telemetrized(tmp_path):

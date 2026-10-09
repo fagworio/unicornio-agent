@@ -647,7 +647,11 @@ class ChecklistTests(unittest.TestCase):
             media_context={
                 "enrichment_round": 2,
                 "inline": {"required": 2, "accepted": []},
-                "search": {"completed": False, "exhausted": False},
+                "search": {
+                    "completed": False,
+                    "exhausted": False,
+                    "completion_reason": "INTERRUPTED",
+                },
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
@@ -655,6 +659,39 @@ class ChecklistTests(unittest.TestCase):
         self.assertIn("enrichment_retries_exhausted", item["detail"])
         self.assertEqual(result["media_decision"]["missing"], 2)
         self.assertTrue(result["media_decision"]["waiver_applied"])
+        self.assertFalse(result["media_decision"]["search_completed"])
+        self.assertFalse(result["media_decision"]["search_exhausted"])
+        self.assertEqual(result["media_decision"]["search_completion_reason"], "INTERRUPTED")
+
+    def test_waiver_distinguishes_search_outcomes_from_enrichment_attempt_limit(self):
+        content = (
+            "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
+            "<p>Mais informações sobre videogame para o leitor.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        cases = [
+            ("PROVIDER_ERROR", 2, False, False, "enrichment_retries_exhausted", True),
+            ("EXHAUSTED", 1, True, True, "search_exhausted", True),
+            ("TARGET_REACHED", 1, True, False, "", False),
+        ]
+        for reason, enrichment_round, completed, exhausted, expected_waiver, should_waive in cases:
+            result = self._run_checklist(
+                post=make_post(featured_media=7),
+                content=content,
+                media_context={
+                    "enrichment_round": enrichment_round,
+                    "search": {
+                        "completed": completed,
+                        "exhausted": exhausted,
+                        "completion_reason": reason,
+                    },
+                },
+            )
+            decision = result["media_decision"]
+            self.assertEqual(decision["waiver_applied"], should_waive, reason)
+            self.assertEqual(decision["waiver_reason"], expected_waiver, reason)
+            self.assertEqual(decision["search_completed"], completed, reason)
+            self.assertEqual(decision["search_exhausted"], exhausted, reason)
 
     def test_media_exhausted_does_not_waive_listicle(self):
         # Listicle (Top N) NAO dispensa o minimo: continua exigindo imagem por

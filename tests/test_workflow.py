@@ -94,11 +94,18 @@ class FakeClient:
         return {"id": post_id, "status": "pending", **payload}
 
     def publish(self, post_id, meta=None, date_gmt=None):
+        if hasattr(self, "posts"):
+            self.post = next(post for post in self.posts if post["id"] == post_id)
         payload = {"status": "publish"}
         if date_gmt:
             payload["date_gmt"] = date_gmt
         if meta:
             payload["meta"] = meta
+        self.post["status"] = "publish"
+        if date_gmt:
+            self.post["date_gmt"] = date_gmt
+        if meta:
+            self.post.setdefault("meta", {}).update(meta)
         self.updated.append((post_id, payload))
         return {
             "id": post_id,
@@ -1914,6 +1921,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(outcome["status"], "published")
             self.assertEqual(outcome["integrity"], "manifest_match")
             self.assertEqual(len(client.updated), 2)  # apply + publish (sem revalidacao)
+            self.assertTrue(client.post["meta"]["_hermes_ready_hash"])
+            self.assertTrue(client.post["meta"]["_hermes_ready_manifest"])
 
     def test_publish_ready_stale_revalidates_and_blocks(self):
         # Fase 11: conteudo mudou apos o apply (edicao externa) -> STALE ->

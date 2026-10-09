@@ -63,6 +63,7 @@ from .state import (
     STATE_READY,
     STATE_SKIPPED,
     STATE_UNCERTAIN,
+    META_READY_HASH,
     build_state_markers,
     cooldown_expired,
     read_state,
@@ -2680,7 +2681,17 @@ def _publish_post_unlocked(
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         stored = parse_manifest(meta.get(META_READY_MANIFEST))
         if manifest_matches(post, stored, state_info["ready_hash"], policy_version=config.policy_version):
-            return _publish_now(client, config, post_id, root=root, integrity="manifest_match")
+            return _publish_now(
+                client,
+                config,
+                post_id,
+                root=root,
+                integrity="manifest_match",
+                ready_hash=state_info["ready_hash"],
+                ready_manifest=meta.get(META_READY_MANIFEST)
+                if isinstance(meta.get(META_READY_MANIFEST), str)
+                else None,
+            )
         # STALE: algo mudou desde o preflight -> revalida com o checklist.
     editorial_path = root / "backups" / str(post_id) / "editorial.latest.json"
     if not editorial_path.is_file():
@@ -2754,7 +2765,24 @@ def _publish_post_unlocked(
             "checklist": checklist,
             "state": state,
         }
-    return _publish_now(client, config, post_id, root=root, integrity="revalidated")
+    refreshed_manifest = build_ready_manifest(
+        post_id=post_id,
+        content=_raw_content(post),
+        featured_media=post.get("featured_media") if isinstance(post.get("featured_media"), int) else None,
+        seo=editorial["seo"],
+        original_link=original_link_of(post),
+        editorial=editorial,
+        policy_version=config.policy_version,
+    )
+    return _publish_now(
+        client,
+        config,
+        post_id,
+        root=root,
+        integrity="revalidated",
+        ready_hash=manifest_hash(refreshed_manifest),
+        ready_manifest=serialize_manifest(refreshed_manifest),
+    )
 
 
 def _publish_now(
@@ -2764,6 +2792,8 @@ def _publish_now(
     *,
     root: Path | None = None,
     integrity: str,
+    ready_hash: str = "",
+    ready_manifest: str | None = None,
 ) -> dict[str, Any]:
     """Publica de fato e marca PUBLISHED (gate PUBLISH_ENABLED já verificado)."""
     if not config.publish_enabled:
@@ -2774,12 +2804,18 @@ def _publish_now(
             "reason": "PUBLISH_ENABLED=false (gate de publicacao desligado)",
         }
     published_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    publish_meta = {
+        **build_state_markers(
+            STATE_PUBLISHED,
+            policy_version=config.policy_version,
+            ready_hash=ready_hash,
+        ),
+    }
+    if ready_manifest is not None:
+        publish_meta[META_READY_MANIFEST] = ready_manifest
     result = client.publish(
         post_id,
-        meta={
-            "_ai_editor_published_at": published_at,
-            **build_state_markers(STATE_PUBLISHED, policy_version=config.policy_version),
-        },
+        meta={"_ai_editor_published_at": published_at, **publish_meta},
         # Política do dono: post antigo em pending publica como data corrente
         # (não fica enterrado no passado do site).
         date_gmt=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
@@ -2792,6 +2828,10 @@ def _publish_now(
     from .pipeline_v2.state_store import StateStore as _V2Store
     try:
         v2_post = client.get_post(post_id)
+        if v2_post.get("status") != "publish":
+            raise WorkflowError("WordPress publish read-back mismatch")
+        if read_state(v2_post).get("state") != STATE_PUBLISHED:
+            raise WorkflowError("legacy publish read-back mismatch")
         v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
         if "_hermes_work_state" in v2_meta:
             v2_store = _V2Store(_V2Backend(client))
@@ -2800,6 +2840,14 @@ def _publish_now(
             v2_verified = v2_store.load(post_id)
             if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
                 raise WorkflowError("V2 state read-back mismatch after publish")
+        verified_post = client.get_post(post_id)
+        verified_meta = verified_post.get("meta", {}) if isinstance(verified_post, dict) else {}
+        if verified_post.get("status") != "publish" or read_state(verified_post).get("state") != STATE_PUBLISHED:
+            raise WorkflowError("publication read-back mismatch")
+        if ready_hash and verified_meta.get(META_READY_HASH) != ready_hash:
+            raise WorkflowError("ready hash read-back mismatch after publish")
+        if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
+            raise WorkflowError("ready manifest read-back mismatch after publish")
     except Exception as exc:
         try:
             append_telemetry(

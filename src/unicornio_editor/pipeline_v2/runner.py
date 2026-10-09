@@ -99,6 +99,23 @@ class PipelineRunner:
                         waiver_applied=True,
                         waiver_reason=str(media_decision.get("waiver_reason") or ""),
                     )
+                    try:
+                        from ..observability import append_telemetry
+
+                        append_telemetry(
+                            getattr(self.config, "root", None) or context.get("root") or ".",
+                            "media_waiver_applied",
+                            post_id=int(post_id),
+                            reason=str(media_decision.get("waiver_reason") or ""),
+                            enrichment_round=int(media_decision.get("enrichment_round") or 0),
+                            search_completed=bool(media_decision.get("search_completed")),
+                            search_exhausted=bool(media_decision.get("search_exhausted")),
+                            search_completion_reason=str(
+                                media_decision.get("search_completion_reason") or ""
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 - telemetry cannot change lifecycle
+                        pass
                 progress = self._media_progressed(previous.media, media) if media_completed else False
                 current_no_progress = (
                     (0 if progress else media_base_no_progress + 1)

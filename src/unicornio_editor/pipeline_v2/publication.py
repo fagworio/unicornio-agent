@@ -163,6 +163,188 @@ def audit_publication_posts(
     }
 
 
+def _lost_ready_hash_report(
+    client: Any,
+    root: Path,
+    post_id: int,
+    *,
+    policy_version: int,
+) -> dict[str, Any]:
+    """Validate the exact historical signature of the publisher hash bug.
+
+    The journal is evidence, not a source from which a new hash is invented:
+    its recorded hash must match the persisted manifest and the current post.
+    """
+    base = audit_publication_post(client, post_id, policy_version=policy_version)
+    if base.get("read_error"):
+        return {**base, "eligible": False, "recommended_action": "retry_read_only_get"}
+    post = client.get_post(int(post_id))
+    meta = _meta(post)
+    journal_path = root / "work" / "v2-journal" / f"{int(post_id)}.json"
+    reasons: list[str] = []
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        journal = {}
+        reasons.append(f"journal_unavailable: {exc}")
+    if post.get("status") != "publish":
+        reasons.append("wordpress_not_published")
+    if str(read_state(post).get("state") or "") != "published":
+        reasons.append("legacy_not_published")
+    state = _v2_state(post)
+    if state is None or state.state is not LifecycleState.READY:
+        reasons.append("v2_not_ready")
+    current_hash = str(meta.get("_hermes_ready_hash") or "")
+    if current_hash:
+        reasons.append("ready_hash_present_or_different_bug")
+    manifest_raw = meta.get(META_READY_MANIFEST)
+    manifest = parse_manifest(manifest_raw)
+    if manifest is None:
+        reasons.append("ready_manifest_missing_or_invalid")
+    journal_hash = str(journal.get("ready_hash") or "")
+    if not journal_hash:
+        reasons.append("journal_ready_hash_missing")
+    if journal.get("status") != "committed" or journal.get("readback") is not True:
+        reasons.append("journal_not_committed_with_readback")
+    journal_state = journal.get("state")
+    if not isinstance(journal_state, dict) or journal_state.get("state") != LifecycleState.READY.value:
+        reasons.append("journal_state_not_ready")
+    if manifest is not None and journal_hash:
+        if manifest_hash(manifest) != journal_hash:
+            reasons.append("journal_hash_does_not_match_manifest")
+        candidate_hash = str(journal.get("candidate_hash") or "")
+        if not candidate_hash or manifest.get("content_hash") != candidate_hash:
+            reasons.append("journal_candidate_hash_does_not_match_manifest")
+        if not manifest_matches(post, manifest, journal_hash, policy_version=policy_version):
+            reasons.append("current_post_does_not_match_journal_manifest")
+    eligible = not reasons
+    signature = _precondition_signature(
+        post,
+        legacy_state=str(read_state(post).get("state") or "") or None,
+        v2_state=state,
+        manifest_raw=manifest_raw if isinstance(manifest_raw, str) else None,
+        ready_hash=current_hash,
+    )
+    return {
+        **base,
+        "command": "v2-repair-lost-ready-hash",
+        "eligible": eligible,
+        "recommended_action": "repair_lost_ready_hash" if eligible else "do_not_modify_without_new_evidence",
+        "journal": {
+            "path": str(journal_path),
+            "present": bool(journal),
+            "status": journal.get("status"),
+            "readback": journal.get("readback"),
+            "ready_hash": journal_hash or None,
+            "candidate_hash": journal.get("candidate_hash"),
+        },
+        "evidence_rejection_reasons": reasons,
+        "recovered_ready_hash": journal_hash or None,
+        "precondition_signature": signature,
+    }
+
+
+def repair_lost_ready_hash(
+    client: Any,
+    config: Any,
+    root: Path | str,
+    post_ids: list[int] | tuple[int, ...],
+    *,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Restore a publisher-cleared Ready Hash only from committed journal proof."""
+    root = Path(root)
+    before = [
+        _lost_ready_hash_report(client, root, post_id, policy_version=config.policy_version)
+        for post_id in post_ids
+    ]
+    result_base = {
+        "command": "v2-repair-lost-ready-hash",
+        "read_only": not apply,
+        "apply": bool(apply),
+        "post_ids": [int(post_id) for post_id in post_ids],
+        "candidates": sum(bool(item.get("eligible")) for item in before),
+        "repaired": [],
+        "posts": before,
+        "skipped": [],
+    }
+    if not apply:
+        return result_base
+    if getattr(config, "dry_run", True):
+        result_base["read_only"] = True
+        result_base["skipped"] = [
+            {"post_id": item["post_id"], "reason": "dry_run_enabled"}
+            for item in before if item.get("eligible")
+        ]
+        return result_base
+    from ..workflow import _acquire_post_lock
+
+    for item in before:
+        post_id = int(item["post_id"])
+        if not item.get("eligible"):
+            continue
+        try:
+            with _acquire_post_lock(root, config, post_id):
+                current = _lost_ready_hash_report(
+                    client, root, post_id, policy_version=config.policy_version
+                )
+                if current.get("precondition_signature") != item.get("precondition_signature"):
+                    result_base["skipped"].append({"post_id": post_id, "reason": "changed_after_scan"})
+                    continue
+                post = client.get_post(post_id)
+                meta = _meta(post)
+                manifest_raw = meta.get(META_READY_MANIFEST)
+                ready_hash = str(current.get("recovered_ready_hash") or "")
+                state = _v2_state(post)
+                if not ready_hash or not isinstance(manifest_raw, str) or state is None:
+                    result_base["skipped"].append({"post_id": post_id, "reason": "evidence_changed"})
+                    continue
+                updated = replace(state, state=LifecycleState.PUBLISHED, phase=Phase.PUBLISH, blocker=None)
+                before_immutable = {
+                    "content": _content_hash(post),
+                    "featured_media": post.get("featured_media"),
+                    "date": post.get("date"),
+                    "date_gmt": post.get("date_gmt"),
+                    "manifest": manifest_raw,
+                    "seo": {key: meta.get(key) for key in (
+                        "rank_math_title", "rank_math_description", "rank_math_focus_keyword", "original_link"
+                    )},
+                }
+                client.update_post(post_id, {"meta": {
+                    "_hermes_ready_hash": ready_hash,
+                    "_hermes_work_state": json.dumps(updated.to_dict(), ensure_ascii=False, separators=(",", ":")),
+                }})
+                verified_post = client.get_post(post_id)
+                verified_meta = _meta(verified_post)
+                verified_state = _v2_state(verified_post)
+                immutable_ok = (
+                    verified_post.get("status") == "publish"
+                    and str(read_state(verified_post).get("state") or "") == "published"
+                    and verified_state == updated
+                    and verified_meta.get("_hermes_ready_hash") == ready_hash
+                    and verified_meta.get(META_READY_MANIFEST) == before_immutable["manifest"]
+                    and _content_hash(verified_post) == before_immutable["content"]
+                    and verified_post.get("featured_media") == before_immutable["featured_media"]
+                    and verified_post.get("date") == before_immutable["date"]
+                    and verified_post.get("date_gmt") == before_immutable["date_gmt"]
+                    and {key: verified_meta.get(key) for key in before_immutable["seo"]} == before_immutable["seo"]
+                )
+                if not immutable_ok:
+                    raise RuntimeError("lost ready hash repair read-back mismatch")
+                append_telemetry(
+                    root,
+                    "v2_lost_ready_hash_repaired",
+                    post_id=post_id,
+                    ready_hash=ready_hash,
+                    previous_state="ready",
+                )
+                result_base["repaired"].append(post_id)
+        except Exception as exc:  # noqa: BLE001 - preserve per-ID auditability
+            append_telemetry(root, "v2_lost_ready_hash_repair_failed", post_id=post_id, error=str(exc)[:200])
+            result_base["skipped"].append({"post_id": post_id, "reason": f"repair_error: {exc}"})
+    return result_base
+
+
 def reconcile_published_v2(
     client: Any,
     config: Any,

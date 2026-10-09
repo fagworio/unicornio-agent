@@ -275,9 +275,12 @@ def run_pre_publish_checklist(
             enrichment_round = int(media_context.get("enrichment_round") or 0)
         except (TypeError, ValueError):
             enrichment_round = 0
-    # A normal article may publish after the second complete enrichment round
-    # when a valid featured exists.  Search exhaustion remains an equivalent
-    # deterministic waiver, but the LLM cannot assert either condition.
+    # A normal article may publish after the second enrichment *attempt* when
+    # a valid featured exists.  This is intentionally distinct from search
+    # completion: an INTERRUPTED/PROVIDER_ERROR round is not reported as
+    # completed or exhausted, but still consumes one bounded enrichment turn.
+    # Search exhaustion remains an equivalent deterministic waiver, and the
+    # LLM cannot assert either condition.
     waiver_reason = (
         "search_exhausted" if media_exhausted else
         "enrichment_retries_exhausted" if enrichment_round >= 2 else ""
@@ -804,6 +807,19 @@ def run_pre_publish_checklist(
             "enrichment_round": enrichment_round,
             "waiver_applied": waive_inline,
             "waiver_reason": waiver_reason,
+            "waiver_basis": waiver_reason or None,
+            "search_completed": bool(
+                isinstance(search_progress, Mapping)
+                and search_progress.get("completed") is True
+            ),
+            "search_exhausted": bool(
+                isinstance(search_progress, Mapping)
+                and search_progress.get("exhausted") is True
+            ),
+            "search_completion_reason": (
+                str(search_progress.get("completion_reason") or "")
+                if isinstance(search_progress, Mapping) else ""
+            ),
             "is_listicle": is_list,
         },
     }

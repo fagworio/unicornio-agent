@@ -614,6 +614,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="aplica somente a meta V2 PUBLISHED após validar manifest e readback",
     )
 
+    repair_ready_hash_parser = subparsers.add_parser(
+        "v2-repair-lost-ready-hash",
+        help="recupera hash READY apagado pelo publisher somente com prova do journal",
+    )
+    repair_ready_hash_parser.add_argument("post_ids", nargs="+", type=int)
+    repair_ready_hash_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_ready_hash_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="restaura o hash comprovado e marca V2 como PUBLISHED, com readback",
+    )
+
     repair_media_funnel_parser = subparsers.add_parser(
         "v2-repair-media-funnel-invariant",
         help="reabre somente o estado histórico allowlistado de violação de conservação do funil",
@@ -2135,6 +2147,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .pipeline_v2.publication import reconcile_published_v2
 
             result = reconcile_published_v2(
+                client,
+                config,
+                args.root,
+                list(args.post_ids),
+                apply=bool(args.apply),
+            )
+        elif args.command == "v2-repair-lost-ready-hash":
+            from .pipeline_v2.publication import repair_lost_ready_hash
+
+            result = repair_lost_ready_hash(
                 client,
                 config,
                 args.root,

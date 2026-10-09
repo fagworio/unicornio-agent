@@ -272,6 +272,7 @@ def historical_cohort_report(
                 "divergence": ["missing_or_invalid_v2_state"],
                 "eligibility_real": {
                     "admission": "allowlisted" if post_id in explicit_allowlist else frozen["classification"],
+                    "admission_authorized": post_id in explicit_allowlist or frozen.get("classification") == "admitted",
                     "processable": False,
                     "reason": "missing_or_invalid_v2_state",
                 },
@@ -297,6 +298,10 @@ def historical_cohort_report(
         elif wordpress_status != "publish" and v2_value == LifecycleState.PUBLISHED.value:
             divergence.append("v2_published_wordpress_not_publish")
         admission = "allowlisted" if post_id in explicit_allowlist else frozen["classification"]
+        admission_authorized = (
+            post_id in explicit_allowlist
+            or frozen.get("classification") == "admitted"
+        )
         next_at = state.retry.next_at
         cooldown_active = False
         if next_at:
@@ -307,9 +312,16 @@ def historical_cohort_report(
                 cooldown_active = parsed > current
             except (AttributeError, TypeError, ValueError):
                 cooldown_active = None
-        processable = state.state is LifecycleState.PENDING and cooldown_active is False
+        processable = bool(
+            admission_authorized
+            and wordpress_status == "pending"
+            and state.state is LifecycleState.PENDING
+            and cooldown_active is False
+        )
         eligibility_reason = (
-            "pending_and_cooldown_inactive" if processable
+            "admission_and_scheduler_eligible" if processable
+            else "historical_not_allowlisted" if not admission_authorized
+            else "wordpress_not_pending" if wordpress_status != "pending"
             else "state_not_pending" if state.state is not LifecycleState.PENDING
             else "cooldown_active"
         )
@@ -323,6 +335,7 @@ def historical_cohort_report(
             "eligibility": admission,
             "eligibility_real": {
                 "admission": admission,
+                "admission_authorized": admission_authorized,
                 "processable": processable,
                 "reason": eligibility_reason,
             },
