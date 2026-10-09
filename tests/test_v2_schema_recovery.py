@@ -85,8 +85,19 @@ def fixture(tmp_path):
     journal = tmp_path / "work" / "v2-journal"
     journal.mkdir(parents=True)
     (journal / "115142.json").write_text(
-        json.dumps({"post_id": 115142, "status": "validated", "run_id": "old-run"}),
+        json.dumps({
+            "post_id": 115142,
+            "status": "committed",
+            "readback": True,
+            "candidate_fresh": True,
+            "candidate_run_id": "real-run",
+            "state": state.to_dict(),
+            "detail": "top-level has invalid fields (unknown=['localization'])",
+        }),
         encoding="utf-8",
+    )
+    (directory / "editorial.candidate.json").write_text(
+        json.dumps({"_v2_run_id": "real-run", "content": body}), encoding="utf-8"
     )
     post = {
         "id": 115142,
@@ -115,6 +126,10 @@ def test_schema_115142_dry_run_is_exact_and_read_only(tmp_path):
     result = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=False)
 
     assert result["eligible"] is True
+    assert result["historical_error_source"] == "journal"
+    assert result["journal_identity_verified"] is True
+    assert result["candidate_run_id_verified"] is True
+    assert result["journal_state_matches_wordpress"] is True
     assert result["checks"]["removed_fields"] == ["decision", "localization"]
     assert result["preserve"]["inline_media_ids"] == [115156, 115157, 115158, 115159, 115160, 115161]
     assert client.updates == []
@@ -141,3 +156,138 @@ def test_schema_repair_refuses_other_post_without_writing(tmp_path):
     assert result["eligible"] is False
     assert result["reason"] == "post_id_not_allowlisted"
     assert client.updates == []
+
+
+def test_schema_repair_uses_committed_journal_without_error_artifact(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    (tmp_path / "backups/115142/editorial.error.json").unlink()
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is True
+    assert result["historical_error_source"] == "journal"
+
+
+def test_schema_repair_rejects_inconsistent_journal_identity(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    journal_path = tmp_path / "work/v2-journal/115142.json"
+    journal = json.loads(journal_path.read_text())
+    journal["candidate_run_id"] = "different-run"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is False
+    assert result["historical_error"] is False
+    assert result["reason"] == "signature_or_checkpoints_not_verified"
+
+
+def test_schema_repair_rejects_journal_from_another_post(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    journal_path = tmp_path / "work/v2-journal/115142.json"
+    journal = json.loads(journal_path.read_text())
+    journal["post_id"] = 999999
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is False
+    assert result["journal_identity_verified"] is False
+
+
+def test_schema_repair_rejects_running_or_wrong_detail_journal(tmp_path):
+    for index, (status, readback, detail) in enumerate((
+        ("running", True, "top-level has invalid fields (unknown=['localization'])"),
+        ("committed", False, "top-level has invalid fields (unknown=['localization'])"),
+        ("committed", True, "top-level has invalid fields (unknown=['decision'])"),
+    )):
+        root = tmp_path / str(index)
+        client, state, _draft = fixture(root)
+        journal_path = root / "work/v2-journal/115142.json"
+        journal = json.loads(journal_path.read_text())
+        journal.update({"status": status, "readback": readback, "detail": detail})
+        journal_path.write_text(json.dumps(journal), encoding="utf-8")
+        result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+        assert result["eligible"] is False
+        assert result["historical_error"] is False
+        # Keep the loop's state object used, making the fixture explicit and
+        # ensuring the refusal is not caused by a missing WordPress state.
+        assert state.state is LifecycleState.PENDING
+
+
+def test_schema_repair_rejects_attachment_url_divergence(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    client.attachments[115156]["source_url"] = "https://media.example/other.webp"
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is False
+    assert result["checks"]["attachments_valid"] is False
+    assert result["attachments"][0]["persisted_url_matches"] is False
+
+
+def test_schema_repair_rejects_wordpress_state_divergence(tmp_path):
+    client, state, _draft = fixture(tmp_path)
+    divergent = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.SCHEMA,
+        retry=state.retry,
+        relevance_approved=state.relevance_approved,
+        media=state.media,
+    )
+    client.post["meta"]["_hermes_work_state"] = json.dumps(divergent.to_dict())
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is False
+    assert result["journal_state_matches_wordpress"] is False
+
+
+def test_schema_repair_does_not_rollback_draft_after_ambiguous_meta_update(tmp_path):
+    client, _state, draft = fixture(tmp_path)
+
+    class ReadbackFails(Client):
+        def __init__(self, post, attachments):
+            super().__init__(post, attachments)
+            self.reads = 0
+
+        def get_post(self, post_id):
+            self.reads += 1
+            if self.reads >= 3:
+                raise RuntimeError("readback unavailable")
+            return super().get_post(post_id)
+
+    client = ReadbackFails(client.post, client.attachments)
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=True)
+
+    assert result["eligible"] is False
+    assert result["reason"] == "reconciliation_required"
+    persisted = json.loads((tmp_path / "backups/115142/editorial.draft.json").read_text())
+    assert set(draft) - set(persisted) == {"decision", "localization"}
+    assert len(client.updates) == 1
+
+
+def test_schema_repair_refuses_draft_changed_between_scan_and_apply(tmp_path):
+    base, _state, draft = fixture(tmp_path)
+
+    class DraftChangesOnSecondRead(Client):
+        def __init__(self, post, attachments, path):
+            super().__init__(post, attachments)
+            self.reads = 0
+            self.path = path
+
+        def get_post(self, post_id):
+            self.reads += 1
+            if self.reads == 2:
+                changed = dict(draft)
+                changed["title"] = "Draft alterado durante o apply"
+                self.path.write_text(json.dumps(changed), encoding="utf-8")
+            return super().get_post(post_id)
+
+    draft_path = tmp_path / "backups/115142/editorial.draft.json"
+    client = DraftChangesOnSecondRead(base.post, base.attachments, draft_path)
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=True)
+
+    assert result["eligible"] is False
+    assert result["reason"] == "changed_after_scan"
+    assert client.updates == []
+
+
+def test_schema_repair_is_idempotent_after_success(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    first = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=True)
+    second = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=True)
+    assert first["readback"] is True
+    assert second["eligible"] is False
+    assert len(client.updates) == 1

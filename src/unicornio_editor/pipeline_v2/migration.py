@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
 from ..editorial_schema import EditorialValidationError, validate_editorial
@@ -93,10 +94,25 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _contains_unknown_localization_error(value: Any) -> bool:
-    """Recognize only the historical strict-schema failure, not any error."""
-    text = json.dumps(value, ensure_ascii=False).casefold()
-    return "localization" in text and "unknown" in text
+def _canonical_attachment_url(value: Any) -> str:
+    parsed = urlsplit(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip().rstrip("/")
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/", parsed.query, ""))
+
+
+def _exact_schema_signature(detail: Any) -> bool:
+    text = str(detail or "")
+    return "top-level has invalid fields" in text and "unknown=['localization']" in text
+
+
+def _journal_state_matches(journal: dict[str, Any], state: WorkState | None) -> bool:
+    if state is None or not isinstance(journal.get("state"), dict):
+        return False
+    try:
+        return WorkState.from_dict(journal["state"]) == state
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 def repair_schema_115142(
@@ -143,9 +159,53 @@ def repair_schema_115142(
         draft_path = directory / "editorial.draft.json"
         draft = _load_json_object(draft_path)
         error = _load_json_object(directory / "editorial.error.json")
+        validation = _load_json_object(directory / "editorial.validation.json")
+        candidate = _load_json_object(directory / "editorial.candidate.json")
         journal_path = root_path / "work" / "v2-journal" / f"{post_id}.json"
         journal = _load_json_object(journal_path)
         checks = result["checks"]
+        journal_identity_verified = bool(
+            journal.get("post_id") == post_id
+            and journal.get("status") == "committed"
+            and journal.get("readback") is True
+            and journal.get("candidate_fresh") is True
+            and bool(str(journal.get("candidate_run_id") or "").strip())
+        )
+        candidate_run_id = str(candidate.get("_v2_run_id") or "").strip()
+        candidate_run_id_verified = bool(
+            journal_identity_verified
+            and candidate_run_id
+            and candidate_run_id == str(journal.get("candidate_run_id") or "").strip()
+        )
+        journal_state_matches_wordpress = bool(
+            journal_identity_verified and _journal_state_matches(journal, state)
+        )
+        journal_signature = bool(
+            journal_identity_verified
+            and candidate_run_id_verified
+            and journal_state_matches_wordpress
+            and _exact_schema_signature(journal.get("detail"))
+        )
+        validation_signature = False
+        validation_run_id = str(validation.get("candidate_run_id") or validation.get("run_id") or "").strip()
+        if validation_run_id and validation_run_id == candidate_run_id:
+            validation_signature = any(
+                _exact_schema_signature(item.get("detail"))
+                for item in validation.get("failures", [])
+                if isinstance(item, dict)
+            )
+        error_run_id = str(error.get("candidate_run_id") or error.get("run_id") or "").strip()
+        error_signature = bool(
+            error_run_id
+            and error_run_id == candidate_run_id
+            and _exact_schema_signature(error.get("detail") or error.get("error"))
+        )
+        historical_error_source = (
+            "journal" if journal_signature else
+            "editorial.validation.json" if validation_signature else
+            "editorial.error.json" if error_signature else
+            None
+        )
         checks.update({
             "wordpress_pending": post.get("status") == "pending",
             "v2_signature": bool(
@@ -154,9 +214,20 @@ def repair_schema_115142(
                 and state.phase is Phase.EDITORIAL
                 and state.blocker is BlockerCode.SCHEMA
             ),
-            "historical_error": _contains_unknown_localization_error(error),
+            "historical_error": historical_error_source is not None,
+            "historical_error_source": historical_error_source,
+            "journal_identity_verified": journal_identity_verified,
+            "journal_state_matches_wordpress": journal_state_matches_wordpress,
+            "candidate_run_id_verified": candidate_run_id_verified,
+            "signature_match_reason": (
+                "committed_journal_readback_fresh_exact_detail"
+                if journal_signature else
+                "validated_artifact_exact_detail" if validation_signature else
+                "error_artifact_exact_detail" if error_signature else
+                "no_verified_schema_signature"
+            ),
             "journal_present": bool(journal),
-            "journal_post_id": journal.get("post_id") in {None, post_id},
+            "journal_post_id": journal.get("post_id") == post_id,
             "draft_present": bool(draft),
             "retry_signature": bool(
                 state is not None
@@ -191,7 +262,20 @@ def repair_schema_115142(
                 })
             except Exception as exc:  # noqa: BLE001 - audit one attachment at a time
                 media_checks.append({"media_id": media_id, "valid": False, "reason": str(exc)})
-        checks["attachments_valid"] = len(media_checks) == 7 and all(item["valid"] for item in media_checks)
+        persisted_urls = {}
+        if state is not None:
+            persisted_urls.update({item.media_id: item.media_url for item in state.media.inline})
+            persisted_urls[state.media.featured.media_id] = state.media.featured.media_url
+        for item in media_checks:
+            item["persisted_url"] = persisted_urls.get(item["media_id"])
+            item["persisted_url_matches"] = bool(
+                item.get("valid")
+                and _canonical_attachment_url(item.get("source_url"))
+                == _canonical_attachment_url(item.get("persisted_url"))
+            )
+        checks["attachments_valid"] = len(media_checks) == 7 and all(
+            item["valid"] and item["persisted_url_matches"] for item in media_checks
+        )
         result["attachments"] = media_checks
 
         sanitized = dict(draft)
@@ -227,6 +311,14 @@ def repair_schema_115142(
             "attachments_valid", "only_expected_fields_removed", "editorial_contract",
             "language_ok", "relevance_ok",
         ))
+        result.update({
+            "historical_error": checks["historical_error"],
+            "historical_error_source": checks["historical_error_source"],
+            "journal_identity_verified": checks["journal_identity_verified"],
+            "journal_state_matches_wordpress": checks["journal_state_matches_wordpress"],
+            "candidate_run_id_verified": checks["candidate_run_id_verified"],
+            "signature_match_reason": checks["signature_match_reason"],
+        })
         result["preserve"] = {
             "attempts": state.retry.attempts if state else None,
             "phase_attempts": state.retry.phase_attempts if state else None,
@@ -288,9 +380,59 @@ def repair_schema_115142(
             verified = _read_state(client.get_post(post_id))
             if verified != reopened:
                 raise RuntimeError("115142 schema recovery read-back mismatch")
-        except Exception:
-            shutil.copy2(backup_path, draft_path)
-            raise
+        except Exception as exc:
+            # Filesystem and WordPress do not share a transaction.  Never
+            # restore the old draft blindly: the meta update may already have
+            # succeeded.  Re-read first and classify the outcome.
+            remote_state = None
+            remote_read_error = None
+            try:
+                remote_state = _read_state(client.get_post(post_id))
+            except Exception as read_exc:  # noqa: BLE001 - preserve ambiguity
+                remote_read_error = str(read_exc)
+            current_draft = _load_json_object(draft_path)
+            current_hash = _html_hash(json.dumps(current_draft, ensure_ascii=False, sort_keys=True))
+            if remote_state == reopened:
+                # The remote transition is durable; keep the sanitized draft
+                # and force reconciliation instead of creating a split-brain
+                # rollback.
+                result["eligible"] = False
+                result["reason"] = "meta_updated_reconciliation_required"
+                result["readback"] = False
+                result["reconciliation"] = {
+                    "remote_state": "proposed",
+                    "draft_state": "sanitized" if current_hash == checks["sanitized_draft_hash"] else "divergent",
+                    "error": str(exc),
+                }
+            elif remote_state == state and current_hash == checks["sanitized_draft_hash"]:
+                # The remote state is still old and the only local change is
+                # our sanitized draft, so restoring the backup is provably safe.
+                shutil.copy2(backup_path, draft_path)
+                result["eligible"] = False
+                result["reason"] = "write_failed_safe_rollback"
+                result["readback"] = False
+                result["reconciliation"] = {"remote_state": "old", "draft_restored": True, "error": str(exc)}
+            else:
+                # Missing/contradictory readback is ambiguous. Preserve both
+                # evidence and the current draft; a later apply is blocked by
+                # the state/signature checks until an operator reconciles it.
+                result["eligible"] = False
+                result["reason"] = "reconciliation_required"
+                result["readback"] = False
+                result["reconciliation"] = {
+                    "remote_state": "unavailable_or_divergent",
+                    "draft_state": "sanitized" if current_hash == checks["sanitized_draft_hash"] else "divergent",
+                    "remote_read_error": remote_read_error,
+                    "error": str(exc),
+                }
+            try:
+                _atomic_json_file(
+                    root_path / "work" / "v2-recovery" / str(post_id) / f"{operation_id}.failure.json",
+                    {**recovery_record, "failure": result.get("reconciliation"), "reason": result.get("reason")},
+                )
+            except Exception:
+                pass
+            return result
         result.update({
             "reopened_state": reopened.to_dict(),
             "readback": True,
