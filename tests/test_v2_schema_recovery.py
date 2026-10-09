@@ -137,6 +137,38 @@ def test_schema_115142_dry_run_is_exact_and_read_only(tmp_path):
     assert state.retry.attempts == 1
 
 
+def test_schema_repair_preserves_validated_artifact_evidence_with_consistent_journal(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    journal_path = tmp_path / "work/v2-journal/115142.json"
+    journal = json.loads(journal_path.read_text())
+    journal["detail"] = "other historical detail"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    (tmp_path / "backups/115142/editorial.error.json").unlink()
+    (tmp_path / "backups/115142/editorial.validation.json").write_text(json.dumps({
+        "candidate_run_id": "real-run",
+        "failures": [{"gate": "schema_editorial", "detail": "top-level has invalid fields (unknown=['localization'])"}],
+    }), encoding="utf-8")
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is True
+    assert result["historical_error_source"] == "editorial.validation.json"
+    assert result["journal_identity_verified"] is True
+
+
+def test_schema_repair_preserves_error_artifact_evidence_with_consistent_journal(tmp_path):
+    client, _state, _draft = fixture(tmp_path)
+    journal_path = tmp_path / "work/v2-journal/115142.json"
+    journal = json.loads(journal_path.read_text())
+    journal["detail"] = "other historical detail"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    (tmp_path / "backups/115142/editorial.error.json").write_text(json.dumps({
+        "candidate_run_id": "real-run",
+        "detail": "top-level has invalid fields (unknown=['localization'])",
+    }), encoding="utf-8")
+    result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+    assert result["eligible"] is True
+    assert result["historical_error_source"] == "editorial.error.json"
+
+
 def test_schema_115142_apply_only_reopens_compose_and_preserves_media(tmp_path):
     client, state, draft = fixture(tmp_path)
     result = repair_schema_115142(client, config(), tmp_path, post_id=115142, apply=True)
@@ -201,7 +233,7 @@ def test_schema_repair_rejects_running_or_wrong_detail_journal(tmp_path):
         journal = json.loads(journal_path.read_text())
         journal.update({"status": status, "readback": readback, "detail": detail})
         journal_path.write_text(json.dumps(journal), encoding="utf-8")
-        result = repair_schema_115142(client, config(), tmp_path, post_id=115142)
+        result = repair_schema_115142(client, config(), root, post_id=115142)
         assert result["eligible"] is False
         assert result["historical_error"] is False
         # Keep the loop's state object used, making the fixture explicit and
@@ -253,6 +285,7 @@ def test_schema_repair_does_not_rollback_draft_after_ambiguous_meta_update(tmp_p
 
     assert result["eligible"] is False
     assert result["reason"] == "reconciliation_required"
+    assert result["reconciliation"]["cron_must_remain_paused"] is True
     persisted = json.loads((tmp_path / "backups/115142/editorial.draft.json").read_text())
     assert set(draft) - set(persisted) == {"decision", "localization"}
     assert len(client.updates) == 1

@@ -308,6 +308,7 @@ def repair_schema_115142(
         checks["safe_signature"] = all(bool(checks.get(key)) for key in (
             "wordpress_pending", "v2_signature", "historical_error", "journal_present",
             "journal_post_id", "draft_present", "retry_signature", "accepted_media_signature",
+            "journal_identity_verified", "candidate_run_id_verified", "journal_state_matches_wordpress",
             "attachments_valid", "only_expected_fields_removed", "editorial_contract",
             "language_ok", "relevance_ok",
         ))
@@ -402,6 +403,7 @@ def repair_schema_115142(
                 result["reconciliation"] = {
                     "remote_state": "proposed",
                     "draft_state": "sanitized" if current_hash == checks["sanitized_draft_hash"] else "divergent",
+                    "cron_must_remain_paused": True,
                     "error": str(exc),
                 }
             elif remote_state == state and current_hash == checks["sanitized_draft_hash"]:
@@ -411,7 +413,12 @@ def repair_schema_115142(
                 result["eligible"] = False
                 result["reason"] = "write_failed_safe_rollback"
                 result["readback"] = False
-                result["reconciliation"] = {"remote_state": "old", "draft_restored": True, "error": str(exc)}
+                result["reconciliation"] = {
+                    "remote_state": "old",
+                    "draft_restored": True,
+                    "cron_must_remain_paused": False,
+                    "error": str(exc),
+                }
             else:
                 # Missing/contradictory readback is ambiguous. Preserve both
                 # evidence and the current draft; a later apply is blocked by
@@ -422,6 +429,7 @@ def repair_schema_115142(
                 result["reconciliation"] = {
                     "remote_state": "unavailable_or_divergent",
                     "draft_state": "sanitized" if current_hash == checks["sanitized_draft_hash"] else "divergent",
+                    "cron_must_remain_paused": True,
                     "remote_read_error": remote_read_error,
                     "error": str(exc),
                 }
