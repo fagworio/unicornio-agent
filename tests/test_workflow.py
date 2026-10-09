@@ -1901,7 +1901,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(meta["_hermes_ready_hash"])
             self.assertTrue(meta["_hermes_ready_manifest"])
             # WP REST persiste meta como string (tipo 'string' registrado).
-            self.assertEqual(meta["_hermes_policy_version"], "2")
+            self.assertEqual(meta["_hermes_policy_version"], "3")
             self.assertEqual(meta["_hermes_attempts"], "0")
             queue = build_queue_report(client, root)
             self.assertEqual(queue["edited"], 1)
@@ -1923,6 +1923,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(client.updated), 2)  # apply + publish (sem revalidacao)
             self.assertTrue(client.post["meta"]["_hermes_ready_hash"])
             self.assertTrue(client.post["meta"]["_hermes_ready_manifest"])
+
+    def test_publish_ready_from_previous_policy_revalidates_before_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True, policy_version=4,
+            )
+            outcome = publish_post(client, config, root, 42)
+            self.assertEqual(outcome["status"], "published")
+            self.assertEqual(outcome["integrity"], "revalidated")
 
     def test_publish_ready_stale_revalidates_and_blocks(self):
         # Fase 11: conteudo mudou apos o apply (edicao externa) -> STALE ->

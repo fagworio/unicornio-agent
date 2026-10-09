@@ -832,7 +832,11 @@ def repair_compose_114987(
         except (EditorialValidationError, TypeError, ValueError):
             checks["editorial_contract"] = False
         original_draft_html = str(draft.get("cleaned_html") or "")
-        required_paragraphs = 2 + (3 * max(0, len(state.media.inline) - 1)) if state else 0
+        # Normal-article placement reserves the first inline boundary until
+        # after paragraph two (slot 1) and never inserts after the final
+        # paragraph.  Four images at spacing three therefore need 12
+        # paragraphs, not the old 11-slot layout that began at slot zero.
+        required_paragraphs = 3 + (3 * max(0, len(state.media.inline) - 1)) if state else 0
         is_listicle = detect_list_format(
             str((post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""),
             original_draft_html,

@@ -19,6 +19,7 @@ from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normal
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..language import editorial_language_report
+from ..html_cleaner import normalize_h1_headings
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import MediaInsertionError, insert_media, plan_normal_media_insertions
@@ -223,7 +224,10 @@ class ProductionEditorialStage:
                 editorial = resolve_editorial_defaults(merged, _post(context))
             else:
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
-            editorial["cleaned_html"] = normalize_editorial_dashes(editorial.get("cleaned_html", ""))
+            editorial["cleaned_html"] = normalize_h1_headings(
+                normalize_editorial_dashes(editorial.get("cleaned_html", "")),
+                post_title=str((input_post.get("title") or {}).get("raw") or ""),
+            )
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             if isinstance(localization, dict):
@@ -354,7 +358,10 @@ class ProductionComposeStage:
                 str(context.get("title") or ""),
                 str(editorial.get("cleaned_html") or ""),
             ) is not None
-            existing_html = str(editorial.get("cleaned_html") or "")
+            existing_html = normalize_h1_headings(
+                str(editorial.get("cleaned_html") or ""),
+                post_title=str(context.get("title") or ""),
+            )
             featured_url = str(media.featured.media_url or "").strip()
             seen_urls: set[str] = set()
             placements: list[dict[str, Any]] = []
@@ -394,10 +401,10 @@ class ProductionComposeStage:
             # candidate; the canonical editorial document remains schema-only.
             working.pop("localization", None)
             working["cleaned_html"] = insert_media(
-                str(editorial["cleaned_html"]),
+                existing_html,
                 placements,
                 listicle=is_listicle,
-            ) if placements else str(editorial["cleaned_html"])
+            ) if placements else existing_html
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)

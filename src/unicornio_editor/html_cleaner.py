@@ -52,7 +52,7 @@ class _TreeParser(HTMLParser):
 
 # O tema do WordPress ja renderiza o titulo do post como H1. Um H1 importado
 # no corpo duplica esse titulo e prejudica a hierarquia semantica da pagina.
-_DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "select", "textarea", "h1"}
+_DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "input", "button", "select", "textarea"}
 _UNWRAP_TAGS = {"article", "div"}
 _VOID_TAGS = {"area", "base", "br", "col", "hr", "link", "meta", "param", "source", "track", "wbr"}
 _ALLOWED_ATTRS = {"class", "id", "title", "alt", "href", "src", "target", "rel", "width", "height"}
@@ -138,7 +138,24 @@ def _sanitize_wp_caption_block(block: str) -> str:
     return head + img.group(0) + " " + caption
 
 
-def clean_html(html: str) -> str:
+def normalize_h1_headings(html: str, *, post_title: str = "") -> str:
+    """Remove only duplicate title H1s; demote distinct H1s to H2."""
+    if not isinstance(html, str):
+        raise TypeError("html must be a string")
+
+    def _h1(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        plain = re.sub(r"<[^>]+>", " ", inner)
+        normalized = _normalize(plain).strip()
+        title = _normalize(post_title).strip()
+        if title and normalized == title:
+            return ""
+        return f"<h2>{inner}</h2>"
+
+    return re.sub(r"<h1\b[^>]*>(.*?)</h1>", _h1, html, flags=re.IGNORECASE | re.DOTALL)
+
+
+def clean_html(html: str, *, post_title: str = "") -> str:
     """Return safe, normalized HTML while preserving editorial text.
 
     Imported inline images are dropped UNLESS they live inside a <figure> whose
@@ -148,7 +165,8 @@ def clean_html(html: str) -> str:
     """
     if not isinstance(html, str):
         raise TypeError("html must be a string")
-    extracted, captions = _extract_wp_captions(html)
+    normalized_headings = normalize_h1_headings(html, post_title=post_title)
+    extracted, captions = _extract_wp_captions(normalized_headings)
     parser = _TreeParser()
     parser.feed(extracted)
     parser.close()

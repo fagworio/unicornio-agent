@@ -168,6 +168,63 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(post=make_post(featured_media=0))
         self.assertEqual(self.statuses(result)["imagem_destaque"], "fail")
 
+    def test_normal_article_rejects_featured_repeated_inline(self):
+        featured_url = "https://media.example/redfall-1280x720.webp"
+        content = (
+            f'<figure><img src="{featured_url}" alt="Redfall key art" /></figure>'
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+        )
+        result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["featured_inline_position"], "fail")
+
+    def test_normal_article_rejects_inline_visually_equal_to_featured(self):
+        featured_url = "https://media.example/redfall-1280x720.webp"
+        inline_url = "https://other.example/redfall-copy.webp"
+        content = (
+            f'<figure><img src="{inline_url}" alt="Redfall key art" /></figure>'
+            "<p>Texto revisado sobre o jogo videogame.</p>"
+        )
+        with mock.patch("unicornio_editor.media.visual_hash.image_hashes", return_value={}):
+            with mock.patch(
+                "unicornio_editor.media.visual_hash.similar_image_pairs",
+                return_value=[(featured_url, inline_url, 2)],
+            ):
+                result = self._run_checklist(content=content)
+        self.assertEqual(self.statuses(result)["featured_inline_position"], "fail")
+
+    def test_listicle_allows_featured_once_only_as_last_inline_image(self):
+        featured_url = "https://media.example/redfall-1280x720.webp"
+        content = (
+            "<h2>1. Item um</h2><p>Descrição do primeiro item.</p>"
+            '<figure><img src="https://media.example/item-um.webp" alt="videogame" /></figure>'
+            "<h2>2. Item dois</h2><p>Descrição do segundo item.</p>"
+            f'<figure><img src="{featured_url}" alt="Redfall key art" /></figure>'
+        )
+        result = self._run_checklist(
+            post=make_post(title={"raw": "Top 2 jogos"}), content=content
+        )
+        self.assertEqual(self.statuses(result)["featured_inline_position"], "pass")
+
+    def test_listicle_rejects_featured_when_not_final_inline_image(self):
+        featured_url = "https://media.example/redfall-1280x720.webp"
+        content = (
+            "<h2>1. Item um</h2><p>Descrição do primeiro item.</p>"
+            f'<figure><img src="{featured_url}" alt="Redfall key art" /></figure>'
+            "<h2>2. Item dois</h2><p>Descrição do segundo item.</p>"
+            '<figure><img src="https://media.example/item-dois.webp" alt="videogame" /></figure>'
+        )
+        result = self._run_checklist(
+            post=make_post(title={"raw": "Top 2 jogos"}), content=content
+        )
+        self.assertEqual(self.statuses(result)["featured_inline_position"], "fail")
+
+    def test_html_semantics_rejects_internal_h1_and_heading_skip(self):
+        content = "<h1>Título interno</h1><h3>Subseção</h3><p>Texto sobre videogame.</p>"
+        result = self._run_checklist(content=content)
+        item = next(item for item in result["items"] if item["name"] == "html_semantics")
+        self.assertEqual(item["status"], "fail")
+        self.assertIn("H1 interno", item["detail"])
+
     def test_body_images_fail_below_word_count_rule(self):
         # Short content requires 2 images; only 1 present.
         content = (
@@ -632,7 +689,7 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertNotIn("waived", item.get("detail") or "")
 
-    def test_deterministic_search_exhaustion_waives_inline_for_non_listicle(self):
+    def test_deterministic_search_exhaustion_does_not_waive_inline_for_non_listicle(self):
         content = (
             "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
             "<p>Mais informações sobre videogame para o leitor.</p>"
@@ -654,10 +711,10 @@ class ChecklistTests(unittest.TestCase):
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
-        self.assertEqual(item["status"], "pass")
-        self.assertIn("waived", item["detail"])
+        self.assertEqual(item["status"], "fail")
+        self.assertFalse(result["media_decision"]["waiver_applied"])
 
-    def test_second_enrichment_round_waives_normal_article_without_faking_missing(self):
+    def test_second_enrichment_round_does_not_waive_normal_article_without_faking_missing(self):
         content = (
             "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
             "<p>Mais informações sobre videogame para o leitor.</p>"
@@ -677,26 +734,25 @@ class ChecklistTests(unittest.TestCase):
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
-        self.assertEqual(item["status"], "pass")
-        self.assertIn("enrichment_retries_exhausted", item["detail"])
+        self.assertEqual(item["status"], "fail")
         self.assertEqual(result["media_decision"]["missing"], 2)
-        self.assertTrue(result["media_decision"]["waiver_applied"])
+        self.assertFalse(result["media_decision"]["waiver_applied"])
         self.assertFalse(result["media_decision"]["search_completed"])
         self.assertFalse(result["media_decision"]["search_exhausted"])
         self.assertEqual(result["media_decision"]["search_completion_reason"], "INTERRUPTED")
 
-    def test_waiver_distinguishes_search_outcomes_from_enrichment_attempt_limit(self):
+    def test_search_outcomes_never_waive_required_inline_images(self):
         content = (
             "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"
             "<p>Mais informações sobre videogame para o leitor.</p>"
             "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
         )
         cases = [
-            ("PROVIDER_ERROR", 2, False, False, "enrichment_retries_exhausted", True),
-            ("EXHAUSTED", 1, True, True, "search_exhausted", True),
-            ("TARGET_REACHED", 1, True, False, "", False),
+            ("PROVIDER_ERROR", 2, False, False),
+            ("EXHAUSTED", 1, True, True),
+            ("TARGET_REACHED", 1, True, False),
         ]
-        for reason, enrichment_round, completed, exhausted, expected_waiver, should_waive in cases:
+        for reason, enrichment_round, completed, exhausted in cases:
             result = self._run_checklist(
                 post=make_post(featured_media=7),
                 content=content,
@@ -710,8 +766,8 @@ class ChecklistTests(unittest.TestCase):
                 },
             )
             decision = result["media_decision"]
-            self.assertEqual(decision["waiver_applied"], should_waive, reason)
-            self.assertEqual(decision["waiver_reason"], expected_waiver, reason)
+            self.assertFalse(decision["waiver_applied"], reason)
+            self.assertEqual(decision["waiver_reason"], "", reason)
             self.assertEqual(decision["search_completed"], completed, reason)
             self.assertEqual(decision["search_exhausted"], exhausted, reason)
 

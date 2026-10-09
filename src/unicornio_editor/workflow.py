@@ -115,7 +115,7 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
         "post_id": post_id,
         "status": post["status"],
         "backup": str(backup),
-        "cleaned_html": clean_html(_repair_orphan_media(raw)),
+        "cleaned_html": clean_html(_repair_orphan_media(raw), post_title=_post_title(post) or ""),
         "original_link": _original_link(post),
         "wordpress_changed": False,
     }
@@ -933,7 +933,7 @@ def _baseline_content(post: dict[str, Any], config: Config) -> str:
     editorial draft that failed the checklist. It preserves CTA, Fonte and
     internal links without persisting incomplete text or media.
     """
-    html = clean_html(_repair_orphan_media(_raw_content(post)))
+    html = clean_html(_repair_orphan_media(_raw_content(post)), post_title=_post_title(post) or "")
     if config.internal_links_enabled:
         from .internal_links import add_internal_links
 
@@ -1820,7 +1820,7 @@ def get_cleaned_content(
         except Exception:  # noqa: BLE001
             pass
         raw = unwrap_operational_envelope(raw)
-    cleaned = clean_html(_repair_orphan_media(raw))
+    cleaned = clean_html(_repair_orphan_media(raw), post_title=_post_title(post) or "")
     return {
         "post_id": post_id,
         "status": post["status"],
@@ -2403,7 +2403,7 @@ def resolve_editorial_defaults(editorial: dict[str, Any], post: dict[str, Any]) 
             post, game_name=editorial.get("game_name")
         )
     if resolved.get("cleaned_html") is None:
-        resolved["cleaned_html"] = clean_html(_repair_orphan_media(_raw_content(post)))
+        resolved["cleaned_html"] = clean_html(_repair_orphan_media(_raw_content(post)), post_title=_post_title(post) or "")
     return resolved
 
 
@@ -2472,7 +2472,7 @@ def _resolve_seo_from_post(
     # the model must not generate what the code can). The keyword must occur
     # naturally in BOTH the title and the body (the quality gate enforces it).
     post_title = _post_title(post) or ""
-    body = clean_html(_raw_content(post))
+    body = clean_html(_raw_content(post), post_title=_post_title(post) or "")
     body_text = re.sub(r"<[^>]+>", " ", body)
     derived_title = post_title.strip()[:65] or "Notícia"
     derived_description = _seo_description(body_text)
@@ -3617,14 +3617,14 @@ def build_cards(
         meta = post.get("meta") or {}
         if not isinstance(meta, dict):
             meta = {}
-        wordpress_cleaned = clean_html(raw)
+        wordpress_cleaned = clean_html(raw, post_title=str(title or ""))
         working_cleaned = wordpress_cleaned
         if state == STATE_PARTIAL:
             try:
                 draft = load_draft(root, post_id)
                 draft_html = str(draft.get("cleaned_html") or "")
                 if draft_html:
-                    working_cleaned = clean_html(draft_html)
+                    working_cleaned = clean_html(draft_html, post_title=str(title or ""))
             except WorkflowError:
                 pass
         entities = extract_entities(title=title, content_html=working_cleaned)

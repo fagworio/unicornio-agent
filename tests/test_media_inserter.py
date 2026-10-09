@@ -22,30 +22,54 @@ def _item(index=1, url="https://media.example/image.webp", alt="Imagem de jogo",
 
 
 class MediaInserterTests(unittest.TestCase):
+    @staticmethod
+    def _paragraphs(count):
+        return "".join(
+            f"<p>Parágrafo {index} com contexto editorial suficiente para a notícia e seus detalhes relevantes.</p>"
+            for index in range(count)
+        )
+
     def test_planner_redistributes_normal_article_slots_from_current_html(self):
-        html = "".join("<p>Texto.</p>" for _ in range(13))
+        html = self._paragraphs(13)
         plan = [_item(index=99, url=f"https://media.example/{index}.webp") for index in range(4)]
         planned = plan_normal_media_insertions(html, plan)
         slots = [item["paragraph_index"] for item in planned]
-        self.assertEqual(slots, [0, 4, 7, 11])
+        self.assertEqual(slots, [1, 4, 8, 11])
+        self.assertGreaterEqual(slots[0], 1)
         self.assertTrue(all(b - a >= 3 for a, b in zip(slots, slots[1:])))
 
     def test_planner_reports_structured_error_when_html_has_too_few_paragraphs(self):
         with self.assertRaises(MediaInsertionError) as error:
             plan_normal_media_insertions(
-                "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>",
+                self._paragraphs(4),
                 [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(4)],
             )
         self.assertEqual(error.exception.code, "insufficient_paragraph_slots")
 
     def test_planner_never_targets_after_final_valid_boundary(self):
-        html = "".join("<p>Texto.</p>" for _ in range(12))
+        html = self._paragraphs(12)
         planned = plan_normal_media_insertions(
             html,
             [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(4)],
         )
-        assert [item["paragraph_index"] for item in planned] == [0, 3, 7, 10]
+        assert [item["paragraph_index"] for item in planned] == [1, 4, 7, 10]
         assert insert_media(html, planned).count("[caption id=\"\" align=\"aligncenter\"") == 4
+
+    def test_planner_requires_two_substantive_lead_paragraphs(self):
+        html = "".join("<p>Curto.</p>" for _ in range(10)) + self._paragraphs(1)
+        with self.assertRaises(MediaInsertionError) as error:
+            plan_normal_media_insertions(html, [_item()])
+        self.assertEqual(error.exception.code, "insufficient_substantive_paragraphs")
+
+    def test_planner_distributes_two_four_and_six_images_after_the_lead(self):
+        for image_count, paragraph_count, expected in (
+            (2, 6, [1, 4]),
+            (4, 12, [1, 4, 7, 10]),
+            (6, 18, [1, 4, 7, 10, 13, 16]),
+        ):
+            plan = [_item(index=index, url=f"https://media.example/{image_count}-{index}.webp") for index in range(image_count)]
+            planned = plan_normal_media_insertions(self._paragraphs(paragraph_count), plan)
+            self.assertEqual([item["paragraph_index"] for item in planned], expected)
 
     def test_normalizer_turns_nine_paragraphs_into_eleven_without_text_changes(self):
         long_body = (

@@ -147,8 +147,12 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     existing = "https://example.test/existing.webp"
     featured = "https://example.test/featured.webp"
     new = "https://example.test/new.webp"
+    paragraph = "Texto editorial com contexto suficiente para explicar a notícia ao leitor interessado."
     editorial = {
-        "cleaned_html": f'<p>one</p><img src="{existing}" /><p>two</p><p>three</p><p>four</p>',
+        "cleaned_html": (
+            f'<p>{paragraph}</p><img src="{existing}" />'
+            f"<p>{paragraph}</p><p>{paragraph}</p><p>{paragraph}</p>"
+        ),
         "seo": {},
     }
     media = MediaProgress(
@@ -171,7 +175,10 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
 
 def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path):
     editorial = {
-        "cleaned_html": "".join(f"<p>Parágrafo {index} sobre videogame.</p>" for index in range(13)),
+        "cleaned_html": "".join(
+                f"<p>Parágrafo {index} com contexto editorial suficiente sobre videogame e seus detalhes principais.</p>"
+            for index in range(13)
+        ),
         "seo": {},
     }
     media = MediaProgress(
@@ -197,7 +204,10 @@ def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path)
 
 def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tmp_path):
     editorial = {
-        "cleaned_html": "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>",
+        "cleaned_html": "".join(
+            "<p>Parágrafo com contexto editorial suficiente para explicar os detalhes conhecidos da notícia.</p>"
+            for _ in range(4)
+        ),
         "seo": {},
     }
     media = MediaProgress(
@@ -274,7 +284,7 @@ def test_readback_identity_uses_img_elements_not_plain_text_urls():
     ) == ["https://example.test/a.webp"]
 
 
-def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tmp_path):
+def test_writer_does_not_apply_candidate_content_while_partial(tmp_path):
     inline_url = "https://example.test/partial.webp"
 
     class Client:
@@ -299,7 +309,10 @@ def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tm
     backup = tmp_path / "backups" / "14"
     backup.mkdir(parents=True)
     (backup / "editorial.candidate.json").write_text(
-        json.dumps({"content": f'<p>texto</p><img src="{inline_url}" />'}),
+        json.dumps({
+            "title": "Título editorial ainda incompleto",
+            "content": f'<p>texto</p><img src="{inline_url}" />',
+        }),
         encoding="utf-8",
     )
     state = WorkState(
@@ -316,14 +329,15 @@ def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tm
 
     first = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
     assert first["readback"] is True
-    assert client.post["content"]["raw"].count(inline_url) == 1
+    assert client.post["content"]["raw"] == "<p>texto</p>"
     assert len(client.updates) == 1
-    assert client.updates[0]["content"]["raw"].count(inline_url) == 1
+    assert "content" not in client.updates[0]
+    assert "title" not in client.updates[0]
 
     second = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
     assert second["readback"] is True
     assert len(client.updates) == 1
-    assert client.post["content"]["raw"].count(inline_url) == 1
+    assert client.post["content"]["raw"] == "<p>texto</p>"
 
 
 def test_writer_ignores_candidate_from_previous_run_after_compose_failure(tmp_path):
@@ -381,7 +395,7 @@ def test_writer_ignores_candidate_from_previous_run_after_compose_failure(tmp_pa
     assert journal["candidate_fresh"] is False
 
 
-def test_writer_reports_partial_apply_readback_failure_as_technical_error(tmp_path):
+def test_writer_does_not_require_partial_candidate_readback(tmp_path):
     inline_url = "https://example.test/not-persisted.webp"
 
     class Client:
@@ -416,13 +430,13 @@ def test_writer_reports_partial_apply_readback_failure_as_technical_error(tmp_pa
         ),
     )
 
-    with pytest.raises(RuntimeError, match="inline media read-back mismatch"):
-        WordPressWriterV2(Client(), tmp_path).commit(
-            15,
-            {"post_id": 15},
-            state,
-            Outcome.retry(Phase.MEDIA, BlockerCode.INLINE_MISSING),
-        )
+    result = WordPressWriterV2(Client(), tmp_path).commit(
+        15,
+        {"post_id": 15},
+        state,
+        Outcome.retry(Phase.MEDIA, BlockerCode.INLINE_MISSING),
+    )
+    assert result["readback"] is True
 
 
 def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkeypatch):

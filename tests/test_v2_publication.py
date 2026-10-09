@@ -4,7 +4,7 @@ import json
 import pytest
 
 from unicornio_editor.config import Config
-from unicornio_editor.manifest import build_ready_manifest, manifest_hash, serialize_manifest
+from unicornio_editor.manifest import build_ready_manifest, manifest_hash, manifest_matches, serialize_manifest
 from unicornio_editor.pipeline_v2.model import (
     FeaturedProgress,
     FeaturedStatus,
@@ -37,7 +37,7 @@ def _ready_post(post_id=114840):
         seo=seo,
         original_link="https://source.test/article",
         editorial={},
-        policy_version=2,
+        policy_version=3,
     )
     state = WorkState(
         state=LifecycleState.READY,
@@ -115,6 +115,17 @@ def test_publication_audit_is_read_only_and_requires_manifest_integrity():
     assert report["posts"][0]["manifest"]["matches_post"] is True
     assert client.updates == []
     assert client.publish_calls == []
+
+
+def test_manifest_from_previous_policy_cannot_use_cheap_publish_path():
+    post = _ready_post()
+    manifest = json.loads(post["meta"]["_hermes_ready_manifest"])
+    assert manifest_matches(
+        post, manifest, post["meta"]["_hermes_ready_hash"], policy_version=3
+    )
+    assert not manifest_matches(
+        post, manifest, post["meta"]["_hermes_ready_hash"], policy_version=4
+    )
 
 
 def test_publication_reconciliation_only_writes_v2_and_reads_back(tmp_path):

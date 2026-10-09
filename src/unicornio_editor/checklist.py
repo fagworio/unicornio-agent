@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
@@ -33,6 +34,46 @@ from .wordpress import WordPressClient
 _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
+_HEADING_RE = re.compile(r"<h([1-4])\b[^>]*>", re.IGNORECASE)
+_EMPTY_PARAGRAPH_RE = re.compile(r"<p\b[^>]*>\s*(?:&nbsp;)?\s*</p>", re.IGNORECASE)
+
+
+def _canonical_image_url(value: str) -> str:
+    parsed = urlsplit(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip().split("?", 1)[0]
+    path = re.sub(r"-\d+x\d+(\.[A-Za-z0-9]+)$", r"\1", parsed.path)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path.rstrip("/") or "/", "", ""))
+
+
+def _html_semantics_errors(content: str) -> list[str]:
+    """Validate the final WordPress body, not an editorial draft."""
+    errors: list[str] = []
+    def _without_canonical_cta(match: re.Match[str]) -> str:
+        heading = re.sub(r"<[^>]+>", " ", match.group(0))
+        return "" if _CTA_MARKER.casefold() in heading.casefold() else match.group(0)
+
+    # The canonical CTA is an H3 in the final template and may contain an
+    # anchor around "Notícias". It is navigation, not an editorial heading.
+    semantic_content = re.sub(
+        r"<h3\b[^>]*>.*?</h3>",
+        _without_canonical_cta,
+        str(content or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    headings = [int(value) for value in _HEADING_RE.findall(semantic_content)]
+    if 1 in headings:
+        errors.append("H1 interno no corpo")
+    previous = 1
+    for level in headings:
+        if level == 1:
+            continue
+        if level > previous + 1:
+            errors.append(f"salto de H{previous} para H{level}")
+        previous = level
+    if _EMPTY_PARAGRAPH_RE.search(str(content or "")):
+        errors.append("parágrafo vazio")
+    return errors
 
 
 def _project_root(backup_path: str | Path | None) -> Path:
@@ -230,16 +271,19 @@ def run_pre_publish_checklist(
         if media_required is not None
         else _required_image_count(words, title=title_str, content=content)
     )
-    inline_images = _IMG_RE.findall(content)
-    image_count = len(inline_images)
+    from .media.relevance import iter_content_images
+
+    img_items = iter_content_images(content)
+    inline_images = [str(item.get("src") or "").strip() for item in img_items]
+    inline_images = [url for url in inline_images if url]
+    # The quota is based on final, canonical frames. WordPress size variants
+    # of the same attachment do not inflate the 2/4/6 count.
+    image_count = len({_canonical_image_url(url) for url in inline_images})
 
     # Opcao A: o minimo e dimensionado pela DISPONIBILIDADE REAL de frames
     # visualmente distintos. O gate imagens_similares bloqueia as repetidas; o
     # minimo efetivo cai para o que existe (obras com poucos frames reais nao
     # devem repetir o mesmo frame so para atingir a cota).
-    from .media.relevance import iter_content_images
-
-    img_items = iter_content_images(content)
     img_urls = [str(item.get("src") or "").strip() for item in img_items]
     img_urls = [u for u in img_urls if u]
     img_hashes = None
@@ -263,29 +307,8 @@ def run_pre_publish_checklist(
     # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
     required_effective = required
 
-    # Waiver "media_exhausted": quando o resolver persistiu uma busca completa
-    # e esgotada, existe featured e o artigo não é listicle, dispensa o mínimo
-    # de imagens inline — artigo publica com featured + texto. Listicle não
-    # dispensa. A featured segue validada pelos gates destaque_* e pela visão.
     from .list_quality import detect_list_format
-
-    # P1 (auditoria): o editorial/LLM NUNCA declara exaustao da busca — só o
-    # código pode, contando buscas completas de verdade. Aceitar o flag do JSON
-    # dispensaria o mínimo 2/4/6 sem nenhuma evidência de busca esgotada.
     search_progress = media_context.get("search") if isinstance(media_context, Mapping) else None
-    media_exhausted = bool(
-        isinstance(search_progress, Mapping)
-        and search_progress.get("completed") is True
-        and search_progress.get("exhausted") is True
-    )
-    # Deterministico: apos N applies falhando em imagens (cada apply = 1 busca
-    # completa), decide SEM depender do campo do LLM. O media_exhausted do
-    # modelo vira apenas uma dica que adianta a decisao (economiza 1 ciclo).
-    # P1 (auditoria): `attempts` conta APPLYs (SEO falhou, trailer
-    # falhou...), não buscas de imagem esgotadas — usá-lo como exaustão
-    # declarava "busca esgotada" sem nenhuma busca ter sido feita.
-    exhausted = media_exhausted
-    featured_exists = isinstance(post.get("featured_media"), int) and int(post.get("featured_media") or 0) > 0
     is_list = detect_list_format(title_str, content) is not None
     enrichment_round = 0
     if isinstance(media_context, Mapping):
@@ -293,34 +316,14 @@ def run_pre_publish_checklist(
             enrichment_round = int(media_context.get("enrichment_round") or 0)
         except (TypeError, ValueError):
             enrichment_round = 0
-    # A normal article may publish after the second enrichment *attempt* when
-    # a valid featured exists.  This is intentionally distinct from search
-    # completion: an INTERRUPTED/PROVIDER_ERROR round is not reported as
-    # completed or exhausted, but still consumes one bounded enrichment turn.
-    # Search exhaustion remains an equivalent deterministic waiver, and the
-    # LLM cannot assert either condition.
-    waiver_reason = (
-        "search_exhausted" if media_exhausted else
-        "enrichment_retries_exhausted" if enrichment_round >= 2 else ""
+    _motivo = f"{words} palavras exigem >= {required_effective} imagens distintas"
+    if distinct_frames is not None and distinct_frames < required:
+        _motivo += f" (politica {required}; {distinct_frames} frames distintos detectados)"
+    check(
+        "imagens_no_corpo",
+        image_count >= required_effective,
+        f"{_motivo}; conteudo tem {image_count}",
     )
-    waive_inline = bool(waiver_reason and featured_exists and not is_list)
-
-    if waive_inline:
-        check(
-            "imagens_no_corpo",
-            True,
-            f"waived: busca de imagens esgotada e featured presente "
-            f"({image_count} inline; minimo {required} dispensado; reason={waiver_reason})",
-        )
-    else:
-        _motivo = f"{words} palavras exigem >= {required_effective} imagens"
-        if distinct_frames is not None and distinct_frames < required:
-            _motivo += f" (politica {required}; {distinct_frames} frames distintos disponiveis)"
-        check(
-            "imagens_no_corpo",
-            image_count >= required_effective,
-            f"{_motivo}; conteudo tem {image_count}",
-        )
 
     # 6b. Every inline image must be semantically related to the cited subject
     #     (deterministic entity-overlap gate; generic concept matches fail).
@@ -566,6 +569,74 @@ def run_pre_publish_checklist(
             ),
         )
 
+    # The featured is an independent visual role. A normal article must not
+    # repeat it in the body; a list/ranking may repeat it once, only as the
+    # final editorial image. Compare canonical URLs first, then persisted V2
+    # attachment identities when they are available.
+    featured_url = ""
+    if featured_ok and client is not None:
+        try:
+            featured_url = str((client.get_media(featured).get("source_url") or "")).strip()
+        except Exception:
+            featured_url = ""
+    inline_ids_by_url: dict[str, int] = {}
+    if isinstance(media_context, Mapping):
+        inline_context = media_context.get("inline")
+        if isinstance(inline_context, Mapping):
+            for asset in inline_context.get("accepted") or []:
+                if isinstance(asset, Mapping) and asset.get("media_id") is not None:
+                    inline_ids_by_url[_canonical_image_url(str(asset.get("media_url") or ""))] = int(asset["media_id"])
+    repeated_featured_indexes = [
+        index for index, item in enumerate(content_images)
+        if (
+            featured_url and _canonical_image_url(str(item.get("src") or "")) == _canonical_image_url(featured_url)
+        ) or (
+            featured_ok
+            and inline_ids_by_url.get(_canonical_image_url(str(item.get("src") or ""))) == featured
+        )
+    ]
+    # URL identity is not enough for re-compressed copies of the same key art.
+    # The visual hash is deliberately fail-soft: an unavailable attachment is
+    # not proof of equality, while a confirmed pair is never publishable as a
+    # separate inline frame.
+    if featured_url and img_urls:
+        try:
+            from .media.visual_hash import image_hashes, similar_image_pairs
+
+            pairs = similar_image_pairs(
+                [featured_url, *img_urls],
+                hashes=image_hashes([featured_url, *img_urls]),
+            )
+            duplicate_inline_urls = {
+                right if left == featured_url else left
+                for left, right, _distance in pairs
+                if featured_url in {left, right}
+            }
+            repeated_featured_indexes.extend(
+                index for index, item in enumerate(content_images)
+                if str(item.get("src") or "") in duplicate_inline_urls
+            )
+        except Exception:  # noqa: BLE001 - visual pHash remains fail-soft
+            pass
+    repeated_featured_indexes = sorted(set(repeated_featured_indexes))
+    featured_inline_ok = not repeated_featured_indexes
+    if repeated_featured_indexes and is_list:
+        featured_inline_ok = (
+            len(repeated_featured_indexes) == 1
+            and repeated_featured_indexes[0] == len(content_images) - 1
+        )
+    check(
+        "featured_inline_position",
+        featured_inline_ok,
+        (
+            "featured não se repete no corpo"
+            if not repeated_featured_indexes else
+            "featured repetida uma vez ao final da lista"
+            if featured_inline_ok else
+            f"featured repetida no corpo nas posições {repeated_featured_indexes}"
+        ),
+    )
+
     # 8. Every published image must be WebP.
     image_urls = list(inline_images)
     if featured_ok and client is not None:
@@ -650,7 +721,16 @@ def run_pre_publish_checklist(
     # 10. Canonical CTA must be present.
     check("cta_canonico", _CTA_MARKER in content, "CTA canonico presente" if _CTA_MARKER in content else "CTA AUSENTE")
 
-    # 11. Text quality gates (keyword, dashes, AI phrasing, subheadings).
+    # 11. Final HTML semantics: the template owns H1, while editorial content
+    # must use a continuous H2/H3/H4 hierarchy.
+    semantic_errors = _html_semantics_errors(content)
+    check(
+        "html_semantics",
+        not semantic_errors,
+        "HTML semântico válido" if not semantic_errors else "; ".join(semantic_errors),
+    )
+
+    # 12. Text quality gates (keyword, dashes, AI phrasing, subheadings).
     try:
         quality = validate_content_quality(
             content,
@@ -663,7 +743,7 @@ def run_pre_publish_checklist(
     except ContentQualityError as exc:
         check("qualidade_texto", False, str(exc))
 
-    # 12. Numbered-list structural validation when applicable.
+    # 13. Numbered-list structural validation when applicable.
     try:
         validate_list_content(
             str((post.get("title") or {}).get("raw") or editorial.get("seo", {}).get("title") or ""),
@@ -673,14 +753,14 @@ def run_pre_publish_checklist(
     except ListContentError as exc:
         check("estrutura_lista", False, str(exc))
 
-    # 13. Strict editorial schema validation.
+    # 14. Strict editorial schema validation.
     try:
         validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
         check("schema_editorial", True, "JSON editorial valido no schema estrito")
     except EditorialValidationError as exc:
         check("schema_editorial", False, str(exc))
 
-    # 14. Vision gate (optional, fail-closed when enabled): a cheap vision
+    # 15. Vision gate (optional, fail-closed when enabled): a cheap vision
     #     model confirms the FEATURED image depicts the subject (key art, not
     #     a typographic/news banner). Inline images skip vision: they already
     #     passed the deterministic relevance gate + source byte-verification,
@@ -824,9 +904,9 @@ def run_pre_publish_checklist(
             "accepted": image_count,
             "missing": max(0, required - image_count),
             "enrichment_round": enrichment_round,
-            "waiver_applied": waive_inline,
-            "waiver_reason": waiver_reason,
-            "waiver_basis": waiver_reason or None,
+            "waiver_applied": False,
+            "waiver_reason": "",
+            "waiver_basis": None,
             "search_completed": bool(
                 isinstance(search_progress, Mapping)
                 and search_progress.get("completed") is True

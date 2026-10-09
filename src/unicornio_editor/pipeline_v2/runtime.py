@@ -1022,27 +1022,18 @@ class WordPressWriterV2:
 
         candidate_title = str(candidate.get("title") or "").strip()
         current_title = str((post.get("title") or {}).get("raw") or "").strip()
-        if candidate_title and candidate_title != current_title:
+        if outcome.type.value == "ready" and candidate_title and candidate_title != current_title:
             update["title"] = {"raw": candidate_title}
 
-        current_content = _html.unescape(str((post.get("content") or {}).get("raw") or ""))
         expected_inline_urls = [
             str(item.media_url or "").strip()
             for item in getattr(getattr(proposed_state, "media", None), "inline", ())
             if str(item.media_url or "").strip()
         ]
-        embedded_current_urls = set(_embedded_media_urls(current_content))
-        pending_inline_urls = [
-            url for url in expected_inline_urls
-            if _canonical_embedded_media_url(url) not in embedded_current_urls
-        ]
-        # Accepted media must reach the post at the end of the acquisition
-        # round even when the post remains PARTIAL/PENDING.  A later retry
-        # derives ``pending_inline_urls`` from WordPress again, making this
-        # write idempotent and preventing duplicate insertions.
-        apply_inline = bool(content) and (
-            outcome.type.value == "ready" or bool(pending_inline_urls)
-        )
+        # A partial candidate is a checkpoint, never public/editor-facing
+        # content.  Persist only lifecycle/media state until the complete
+        # candidate passes every final gate and reaches READY.
+        apply_inline = bool(content) and outcome.type.value == "ready"
         if apply_inline:
             update["content"] = {"raw": content}
         if outcome.type.value == "ready" and content:
@@ -1108,7 +1099,7 @@ class WordPressWriterV2:
                 raise RuntimeError("candidate content read-back mismatch")
             if readback_meta.get("_hermes_ready_hash") != ready_hash:
                 raise RuntimeError("ready hash read-back mismatch")
-        if candidate_title:
+        if outcome.type.value == "ready" and candidate_title:
             readback_title = str((readback.get("title") or {}).get("raw") or "").strip()
             if readback_title != candidate_title:
                 raise RuntimeError("candidate title read-back mismatch")

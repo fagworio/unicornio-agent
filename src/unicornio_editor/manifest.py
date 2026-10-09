@@ -110,6 +110,10 @@ def manifest_matches(
         return False
     if stored_manifest.get("post_id") != post.get("id"):
         return False
+    # A manifest from an older editorial policy cannot use the cheap publish
+    # path: it must pass the current final-HTML checklist first.
+    if stored_manifest.get("policy_version") != policy_version:
+        return False
     return current_manifest_hash(post, stored_manifest, policy_version=policy_version) == ready_hash
 
 

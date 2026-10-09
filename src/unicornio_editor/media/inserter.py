@@ -60,14 +60,28 @@ def plan_normal_media_insertions(
         raise MediaInsertionError("HTML and media plan have invalid types")
     if minimum_spacing < 1:
         raise MediaInsertionError("minimum_spacing must be positive")
-    paragraph_count = len(re.findall(r"</p>\s*", html, flags=re.IGNORECASE))
+    paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>\s*", html, flags=re.IGNORECASE | re.DOTALL)
+    paragraph_count = len(paragraphs)
     # ``insert_media`` only accepts a boundary before the final paragraph;
     # the last valid index is therefore N-2, not N-1.
     last_slot = max(0, paragraph_count - 2)
     count = len(plan)
     if count == 0:
         return []
-    capacity = 1 + (last_slot // minimum_spacing) if paragraph_count >= 2 else 0
+    # The lead needs two substantive paragraphs before the first inline image.
+    # A tag-only or one-line spacer is not editorial lead copy and cannot earn
+    # that placement. Slots are zero-based paragraph boundaries.
+    substantive = [
+        index for index, paragraph in enumerate(paragraphs)
+        if _plain_word_count(paragraph) >= 12
+    ]
+    if len(substantive) < 2:
+        raise MediaInsertionError(
+            "at least two substantive paragraphs are required before the first inline image",
+            code="insufficient_substantive_paragraphs",
+        )
+    first_slot = substantive[1]
+    capacity = 1 + ((last_slot - first_slot) // minimum_spacing) if last_slot >= first_slot else 0
     if capacity < count:
         raise MediaInsertionError(
             f"insufficient valid paragraph slots: {count} image(s) require "
@@ -76,13 +90,13 @@ def plan_normal_media_insertions(
             code="insufficient_paragraph_slots",
         )
     if count == 1:
-        slots = [last_slot // 2]
+        slots = [max(first_slot, last_slot // 2)]
     else:
-        span = last_slot
+        span = last_slot - first_slot
         minimum_span = minimum_spacing * (count - 1)
         slack = span - minimum_span
         slots = [
-            index * minimum_spacing + round(slack * index / (count - 1))
+            first_slot + index * minimum_spacing + round(slack * index / (count - 1))
             for index in range(count)
         ]
     planned: list[dict[str, Any]] = []

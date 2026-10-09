@@ -67,7 +67,7 @@ def audit_publication_post(
     client: Any,
     post_id: int,
     *,
-    policy_version: int = 2,
+    policy_version: int = 3,
 ) -> dict[str, Any]:
     """Inspect one explicit post without writing to WordPress."""
     try:
@@ -149,7 +149,7 @@ def audit_publication_posts(
     client: Any,
     post_ids: list[int] | tuple[int, ...],
     *,
-    policy_version: int = 2,
+    policy_version: int = 3,
 ) -> dict[str, Any]:
     """Audit only the explicitly supplied IDs; never scans or writes."""
     reports = [audit_publication_post(client, post_id, policy_version=policy_version) for post_id in post_ids]

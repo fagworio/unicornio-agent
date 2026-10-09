@@ -39,9 +39,9 @@ def _fixture(tmp_path):
         "O anúncio também informa que o lançamento seguirá o calendário divulgado anteriormente, "
         "sem alterar os recursos já apresentados pela desenvolvedora."
     )
-    html = f"<p>{long_body}</p><p>{long_body}</p>" + "".join(
+    html = f"<p>{long_body}</p><p>{long_body}</p><p>{long_body}</p>" + "".join(
         f"<p>O parágrafo {index} explica os detalhes conhecidos até o momento.</p>"
-        for index in range(1, 8)
+        for index in range(1, 7)
     )
     inline = tuple(
         InlineMedia(
@@ -109,7 +109,7 @@ def test_repair_114987_dry_run_reconstructs_without_writing(tmp_path):
 
     assert result["eligible"] is True
     assert result["restructure"]["original_paragraphs"] == 9
-    assert result["restructure"]["final_paragraphs"] == 11
+    assert result["restructure"]["final_paragraphs"] == 12
     assert result["words"]["before"] == result["words"]["after"]
     assert result["validation"]["all_accepted_media_reconstructed"] is True
     assert result["validation"]["distinct_accepted_img_elements"] == 4
@@ -134,7 +134,7 @@ def test_repair_114987_apply_persists_only_draft_and_v2_reopen(tmp_path):
     assert result["reopened_state"]["retry"]["attempts"] == state.retry.attempts
     assert result["reopened_state"]["media"] == state.media.to_dict()
     saved = json.loads((tmp_path / "backups/114987/editorial.draft.json").read_text())
-    assert saved["cleaned_html"].count("</p>") == 11
+    assert saved["cleaned_html"].count("</p>") == 12
     assert list((tmp_path / "backups/114987").glob("editorial.draft.compose-recovery.*.json"))
     assert len(client.updates) == 1
     assert set(client.updates[0][1]) == {"meta"}
