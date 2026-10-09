@@ -254,6 +254,7 @@ def _normalize_output(
                 normalized.append({"post_id": post_id, "status": "needs_retry", "reason": reason or "editorial ausente", "retry_kind": retry_kind})
                 seen.add(post_id)
                 continue
+            normalizations: list[str] = []
             # O trailer e descoberto de forma DETERMINISTICA pelo codigo (por
             # `game_name`, em compose_final_content): nao existe busca de
             # trailer nesta chamada sem ferramentas. Se o modelo sinalizou
@@ -262,6 +263,14 @@ def _normalize_output(
             # descoberta continua acontecendo no apply.
             if editorial.get("needs_trailer") and not editorial.get("trailer_url"):
                 editorial = {**editorial, "needs_trailer": False, "trailer_url": None}
+                normalizations.append("needs_trailer_without_url_cleared")
+            elif editorial.get("needs_trailer") is False and editorial.get("trailer_url") is not None:
+                # A URL de trailer só é válida quando o contrato declara que
+                # há trailer. Limpar a inconsistência é seguro e evita gastar
+                # uma tentativa operacional; o schema continua estrito para
+                # todos os demais casos.
+                editorial = {**editorial, "trailer_url": None}
+                normalizations.append("trailer_url_cleared_when_needs_trailer_false")
             if status == "needs_retry" and retry_kind == "media":
                 editorial = {**editorial, "media_plan": []}
             try:
@@ -285,6 +294,7 @@ def _normalize_output(
                     "post_id": post_id,
                     "status": "needs_retry",
                     "reason": f"editorial invalido: {exc}",
+                    "normalizations": normalizations,
                 })
             else:
                 normalized.append({
@@ -293,6 +303,7 @@ def _normalize_output(
                     "reason": reason,
                     "retry_kind": retry_kind,
                     "editorial": checked,
+                    "normalizations": normalizations,
                 })
         seen.add(post_id)
     if seen != post_ids:
@@ -413,6 +424,15 @@ def generate_editorial_batch(
         if custo is not None:
             evento["model_cost_usd"] = custo
         append_telemetry(root, "editorial_model_request", **evento)
+        for result in normalized["results"]:
+            for normalization in result.get("normalizations") or []:
+                append_telemetry(
+                    root,
+                    "editorial_normalization",
+                    batch_id=batch_id,
+                    post_id=int(result["post_id"]),
+                    normalization=str(normalization),
+                )
     return {
         "schema_version": BATCH_SCHEMA_VERSION,
         "batch_id": batch_id,

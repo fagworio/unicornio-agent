@@ -69,6 +69,8 @@ class EditorialHandler(BaseHTTPRequestHandler):
             return "{nao e json}"
         if type(self).editorial_mode == "trailer-no-url":
             return {**_EDITORIAL, "needs_trailer": True, "trailer_url": None}
+        if type(self).editorial_mode == "trailer-inconsistent":
+            return {**_EDITORIAL, "trailer_url": "https://video.example/trailer"}
         return dict(_EDITORIAL)
 
     def log_message(self, *_args):
@@ -228,6 +230,66 @@ class EditorialProviderTests(unittest.TestCase):
             editorial = payload["results"][0]["editorial"]
             self.assertFalse(editorial["needs_trailer"])
             self.assertIsNone(editorial["trailer_url"])
+
+    def test_false_trailer_with_url_is_cleared_before_strict_validation(self):
+        editorial = {**_EDITORIAL, "trailer_url": "https://video.example/trailer"}
+        result = _normalize_output(
+            {
+                "batch_id": "batch-x",
+                "results": [{"post_id": 1, "status": "ok", "editorial": editorial}],
+            },
+            batch_id="batch-x",
+            post_ids={1},
+            min_confidence=0.8,
+        )
+        item = result["results"][0]
+        self.assertEqual(item["status"], "ok")
+        self.assertIsNone(item["editorial"]["trailer_url"])
+        self.assertEqual(
+            item["normalizations"],
+            ["trailer_url_cleared_when_needs_trailer_false"],
+        )
+        self.assertEqual(item["editorial"]["media_plan"], _EDITORIAL["media_plan"])
+
+    def test_trailer_normalization_is_recorded_for_audit(self):
+        EditorialHandler.editorial_mode = "trailer-inconsistent"
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run(Path(directory))
+            payload = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["results"][0]["normalizations"],
+                ["trailer_url_cleared_when_needs_trailer_false"],
+            )
+            telemetry = (Path(directory) / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"event": "editorial_normalization"', telemetry)
+
+    def test_valid_trailer_is_preserved_and_invalid_true_trailer_retries(self):
+        valid = {**_EDITORIAL, "needs_trailer": True, "trailer_url": "https://video.example/trailer"}
+        result = _normalize_output(
+            {
+                "batch_id": "batch-x",
+                "results": [{"post_id": 1, "status": "ok", "editorial": valid}],
+            },
+            batch_id="batch-x",
+            post_ids={1},
+            min_confidence=0.8,
+        )
+        self.assertEqual(result["results"][0]["status"], "ok")
+        self.assertEqual(result["results"][0]["editorial"]["trailer_url"], valid["trailer_url"])
+        self.assertEqual(result["results"][0]["normalizations"], [])
+
+        invalid = {**_EDITORIAL, "needs_trailer": True, "trailer_url": "not-a-url"}
+        retry = _normalize_output(
+            {
+                "batch_id": "batch-x",
+                "results": [{"post_id": 1, "status": "ok", "editorial": invalid}],
+            },
+            batch_id="batch-x",
+            post_ids={1},
+            min_confidence=0.8,
+        )
+        self.assertEqual(retry["results"][0]["status"], "needs_retry")
+        self.assertIn("trailer_url", retry["results"][0]["reason"])
 
 
 if __name__ == "__main__":
