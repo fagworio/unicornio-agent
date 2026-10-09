@@ -83,6 +83,7 @@ _SEO_SCHEMA = {
 _EDITORIAL_SCHEMA = {
     "type": "object",
     "properties": {
+        "title": {"type": ["string", "null"], "maxLength": 180},
         "site_relevance": _RELEVANCE_SCHEMA,
         "media_plan": {"type": "array", "items": _MEDIA_ITEM_SCHEMA},
         "needs_trailer": {"type": "boolean"},
@@ -92,6 +93,7 @@ _EDITORIAL_SCHEMA = {
         "seo": _SEO_SCHEMA,
     },
     "required": [
+        "title",
         "site_relevance",
         "media_plan",
         "needs_trailer",
@@ -134,9 +136,11 @@ search, invent facts, or combine facts between posts. Use post_id as the only
 correlation key. If one post cannot be safely completed, return
 status=needs_retry and a concise reason for that post; still return the other
 post when it is valid. For status=ok, editorial must follow the existing
-editorial contract: site_relevance, media_plan, needs_trailer, trailer_url and
-game_name are required fields. cleaned_html and seo must be null unless a real
-change is required — never re-emit text or SEO the post already carries.
+editorial contract: title, site_relevance, media_plan, needs_trailer,
+trailer_url and game_name are required fields. For a non-localized post, title
+must be null unless the visible title really needs changing; cleaned_html and
+seo must be null unless a real change is required — never re-emit text or SEO
+the post already carries.
 
 Neither images nor the trailer are resolved in this call: both are handled
 deterministically afterwards by the code. So: always return "media_plan": [];
@@ -153,7 +157,15 @@ its baseline, correct specifically the failed_gates, preserve fields that do not
 need changes, and attempt the requested correction. If a retry is needed, set
 retry_kind to text, seo, relevance, facts, or media. Use retry_kind=media only
 when the editorial payload itself is valid and the remaining media work is
-deterministic; never use a media retry to block a valid editorial."""
+deterministic; never use a media retry to block a valid editorial.
+
+When localization.required is true, the source article is unequivocally in
+English. Return a natural Brazilian-Portuguese rewrite: title, cleaned_html
+and seo (title, meta_description and focus_keyword) must be populated and may
+not be null. Preserve official names, links, credits, embeds and factual
+uncertainty. When localization.required is false, keep the token-economy
+contract: those fields may be null and valid existing Portuguese fields may be
+preserved by the pipeline."""
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
     source = Path(path)
@@ -209,6 +221,7 @@ def _normalize_output(
     post_ids: set[int],
     min_confidence: float,
     relevance_policies: dict[int, set[str]] | None = None,
+    localization_requirements: dict[int, bool] | None = None,
 ) -> dict[str, Any]:
     if set(payload) != {"batch_id", "results"}:
         raise EditorialProviderError("resposta editorial possui campos inesperados")
@@ -273,6 +286,30 @@ def _normalize_output(
                 normalizations.append("trailer_url_cleared_when_needs_trailer_false")
             if status == "needs_retry" and retry_kind == "media":
                 editorial = {**editorial, "media_plan": []}
+            localize = bool((localization_requirements or {}).get(post_id))
+            missing_localization_fields: list[str] = []
+            if localize:
+                if not isinstance(editorial.get("title"), str) or not editorial["title"].strip():
+                    missing_localization_fields.append("title")
+                if not isinstance(editorial.get("cleaned_html"), str) or not editorial["cleaned_html"].strip():
+                    missing_localization_fields.append("cleaned_html")
+                seo_payload = editorial.get("seo")
+                if not isinstance(seo_payload, dict) or any(
+                    not isinstance(seo_payload.get(name), str)
+                    or not str(seo_payload.get(name)).strip()
+                    for name in ("title", "meta_description", "focus_keyword")
+                ):
+                    missing_localization_fields.append("seo")
+            if missing_localization_fields and status == "ok":
+                normalized.append({
+                    "post_id": post_id,
+                    "status": "needs_retry",
+                    "reason": "localizacao_pt_br_incompleta: " + ", ".join(missing_localization_fields),
+                    "retry_kind": "text",
+                    "normalizations": normalizations,
+                })
+                seen.add(post_id)
+                continue
             try:
                 checked = validate_editorial(editorial, min_confidence=min_confidence)
                 allowed_topics = set((relevance_policies or {}).get(post_id) or ())
@@ -386,6 +423,10 @@ def generate_editorial_batch(
                 for topic in ((item.get("relevance_policy") or {}).get("allowed_topics") or [])
                 if str(topic).strip()
             }
+            for item in posts
+        },
+        localization_requirements={
+            int(item["post_id"]): bool((item.get("localization") or {}).get("required"))
             for item in posts
         },
     )

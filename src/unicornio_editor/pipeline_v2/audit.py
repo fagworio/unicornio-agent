@@ -18,7 +18,6 @@ from .migration import (
     HISTORICAL_MEDIA_DUPLICATE_ID,
     _repair_historical_media_state,
     _repair_known_terminal_state,
-    _read_state,
 )
 from .model import LifecycleState, WorkState
 from .runtime import load_historical_cohort
@@ -45,14 +44,74 @@ def _load_inventory(path: str | Path) -> tuple[list[dict[str, Any]], str | None]
     return rows, None
 
 
-def _state_from_inventory_row(row: dict[str, Any]) -> WorkState | None:
-    raw = row.get("state")
-    if isinstance(raw, dict):
+def _decode_work_state(raw: Any) -> WorkState | None:
+    if isinstance(raw, str):
         try:
-            return WorkState.from_dict(raw)
-        except (TypeError, ValueError, KeyError):
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
             return None
-    return _read_state(row)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return WorkState.from_dict(raw)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _state_resolution(row: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve inventory state without allowing a legacy snapshot to win.
+
+    ``v2_work_state`` is the explicit inventory projection.  The persisted
+    ``_hermes_work_state`` is the next canonical source.  ``state`` is the
+    legacy snapshot and is used only when no canonical source is present.
+    """
+    if not isinstance(row, dict):
+        return {"state": None, "source": None, "conflicts": [], "canonical_present": False}
+
+    explicit_present = "v2_work_state" in row
+    explicit_raw = row.get("v2_work_state")
+    if explicit_present:
+        explicit = _decode_work_state(explicit_raw)
+        conflicts: list[str] = []
+        legacy = _decode_work_state(row.get("state"))
+        if explicit is None:
+            conflicts.append("v2_work_state_invalid_legacy_ignored")
+        elif legacy is not None and legacy.state is not explicit.state:
+            conflicts.append("v2_work_state_conflicts_with_legacy_state")
+        return {
+            "state": explicit,
+            "source": "v2_work_state",
+            "conflicts": conflicts,
+            "canonical_present": True,
+        }
+
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    persisted_present = "_hermes_work_state" in row or "_hermes_work_state" in meta
+    persisted_raw = row.get("_hermes_work_state") if "_hermes_work_state" in row else meta.get("_hermes_work_state")
+    if persisted_present:
+        persisted = _decode_work_state(persisted_raw)
+        conflicts = [] if persisted is not None else ["_hermes_work_state_invalid_legacy_ignored"]
+        legacy = _decode_work_state(row.get("state"))
+        if persisted is not None and legacy is not None and legacy.state is not persisted.state:
+            conflicts.append("_hermes_work_state_conflicts_with_legacy_state")
+        return {
+            "state": persisted,
+            "source": "_hermes_work_state",
+            "conflicts": conflicts,
+            "canonical_present": True,
+        }
+
+    legacy = _decode_work_state(row.get("state"))
+    return {
+        "state": legacy,
+        "source": "legacy_state" if legacy is not None else None,
+        "conflicts": [],
+        "canonical_present": False,
+    }
+
+
+def _state_from_inventory_row(row: dict[str, Any]) -> WorkState | None:
+    return _state_resolution(row).get("state")
 
 
 def _media_diagnostics(state: WorkState, row: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -100,7 +159,8 @@ def classify_human_required_row(
             "next_action": "provide_valid_post_id_and_state",
         }
 
-    state = _state_from_inventory_row(row)
+    resolution = _state_resolution(row)
+    state = resolution["state"]
     if state is None:
         return {
             "post_id": post_id,
@@ -109,6 +169,8 @@ def classify_human_required_row(
             "repair": None,
             "eligible": False,
             "next_action": "capture_complete_v2_state",
+            "state_source": resolution["source"],
+            "state_conflicts": resolution["conflicts"],
         }
 
     result: dict[str, Any] = {
@@ -121,6 +183,8 @@ def classify_human_required_row(
         "media": _media_diagnostics(state),
         "repair": None,
         "eligible": False,
+        "state_source": resolution["source"],
+        "state_conflicts": resolution["conflicts"],
     }
     if state.state is not LifecycleState.HUMAN_REQUIRED:
         result.update({
@@ -253,7 +317,8 @@ def historical_cohort_report(
     report_posts: list[dict[str, Any]] = []
     for post_id, frozen in sorted(cohort.items()):
         row = inventory_by_id.get(post_id)
-        state = _state_from_inventory_row(row) if row is not None else None
+        resolution = _state_resolution(row)
+        state = resolution["state"]
         wordpress_status = None
         if row is not None:
             wordpress_status = row.get("wordpress_status", row.get("status"))
@@ -277,6 +342,8 @@ def historical_cohort_report(
                     "reason": "missing_or_invalid_v2_state",
                 },
                 "evidence": "missing_or_invalid_state",
+                "state_source": resolution["source"],
+                "state_conflicts": resolution["conflicts"],
                 "state": None,
                 "phase": None,
                 "blocker": None,
@@ -343,6 +410,8 @@ def historical_cohort_report(
             "v2_state": v2_value,
             "divergence": divergence,
             "evidence": "state_present",
+            "state_source": resolution["source"],
+            "state_conflicts": resolution["conflicts"],
             "state": state.state.value,
             "phase": state.phase.value,
             "blocker": state.blocker.value if state.blocker else None,

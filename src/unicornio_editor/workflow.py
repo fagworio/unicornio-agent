@@ -21,6 +21,7 @@ from .checklist import _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import _repair_orphan_media, clean_html
+from .language import editorial_language_report
 from .list_quality import detect_list_format
 from .locking import LockError, LockManager
 from .manifest import (
@@ -2675,6 +2676,43 @@ def _publish_post_unlocked(
             "status": "blocked",
             "reason": aviso,
             "state": STATE_BLOCKED,
+        }
+    post_meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    language_report = editorial_language_report(
+        title=str(_post_title(post) or ""),
+        content=str(_raw_content(post) or ""),
+        seo_title=str(post_meta.get("rank_math_title") or ""),
+        meta_description=str(post_meta.get("rank_math_description") or ""),
+    )
+    if not language_report["passed"]:
+        reason = (
+            "idioma_pt_br: campos predominantemente em inglês: "
+            + ", ".join(language_report.get("failing_fields") or [])
+        )
+        try:
+            _write_state_markers(client, config, post_id, STATE_BLOCKED, root=root, last_error=reason)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .observability import append_telemetry as _telemetria
+
+            _telemetria(
+                root,
+                "publish_blocked_language",
+                post_id=post_id,
+                language=language_report.get("language"),
+                confidence=language_report.get("confidence"),
+                failing_fields=language_report.get("failing_fields") or [],
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "blocked",
+            "reason": reason,
+            "state": STATE_BLOCKED,
+            "language": language_report,
         }
     if state == STATE_READY:
         raw_meta = post.get("meta")

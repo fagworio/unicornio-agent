@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 # Keep the legacy symbol imported: existing integrations/tests patch this
 # module-level name while the production path uses the canonical HTML helper.
@@ -15,6 +16,7 @@ from ..checklist import required_image_count, required_image_count_for_content
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import editorial_subjects, item_query, post_subjects
+from ..media.relevance import iter_content_images
 from ..list_quality import detect_list_format
 from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
@@ -28,6 +30,28 @@ from .scheduler import _cooldown_expired, select
 
 
 _DEFAULT_REQUIRED_IMAGE_COUNT = required_image_count
+
+
+def _canonical_embedded_media_url(value: str) -> str:
+    parsed = urlsplit(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip()
+    return urlunsplit((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+        "",
+    ))
+
+
+def _embedded_media_urls(content: str) -> list[str]:
+    """Return only URLs used by actual img elements, never plain text URLs."""
+    return [
+        _canonical_embedded_media_url(str(item.get("src") or ""))
+        for item in iter_content_images(str(content or ""))
+        if str(item.get("src") or "").strip()
+    ]
 
 
 def _required_image_count_for_editorial(content: str, *, title: str = "") -> int:
@@ -217,12 +241,19 @@ def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -
     temporary.replace(target)
 
 
-def _write_v2_journal_checkpoint(root: Path, post_id: int, status: str, state) -> None:
+def _write_v2_journal_checkpoint(
+    root: Path, post_id: int, status: str, state, *, run_id: str | None = None
+) -> None:
     target = Path(root) / "work" / "v2-journal" / f"{post_id}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(
-            {"status": status, "post_id": post_id, "state": state.to_dict()},
+            {
+                "status": status,
+                "post_id": post_id,
+                "state": state.to_dict(),
+                **({"run_id": run_id} if run_id else {}),
+            },
             ensure_ascii=False,
             indent=2,
         ),
@@ -953,6 +984,17 @@ class WordPressWriterV2:
         journal_dir.mkdir(parents=True, exist_ok=True)
         candidate_path = self.root / "backups" / str(post_id) / "editorial.candidate.json"
         candidate = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+        expected_run_id = str(context.get("v2_run_id") or "").strip()
+        requires_fresh_candidate = bool(context.get("candidate_must_be_fresh"))
+        candidate_run_id = str(candidate.get("_v2_run_id") or "").strip() if isinstance(candidate, dict) else ""
+        candidate_fresh = not requires_fresh_candidate or (
+            bool(expected_run_id) and candidate_run_id == expected_run_id
+        )
+        if not candidate_fresh:
+            # A failed COMPOSE must never fall through to a candidate from a
+            # previous attempt. Keep the lifecycle/state write available, but
+            # make all derived editorial writes unavailable for this commit.
+            candidate = {}
         content = str(candidate.get("content") or "")
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
@@ -971,10 +1013,17 @@ class WordPressWriterV2:
             latest.parent.mkdir(parents=True, exist_ok=True)
             latest.write_text(json.dumps(candidate.get("editorial") or {}, ensure_ascii=False, indent=2), encoding="utf-8")
         journal = journal_dir / f"{post_id}.json"
-        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "detail": outcome.detail or context.get("provider_reason")}
+        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "candidate_fresh": candidate_fresh, "candidate_run_id": candidate_run_id or None, "detail": outcome.detail or context.get("provider_reason")}
+        if not candidate_fresh and outcome.type.value == "ready":
+            raise RuntimeError("stale editorial candidate cannot produce READY")
         journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
         import html as _html
+
+        candidate_title = str(candidate.get("title") or "").strip()
+        current_title = str((post.get("title") or {}).get("raw") or "").strip()
+        if candidate_title and candidate_title != current_title:
+            update["title"] = {"raw": candidate_title}
 
         current_content = _html.unescape(str((post.get("content") or {}).get("raw") or ""))
         expected_inline_urls = [
@@ -982,9 +1031,10 @@ class WordPressWriterV2:
             for item in getattr(getattr(proposed_state, "media", None), "inline", ())
             if str(item.media_url or "").strip()
         ]
+        embedded_current_urls = set(_embedded_media_urls(current_content))
         pending_inline_urls = [
             url for url in expected_inline_urls
-            if url not in current_content
+            if _canonical_embedded_media_url(url) not in embedded_current_urls
         ]
         # Accepted media must reach the post at the end of the acquisition
         # round even when the post remains PARTIAL/PENDING.  A later retry
@@ -1000,6 +1050,7 @@ class WordPressWriterV2:
         current = post.get("content") or {}
         if (
             (not apply_inline or update.get("content", {}).get("raw") == current.get("raw"))
+            and "title" not in update
             and meta.get("_hermes_work_state") == state_json
         ):
             readback = post
@@ -1019,9 +1070,10 @@ class WordPressWriterV2:
             raise RuntimeError("V2 state read-back mismatch")
         if apply_inline or outcome.type.value == "ready":
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
+            embedded_readback_urls = set(_embedded_media_urls(readback_content))
             missing_inline = [
                 url for url in expected_inline_urls
-                if url not in readback_content
+                if _canonical_embedded_media_url(url) not in embedded_readback_urls
             ]
             if missing_inline:
                 raise RuntimeError(
@@ -1031,13 +1083,21 @@ class WordPressWriterV2:
             try:
                 from .observability import append_telemetry
 
+                embedded_candidate_urls = set(_embedded_media_urls(_html.unescape(content)))
                 append_telemetry(
                     self.root,
                     "media_apply_readback",
                     post_id=int(post_id),
                     accepted_media=len(expected_inline_urls),
-                    inline_applied=sum(url in _html.unescape(content) for url in expected_inline_urls),
-                    inline_readback=sum(url in readback_content for url in expected_inline_urls),
+                    inline_applied=sum(
+                        _canonical_embedded_media_url(url)
+                        in embedded_candidate_urls
+                        for url in expected_inline_urls
+                    ),
+                    inline_readback=sum(
+                        _canonical_embedded_media_url(url) in embedded_readback_urls
+                        for url in expected_inline_urls
+                    ),
                     readback=True,
                     partial=outcome.type.value != "ready",
                 )
@@ -1048,8 +1108,17 @@ class WordPressWriterV2:
                 raise RuntimeError("candidate content read-back mismatch")
             if readback_meta.get("_hermes_ready_hash") != ready_hash:
                 raise RuntimeError("ready hash read-back mismatch")
+        if candidate_title:
+            readback_title = str((readback.get("title") or {}).get("raw") or "").strip()
+            if readback_title != candidate_title:
+                raise RuntimeError("candidate title read-back mismatch")
         journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"wordpress_changed": changed, "readback": True, "ready_hash": ready_hash}
+        return {
+            "wordpress_changed": changed,
+            "readback": True,
+            "ready_hash": ready_hash,
+            "candidate_fresh": candidate_fresh,
+        }
 
 
 def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
@@ -1162,16 +1231,19 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
         for post_id, context in selected:
             context["root"] = root
             initial = context["v2_state"]
+            run_id = uuid.uuid4().hex
+            context["v2_run_id"] = run_id
+            context["candidate_must_be_fresh"] = initial.phase is not Phase.VALIDATE
             buffered = BufferedStateStore(initial)
             try:
                 # Mark the transaction before any provider/media work. If the
                 # process dies after an upload, recovery must not mistake the
                 # previous committed journal for a completed run.
-                _write_v2_journal_checkpoint(root, post_id, "running", initial)
+                _write_v2_journal_checkpoint(root, post_id, "running", initial, run_id=run_id)
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(
-                    root, post_id, "validated", buffered.state
+                    root, post_id, "validated", buffered.state, run_id=run_id
                 )
                 error_path = root / "backups" / str(post_id) / "editorial.error.json"
                 if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
@@ -1179,9 +1251,27 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
                         context["provider_reason"] = json.loads(error_path.read_text(encoding="utf-8")).get("reason")
                     except (OSError, ValueError):
                         context["provider_reason"] = "provider_error"
-                write = WordPressWriterV2(
-                    client, root, policy_version=config.policy_version
-                ).commit(post_id, context, buffered.state, outcome)
+                try:
+                    write = WordPressWriterV2(
+                        client, root, policy_version=config.policy_version
+                    ).commit(post_id, context, buffered.state, outcome)
+                except Exception as exc:
+                    _write_v2_journal_checkpoint(
+                        root, post_id, "writer_failed", buffered.state, run_id=run_id
+                    )
+                    try:
+                        from ..observability import append_telemetry
+
+                        append_telemetry(
+                            root,
+                            "v2_writer_failure",
+                            post_id=int(post_id),
+                            run_id=run_id,
+                            detail=str(exc)[:400],
+                        )
+                    except Exception:  # noqa: BLE001 - telemetry cannot mask failure
+                        pass
+                    raise
                 completed += 1
                 details.append({
                     "post_id": post_id,

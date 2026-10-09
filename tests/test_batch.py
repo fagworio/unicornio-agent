@@ -83,6 +83,8 @@ class BatchContextTests(unittest.TestCase):
                 self.assertEqual(context["batch_id"], "batch-test-001")
                 self.assertEqual(context["status"], "pending")
                 self.assertIn("cleaned_html", context)
+                self.assertIn("source_language", context)
+                self.assertFalse(context["localization"]["required"])
                 self.assertIn("requirements", context)
                 self.assertIn("relevance_policy", context)
                 self.assertEqual(context["relevance_policy"]["allowed_topics"], [])

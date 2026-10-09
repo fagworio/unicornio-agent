@@ -131,6 +131,37 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "needs_retry")
         self.assertIn("pauta", result["results"][0]["reason"])
 
+    def test_english_source_cannot_reuse_null_localization_fields(self):
+        result = _normalize_output(
+            {
+                "batch_id": "batch-en",
+                "results": [{
+                    "post_id": 1,
+                    "status": "ok",
+                    "editorial": {
+                        **_EDITORIAL,
+                        "site_relevance": {
+                            "decision": "process",
+                            "confidence": 1.0,
+                            "reason": "processar",
+                            "matched_topics": ["games"],
+                        },
+                        "title": None,
+                        "cleaned_html": None,
+                        "seo": None,
+                    },
+                }],
+            },
+            batch_id="batch-en",
+            post_ids={1},
+            min_confidence=0.8,
+            relevance_policies={1: {"games"}},
+            localization_requirements={1: True},
+        )
+        assert result["results"][0]["status"] == "needs_retry"
+        assert result["results"][0]["retry_kind"] == "text"
+        assert "localizacao_pt_br_incompleta" in result["results"][0]["reason"]
+
     def _run(self, root, retry_mode="", **kwargs):
         source = root / "editorial.input.json"
         source.write_text(json.dumps({

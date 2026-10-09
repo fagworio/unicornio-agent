@@ -19,6 +19,7 @@ from typing import Any
 from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
 from .editorial_schema import EditorialValidationError, validate_editorial
+from .language import editorial_language_report
 from .list_quality import ListContentError, validate_list_content
 from .media.vision_gate import (
     VisionGateError,
@@ -158,6 +159,23 @@ def run_pre_publish_checklist(
     cleaned = editorial.get("cleaned_html")
     content_ok = isinstance(cleaned, str) and bool(cleaned.strip())
     check("conteudo_nao_vazio", content_ok, "cleaned_html preenchido" if content_ok else "cleaned_html vazio")
+    language_report = editorial_language_report(
+        title=str((post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""),
+        content=content,
+        seo_title=str((editorial.get("seo") or {}).get("title") or ""),
+        meta_description=str((editorial.get("seo") or {}).get("meta_description") or ""),
+    )
+    if language_report["passed"]:
+        language_detail = (
+            f"idioma={language_report['language']} confidence={language_report['confidence']:.2f}"
+        )
+    else:
+        language_detail = (
+            "campos predominantemente em inglês: "
+            + ", ".join(language_report.get("failing_fields") or [])
+            + f" (confidence={language_report['confidence']:.2f})"
+        )
+    check("idioma_pt_br", bool(language_report["passed"]), language_detail)
     # P0 (auditoria): o corpo não pode ser a saída de um comando do CLI. O
     # acidente do post 114180 publicou {"post_id":..., "cleaned_html":...} na
     # cara do leitor. Verifica o editorial E o conteúdo REAL do WordPress: o
@@ -800,6 +818,7 @@ def run_pre_publish_checklist(
         "skipped": skipped,
         "failed": failed,
         "all_passed": failed == 0,
+        "language": language_report,
         "media_decision": {
             "required": required,
             "accepted": image_count,

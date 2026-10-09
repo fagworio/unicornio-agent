@@ -102,6 +102,28 @@ class ChecklistTests(unittest.TestCase):
     def statuses(self, result):
         return {item["name"]: item["status"] for item in result["items"]}
 
+    def test_language_gate_blocks_unequivocal_english_body(self):
+        result = self._run_checklist(
+            post=make_post(title={"raw": "New game release announced"}),
+            editorial=editorial_payload(
+                **{
+                    "seo": {
+                        "title": "New game release announced",
+                        "meta_description": "The studio announced the latest news about the game and its release date.",
+                        "focus_keyword": "new game release",
+                    }
+                }
+            ),
+            content=(
+                "The studio announced a new release for the game. Players will receive "
+                "more details about the upcoming episode and film. The latest news "
+                "confirms the release date for the show."
+            ),
+        )
+        idioma = next(item for item in result["items"] if item["name"] == "idioma_pt_br")
+        assert idioma["status"] == "fail"
+        assert result["language"]["language"] == "en"
+
     def test_all_pass_when_every_rule_is_satisfied(self):
         content = (
             '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Redfall key art" />'

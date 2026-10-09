@@ -244,3 +244,60 @@ def test_cohort_report_separates_admission_from_scheduler_processability(tmp_pat
     assert by_id[4]["eligibility_real"]["reason"] == "cooldown_active"
     assert by_id[5]["eligibility_real"]["processable"] is False
     assert by_id[5]["eligibility_real"]["reason"] == "wordpress_not_pending"
+
+
+def test_cohort_report_prefers_canonical_v2_work_state_over_legacy_snapshot(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({
+        "version": 1,
+        "posts": [{
+            "post_id": 114840,
+            "original_datetime": "2026-10-01T00:00:00Z",
+            "classification": "admitted",
+        }],
+    }), encoding="utf-8")
+    published = WorkState(
+        state=LifecycleState.PUBLISHED,
+        phase=Phase.PUBLISH,
+        relevance_approved=True,
+    )
+    ready = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    )
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"posts": [{
+        "post_id": 114840,
+        "wordpress_status": "publish",
+        "v2_work_state": published.to_dict(),
+        "state": ready.to_dict(),
+    }]}), encoding="utf-8")
+
+    report = historical_cohort_report(
+        cohort, inventory, now=datetime(2026, 10, 8, tzinfo=timezone.utc)
+    )
+
+    post = report["posts"][0]
+    assert report["counts"]["ready"] == 0
+    assert report["counts"]["published"] == 1
+    assert post["v2_state"] == "published"
+    assert post["phase"] == "publish"
+    assert post["state_source"] == "v2_work_state"
+    assert "v2_work_state_conflicts_with_legacy_state" in post["state_conflicts"]
+
+
+def test_invalid_canonical_state_does_not_fallback_to_legacy_snapshot(tmp_path):
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"posts": [{
+        "post_id": 114840,
+        "v2_work_state": {"state": "not-a-lifecycle"},
+        "state": _state().to_dict(),
+    }]}), encoding="utf-8")
+
+    report = audit_human_required_inventory(inventory)
+
+    post = report["posts"][0]
+    assert post["category"] == "evidence_insufficient"
+    assert post["state_source"] == "v2_work_state"
+    assert post["state_conflicts"] == ["v2_work_state_invalid_legacy_ignored"]

@@ -18,6 +18,7 @@ from ..checklist import required_image_count, required_image_count_for_content
 from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
+from ..language import editorial_language_report
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import insert_media
@@ -126,9 +127,18 @@ class ProductionEditorialStage:
                 raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, "post preparation failed")
             input_path = Path(prepared["editorial_input"])
             input_payload = json.loads(input_path.read_text(encoding="utf-8"))
+            input_post = next(
+                (item for item in input_payload.get("posts", [])
+                 if int(item.get("post_id") or 0) == post_id),
+                {},
+            )
+            localization = input_post.get("localization") if isinstance(input_post, dict) else {}
+            must_localize = bool(isinstance(localization, dict) and localization.get("required"))
             draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
             previous_editorial = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
             if (
+                not must_localize
+                and
                 state.phase is Phase.EDITORIAL
                 and state.blocker is BlockerCode.TEXT_QUALITY
                 and isinstance(previous_editorial, dict)
@@ -180,19 +190,48 @@ class ProductionEditorialStage:
                 _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry"), "blocker": blocker.value})
                 raise StageError(blocker, phase, reason)
             raw_editorial = dict(item["editorial"])
+            if must_localize:
+                missing = []
+                if not str(raw_editorial.get("title") or "").strip():
+                    missing.append("title")
+                if not str(raw_editorial.get("cleaned_html") or "").strip():
+                    missing.append("cleaned_html")
+                seo_payload = raw_editorial.get("seo")
+                if not isinstance(seo_payload, dict) or any(
+                    not str(seo_payload.get(name) or "").strip()
+                    for name in ("title", "meta_description", "focus_keyword")
+                ):
+                    missing.append("seo")
+                if missing:
+                    raise StageError(
+                        BlockerCode.TEXT_QUALITY,
+                        Phase.EDITORIAL,
+                        "localizacao_pt_br_incompleta: " + ", ".join(missing),
+                    )
             if state.phase is Phase.EDITORIAL and isinstance(previous_editorial, dict):
                 previous_clean = dict(previous_editorial)
                 previous_clean.pop("decision", None)
+                previous_clean.pop("localization", None)
                 merged = dict(previous_clean)
                 merged.update({key: value for key, value in raw_editorial.items() if value is not None})
                 if isinstance(previous_clean.get("seo"), dict) and isinstance(raw_editorial.get("seo"), dict):
                     merged["seo"] = {**previous_clean["seo"], **raw_editorial["seo"]}
+                if must_localize:
+                    for field in ("title", "cleaned_html", "seo"):
+                        if raw_editorial.get(field) is None:
+                            merged.pop(field, None)
                 editorial = resolve_editorial_defaults(merged, _post(context))
             else:
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
             editorial["cleaned_html"] = normalize_editorial_dashes(editorial.get("cleaned_html", ""))
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
+            if isinstance(localization, dict):
+                editorial["localization"] = {
+                    "required": must_localize,
+                    "reason": str(localization.get("reason") or ""),
+                    "source_language": input_post.get("source_language") or {},
+                }
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
             return editorial
         except StageError:
@@ -340,7 +379,7 @@ class ProductionComposeStage:
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)
-            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "featured_media": media.featured.media_id, "media": media.to_dict(), "trailer": trailer, "trailer_status": trailer_status}
+            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": media.to_dict(), "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
         except Exception as exc:
@@ -368,6 +407,9 @@ class ProductionValidateStage:
                 if isinstance(candidate_featured, int) and candidate_featured > 0
                 else None
             )
+            candidate_title = str(candidate.get("title") or "").strip()
+            if candidate_title:
+                post_for_checklist["title"] = {"raw": candidate_title}
             seo = dict(checklist_editorial.get("seo") or {})
             checklist = run_pre_publish_checklist(post=post_for_checklist, editorial=checklist_editorial, content=str(candidate["content"]), backup_path=self.root / "backups" / str(context["post_id"]) / "editorial.draft.json", config=self.config, client=self.client, attempts=int((context.get("v2_state").retry.attempts if context.get("v2_state") else 0)), media_context=candidate.get("media"))
             raw_failures = [item for item in checklist.get("items", []) if item.get("status") == "fail"]

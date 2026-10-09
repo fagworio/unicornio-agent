@@ -27,6 +27,7 @@ GATE_TO_BLOCKER: dict[str, BlockerCode] = {
     "status_pending": BlockerCode.WORDPRESS_ERROR,
     "imagens_visao": BlockerCode.FEATURED_VISION,
     "qualidade_texto": BlockerCode.TEXT_QUALITY,
+    "idioma_pt_br": BlockerCode.TEXT_QUALITY,
     "seo": BlockerCode.SEO,
     "estrutura": BlockerCode.STRUCTURE,
     "fonte": BlockerCode.SOURCE,

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.pipeline_v2.errors import StageError
-from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
-from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2
+from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, _embedded_media_urls
 from unicornio_editor.workflow import MediaFunnelInvariantError
 
 
@@ -180,6 +180,14 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     assert result["readback"] is True
 
 
+def test_readback_identity_uses_img_elements_not_plain_text_urls():
+    url = "https://example.test/a.webp"
+    assert _embedded_media_urls(f"<p>{url}</p>") == []
+    assert _embedded_media_urls(
+        f'<figure><img src="https://EXAMPLE.test/a.webp#frame" /></figure>'
+    ) == ["https://example.test/a.webp"]
+
+
 def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tmp_path):
     inline_url = "https://example.test/partial.webp"
 
@@ -230,6 +238,61 @@ def test_writer_applies_accepted_inline_media_while_partial_and_is_idempotent(tm
     assert second["readback"] is True
     assert len(client.updates) == 1
     assert client.post["content"]["raw"].count(inline_url) == 1
+
+
+def test_writer_ignores_candidate_from_previous_run_after_compose_failure(tmp_path):
+    inline_url = "https://example.test/stale.webp"
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 15,
+                "status": "pending",
+                "content": {"raw": "<p>conteudo anterior</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.updates = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            self.post.update(update)
+
+    client = Client()
+    backup = tmp_path / "backups" / "15"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(
+        json.dumps({
+            "_v2_run_id": "old-run",
+            "content": f'<p>conteudo obsoleto</p><img src="{inline_url}" />',
+        }),
+        encoding="utf-8",
+    )
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.COMPOSE,
+        blocker=BlockerCode.MANIFEST_INVALID,
+        relevance_approved=True,
+        media=MediaProgress(required=1, inline=(InlineMedia(15, inline_url, 0),)),
+    )
+    result = WordPressWriterV2(client, tmp_path).commit(
+        15,
+        {
+            "post_id": 15,
+            "v2_run_id": "new-run",
+            "candidate_must_be_fresh": True,
+        },
+        state,
+        Outcome(OutcomeType.RETRY, Phase.COMPOSE, BlockerCode.MANIFEST_INVALID),
+    )
+    assert result["readback"] is True
+    assert client.post["content"]["raw"] == "<p>conteudo anterior</p>"
+    assert "content" not in client.updates[-1]
+    journal = json.loads((tmp_path / "work/v2-journal/15.json").read_text())
+    assert journal["candidate_fresh"] is False
 
 
 def test_writer_reports_partial_apply_readback_failure_as_technical_error(tmp_path):

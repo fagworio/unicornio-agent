@@ -14,6 +14,7 @@ class EditorialValidationError(ValueError):
 _TOP_LEVEL = {
     "site_relevance",
     "cleaned_html",
+    "title",
     "seo",
     "media_plan",
     "needs_trailer",
@@ -76,7 +77,7 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
         _TOP_LEVEL,
         "top-level",
         optional={
-            "cleaned_html", "seo", "media_exhausted",
+            "cleaned_html", "seo", "title", "media_exhausted",
             "trailer_unavailable", "trailer_search_evidence",
         },
     )
@@ -117,6 +118,13 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
         raise EditorialValidationError("cleaned_html must be a string or null")
     if decision == "process" and isinstance(cleaned_html, str) and not cleaned_html.strip():
         raise EditorialValidationError("cleaned_html cannot be empty when processing")
+
+    title = payload.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise EditorialValidationError("title must be a non-empty string or null")
+        if len(title.strip()) > 180:
+            raise EditorialValidationError("title must contain at most 180 characters")
 
     # seo is OPTIONAL too: when absent the workflow inherits a valid existing
     # Rank Math meta (token economy — the model must not re-emit SEO the post

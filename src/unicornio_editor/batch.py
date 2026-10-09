@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 from .checklist import required_image_count
 from .content_quality import word_count
+from .language import detect_language, localization_required
 from .media.relevance import extract_entities
 from .state import read_state, uncertain_second_pass_eligible
 from .workflow import (
@@ -280,6 +281,12 @@ def _context_for_post(
     images = _images_summary(cleaned_html, title, entities)
     featured = _featured_diagnosis(client, post, entities)
     state = read_state(post)
+    source_language = detect_language(f"{title}\n{source_content}")
+    needs_localization = localization_required(source_language)
+    localization = {
+        "required": needs_localization,
+        "reason": "original_content_english" if needs_localization else "not_unequivocally_english",
+    }
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
     retry_mode = "uncertain_second_pass" if uncertain_second_pass_eligible(post) else None
     relevance_policy = {
@@ -328,6 +335,8 @@ def _context_for_post(
         "link": post.get("link"),
         "original_link": prepared.get("original_link") or meta.get("original_link"),
         "source_content": source_content,
+        "source_language": source_language,
+        "localization": localization,
         "cleaned_html": cleaned_html,
         "seo_existing": _seo_snapshot(post),
         "featured_media": post.get("featured_media"),
@@ -355,6 +364,8 @@ _MODEL_FACING_KEYS = (
     "link",
     "original_link",
     "source_content",
+    "source_language",
+    "localization",
     "cleaned_html",
     "seo_existing",
     "entities",
