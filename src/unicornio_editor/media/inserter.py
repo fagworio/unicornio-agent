@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from html import escape
+from html import unescape
 from typing import Any
 from urllib.parse import urlparse
 
@@ -88,6 +89,136 @@ def plan_normal_media_insertions(
     for item, slot in zip(plan, slots):
         planned.append({**dict(item), "paragraph_index": int(slot)})
     return planned
+
+
+def _safe_sentence_boundaries(body: str) -> list[int]:
+    """Return raw HTML offsets that are outside inline tags and shortcodes."""
+    if "[" in body or "]" in body:
+        return []
+    boundaries: list[int] = []
+    depth = 0
+    token_re = re.compile(r"<!--[\s\S]*?-->|<[^>]+>|[^<]+")
+    for match in token_re.finditer(body):
+        token = match.group(0)
+        if token.startswith("<!--"):
+            continue
+        if token.startswith("<"):
+            tag_match = re.match(r"<\s*(/?)\s*([A-Za-z][\w:-]*)", token)
+            if not tag_match:
+                continue
+            closing, tag = tag_match.groups()
+            tag = tag.casefold()
+            if tag in {"br", "hr", "img", "input", "source", "wbr"} or token.rstrip().endswith("/>"):
+                continue
+            depth = max(0, depth - 1) if closing else depth + 1
+            continue
+        if depth:
+            continue
+        for punctuation in re.finditer(r"[.!?](?=\s+|$)", token):
+            end = match.start() + punctuation.end()
+            before = body[max(0, end - 3):end]
+            if before.count(".") >= 2 and len(before.replace(".", "")) <= 2:
+                continue
+            boundaries.append(end)
+    return boundaries
+
+
+def _plain_word_count(value: str) -> int:
+    text = re.sub(r"<[^>]+>", " ", unescape(value or ""))
+    return len(re.findall(r"[A-Za-zÀ-ÿ0-9]+(?:['’][A-Za-zÀ-ÿ0-9]+)?", text))
+
+
+def _split_paragraph_once(open_tag: str, body: str) -> tuple[str, int] | None:
+    """Split one paragraph only when both resulting pieces remain substantial."""
+    boundaries = _safe_sentence_boundaries(body)
+    if not boundaries or _plain_word_count(body) < 36:
+        return None
+    total = _plain_word_count(body)
+    suitable = [
+        boundary for boundary in boundaries
+        if _plain_word_count(body[:boundary]) >= 18
+        and _plain_word_count(body[boundary:]) >= 18
+    ]
+    if not suitable:
+        return None
+    target = total // 2
+    boundary = min(suitable, key=lambda item: abs(_plain_word_count(body[:item]) - target))
+    first = body[:boundary].rstrip()
+    second = body[boundary:].lstrip()
+    return f"{open_tag}{first}</p>{open_tag}{second}</p>", boundary
+
+
+def normalize_normal_article_paragraphs(
+    html: str,
+    *,
+    required_paragraphs: int,
+    max_words: int = 1000,
+) -> dict[str, Any]:
+    """Safely increase paragraph capacity without changing editorial text."""
+    if not isinstance(html, str) or required_paragraphs < 1:
+        raise MediaInsertionError("HTML and required_paragraphs have invalid types")
+    paragraph_re = re.compile(r"(?P<open><p\b[^>]*>)(?P<body>[\s\S]*?)</p>", re.IGNORECASE)
+    matches = list(paragraph_re.finditer(html))
+    original_words = _plain_word_count(html)
+    audit: dict[str, Any] = {
+        "original_paragraphs": len(matches),
+        "required_paragraphs": required_paragraphs,
+        "original_words": original_words,
+        "final_words": original_words,
+        "changed": False,
+        "reason": None,
+        "splits": [],
+    }
+    if original_words > max_words:
+        audit["reason"] = "editorial_restructure_required: word_count_limit"
+        audit["final_paragraphs"] = len(matches)
+        return {"html": html, "audit": audit}
+    if len(matches) >= required_paragraphs:
+        audit["final_paragraphs"] = len(matches)
+        return {"html": html, "audit": audit}
+
+    needed = required_paragraphs - len(matches)
+    replacements: dict[int, str] = {}
+    candidates: list[tuple[int, int, str, str]] = []
+    for index, match in enumerate(matches):
+        body = match.group("body")
+        if _plain_word_count(body) < 36 or "<h" in body.casefold() or "[" in body or "]" in body:
+            continue
+        if _safe_sentence_boundaries(body):
+            candidates.append((index, _plain_word_count(body), match.group("open"), body))
+    candidates.sort(key=lambda item: (-item[1], item[0]))
+    for index, _words, open_tag, body in candidates[:needed]:
+        split = _split_paragraph_once(open_tag, body)
+        if split is None:
+            continue
+        replacement, boundary = split
+        replacements[index] = replacement
+        audit["splits"].append({
+            "original_paragraph_index": index,
+            "boundary_offset": boundary,
+            "original_words": _plain_word_count(body),
+            "result_words": [_plain_word_count(body[:boundary]), _plain_word_count(body[boundary:])],
+        })
+
+    pieces: list[str] = []
+    cursor = 0
+    for index, match in enumerate(matches):
+        pieces.append(html[cursor:match.start()])
+        pieces.append(replacements.get(index, match.group(0)))
+        cursor = match.end()
+    pieces.append(html[cursor:])
+    normalized = "".join(pieces)
+    final_matches = list(paragraph_re.finditer(normalized))
+    audit["final_paragraphs"] = len(final_matches)
+    audit["final_words"] = _plain_word_count(normalized)
+    audit["changed"] = normalized != html
+    source_text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", html))).strip()
+    result_text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", normalized))).strip()
+    if source_text != result_text or audit["final_words"] != original_words:
+        raise MediaInsertionError("structural normalization changed editorial text", code="text_preservation_failed")
+    if audit["final_paragraphs"] < required_paragraphs:
+        audit["reason"] = "editorial_restructure_required: no_safe_sentence_boundary"
+    return {"html": normalized, "audit": audit}
 
 
 def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = False) -> str:

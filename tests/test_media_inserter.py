@@ -4,6 +4,7 @@ from unicornio_editor.media.inserter import (
     MediaInsertionError,
     append_featured_credit,
     insert_media,
+    normalize_normal_article_paragraphs,
     plan_normal_media_insertions,
 )
 
@@ -45,6 +46,42 @@ class MediaInserterTests(unittest.TestCase):
         )
         assert [item["paragraph_index"] for item in planned] == [0, 3, 7, 10]
         assert insert_media(html, planned).count("[caption id=\"\" align=\"aligncenter\"") == 4
+
+    def test_normalizer_turns_nine_paragraphs_into_eleven_without_text_changes(self):
+        long_body = (
+            "A equipe confirmou uma atualização importante para o jogo nesta semana, "
+            "com detalhes sobre personagens, sistemas e conteúdo adicional para os jogadores. "
+            "O anúncio também informa que o lançamento seguirá o calendário divulgado anteriormente, "
+            "sem alterar os recursos já apresentados pela desenvolvedora."
+        )
+        html = f"<p>{long_body}</p><p>{long_body}</p>" + "".join(
+            f"<p>O parágrafo {index} explica os detalhes conhecidos até o momento.</p>"
+            for index in range(1, 8)
+        )
+        normalized = normalize_normal_article_paragraphs(html, required_paragraphs=11)
+        assert normalized["audit"]["original_paragraphs"] == 9
+        assert normalized["audit"]["final_paragraphs"] == 11
+        assert normalized["audit"]["original_words"] == normalized["audit"]["final_words"]
+        assert normalized["audit"]["changed"] is True
+        assert "<a href" not in normalized["html"]
+
+    def test_normalizer_preserves_inline_links_and_refuses_shortcodes(self):
+        linked = (
+            "<p>Uma notícia importante foi confirmada pela "
+            '<a href="https://example.test/fonte"><strong>fonte oficial</strong></a> '
+            "e será detalhada em uma atualização posterior para os leitores.</p>"
+        )
+        html = linked + "".join(f"<p>Texto {index} curto.</p>" for index in range(8))
+        normalized = normalize_normal_article_paragraphs(html, required_paragraphs=10)
+        assert 'href="https://example.test/fonte"' in normalized["html"]
+        assert "<strong>fonte oficial</strong>" in normalized["html"]
+
+        shortcode_html = "<p>[caption]Texto que não deve ser dividido.</p>" + "".join(
+            f"<p>Texto {index} curto.</p>" for index in range(8)
+        )
+        refused = normalize_normal_article_paragraphs(shortcode_html, required_paragraphs=10)
+        assert refused["audit"]["final_paragraphs"] == 9
+        assert refused["audit"]["reason"].startswith("editorial_restructure_required")
 
     def test_adds_one_visible_featured_credit(self):
         credit = "Crédito da imagem: Omelete. Imagem promocional do trailer. Direitos autorais dos detentores."

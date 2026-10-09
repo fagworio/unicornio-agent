@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import difflib
+import hashlib
+import re
+import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +14,8 @@ from typing import Any
 
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
 from ..editorial_schema import EditorialValidationError, validate_editorial
-from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
+from ..media.inserter import MediaInsertionError, normalize_normal_article_paragraphs
+from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedStatus, LifecycleState, Phase, RetryInfo, WorkState
 
 
 HISTORICAL_MEDIA_HUMAN_REQUIRED_IDS = frozenset({
@@ -59,6 +64,24 @@ def _read_state(post: dict[str, Any]) -> WorkState | None:
         return WorkState.from_dict(raw)
     except (TypeError, ValueError, KeyError):
         return None
+
+
+def _atomic_json_file(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _html_hash(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _paragraph_structural_diff(before: str, after: str) -> list[str]:
+    paragraph_re = r"<p\b[^>]*>[\s\S]*?</p>"
+    before_lines = [f"{item}\n" for item in re.findall(paragraph_re, before, re.IGNORECASE)]
+    after_lines = [f"{item}\n" for item in re.findall(paragraph_re, after, re.IGNORECASE)]
+    return list(difflib.unified_diff(before_lines, after_lines, fromfile="before", tofile="after"))
 
 
 def _migrate_state(state: WorkState, now: datetime) -> WorkState | None:
@@ -315,6 +338,8 @@ def repair_compose_114987(
     from .lock import RunSessionLock
     from .production_stages import ProductionComposeStage
     from .runtime import _canonical_embedded_media_url
+    from ..language import editorial_language_report
+    from ..list_quality import detect_list_format
 
     post_id = HISTORICAL_COMPOSE_RECOVERY_ID
     root_path = Path(root)
@@ -437,6 +462,58 @@ def repair_compose_114987(
             checks["editorial_contract"] = True
         except (EditorialValidationError, TypeError, ValueError):
             checks["editorial_contract"] = False
+        original_draft_html = str(draft.get("cleaned_html") or "")
+        required_paragraphs = 2 + (3 * max(0, len(state.media.inline) - 1)) if state else 0
+        is_listicle = detect_list_format(
+            str((post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""),
+            original_draft_html,
+        ) is not None
+        checks["normal_article"] = not is_listicle
+        if is_listicle:
+            restructuring = {
+                "html": original_draft_html,
+                "audit": {
+                    "original_paragraphs": original_draft_html.lower().count("</p>"),
+                    "final_paragraphs": original_draft_html.lower().count("</p>"),
+                    "original_words": len(original_draft_html.split()),
+                    "final_words": len(original_draft_html.split()),
+                    "changed": False,
+                    "reason": "editorial_restructure_required: listicle_preserved",
+                    "splits": [],
+                },
+            }
+        elif original_draft_html and required_paragraphs:
+            try:
+                restructuring = normalize_normal_article_paragraphs(
+                    original_draft_html,
+                    required_paragraphs=required_paragraphs,
+                )
+            except MediaInsertionError as exc:
+                restructuring = {
+                    "html": original_draft_html,
+                    "audit": {
+                        "original_paragraphs": original_draft_html.lower().count("</p>"),
+                        "final_paragraphs": original_draft_html.lower().count("</p>"),
+                        "original_words": len(original_draft_html.split()),
+                        "final_words": len(original_draft_html.split()),
+                        "changed": False,
+                        "reason": f"editorial_restructure_required: {exc.code}",
+                        "splits": [],
+                    },
+                }
+        else:
+            restructuring = {
+                "html": original_draft_html,
+                "audit": {"final_paragraphs": 0, "reason": "missing_draft_html"},
+            }
+        normalized_draft = dict(draft)
+        normalized_draft["cleaned_html"] = restructuring["html"]
+        checks["restructure_possible"] = bool(
+            restructuring["audit"].get("final_paragraphs", 0) >= required_paragraphs
+        )
+        checks["restructure_text_preserved"] = bool(
+            restructuring["audit"].get("final_words") == restructuring["audit"].get("original_words")
+        )
         current_html = str((post.get("content") or {}).get("raw") or "")
         from ..media.relevance import iter_content_images
 
@@ -452,6 +529,7 @@ def repair_compose_114987(
         required_checks = (
             "wordpress_pending",
             "v2_signature",
+            "normal_article",
             "journal_committing",
             "journal_post_id",
             "accepted_media_signature",
@@ -462,6 +540,8 @@ def repair_compose_114987(
             "editorial_draft",
             "editorial_contract",
             "accepted_media_absent_from_html",
+            "restructure_possible",
+            "restructure_text_preserved",
             "concurrent_run",
         )
         checks["safe_signature"] = all(bool(checks.get(name)) for name in required_checks)
@@ -484,6 +564,12 @@ def repair_compose_114987(
                 "phase_attempts": state.retry.phase_attempts if state else None,
                 "media_ids": list(checks.get("accepted_media_ids") or []),
             },
+            "restructure": restructuring["audit"],
+            "structural_diff": _paragraph_structural_diff(original_draft_html, restructuring["html"]),
+            "words": {
+                "before": restructuring["audit"].get("original_words", 0),
+                "after": restructuring["audit"].get("final_words", 0),
+            },
         }
         if not checks["safe_signature"] or state is None or not draft:
             result["reason"] = "signature_or_checkpoints_not_verified"
@@ -497,7 +583,7 @@ def repair_compose_114987(
         }
         try:
             candidate = ProductionComposeStage(config, root_path).compose_candidate(
-                context, draft, state.media, persist=False
+                context, normalized_draft, state.media, persist=False
             )
         except Exception as exc:  # noqa: BLE001 - dry-run must report, never mutate
             result["reason"] = "composition_not_reconstructable"
@@ -509,6 +595,11 @@ def repair_compose_114987(
         reconstructed_urls = {
             _canonical_embedded_media_url(str(image.get("src") or ""))
             for image in iter_content_images(str(candidate.get("content") or ""))
+        }
+        attachment_urls = {
+            int(item["media_id"]): _canonical_embedded_media_url(str(item.get("source_url") or ""))
+            for item in media_checks
+            if item.get("valid")
         }
         reconstructed_ids = [
             media_id
@@ -522,15 +613,67 @@ def repair_compose_114987(
         result["validation"] = {
             "accepted_media_in_reconstructed_content": reconstructed_ids,
             "all_accepted_media_reconstructed": set(reconstructed_ids) == set(checks["accepted_media_ids"]),
+            "img_elements": len(iter_content_images(str(candidate.get("content") or ""))),
+            "distinct_accepted_img_elements": len({attachment_urls.get(media_id) for media_id in reconstructed_ids if attachment_urls.get(media_id)}),
+            "credits_present": all(
+                str(item.credit_text or "") in str(candidate.get("content") or "")
+                for item in state.media.inline
+            ),
+            "featured_valid": (
+                state.media.featured.status is FeaturedStatus.VALID
+                and candidate.get("featured_media") == state.media.featured.media_id
+            ),
+            "seo_valid": checks["editorial_contract"],
             "ready_written": False,
             "new_uploads": 0,
             "next_stage": "v2-run COMPOSE/checklist/writer/readback",
         }
-        if not result["validation"]["all_accepted_media_reconstructed"]:
-            result["reason"] = "reconstructed_content_missing_accepted_media"
+        result["validation"]["language"] = editorial_language_report(
+            title=str(normalized_draft.get("title") or (normalized_draft.get("seo") or {}).get("title") or ""),
+            content=str(normalized_draft.get("cleaned_html") or ""),
+            seo_title=str((normalized_draft.get("seo") or {}).get("title") or ""),
+            meta_description=str((normalized_draft.get("seo") or {}).get("meta_description") or ""),
+        )
+        result["validation"]["language_ok"] = bool(result["validation"]["language"].get("passed"))
+        if not (
+            result["validation"]["all_accepted_media_reconstructed"]
+            and result["validation"]["distinct_accepted_img_elements"] == len(checks["accepted_media_ids"])
+            and result["validation"]["credits_present"]
+            and result["validation"]["featured_valid"]
+            and result["validation"]["seo_valid"]
+            and result["validation"]["language_ok"]
+        ):
+            result["reason"] = "reconstructed_candidate_validation_failed"
             return result
         result["eligible"] = True
         if apply:
+            latest_post = client.get_post(post_id)
+            latest_state = _read_state(latest_post)
+            latest_html = str((latest_post.get("content") or {}).get("raw") or "")
+            if (
+                latest_post.get("status") != "pending"
+                or latest_state != state
+                or _html_hash(latest_html) != _html_hash(current_html)
+            ):
+                result["eligible"] = False
+                result["reason"] = "changed_after_scan"
+                return result
+            draft_path = directory / "editorial.draft.json"
+            operation_id = f"compose-114987-{_html_hash(normalized_draft['cleaned_html'])[:12]}"
+            backup_path = directory / f"editorial.draft.compose-recovery.{operation_id}.json"
+            if not draft_path.is_file():
+                raise RuntimeError("canonical editorial draft disappeared before apply")
+            if not backup_path.exists():
+                shutil.copy2(draft_path, backup_path)
+            recovery_record = {
+                "operation_id": operation_id,
+                "post_id": post_id,
+                "original_draft_sha256": _html_hash(original_draft_html),
+                "normalized_draft_sha256": _html_hash(normalized_draft["cleaned_html"]),
+                "restructure": restructuring["audit"],
+                "structural_diff": result["structural_diff"],
+                "preserved_media_ids": checks["accepted_media_ids"],
+            }
             reopened = replace(
                 state,
                 state=LifecycleState.PENDING,
@@ -538,19 +681,31 @@ def repair_compose_114987(
                 blocker=BlockerCode.MANIFEST_INVALID,
                 retry=replace(state.retry, next_at=current.isoformat(timespec="seconds")),
             )
-            meta = post.get("meta") if isinstance(post.get("meta"), dict) else None
+            meta = latest_post.get("meta") if isinstance(latest_post.get("meta"), dict) else None
             if meta is None:
                 raise RuntimeError("post 114987 has no editable meta payload")
             updated_meta = dict(meta)
             updated_meta["_hermes_work_state"] = json.dumps(
                 reopened.to_dict(), ensure_ascii=False, separators=(",", ":")
             )
-            client.update_post(post_id, {"meta": updated_meta})
+            try:
+                _atomic_json_file(draft_path, normalized_draft)
+                _atomic_json_file(
+                    root_path / "work" / "v2-recovery" / str(post_id) / f"{operation_id}.json",
+                    recovery_record,
+                )
+                client.update_post(post_id, {"meta": updated_meta})
+            except Exception:
+                shutil.copy2(backup_path, draft_path)
+                raise
             verified = _read_state(client.get_post(post_id))
             if verified != reopened:
                 raise RuntimeError("114987 compose recovery read-back mismatch")
             result["reopened_state"] = reopened.to_dict()
             result["readback"] = True
+            result["operation_id"] = operation_id
+            result["draft_backup"] = str(backup_path)
+            result["draft_persisted"] = str(draft_path)
         return result
     finally:
         lock.release()

@@ -1,4 +1,5 @@
 from unicornio_editor.language import (
+    audit_published_language,
     detect_language,
     editorial_language_report,
     localization_required,
@@ -106,3 +107,31 @@ def test_attributed_english_quote_is_not_editorial_language_failure():
     )
     assert report["passed"]
     assert report["english_editorial_paragraphs"] == 0
+
+
+def test_published_language_audit_separates_body_and_metadata_reviews():
+    class Client:
+        def get_post(self, _post_id):
+            return {
+                "id": 115122,
+                "status": "publish",
+                "link": "https://example.test/post",
+                "title": {"raw": "New game release announced"},
+                "content": {"raw": (
+                    "<p>A produção confirmou novidades para o público brasileiro e "
+                    "divulgou detalhes sobre a próxima atualização da série para os fãs.</p>"
+                )},
+                "meta": {
+                    "rank_math_description": "The studio announced the latest news about the game and its release date.",
+                    "_hermes_work_state": '{"state":"published"}',
+                },
+            }
+
+    result = audit_published_language(Client(), [115122])
+    row = result["posts"][0]
+    assert result["read_only"] is True
+    assert row["body_language_ok"] is True
+    assert row["title_review_required"] is True
+    assert row["meta_description_review_required"] is True
+    assert row["localization_required"] is False
+    assert row["published_revision_recommended"] is True

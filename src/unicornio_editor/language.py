@@ -28,6 +28,11 @@ _PT_MARKERS = frozenset(
 _EN_MARKERS = frozenset(
     "the and of to in for with this that from has have had was were will would are is its their about after before latest news release released announced announces reveals revealed players player first new game games according confirmed confirms sources into during season episode movie film show".split()
 )
+_PROTECTED_OFFICIAL_NAMES = (
+    "the last of us",
+    "xbox game pass",
+    "playstation",
+)
 
 
 class _EditorialBlockParser(HTMLParser):
@@ -223,6 +228,11 @@ def localization_required(report: dict[str, Any] | None) -> bool:
     )
 
 
+def _protected_official_name(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+    return any(name in normalized for name in _PROTECTED_OFFICIAL_NAMES)
+
+
 def audit_published_language(client: Any, post_ids: list[int] | tuple[int, ...]) -> dict[str, Any]:
     """Read-only language audit for an explicit set of published posts."""
     rows: list[dict[str, Any]] = []
@@ -248,14 +258,54 @@ def audit_published_language(client: Any, post_ids: list[int] | tuple[int, ...])
             seo_title=seo_title,
             meta_description=meta_description,
         )
+        fields = report["fields"]
+        body_field = fields["content"]
+        title_field = fields["title"]
+        seo_title_field = fields["seo_title"]
+        description_field = fields["meta_description"]
+        body_language_ok = (
+            body_field["language"] == "pt-BR"
+            and body_field["confidence"] >= 0.7
+            and "content" not in report["failing_fields"]
+        )
+        title_review_required = (
+            title_field["language"] == "en"
+            and title_field["confidence"] >= 0.78
+            and not _protected_official_name(str(title_payload.get("raw") or title_payload.get("rendered") or ""))
+        )
+        seo_title_review_required = (
+            seo_title_field["language"] == "en"
+            and seo_title_field["confidence"] >= 0.78
+            and not _protected_official_name(seo_title)
+        )
+        meta_description_review_required = (
+            description_field["language"] == "en"
+            and description_field["confidence"] >= 0.78
+        )
+        localization_needed = bool(
+            "content" in report["failing_fields"]
+            or (body_field["language"] == "en" and body_field["confidence"] >= 0.7)
+        )
+        published_revision_recommended = bool(
+            localization_needed
+            or title_review_required
+            or seo_title_review_required
+            or meta_description_review_required
+        )
         rows.append({
             "post_id": int(post_id),
             "status": post.get("status"),
             "link": post.get("link"),
             "v2_state": state.get("state") if isinstance(state, dict) else None,
             "language": report,
-            "needs_localization": not bool(report.get("passed")),
-            "recommended_action": "review_diff_before_any_write" if not report.get("passed") else "no_change",
+            "body_language_ok": body_language_ok,
+            "title_review_required": title_review_required,
+            "seo_title_review_required": seo_title_review_required,
+            "meta_description_review_required": meta_description_review_required,
+            "localization_required": localization_needed,
+            "published_revision_recommended": published_revision_recommended,
+            "needs_localization": localization_needed,
+            "recommended_action": "review_diff_before_any_write" if published_revision_recommended else "no_change",
         })
     return {"read_only": True, "post_ids": [int(item) for item in post_ids], "posts": rows}
 
