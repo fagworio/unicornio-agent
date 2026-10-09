@@ -1392,6 +1392,14 @@ def _media_item_rejection(
         if media_id not in attachment_cache:
             attachment_cache[media_id] = client.get_media(media_id)
         attachment = attachment_cache[media_id]
+    from .media.page_assets import is_noise_image_url
+
+    candidate_url = str(
+        (attachment or {}).get("source_url") if attachment is not None
+        else item.get("direct_image_url") or ""
+    )
+    if is_noise_image_url(candidate_url):
+        return "imagem de avatar/perfil nao e midia editorial; escolha uma imagem da noticia ou da obra"
     if attachment is not None:
         title = str((attachment.get("title") or {}).get("rendered") or "")
         alt = str(attachment.get("alt_text") or "")

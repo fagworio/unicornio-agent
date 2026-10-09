@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from unicornio_editor.media import search
-from unicornio_editor.media.evidence import item_query, tipo_de_conteudo
+from unicornio_editor.media.evidence import diverse_item_queries, item_query, tipo_de_conteudo
 from unicornio_editor.media.official_sources import dominios_oficiais, official_source
 
 
@@ -22,6 +22,13 @@ class DesambiguacaoTests(unittest.TestCase):
 
     def test_nao_duplica_termo_ja_presente(self):
         self.assertEqual(item_query("Pluto anime", "10 melhores animes"), "Pluto anime")
+
+    def test_query_diversa_mantem_assunto_e_varia_papel_visual(self):
+        queries = diverse_item_queries("Star Fox", "novo jogo da franquia game")
+        self.assertEqual(queries[0], "Star Fox game")
+        self.assertIn("Star Fox game gameplay screenshot", queries)
+        self.assertIn("Star Fox game official artwork", queries)
+        self.assertTrue(all(query.startswith("Star Fox game") for query in queries))
 
     def test_tipo_de_conteudo_reconhece_plural_e_marca(self):
         self.assertEqual(tipo_de_conteudo("ranking de animes"), "anime")

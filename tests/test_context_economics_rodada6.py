@@ -158,7 +158,10 @@ class VisionDirectGrandTotalTests(unittest.TestCase):
             db.commit()
             db.close()
             med = modulo.usage_measurement_in_last_24h(
-                banco, "9e39343dc6f5", str(root), telemetry_path=telemetria
+                banco, "9e39343dc6f5", str(root), telemetry_path=telemetria,
+                # Fixture contract: only Hermes costs are asserted here. Real
+                # provider price environment must not change this expectation.
+                editorial_price=(0.0, 0.0), vision_price=(0.0, 0.0),
             )
         # Camadas separadas.
         self.assertEqual(med["main_prompt_tokens"], 10_000)

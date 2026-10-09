@@ -50,6 +50,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse, urlsplit
 from urllib.request import Request, urlopen
 
+from .page_assets import is_noise_image_url
+
 _GOOGLE_IMAGES_BASE = "https://www.google.com/search"
 _BING_IMAGES_BASE = "https://www.bing.com/images/search"
 _YANDEX_IMAGES_BASE = "https://yandex.com/images/search"
@@ -316,13 +318,16 @@ def _candidate(
     descoberto no apply (depois de baixar e gastar upload).
     """
     page_clean = _clean_page_url(page)
-    usable = _valid_http(direct) and _valid_http(page_clean)
+    noisy = is_noise_image_url(direct)
+    usable = _valid_http(direct) and _valid_http(page_clean) and not noisy
     candidate_id = hashlib.sha256(
         f"{engine}|{query}|{direct}".encode("utf-8", "ignore")
     ).hexdigest()[:20]
     motivo = ""
     if not usable:
-        if not _valid_http(page_clean):
+        if noisy:
+            motivo = "noise_domain"
+        elif not _valid_http(page_clean):
             motivo = "missing_source_page"
         else:
             motivo = "invalid_direct_image_url"

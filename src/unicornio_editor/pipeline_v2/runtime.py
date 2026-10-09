@@ -15,7 +15,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 from ..checklist import required_image_count, required_image_count_for_content
 from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
-from ..media.evidence import editorial_subjects, item_query, post_subjects
+from ..media.evidence import diverse_item_queries, editorial_subjects, item_query, post_subjects
 from ..media.relevance import iter_content_images
 from ..list_quality import detect_list_format
 from ..seo.rank_math import build_meta
@@ -388,7 +388,16 @@ class ProductionMediaResolver:
             subject = str(row.get("subject") or "").strip()
             if subject:
                 subject_meta[subject] = {**row, "section_slot": row.get("section_slot", index)}
-            add_query(subject, item_query(subject, title, extra=focus_keyword))
+            # Listicles diversify naturally by item. For a normal article with
+            # one unresolved subject, vary the visual role instead of asking
+            # engines for the same cover/key art on every retry.
+            queries = (
+                diverse_item_queries(subject, title, extra=focus_keyword)
+                if not is_listicle and len(missing_rows) == 1
+                else [item_query(subject, title, extra=focus_keyword)]
+            )
+            for query in queries:
+                add_query(subject, query)
         if focus_keyword and not is_listicle:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
             add_query(main_subject, item_query(focus_keyword, title))

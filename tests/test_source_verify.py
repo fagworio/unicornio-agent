@@ -25,9 +25,19 @@ class SourcePageHandler(BaseHTTPRequestHandler):
     """Serves an article page listing two gallery images + a third unrelated one."""
 
     images: dict[str, bytes] = {}
+    page_html: dict[str, str] = {}
     page_hits = 0
 
     def do_GET(self):
+        if self.path in SourcePageHandler.page_html:
+            SourcePageHandler.page_hits += 1
+            data = SourcePageHandler.page_html[self.path].encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/page.html":
             SourcePageHandler.page_hits += 1
             html = (
@@ -44,7 +54,7 @@ class SourcePageHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        data = self.images.get(self.path)
+        data = self.images.get(self.path) or self.images.get(self.path.split("?", 1)[0])
         if data is None:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -89,6 +99,7 @@ class SourceVerifyTests(unittest.TestCase):
             "/img/gallery/green-lantern-rings-1786934482.jpg": _png_bytes((10, 10, 200)),
             "/img/related-other-work.jpg": _png_bytes((200, 200, 10)),
         }
+        SourcePageHandler.page_html = {}
         SourcePageHandler.page_hits = 0
         self._tmp_dir = tempfile.mkdtemp()
 
@@ -149,6 +160,35 @@ class SourceVerifyTests(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
         self.assertIn("visual", reason)
+
+    def test_accepts_cdn_rendition_declared_only_in_lazy_picture_srcset(self):
+        """A CDN resize is verified by bytes, never accepted by its name alone."""
+        frame = _png_bytes((30, 90, 190), size=(1600, 900))
+        SourcePageHandler.page_html["/dynamic.html"] = (
+            '<article><picture><source data-srcset="'
+            '/cdn/star-fox-battle-1600x900.jpg?width=1600 1600w">'
+            '<img data-src="/cdn/star-fox-battle-1600x900.jpg?width=1600"></picture></article>'
+        )
+        SourcePageHandler.images["/cdn/star-fox-battle-1600x900.jpg"] = frame
+        SourcePageHandler.images["/cdn/star-fox-battle-768x432.webp"] = frame
+        downloaded = Path(self._tmp_dir) / "star-fox-battle-768x432.webp"
+        downloaded.write_bytes(frame)
+
+        preflight = validate_discovered_candidate({
+            "direct_image_url": f"{self.base}/cdn/star-fox-battle-768x432.webp?format=webp",
+            "source_page_url": f"{self.base}/dynamic.html",
+        })
+        self.assertTrue(preflight["valid"], preflight["reason"])
+        self.assertEqual(preflight["verification_level"], "PIXEL_IDENTICAL")
+
+        ok, reason = verify_downloaded_against_source(
+            source_page_url=f"{self.base}/dynamic.html",
+            downloaded=downloaded,
+            direct_image_url=f"{self.base}/cdn/star-fox-battle-768x432.webp?format=webp",
+        )
+
+        self.assertTrue(ok, reason)
+        self.assertIn("rendicao CDN", reason)
 
     def test_resolve_visual_yandex_promove_url_canonica_da_pagina(self):
         SourcePageHandler.images["/discovery/yandex-copy.jpg"] = _png_bytes((10, 10, 200))

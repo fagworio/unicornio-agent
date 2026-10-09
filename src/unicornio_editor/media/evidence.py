@@ -266,6 +266,34 @@ def item_query(subject: str, article_title: str = "", *, extra: str = "") -> str
     return f"{base} {contexto}"
 
 
+def diverse_item_queries(subject: str, article_title: str = "", *, extra: str = "") -> list[str]:
+    """Return bounded, deterministic queries for distinct editorial roles.
+
+    A normal article with one subject cannot recover from repeated cover art by
+    issuing the same query again. Every variant retains the concrete subject;
+    only the requested visual role changes.
+    """
+    base = item_query(subject, article_title, extra=extra)
+    if not base:
+        return []
+    content_type = tipo_de_conteudo(article_title) or tipo_de_conteudo(extra)
+    if content_type == "game":
+        suffixes = ("gameplay screenshot", "official artwork", "character scene", "environment screenshot")
+    elif content_type in {"anime", "serie", "filme"}:
+        suffixes = ("scene screenshot", "official artwork", "character scene")
+    else:
+        suffixes = ("official artwork", "scene image")
+    result: list[str] = []
+    seen: set[str] = set()
+    for query in (base, *(f"{base} {suffix}" for suffix in suffixes)):
+        normalized = " ".join(query.split())
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
+
+
 
 def _image_local_context(html: str, image_url: str) -> dict[str, str]:
     """figcaption/heading da REGIÃO da imagem (não os primeiros da página)."""
@@ -586,6 +614,7 @@ __all__ = [
     "SINAIS_LOCAIS",
     "LIMIAR_LOCAL",
     "dedupe_by_phash",
+    "diverse_item_queries",
     "item_query",
     "tipo_de_conteudo",
     "PENALIDADES",

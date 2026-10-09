@@ -5,7 +5,7 @@ from unittest import mock
 
 from unicornio_editor.media.relevance import image_is_relevant
 from unicornio_editor.media.search import (
-    build_bing_url, build_search_url, search_bing_images, search_web_images,
+    _candidate, build_bing_url, build_search_url, search_bing_images, search_web_images,
     search_web_images_batch, search_yandex_images,
 )
 
@@ -124,6 +124,16 @@ class SearchQueryEvidenceTests(unittest.TestCase):
             source_only=True,
         )
         self.assertFalse(relevant)
+
+    def test_noise_domain_is_not_usable_even_with_a_source_page(self):
+        result = _candidate(
+            "star fox", "1024x768|w",
+            "https://secure.gravatar.com/avatar/abc?s=512",
+            "https://example.test/article", "avatar", "", engine="bing",
+        )
+        self.assertFalse(result["usable"])
+        self.assertTrue(result["discovery_only"])
+        self.assertEqual(result["rejected_reason"], "noise_domain")
 
     def test_wrong_query_does_not_pass(self):
         relevant = image_is_relevant(

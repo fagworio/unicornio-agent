@@ -1,6 +1,6 @@
 import unittest
 
-from unicornio_editor.media.page_assets import extract_page_assets, rank_page_assets
+from unicornio_editor.media.page_assets import extract_page_assets, is_noise_image_url, rank_page_assets
 
 
 class PageAssetTests(unittest.TestCase):
@@ -53,6 +53,10 @@ class PageAssetTests(unittest.TestCase):
         assert by_url["https://cdn.test/hero.jpg"].context_kind == "article_body"
         assert by_url["https://cdn.test/gta-6.jpg"].context_kind == "excluded"
         assert by_url["https://cdn.test/avatar.jpg"].context_kind == "excluded"
+
+    def test_marks_gravatar_as_non_editorial_before_media_processing(self):
+        assert is_noise_image_url("https://secure.gravatar.com/avatar/abc?s=512")
+        assert not is_noise_image_url("https://images.nintendolife.com/news/star-fox.jpg")
 
 
 if __name__ == "__main__":

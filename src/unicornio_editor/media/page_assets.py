@@ -14,6 +14,20 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 
+# Profile/avatar infrastructure is never editorial media. Keep this narrow:
+# provenance and relevance still decide ordinary image CDNs.
+_NOISE_IMAGE_HOST_SUFFIXES = ("gravatar.com",)
+
+
+def is_noise_image_url(url: str) -> bool:
+    """Return whether ``url`` belongs to a known non-editorial image host."""
+    try:
+        host = (urlparse(str(url or "")).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return False
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in _NOISE_IMAGE_HOST_SUFFIXES)
+
+
 @dataclass(frozen=True)
 class PageAsset:
     url: str
@@ -275,4 +289,4 @@ def rank_page_assets(
     return sorted(assets, key=score, reverse=True)[: max(1, int(limit))]
 
 
-__all__ = ["PageAsset", "extract_page_assets", "rank_page_assets"]
+__all__ = ["PageAsset", "extract_page_assets", "is_noise_image_url", "rank_page_assets"]

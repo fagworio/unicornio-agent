@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from .url_safety import inspect_remote_url
-from .page_assets import extract_page_assets, rank_page_assets
+from .page_assets import extract_page_assets, is_noise_image_url, rank_page_assets
 
 _PAGE_MAX_BYTES = 2 * 1024 * 1024
 _IMG_MAX_BYTES = 8 * 1024 * 1024
@@ -94,7 +94,7 @@ def discover_article_source_candidates(
     seen: set[str] = set()
     for asset in assets:
         url = str(asset.url or "").strip()
-        if not _valid_http(url) or url in seen:
+        if not _valid_http(url) or is_noise_image_url(url) or url in seen:
             continue
         seen.add(url)
         if asset.context_kind == "excluded":
@@ -174,6 +174,20 @@ def _slug(url: str) -> str:
     path = urlparse(url).path
     base = unquote(path.rsplit("/", 1)[-1])
     return re.sub(r"\.(?:jpe?g|png|webp|gif|avif|bmp)$", "", base, flags=re.I).lower()
+
+
+def _asset_rendition_key(url: str) -> str:
+    """Key common CDN resize variants for later byte/visual verification.
+
+    The key only prioritizes a page-declared asset. It is never itself a proof
+    of provenance, so a matching rendition must still pass the byte/pHash
+    comparison below.
+    """
+    parsed = urlparse(unquote(str(url or "")))
+    host = (parsed.hostname or "").casefold()
+    stem = _slug(url)
+    stem = re.sub(r"(?:[-_.](?:\d{2,5}x\d{2,5}|(?:w|h|width|height)[-_]?\d{2,5}))+$", "", stem)
+    return f"{host}|{stem}" if host and stem else ""
 
 
 def _image_urls_in_page(html: str, base_url: str) -> list[str]:
@@ -320,6 +334,12 @@ def validate_discovered_candidate(
         resultado["reason"] = "mesma imagem (slug) listada na pagina de origem"
         return resultado
 
+    rendition_key = _asset_rendition_key(image_url)
+    rendition_matches = [
+        url for url in listadas
+        if rendition_key and _asset_rendition_key(url) == rendition_key
+    ]
+
     # Candidatos de engines como Yandex podem apontar para um CDN diferente do
     # asset listado pela página. A origem continua sendo obrigatória: baixamos o
     # candidato e os assets listados e promovemos somente o correspondente
@@ -329,12 +349,13 @@ def validate_discovered_candidate(
         ranked_assets = rank_page_assets(
             extract_page_assets(page_html, page_url), image_url, subject=subject, limit=10
         )
-        ranked_urls = [asset.url for asset in ranked_assets]
+        ranked_urls = [*rendition_matches, *(asset.url for asset in ranked_assets)]
         # Keep any parser/HTML representation not understood by PageAsset in
         # the bounded list, without reverting to the old first-six policy.
         ranked_urls.extend(url for url in listadas if url not in ranked_urls)
     else:
-        ranked_urls = list(listadas)
+        ranked_urls = [*rendition_matches, *list(listadas)]
+    ranked_urls = list(dict.fromkeys(ranked_urls))
     try:
         candidate_bytes: bytes | None = None
         local_path = str(candidate.get("local_image_path") or "")
@@ -432,19 +453,26 @@ def verify_downloaded_against_source(
 
     slug = _slug(direct_image_url)
     same_slug = [url for url in listed if _slug(url) == slug]
+    rendition_key = _asset_rendition_key(direct_image_url)
+    same_rendition = [
+        url for url in listed
+        if rendition_key and _asset_rendition_key(url) == rendition_key and url not in same_slug
+    ]
     downloads = 0
-    for url in same_slug:
+    for url in [*same_slug, *same_rendition]:
         if downloads >= _MAX_DOWNLOADS:
             break
         downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if data is not None:
             if _md5(data) == downloaded_hash:
-                return True, "imagem confirmada na pagina de origem por slug e bytes"
+                via = "slug" if url in same_slug else "rendicao CDN"
+                return True, f"imagem confirmada na pagina de origem por {via} e bytes"
             same_frame, level = verify_image_identity(downloaded_bytes, data)
             if same_frame:
-                return True, f"imagem confirmada na pagina de origem por slug ({level.lower()})"
-    if same_slug:
+                via = "slug" if url in same_slug else "rendicao CDN"
+                return True, f"imagem confirmada na pagina de origem por {via} ({level.lower()})"
+    if same_slug or same_rendition:
         return (
             False,
             "CDN serviu conteudo divergente da pagina de origem para a mesma imagem "

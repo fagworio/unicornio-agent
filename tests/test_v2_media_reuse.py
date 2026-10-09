@@ -457,6 +457,43 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.exhausted is True
 
 
+def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    queries = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        query = batch["posts"][0]["query"]
+        queries.append(query)
+        return {"posts": [{
+            "reuse": [], "audit_candidates": [],
+            "search": {"completed": True, "queries_attempted": 1, "engines_attempted": ["yandex"]},
+        }]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Star Fox"}])
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 2)
+
+    previous = MediaProgress(
+        required=2,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 114838, "title": "Star Fox game review"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>Test.</p>", "seo": {}}, previous,
+    )
+
+    assert queries == [
+        "Star Fox game",
+        "Star Fox game gameplay screenshot",
+        "Star Fox game official artwork",
+        "Star Fox game character scene",
+        "Star Fox game environment screenshot",
+    ]
+
+
 def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
