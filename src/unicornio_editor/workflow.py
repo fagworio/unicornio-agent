@@ -1857,6 +1857,7 @@ def _execute_media_plan(
     previous_inline_phashes: list[str] | tuple[str, ...] = (),
     previous_inline_visual_assets: list[dict[str, Any]] | None = None,
     featured_visual_asset: dict[str, Any] | None = None,
+    visual_comparison_budget: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -2037,7 +2038,7 @@ def _execute_media_plan(
             # baseline fingerprints in the V2 state after this run.
             visual_baseline: list[dict[str, Any]] = []
             visual_baseline_unavailable = False
-            visual_comparison_budget = [0]
+            visual_comparison_budget = visual_comparison_budget if visual_comparison_budget is not None else [0]
             for asset in [*(previous_inline_visual_assets or []), *([featured_visual_asset] if featured_visual_asset else [])]:
                 if not isinstance(asset, dict):
                     continue
