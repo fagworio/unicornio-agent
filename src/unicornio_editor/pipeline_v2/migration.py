@@ -29,6 +29,7 @@ HISTORICAL_VISION_PROVIDER_ID = 115025
 HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS = frozenset({115025})
 VISION_PROVIDER_RETRY_RELEASE_ID = 115025
 HISTORICAL_COMPOSE_RECOVERY_ID = 114987
+HISTORICAL_SCHEMA_RECOVERY_ID = 115142
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -82,6 +83,224 @@ def _paragraph_structural_diff(before: str, after: str) -> list[str]:
     before_lines = [f"{item}\n" for item in re.findall(paragraph_re, before, re.IGNORECASE)]
     after_lines = [f"{item}\n" for item in re.findall(paragraph_re, after, re.IGNORECASE)]
     return list(difflib.unified_diff(before_lines, after_lines, fromfile="before", tofile="after"))
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _contains_unknown_localization_error(value: Any) -> bool:
+    """Recognize only the historical strict-schema failure, not any error."""
+    text = json.dumps(value, ensure_ascii=False).casefold()
+    return "localization" in text and "unknown" in text
+
+
+def repair_schema_115142(
+    client: Any,
+    config: Any,
+    root: Path | str,
+    *,
+    post_id: int,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Dry-run-first recovery for the exact 115142 schema contamination.
+
+    This is deliberately narrower than a generic schema migration: only the
+    historical post and only top-level operational keys are eligible.  The
+    function never calls an editorial/media provider and never writes post
+    content or attachments.
+    """
+    from .lock import RunSessionLock
+    from ..language import editorial_language_report
+
+    root_path = Path(root)
+    current = _as_utc(now)
+    result: dict[str, Any] = {
+        "command": "v2-repair-schema",
+        "post_id": post_id,
+        "apply": bool(apply),
+        "read_only": not apply,
+        "eligible": False,
+        "checks": {},
+    }
+    if post_id != HISTORICAL_SCHEMA_RECOVERY_ID:
+        result["reason"] = "post_id_not_allowlisted"
+        return result
+
+    lock = RunSessionLock(root_path / "work" / "v2-run.lock")
+    if not lock.acquire():
+        result["reason"] = "v2_run_locked"
+        return result
+    try:
+        post = client.get_post(post_id)
+        state = _read_state(post)
+        directory = root_path / "backups" / str(post_id)
+        draft_path = directory / "editorial.draft.json"
+        draft = _load_json_object(draft_path)
+        error = _load_json_object(directory / "editorial.error.json")
+        journal_path = root_path / "work" / "v2-journal" / f"{post_id}.json"
+        journal = _load_json_object(journal_path)
+        checks = result["checks"]
+        checks.update({
+            "wordpress_pending": post.get("status") == "pending",
+            "v2_signature": bool(
+                state is not None
+                and state.state is LifecycleState.PENDING
+                and state.phase is Phase.EDITORIAL
+                and state.blocker is BlockerCode.SCHEMA
+            ),
+            "historical_error": _contains_unknown_localization_error(error),
+            "journal_present": bool(journal),
+            "journal_post_id": journal.get("post_id") in {None, post_id},
+            "draft_present": bool(draft),
+            "retry_signature": bool(
+                state is not None
+                and state.retry.attempts == 1
+                and state.retry.phase_attempts == 1
+            ),
+        })
+        expected_inline = (115156, 115157, 115158, 115159, 115160, 115161)
+        actual_inline = tuple(item.media_id for item in state.media.inline) if state else ()
+        checks["accepted_media_signature"] = bool(
+            state is not None
+            and state.media.required == 6
+            and set(actual_inline) == set(expected_inline)
+            and len(actual_inline) == len(expected_inline)
+            and state.media.featured.status is FeaturedStatus.VALID
+            and state.media.featured.media_id == 115155
+        )
+        media_checks: list[dict[str, Any]] = []
+        for media_id in (*expected_inline, 115155):
+            try:
+                attachment = client.get_media(media_id)
+                source_url = str((attachment or {}).get("source_url") or "").strip()
+                details = (attachment or {}).get("media_details") or {}
+                mime = str(details.get("mime_type") or (attachment or {}).get("mime_type") or "").lower()
+                media_checks.append({
+                    "media_id": media_id,
+                    "valid": bool(source_url) and (
+                        mime == "image/webp" or source_url.lower().split("?", 1)[0].endswith(".webp")
+                    ),
+                    "source_url": source_url,
+                    "mime_type": mime or None,
+                })
+            except Exception as exc:  # noqa: BLE001 - audit one attachment at a time
+                media_checks.append({"media_id": media_id, "valid": False, "reason": str(exc)})
+        checks["attachments_valid"] = len(media_checks) == 7 and all(item["valid"] for item in media_checks)
+        result["attachments"] = media_checks
+
+        sanitized = dict(draft)
+        removed = {key: sanitized.pop(key) for key in ("decision", "localization") if key in sanitized}
+        checks["only_expected_fields_removed"] = bool(removed) and set(removed) <= {"decision", "localization"}
+        checks["removed_fields"] = sorted(removed)
+        try:
+            validated = validate_editorial(
+                sanitized,
+                min_confidence=float(getattr(config, "min_relevance_confidence", 0.8)),
+            )
+            checks["editorial_contract"] = True
+        except (EditorialValidationError, TypeError, ValueError) as exc:
+            validated = {}
+            checks["editorial_contract"] = False
+            result["editorial_error"] = str(exc)
+        checks["draft_hash"] = _html_hash(json.dumps(draft, ensure_ascii=False, sort_keys=True))
+        checks["sanitized_draft_hash"] = _html_hash(json.dumps(sanitized, ensure_ascii=False, sort_keys=True))
+        language = editorial_language_report(
+            title=str(sanitized.get("title") or (sanitized.get("seo") or {}).get("title") or ""),
+            content=str(sanitized.get("cleaned_html") or ""),
+            seo_title=str((sanitized.get("seo") or {}).get("title") or ""),
+            meta_description=str((sanitized.get("seo") or {}).get("meta_description") or ""),
+        )
+        checks["language_ok"] = bool(language.get("passed"))
+        checks["relevance_ok"] = bool(
+            isinstance(validated.get("site_relevance"), dict)
+            and validated["site_relevance"].get("decision") == "process"
+        )
+        checks["safe_signature"] = all(bool(checks.get(key)) for key in (
+            "wordpress_pending", "v2_signature", "historical_error", "journal_present",
+            "journal_post_id", "draft_present", "retry_signature", "accepted_media_signature",
+            "attachments_valid", "only_expected_fields_removed", "editorial_contract",
+            "language_ok", "relevance_ok",
+        ))
+        result["preserve"] = {
+            "attempts": state.retry.attempts if state else None,
+            "phase_attempts": state.retry.phase_attempts if state else None,
+            "inline_media_ids": list(actual_inline),
+            "featured_media_id": state.media.featured.media_id if state else None,
+        }
+        result["journal"] = {"path": str(journal_path), "status": journal.get("status"), "run_id": journal.get("run_id")}
+        result["language"] = language
+        result["diff"] = {"removed_top_level_fields": sorted(removed), "other_changes": []}
+        if not checks["safe_signature"] or state is None:
+            result["reason"] = "signature_or_checkpoints_not_verified"
+            return result
+
+        result["eligible"] = True
+        if not apply:
+            return result
+
+        latest_post = client.get_post(post_id)
+        latest_state = _read_state(latest_post)
+        latest_draft = _load_json_object(draft_path)
+        if (
+            latest_post.get("status") != "pending"
+            or latest_state != state
+            or _html_hash(json.dumps(latest_draft, ensure_ascii=False, sort_keys=True)) != checks["draft_hash"]
+        ):
+            result["eligible"] = False
+            result["reason"] = "changed_after_scan"
+            return result
+        operation_id = f"schema-115142-{checks['draft_hash'][:12]}"
+        backup_path = directory / f"editorial.draft.schema-recovery.{operation_id}.json"
+        if not backup_path.exists():
+            shutil.copy2(draft_path, backup_path)
+        reopened = replace(
+            state,
+            state=LifecycleState.PENDING,
+            phase=Phase.COMPOSE,
+            blocker=BlockerCode.SCHEMA,
+            retry=replace(state.retry, next_at=current.isoformat(timespec="seconds")),
+        )
+        meta = latest_post.get("meta") if isinstance(latest_post.get("meta"), dict) else None
+        if meta is None:
+            raise RuntimeError("post 115142 has no editable meta payload")
+        updated_meta = dict(meta)
+        updated_meta["_hermes_work_state"] = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        recovery_record = {
+            "operation_id": operation_id,
+            "post_id": post_id,
+            "reason": "historical_schema_localization_unknown",
+            "removed_top_level_fields": sorted(removed),
+            "original_draft_sha256": checks["draft_hash"],
+            "sanitized_draft_sha256": checks["sanitized_draft_hash"],
+            "preserved_media_ids": list(actual_inline),
+            "featured_media_id": state.media.featured.media_id,
+        }
+        try:
+            _atomic_json_file(draft_path, sanitized)
+            _atomic_json_file(root_path / "work" / "v2-recovery" / str(post_id) / f"{operation_id}.json", recovery_record)
+            client.update_post(post_id, {"meta": updated_meta})
+            verified = _read_state(client.get_post(post_id))
+            if verified != reopened:
+                raise RuntimeError("115142 schema recovery read-back mismatch")
+        except Exception:
+            shutil.copy2(backup_path, draft_path)
+            raise
+        result.update({
+            "reopened_state": reopened.to_dict(),
+            "readback": True,
+            "operation_id": operation_id,
+            "draft_backup": str(backup_path),
+            "draft_persisted": str(draft_path),
+        })
+        return result
+    finally:
+        lock.release()
 
 
 def _migrate_state(state: WorkState, now: datetime) -> WorkState | None:

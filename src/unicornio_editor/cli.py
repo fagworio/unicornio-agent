@@ -91,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     v2_run_parser = subparsers.add_parser("v2-run", help="executa uma sessão operacional V2")
     v2_run_parser.add_argument("--root", type=Path, default=Path("."))
     v2_run_parser.add_argument("--limit", type=int, default=1)
+    v2_run_parser.add_argument("--post-id", type=int, default=None, help="processa exclusivamente este post")
+    v2_run_parser.add_argument(
+        "--preview", action="store_true", help="mostra a seleção sem executar stages ou escrever"
+    )
 
     queue_parser.add_argument("--root", type=Path, default=Path("."))
     queue_parser.add_argument(
@@ -648,6 +652,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="reabre somente a meta V2 após reconstrução e readback do dry-run",
+    )
+
+    repair_schema_parser = subparsers.add_parser(
+        "v2-repair-schema",
+        help="audita/reabre somente o schema histórico allowlistado do 115142 (dry-run por padrão)",
+    )
+    repair_schema_parser.add_argument("--post-id", type=int, required=True)
+    repair_schema_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_schema_parser.add_argument(
+        "--apply", action="store_true", help="persiste somente draft sanitizado e meta PENDING/COMPOSE"
     )
 
     release_vision_retry_parser = subparsers.add_parser(
@@ -2197,7 +2211,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "v2-run":
             from .pipeline_v2.runtime import run_v2
 
-            result = run_v2(client, config, args.root, limit=int(args.limit))
+            result = run_v2(
+                client,
+                config,
+                args.root,
+                limit=int(args.limit),
+                post_id=getattr(args, "post_id", None),
+                preview=bool(getattr(args, "preview", False)),
+            )
         elif args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)
             if args.compact:
@@ -2289,6 +2310,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config,
                 args.root,
                 apply=bool(getattr(args, "apply", False)),
+            )
+
+        elif args.command == "v2-repair-schema":
+            from .pipeline_v2.migration import repair_schema_115142
+
+            result = repair_schema_115142(
+                client,
+                config,
+                args.root,
+                post_id=int(args.post_id),
+                apply=bool(args.apply),
             )
 
         elif args.command == "v2-release-vision-provider-retry":

@@ -1121,7 +1121,15 @@ class WordPressWriterV2:
         }
 
 
-def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
+def run_v2(
+    client,
+    config,
+    root: Path,
+    *,
+    limit: int = 1,
+    post_id: int | None = None,
+    preview: bool = False,
+) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
     lock = RunSessionLock(Path(root) / "work" / "v2-run.lock")
@@ -1159,7 +1167,18 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
             def load(self, post_id):
                 return self.states[post_id]
 
-        selected = select(candidates, _SnapshotStore(candidates), limit=limit)
+        requested_admission = None
+        requested_pending = None
+        requested_eligible = None
+        if post_id is not None:
+            requested_admission = any(candidate_id == post_id for candidate_id, _ in admitted)
+            requested_pending = any(candidate_id == post_id for candidate_id, _ in admitted_pending)
+            requested_eligible = any(candidate_id == post_id for candidate_id, _ in candidates)
+            # An explicit post request is never allowed to fall back to another
+            # queue item.  The same admission/cooldown filters still apply.
+            selected = [item for item in candidates if item[0] == post_id] if requested_eligible else []
+        else:
+            selected = select(candidates, _SnapshotStore(candidates), limit=limit)
         pending = [context for _post_id, context in admitted_pending]
         eligible_ids = {post_id for post_id, _context in candidates}
         cooldown = [
@@ -1216,6 +1235,40 @@ def run_v2(client, config, root: Path, *, limit: int = 1) -> dict[str, Any]:
                 if context["v2_state"].state.value == "pending"
             },
         }
+        if post_id is not None:
+            queue["requested_post_id"] = post_id
+            queue["requested_admitted"] = requested_admission
+            queue["requested_pending"] = requested_pending
+            queue["requested_eligible"] = requested_eligible
+            queue["request_reason"] = (
+                "eligible"
+                if requested_eligible
+                else "not_admitted"
+                if not requested_admission
+                else "state_not_pending"
+                if not requested_pending
+                else "cooldown_active"
+            )
+        if preview:
+            return {
+                "selected": len(selected),
+                "completed": 0,
+                "failed": 0,
+                "locked": False,
+                "preview": True,
+                "post_id": post_id,
+                "queue": queue,
+                "details": [
+                    {
+                        "post_id": selected_id,
+                        "state": context["v2_state"].state.value,
+                        "phase": context["v2_state"].phase.value,
+                        "blocker": context["v2_state"].blocker.value if context["v2_state"].blocker else None,
+                        "cooldown": context["v2_state"].retry.next_at,
+                    }
+                    for selected_id, context in selected
+                ],
+            }
         details = []
         completed = 0
         failed = 0

@@ -21,15 +21,33 @@ def rank(state: WorkState) -> int:
 
 
 def _cooldown_expired(value: str | None, now: datetime) -> bool:
+    return cooldown_status(value, now=now)["expired"]
+
+
+def cooldown_status(value: str | None, *, now: datetime | None = None) -> dict[str, object]:
+    """Return a timezone-safe, read-only interpretation of a retry cooldown."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
     if not value:
-        return True
+        return {"value": value, "valid": True, "active": False, "expired": True}
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return True
+        return {"value": value, "valid": False, "active": False, "expired": True}
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed <= now
+    parsed = parsed.astimezone(timezone.utc)
+    active = parsed > current
+    return {
+        "value": value,
+        "valid": True,
+        "active": active,
+        "expired": not active,
+        "next_at_utc": parsed.isoformat(),
+        "now_utc": current.isoformat(),
+    }
 
 
 def select(candidates, state_store, *, limit: int = 5, now: datetime | None = None):

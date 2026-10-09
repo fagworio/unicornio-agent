@@ -21,7 +21,7 @@ from .migration import (
 )
 from .model import LifecycleState, WorkState
 from .runtime import load_historical_cohort
-from .scheduler import next_action
+from .scheduler import cooldown_status, next_action
 
 
 def _utc_now(value: datetime | None = None) -> datetime:
@@ -370,15 +370,8 @@ def historical_cohort_report(
             or frozen.get("classification") == "admitted"
         )
         next_at = state.retry.next_at
-        cooldown_active = False
-        if next_at:
-            try:
-                parsed = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                cooldown_active = parsed > current
-            except (AttributeError, TypeError, ValueError):
-                cooldown_active = None
+        cooldown = cooldown_status(next_at, now=current)
+        cooldown_active = cooldown["active"]
         processable = bool(
             admission_authorized
             and wordpress_status == "pending"
@@ -416,7 +409,7 @@ def historical_cohort_report(
             "phase": state.phase.value,
             "blocker": state.blocker.value if state.blocker else None,
             "media": _media_diagnostics(state, row),
-            "cooldown": {"next_at": next_at, "active": cooldown_active},
+            "cooldown": {**cooldown, "next_at": next_at},
             "reevaluations": {
                 "attempts": state.retry.attempts,
                 "phase_attempts": state.retry.phase_attempts,
