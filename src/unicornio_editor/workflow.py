@@ -2680,7 +2680,7 @@ def _publish_post_unlocked(
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         stored = parse_manifest(meta.get(META_READY_MANIFEST))
         if manifest_matches(post, stored, state_info["ready_hash"], policy_version=config.policy_version):
-            return _publish_now(client, config, post_id, integrity="manifest_match")
+            return _publish_now(client, config, post_id, root=root, integrity="manifest_match")
         # STALE: algo mudou desde o preflight -> revalida com o checklist.
     editorial_path = root / "backups" / str(post_id) / "editorial.latest.json"
     if not editorial_path.is_file():
@@ -2754,7 +2754,7 @@ def _publish_post_unlocked(
             "checklist": checklist,
             "state": state,
         }
-    return _publish_now(client, config, post_id, integrity="revalidated")
+    return _publish_now(client, config, post_id, root=root, integrity="revalidated")
 
 
 def _publish_now(
@@ -2762,6 +2762,7 @@ def _publish_now(
     config: Config,
     post_id: int,
     *,
+    root: Path | None = None,
     integrity: str,
 ) -> dict[str, Any]:
     """Publica de fato e marca PUBLISHED (gate PUBLISH_ENABLED já verificado)."""
@@ -2789,15 +2790,27 @@ def _publish_now(
     from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase
     from .pipeline_v2.operational import WordPressStateBackend as _V2Backend
     from .pipeline_v2.state_store import StateStore as _V2Store
-    v2_post = client.get_post(post_id)
-    v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
-    if "_hermes_work_state" in v2_meta:
-        v2_store = _V2Store(_V2Backend(client))
-        v2_current = v2_store.load(post_id)
-        v2_store.mark_published(post_id, _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None))
-        v2_verified = v2_store.load(post_id)
-        if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
-            raise WorkflowError("V2 state read-back mismatch after publish")
+    try:
+        v2_post = client.get_post(post_id)
+        v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
+        if "_hermes_work_state" in v2_meta:
+            v2_store = _V2Store(_V2Backend(client))
+            v2_current = v2_store.load(post_id)
+            v2_store.mark_published(post_id, _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None))
+            v2_verified = v2_store.load(post_id)
+            if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
+                raise WorkflowError("V2 state read-back mismatch after publish")
+    except Exception as exc:
+        try:
+            append_telemetry(
+                root or Path("."),
+                "publish_v2_sync_failed",
+                post_id=post_id,
+                error=str(exc)[:200],
+            )
+        except Exception:  # noqa: BLE001 - telemetry must not hide the root failure
+            pass
+        raise
     return {
         "post_id": post_id,
         "wordpress_changed": True,

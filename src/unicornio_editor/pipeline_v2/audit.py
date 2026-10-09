@@ -55,8 +55,11 @@ def _state_from_inventory_row(row: dict[str, Any]) -> WorkState | None:
     return _read_state(row)
 
 
-def _media_diagnostics(state: WorkState) -> dict[str, Any]:
+def _media_diagnostics(state: WorkState, row: dict[str, Any] | None = None) -> dict[str, Any]:
     media = state.media
+    checklist = row.get("checklist_approved") if isinstance(row, dict) else None
+    if checklist is None and isinstance(row, dict) and isinstance(row.get("checklist"), dict):
+        checklist = row["checklist"].get("all_passed")
     return {
         "required": media.required,
         "accepted": media.accepted,
@@ -67,6 +70,8 @@ def _media_diagnostics(state: WorkState) -> dict[str, Any]:
         "enrichment_round": media.enrichment_round,
         "waiver_applied": media.waiver_applied,
         "waiver_reason": media.waiver_reason,
+        "featured_valid": media.featured.status.value == "valid",
+        "checklist_approved": checklist,
         "no_progress": state.retry.no_progress,
     }
 
@@ -96,7 +101,7 @@ def classify_human_required_row(
         }
 
     state = _state_from_inventory_row(row)
-    if state is None or state.blocker is None:
+    if state is None:
         return {
             "post_id": post_id,
             "category": "evidence_insufficient",
@@ -110,7 +115,7 @@ def classify_human_required_row(
         "post_id": post_id,
         "state": state.state.value,
         "phase": state.phase.value,
-        "blocker": state.blocker.value,
+        "blocker": state.blocker.value if state.blocker else None,
         "attempts": state.retry.attempts,
         "phase_attempts": state.retry.phase_attempts,
         "media": _media_diagnostics(state),
@@ -122,6 +127,14 @@ def classify_human_required_row(
             "category": "not_human_required",
             "signature": "state_not_terminal",
             "next_action": "leave_unchanged",
+        })
+        return result
+
+    if state.blocker is None:
+        result.update({
+            "category": "evidence_insufficient",
+            "signature": "human_required_without_blocker",
+            "next_action": "capture_complete_v2_state",
         })
         return result
 
@@ -241,12 +254,27 @@ def historical_cohort_report(
     for post_id, frozen in sorted(cohort.items()):
         row = inventory_by_id.get(post_id)
         state = _state_from_inventory_row(row) if row is not None else None
+        wordpress_status = None
+        if row is not None:
+            wordpress_status = row.get("wordpress_status", row.get("status"))
+            if wordpress_status is None and isinstance(row.get("wordpress"), dict):
+                wordpress_status = row["wordpress"].get("status")
+            if wordpress_status is not None:
+                wordpress_status = str(wordpress_status)
         if state is None:
             report_posts.append({
                 "post_id": post_id,
                 "original_datetime": frozen["original_datetime"].isoformat(),
                 "classification": frozen["classification"],
                 "eligibility": "allowlisted" if post_id in explicit_allowlist else frozen["classification"],
+                "wordpress_status": wordpress_status,
+                "v2_state": None,
+                "divergence": ["missing_or_invalid_v2_state"],
+                "eligibility_real": {
+                    "admission": "allowlisted" if post_id in explicit_allowlist else frozen["classification"],
+                    "processable": False,
+                    "reason": "missing_or_invalid_v2_state",
+                },
                 "evidence": "missing_or_invalid_state",
                 "state": None,
                 "phase": None,
@@ -260,6 +288,15 @@ def historical_cohort_report(
             })
             continue
 
+        v2_value = state.state.value
+        divergence: list[str] = []
+        if wordpress_status == "publish" and v2_value == LifecycleState.READY.value:
+            divergence.append("wordpress_publish_v2_ready")
+        elif wordpress_status == "publish" and v2_value != LifecycleState.PUBLISHED.value:
+            divergence.append("wordpress_publish_v2_not_published")
+        elif wordpress_status != "publish" and v2_value == LifecycleState.PUBLISHED.value:
+            divergence.append("v2_published_wordpress_not_publish")
+        admission = "allowlisted" if post_id in explicit_allowlist else frozen["classification"]
         next_at = state.retry.next_at
         cooldown_active = False
         if next_at:
@@ -270,16 +307,33 @@ def historical_cohort_report(
                 cooldown_active = parsed > current
             except (AttributeError, TypeError, ValueError):
                 cooldown_active = None
+        processable = state.state is LifecycleState.PENDING and cooldown_active is False
+        eligibility_reason = (
+            "pending_and_cooldown_inactive" if processable
+            else "state_not_pending" if state.state is not LifecycleState.PENDING
+            else "cooldown_active"
+        )
+        recommended_action = next_action(state)
+        if "wordpress_publish_v2_ready" in divergence:
+            recommended_action = "v2-reconcile-publication"
         report_posts.append({
             "post_id": post_id,
             "original_datetime": frozen["original_datetime"].isoformat(),
             "classification": frozen["classification"],
-            "eligibility": "allowlisted" if post_id in explicit_allowlist else frozen["classification"],
+            "eligibility": admission,
+            "eligibility_real": {
+                "admission": admission,
+                "processable": processable,
+                "reason": eligibility_reason,
+            },
+            "wordpress_status": wordpress_status,
+            "v2_state": v2_value,
+            "divergence": divergence,
             "evidence": "state_present",
             "state": state.state.value,
             "phase": state.phase.value,
             "blocker": state.blocker.value if state.blocker else None,
-            "media": _media_diagnostics(state),
+            "media": _media_diagnostics(state, row),
             "cooldown": {"next_at": next_at, "active": cooldown_active},
             "reevaluations": {
                 "attempts": state.retry.attempts,
@@ -287,7 +341,7 @@ def historical_cohort_report(
             },
             "ready": state.state is LifecycleState.READY,
             "published": state.state is LifecycleState.PUBLISHED,
-            "next_action": next_action(state),
+            "next_action": recommended_action,
         })
 
     return {

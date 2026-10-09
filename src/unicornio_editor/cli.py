@@ -596,6 +596,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="IDs explicitamente allowlisted, separados por virgula",
     )
 
+    audit_publication_parser = subparsers.add_parser(
+        "v2-audit-publication",
+        help="audita divergencia WordPress/V2 por IDs explícitos, somente leitura",
+    )
+    audit_publication_parser.add_argument("post_ids", nargs="+", type=int)
+
+    reconcile_publication_parser = subparsers.add_parser(
+        "v2-reconcile-publication",
+        help="reconcilia somente V2 READY já publicado no WordPress (dry-run por padrão)",
+    )
+    reconcile_publication_parser.add_argument("post_ids", nargs="+", type=int)
+    reconcile_publication_parser.add_argument("--root", type=Path, default=Path("."))
+    reconcile_publication_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="aplica somente a meta V2 PUBLISHED após validar manifest e readback",
+    )
+
     repair_media_funnel_parser = subparsers.add_parser(
         "v2-repair-media-funnel-invariant",
         help="reabre somente o estado histórico allowlistado de violação de conservação do funil",
@@ -2105,7 +2123,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "apply" and getattr(args, "dry_run", False):
             config = replace(config, dry_run=True)
         client = WordPressClient(config)
-        if args.command == "v2-shadow":
+        if args.command == "v2-audit-publication":
+            from .pipeline_v2.publication import audit_publication_posts
+
+            result = audit_publication_posts(
+                client,
+                list(args.post_ids),
+                policy_version=config.policy_version,
+            )
+        elif args.command == "v2-reconcile-publication":
+            from .pipeline_v2.publication import reconcile_published_v2
+
+            result = reconcile_published_v2(
+                client,
+                config,
+                args.root,
+                list(args.post_ids),
+                apply=bool(args.apply),
+            )
+        elif args.command == "v2-shadow":
             from .pipeline_v2.operational import run_shadow
 
             output_dir = args.output_dir or (args.root / "work" / "v2-shadow" / "snapshots")

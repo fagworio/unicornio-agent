@@ -96,6 +96,54 @@ def test_audit_does_not_treat_non_terminal_state_as_repairable(tmp_path):
     assert report["posts"][0]["repair"] is None
 
 
+def test_audit_classifies_valid_ready_and_published_states_as_not_human_required(tmp_path):
+    states = []
+    base = _state()
+    for lifecycle in (LifecycleState.PENDING, LifecycleState.READY, LifecycleState.PUBLISHED):
+        states.append({
+            "post_id": len(states) + 1,
+            "state": WorkState(
+                state=lifecycle,
+                phase=Phase.MEDIA,
+                blocker=None,
+                relevance_approved=lifecycle in (LifecycleState.READY, LifecycleState.PUBLISHED),
+                retry=base.retry,
+                media=base.media,
+            ).to_dict(),
+        })
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps(states), encoding="utf-8")
+
+    report = audit_human_required_inventory(inventory)
+
+    assert report["counts"] == {"not_human_required": 3}
+    assert all(item["blocker"] is None for item in report["posts"])
+
+
+def test_audit_distinguishes_human_required_without_blocker_from_invalid_state(tmp_path):
+    base = _state()
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps([
+        {
+            "post_id": 1,
+            "state": WorkState(
+                state=LifecycleState.HUMAN_REQUIRED,
+                phase=base.phase,
+                blocker=None,
+                retry=base.retry,
+                media=base.media,
+            ).to_dict(),
+        },
+        {"post_id": 2, "state": {"state": "not-a-lifecycle"}},
+    ]), encoding="utf-8")
+
+    report = audit_human_required_inventory(inventory)
+
+    assert report["counts"] == {"evidence_insufficient": 2}
+    assert report["posts"][0]["signature"] == "human_required_without_blocker"
+    assert report["posts"][1]["signature"] == "missing_or_invalid_work_state"
+
+
 def test_cohort_report_joins_frozen_ids_with_current_state_without_mutation(tmp_path):
     cohort = tmp_path / "cohort.json"
     cohort.write_text(
@@ -119,7 +167,12 @@ def test_cohort_report_joins_frozen_ids_with_current_state_without_mutation(tmp_
     )
     inventory = tmp_path / "inventory.json"
     inventory.write_text(
-        json.dumps({"posts": [{"post_id": 10, "state": ready.to_dict()}]}),
+        json.dumps({"posts": [{
+            "post_id": 10,
+            "status": "publish",
+            "checklist_approved": True,
+            "state": ready.to_dict(),
+        }]}),
         encoding="utf-8",
     )
 
@@ -134,4 +187,9 @@ def test_cohort_report_joins_frozen_ids_with_current_state_without_mutation(tmp_
     assert report["counts"] == {"ready": 1, "published": 0, "missing_state": 1}
     assert report["posts"][0]["ready"] is True
     assert report["posts"][0]["media"]["accepted"] == 2
+    assert report["posts"][0]["wordpress_status"] == "publish"
+    assert report["posts"][0]["v2_state"] == "ready"
+    assert report["posts"][0]["divergence"] == ["wordpress_publish_v2_ready"]
+    assert report["posts"][0]["next_action"] == "v2-reconcile-publication"
+    assert report["posts"][0]["media"]["checklist_approved"] is True
     assert report["posts"][1]["next_action"] == "capture_complete_v2_state"
