@@ -237,6 +237,21 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(statuses["media_duplicate_confirmed"], "pass")
         self.assertEqual(statuses["imagens_no_corpo"], "fail")
 
+    def test_listicle_does_not_exempt_final_duplicate_of_another_inline(self):
+        content = "<h2>1. Jogo A</h2><p>Descrição.</p><img src=\"https://media.example/other.webp\"><h2>2. Jogo B</h2><p>Descrição.</p><img src=\"https://media.example/crop.webp\">"
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 2, "accepted": [
+                {"media_id": 8, "media_url": "https://media.example/other.webp", "slot": 0, "sha256": "a", "phash": "b", "visual_group_id": "v:a", "visual_verification": {"decision": "DIFFERENT"}},
+                {"media_id": 9, "media_url": "https://media.example/crop.webp", "slot": 1, "sha256": "c", "phash": "d", "visual_group_id": "v:c", "visual_verification": {"decision": "SAME_ART_CROP", "duplicate_of": "8"}},
+            ]},
+            "featured": {"status": "valid", "media_id": 7, "media_url": "https://media.example/redfall-1280x720.webp", "sha256": "z", "phash": "y", "visual_group_id": "v:z", "visual_verification": {"decision": "INITIAL"}},
+        }
+        result = self._run_checklist(content=content, media_context=media_context)
+        statuses = self.statuses(result)
+        self.assertEqual(statuses["visual_identity_verified"], "fail")
+        self.assertEqual(statuses["media_duplicate_confirmed"], "fail")
+
     def test_html_semantics_rejects_internal_h1_and_heading_skip(self):
         content = "<h1>Título interno</h1><h3>Subseção</h3><p>Texto sobre videogame.</p>"
         result = self._run_checklist(content=content)

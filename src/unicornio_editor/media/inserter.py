@@ -59,16 +59,12 @@ def remove_media_urls(html: str, urls: list[str] | tuple[str, ...] | set[str]) -
     def contains_target(fragment: str) -> bool:
         return any(re.search(r"\bsrc\s*=\s*(['\"])" + re.escape(url) + r"\1", fragment, re.IGNORECASE) for url in targets)
 
-    output = re.sub(
-        r"<figure\b[^>]*>[\s\S]*?</figure>\s*",
-        lambda match: "" if contains_target(match.group(0)) else match.group(0),
-        html,
-        flags=re.IGNORECASE,
-    )
+    # A figure can legitimately contain gallery/credit markup and more than
+    # one image. Remove only the exact ``img`` nodes; never discard siblings.
     output = re.sub(
         r"<img\b[^>]*>\s*",
         lambda match: "" if contains_target(match.group(0)) else match.group(0),
-        output,
+        html,
         flags=re.IGNORECASE,
     )
     return output

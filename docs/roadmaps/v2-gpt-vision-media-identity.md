@@ -48,7 +48,9 @@ O primeiro não escreve. O segundo é dry-run por padrão; com `--apply` atualiz
 somente `_hermes_work_state` após materializar todos os fingerprints, comparar
 featured/inline e confirmar readback. Ele remove somente inline com decisão
 `SAME_IMAGE` ou `SAME_ART_CROP`, preserva a featured, tentativas e attachments
-globais. Um journal local e lock por post protegem o apply; o COMPOSE normal
+globais. Um journal local passa por `prepared` e só é marcado `confirmed` após
+o readback; o COMPOSE ignora journals pendentes ou que não correspondam ao
+estado V2 atual. Um lock por post protege o apply; o COMPOSE normal
 reconstrói o HTML pendente a partir da mídia restante. Não faz upload nem
 publica.
 
@@ -61,6 +63,10 @@ No COMPOSE, um journal de reconciliação remove do HTML pendente somente URLs
 explicitamente invalidadas antes de reposicionar a mídia válida. Isso impede a
 reinserção de uma figura já comprovadamente duplicada, sem alterar posts
 publicados ou a Media Library.
+
+Em listicles, uma duplicata visual só pode permanecer se estiver na última
+posição editorial **e** sua decisão apontar explicitamente `duplicate_of` para
+o `media_id` da featured. Ela nunca contribui para a cota inline.
 
 ## Policy
 

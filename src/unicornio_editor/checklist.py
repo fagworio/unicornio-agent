@@ -357,10 +357,18 @@ def run_pre_publish_checklist(
         # remains outside the image quota but is not an identity-gate failure.
         permitted_list_repeat = False
         permitted_duplicate_ids: set[int] = set()
-        if is_list and len(confirmed_duplicates) == 1 and img_items:
+        if (
+            is_list and len(confirmed_duplicates) == 1 and img_items
+            and isinstance(featured_payload, Mapping)
+            and featured_payload.get("media_id") is not None
+        ):
             duplicate = confirmed_duplicates[0]
             duplicate_url = _canonical_image_url(str(duplicate.get("media_url") or ""))
-            permitted_list_repeat = duplicate_url == _canonical_image_url(str(img_items[-1].get("src") or ""))
+            duplicate_of = str((duplicate.get("visual_verification") or {}).get("duplicate_of") or "")
+            permitted_list_repeat = (
+                duplicate_of == str(featured_payload["media_id"])
+                and duplicate_url == _canonical_image_url(str(img_items[-1].get("src") or ""))
+            )
             if permitted_list_repeat and duplicate.get("media_id") is not None:
                 permitted_duplicate_ids.add(int(duplicate["media_id"]))
         missing_identity = [

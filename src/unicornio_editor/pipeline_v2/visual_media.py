@@ -160,11 +160,15 @@ def reconcile_visual_media(client: Any, config: Any, root: Path, post_id: int, *
         journal_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             journal_dir / f"{post_id}.json",
-            json.dumps({"previous": previous.to_dict(), "proposed": proposed.to_dict(), "duplicates": report["duplicates"]}, ensure_ascii=False, indent=2),
+            json.dumps({"status": "prepared", "previous": previous.to_dict(), "proposed": proposed.to_dict(), "duplicates": report["duplicates"]}, ensure_ascii=False, indent=2),
         )
         store.commit(post_id, proposed)
         if store.load(post_id).to_dict() != proposed.to_dict():
             raise RuntimeError("visual reconciliation state readback mismatch")
+        atomic_write_text(
+            journal_dir / f"{post_id}.json",
+            json.dumps({"status": "confirmed", "previous": previous.to_dict(), "proposed": proposed.to_dict(), "duplicates": report["duplicates"]}, ensure_ascii=False, indent=2),
+        )
     append_telemetry(root, "v2_visual_media_reconciled", post_id=post_id, duplicates=len(duplicate_ids), effective_missing=proposed.media.missing)
     report.update({"writes": 1, "readback": True, "invalid_media": report["duplicates"], "effective_missing": proposed.media.missing})
     return report

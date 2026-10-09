@@ -44,14 +44,35 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     return target
 
 
-def _visual_reconcile_urls(root: Path, post_id: int) -> list[str]:
+def _visual_reconcile_urls(root: Path, post_id: int, media: MediaProgress) -> list[str]:
     """Explicit URLs invalidated by a completed local visual reconciliation."""
     path = Path(root) / "work" / "v2-visual-reconcile" / f"{post_id}.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    rows = value.get("duplicates") if isinstance(value, dict) else []
+    if not isinstance(value, dict) or value.get("status") != "confirmed":
+        return []
+    proposed = value.get("proposed")
+    proposed_media = proposed.get("media") if isinstance(proposed, dict) else None
+    # Do not consume a prepared/stale journal. The current state must retain
+    # the reconciled media shape (it may have gained new valid inline assets).
+    if not isinstance(proposed_media, dict):
+        return []
+    expected_ids = {
+        int(item.get("media_id"))
+        for item in ((proposed_media.get("inline") or {}).get("accepted") or [])
+        if isinstance(item, dict) and item.get("media_id") is not None
+    }
+    current_ids = {item.media_id for item in media.inline}
+    invalid_ids = {
+        int(row.get("media_id"))
+        for row in (value.get("duplicates") or [])
+        if isinstance(row, dict) and row.get("media_id") is not None
+    }
+    if not expected_ids.issubset(current_ids) or invalid_ids.intersection(current_ids):
+        return []
+    rows = value.get("duplicates")
     return [str(row.get("media_url") or "") for row in rows if isinstance(row, dict) and row.get("media_url")]
 
 
@@ -390,7 +411,7 @@ class ProductionComposeStage:
             )
             existing_html = remove_media_urls(
                 existing_html,
-                _visual_reconcile_urls(self.root, int(context["post_id"])),
+                _visual_reconcile_urls(self.root, int(context["post_id"]), media),
             )
             featured_url = str(media.featured.media_url or "").strip()
             seen_urls: set[str] = set()

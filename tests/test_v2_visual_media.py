@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from PIL import Image
 
@@ -10,6 +11,7 @@ from unicornio_editor.pipeline_v2.operational import WordPressStateBackend
 from unicornio_editor.pipeline_v2.state_store import StateStore
 from unicornio_editor.pipeline_v2.visual_media import audit_visual_media, reconcile_visual_media
 from unicornio_editor.media.inserter import remove_media_urls
+from unicornio_editor.pipeline_v2.production_stages import _visual_reconcile_urls
 
 
 class Client:
@@ -65,6 +67,8 @@ def test_reconcile_removes_only_sha_proven_duplicates(monkeypatch, tmp_path: Pat
     assert state.media.inline == ()
     assert state.media.featured.media_id == 115130
     assert state.media.missing == 4
+    journal = json.loads((tmp_path / "work" / "v2-visual-reconcile" / "114838.json").read_text())
+    assert journal["status"] == "confirmed"
 
 
 def test_reconcile_is_dry_run_by_default(monkeypatch, tmp_path: Path):
@@ -80,8 +84,23 @@ def test_reconcile_is_dry_run_by_default(monkeypatch, tmp_path: Path):
 
 
 def test_controlled_html_cleanup_removes_only_explicit_duplicate_url():
-    html = '<p>Texto.</p><figure><img src="https://wp.test/115131.webp"><figcaption>dup</figcaption></figure><p>Fim.</p><img src="https://wp.test/keep.webp">'
+    html = '<p>Texto.</p><figure><img src="https://wp.test/115131.webp"><img src="https://wp.test/keep.webp"><figcaption>legenda</figcaption></figure><p>Fim.</p>'
     output = remove_media_urls(html, {"https://wp.test/115131.webp"})
     assert "115131.webp" not in output
     assert "keep.webp" in output
-    assert "Texto." in output and "Fim." in output
+    assert "Texto." in output and "Fim." in output and "legenda" in output
+
+
+def test_compose_ignores_unconfirmed_or_stale_visual_journal(tmp_path: Path):
+    path = tmp_path / "work" / "v2-visual-reconcile"
+    path.mkdir(parents=True)
+    payload = {
+        "status": "prepared",
+        "proposed": {"media": MediaProgress(required=2).to_dict()},
+        "duplicates": [{"media_id": 9, "media_url": "https://wp.test/duplicate.webp"}],
+    }
+    (path / "42.json").write_text(json.dumps(payload))
+    assert _visual_reconcile_urls(tmp_path, 42, MediaProgress(required=2)) == []
+    payload["status"] = "confirmed"
+    (path / "42.json").write_text(json.dumps(payload))
+    assert _visual_reconcile_urls(tmp_path, 42, MediaProgress(required=2)) == ["https://wp.test/duplicate.webp"]
