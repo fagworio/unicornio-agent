@@ -1855,6 +1855,8 @@ def _execute_media_plan(
     preflight: dict[str, Any] | None = None,
     post_id: int | None = None,
     previous_inline_phashes: list[str] | tuple[str, ...] = (),
+    previous_inline_visual_assets: list[dict[str, Any]] | None = None,
+    featured_visual_asset: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -2030,6 +2032,36 @@ def _execute_media_plan(
     if pending:
         with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
             tmp = Path(directory)
+            # Materialise existing accepted media once.  The dictionaries are
+            # intentionally updated in place so the caller can persist legacy
+            # baseline fingerprints in the V2 state after this run.
+            visual_baseline: list[dict[str, Any]] = []
+            visual_baseline_unavailable = False
+            for asset in [*(previous_inline_visual_assets or []), *([featured_visual_asset] if featured_visual_asset else [])]:
+                if not isinstance(asset, dict):
+                    continue
+                row = asset
+                try:
+                    if not row.get("sha256") or not row.get("phash"):
+                        url = str(row.get("media_url") or "")
+                        if not url:
+                            raise ValueError("missing media URL")
+                        baseline_file = download_image(url, tmp / f"baseline_{row.get('media_id') or len(visual_baseline)}.img", url_policy=config.remote_url_policy)
+                        from .media.visual_identity import fingerprint_path
+                        identity = fingerprint_path(baseline_file)
+                        row.update(identity.to_dict())
+                        row["local_path"] = str(baseline_file)
+                    elif row.get("local_path") and Path(str(row["local_path"])).is_file():
+                        pass
+                    else:
+                        baseline_file = download_image(str(row.get("media_url") or ""), tmp / f"baseline_{row.get('media_id') or len(visual_baseline)}.img", url_policy=config.remote_url_policy)
+                        row["local_path"] = str(baseline_file)
+                    visual_baseline.append(row)
+                    if row.get("phash"):
+                        accepted_final_phashes.add(str(row["phash"]))
+                except Exception as exc:  # fail closed for an identity baseline
+                    visual_baseline_unavailable = True
+                    append_telemetry(root, "visual_identity_baseline_unavailable", post_id=post_id, media_id=row.get("media_id"), error=type(exc).__name__)
 
             def _process_item(pair: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
                 position, item = pair
@@ -2127,8 +2159,29 @@ def _execute_media_plan(
                             "status": "rejected",
                             "detail": "duplicate_existing_frame",
                         }
-                    if final_phash:
-                        accepted_final_phashes.add(final_phash)
+                    from .media.visual_identity import VisualIdentity, VisualIdentityDecision, verify_candidate_identity
+                    try:
+                        identity, visual = verify_candidate_identity(
+                            webp, candidate_id=str(item.get("candidate_id") or position),
+                            baseline=visual_baseline, config=config, root=root,
+                        )
+                    except Exception as exc:
+                        # A first asset has no duplicate baseline.  Keep the
+                        # historical upload contract resilient to a transient
+                        # local fingerprinting failure, but never use that
+                        # escape when a baseline needs comparison.
+                        if visual_baseline or visual_baseline_unavailable:
+                            return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{type(exc).__name__}"}
+                        identity = VisualIdentity("", str(final_phash or ""), "")
+                        visual = VisualIdentityDecision("INITIAL", True, reason="initial_identity_pending")
+                    if visual_baseline_unavailable:
+                        visual = type(visual)("UNVERIFIED", False, reason="baseline_identity_unavailable")
+                    if not visual.verified:
+                        _funnel("visual_identity", "rejected", item, position, visual.reason)
+                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{visual.reason}"}
+                    if visual.decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
+                        _funnel("visual_identity", "rejected", item, position, visual.reason)
+                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "duplicate_existing_frame"}
                 media = upload_image(client, webp, evidence)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
@@ -2152,6 +2205,8 @@ def _execute_media_plan(
                         subject=str(item.get("subject") or "") or subject_idx,
                         media_id=int(media_id),
                         article_id=int(post_id) if post_id else None,
+                        sha256=identity.sha256,
+                        visual_group_id=identity.visual_group_id,
                     )
                 except (OSError, ValueError) as exc:
                     try:
@@ -2175,6 +2230,11 @@ def _execute_media_plan(
                         {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
                     )
                 _funnel("upload", "passed", item, position)
+                visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
+                if identity.sha256:
+                    visual_baseline.append({**identity.to_dict(), "media_id": int(media_id), "media_url": str(media_url), "local_path": str(webp)})
+                if final_phash:
+                    accepted_final_phashes.add(final_phash)
                 return position, {
                     "paragraph_index": item["paragraph_index"],
                     "media_id": media_id,
@@ -2190,36 +2250,26 @@ def _execute_media_plan(
                     "height": height,
                     "transparency": transparency,
                     "phash": final_phash,
+                    "sha256": identity.sha256,
+                    "visual_group_id": identity.visual_group_id,
+                    "visual_verification": visual_record,
                 }
 
+            # Visual identity has a mutable accepted baseline.  Process serially:
+            # this is stronger than an in-memory reservation and prevents two
+            # workers accepting the same artwork before either upload completes.
             # Fase paralela (I/O-bound). Somente falha ao CRIAR o executor cai
             # para serial: nessa altura ainda não há download nem upload. Uma
             # falha dentro de worker vira rejeição daquele item; reexecutar o
             # lote inteiro duplicaria anexos que já foram enviados.
-            try:
-                pool = ThreadPoolExecutor(max_workers=_MEDIA_WORKERS)
-            except Exception:
-                processed = [_process_item(pair) for pair in pending]
-            else:
-                with pool:
-                    futures = [(pair, pool.submit(_process_item, pair)) for pair in pending]
-                    processed = []
-                    for pair, future in futures:
-                        position, item = pair
-                        try:
-                            processed.append(future.result())
-                        except Exception as exc:  # noqa: BLE001 - report one failed item
-                            _funnel("worker", "error", item, position, str(exc))
-                            processed.append(
-                                (
-                                    position,
-                                    {
-                                        "paragraph_index": item.get("paragraph_index"),
-                                        "status": "error",
-                                        "detail": f"processamento de midia: {str(exc)[:160]}",
-                                    },
-                                )
-                            )
+            processed = []
+            for pair in pending:
+                position, item = pair
+                try:
+                    processed.append(_process_item(pair))
+                except Exception as exc:  # noqa: BLE001 - report one failed item
+                    _funnel("worker", "error", item, position, str(exc))
+                    processed.append((position, {"paragraph_index": item.get("paragraph_index"), "status": "error", "detail": f"processamento de midia: {str(exc)[:160]}"}))
 
             for position, result in processed:
                 outcomes[position] = result

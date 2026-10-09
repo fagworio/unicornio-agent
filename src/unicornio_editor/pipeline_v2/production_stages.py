@@ -290,6 +290,8 @@ class ProductionMediaStage:
                     preflight=checked,
                     post_id=int(context["post_id"]),
                     previous_inline_phashes=tuple(item.phash for item in previous.inline if item.phash),
+                    previous_inline_visual_assets=[item.to_dict() for item in previous.inline],
+                    featured_visual_asset=previous.featured.to_dict(),
                 )
                 inline = tuple(
                     InlineMedia(
@@ -305,6 +307,9 @@ class ProductionMediaStage:
                         int(row.get("width") or 1200),
                         int(row.get("height") or 800),
                         str(row.get("phash") or ""),
+                        str(row.get("sha256") or ""),
+                        str(row.get("visual_group_id") or ""),
+                        dict(row.get("visual_verification") or {}),
                     )
                     for row in results
                     if row.get("status") in {"accepted", "ok"}
@@ -312,7 +317,12 @@ class ProductionMediaStage:
                     and not row.get("featured")
                 )
                 inline = tuple(accepted.values()) + tuple(item for item in inline if item.media_id not in accepted)
-                fp = FeaturedProgress(FeaturedStatus.VALID, featured_id, str(next((row.get("media_url") for row in results if row.get("featured") and row.get("media_id")), "") or "")) if featured_id else featured
+                featured_row = next((row for row in results if row.get("featured") and row.get("media_id")), {})
+                fp = FeaturedProgress(
+                    FeaturedStatus.VALID, featured_id, str(featured_row.get("media_url") or ""),
+                    str(featured_row.get("sha256") or ""), str(featured_row.get("phash") or ""),
+                    str(featured_row.get("visual_group_id") or ""), dict(featured_row.get("visual_verification") or {}),
+                ) if featured_id else featured
                 media = MediaProgress(required=required, inline=inline, featured=fp, search=previous.search)
             if getattr(state, "phase", None) is Phase.MEDIA and media.enrichment_round <= previous.enrichment_round:
                 media = replace(

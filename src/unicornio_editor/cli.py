@@ -670,6 +670,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     release_vision_retry_parser.add_argument("--root", type=Path, default=Path("."))
     release_vision_retry_parser.add_argument("--apply", action="store_true")
+    visual_audit_parser = subparsers.add_parser(
+        "v2-audit-visual-media", help="audita somente leitura a identidade visual V2 de um post"
+    )
+    visual_audit_parser.add_argument("--post-id", type=int, required=True)
+    visual_audit_parser.add_argument("--root", type=Path, default=Path("."))
+    visual_reconcile_parser = subparsers.add_parser(
+        "v2-reconcile-visual-media", help="materializa fingerprints V2; dry-run por padrão"
+    )
+    visual_reconcile_parser.add_argument("--post-id", type=int, required=True)
+    visual_reconcile_parser.add_argument("--root", type=Path, default=Path("."))
+    visual_reconcile_parser.add_argument("--apply", action="store_true")
     reconcile_parser = subparsers.add_parser(
         "reconcile",
         help="compara status WP x _hermes_state x artefatos do filesystem "
@@ -2188,6 +2199,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 list(args.post_ids),
                 apply=bool(args.apply),
             )
+        elif args.command in {"v2-audit-visual-media", "v2-reconcile-visual-media"}:
+            from .pipeline_v2.visual_media import audit_visual_media, reconcile_visual_media
+            if args.command == "v2-audit-visual-media":
+                result = audit_visual_media(client, args.root, int(args.post_id))
+            else:
+                result = reconcile_visual_media(client, args.root, int(args.post_id), apply=bool(args.apply))
         elif args.command == "v2-repair-lost-ready-hash":
             from .pipeline_v2.publication import repair_lost_ready_hash
 

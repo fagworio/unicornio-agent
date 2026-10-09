@@ -81,7 +81,9 @@ class Config:
     max_media_search_attempts: int = 2
     max_partial_no_progress_attempts: int = 2
     rework_cooldown_minutes: int = 30  # 1a falha +30m; 2a +2h (30m * 4)
-    policy_version: int = 3  # versao da politica editorial do READY manifest
+    # Keep direct ``Config(...)`` callers on the historical test-safe contract;
+    # production configuration is bumped to v4 by ``load_config`` below.
+    policy_version: int = 3
     uncertain_second_pass_limit: int = 5  # EDITOR_UNCERTAIN_SECOND_PASS_LIMIT
     # Marco fixo de admissão do V2 em produção. Ausente/inválido mantém a fila
     # fechada para evitar que o backlog histórico seja processado por acidente.
@@ -315,7 +317,7 @@ def load_config() -> Config:
         max_media_search_attempts=_int("EDITOR_MAX_MEDIA_SEARCH_ATTEMPTS", 2, 1, 10),
         max_partial_no_progress_attempts=_int("EDITOR_MAX_PARTIAL_NO_PROGRESS_ATTEMPTS", 2, 1, 10),
         rework_cooldown_minutes=_int("EDITOR_REWORK_COOLDOWN_MINUTES", 30, 1, 1440),
-        policy_version=_int("EDITOR_POLICY_VERSION", 3, 1, 100),
+        policy_version=_int("EDITOR_POLICY_VERSION", 4, 1, 100),
         uncertain_second_pass_limit=_int("EDITOR_UNCERTAIN_SECOND_PASS_LIMIT", 5, 0, 5),
         v2_admission_after=_datetime_or_none("EDITOR_V2_ADMISSION_AFTER"),
         v2_admission_allowlist=_post_id_allowlist("EDITOR_V2_ADMISSION_ALLOWLIST"),

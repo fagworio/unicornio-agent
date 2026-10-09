@@ -473,7 +473,7 @@ class ProductionMediaResolver:
 
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Execute one candidate batch and merge only final accepted media."""
-            nonlocal current_featured
+            nonlocal current_featured, current_inline
             if not plan:
                 return []
             try:
@@ -508,6 +508,8 @@ class ProductionMediaResolver:
                     str(vision_errors[0].get("reason") or "vision provider error")
                 )
             try:
+                baseline_inline_assets = [item.to_dict() for item in current_inline]
+                baseline_featured_asset = current_featured.to_dict()
                 results, _featured_id, _featured_credit = _execute_media_plan(
                     {**editorial, "media_plan": plan},
                     self.config,
@@ -518,6 +520,8 @@ class ProductionMediaResolver:
                     previous_inline_phashes=tuple(
                         item.phash for item in current_inline if item.phash
                     ),
+                    previous_inline_visual_assets=baseline_inline_assets,
+                    featured_visual_asset=baseline_featured_asset,
                 )
             finally:
                 from ..media.google_browser import cleanup_browser_artifacts
@@ -542,13 +546,40 @@ class ProductionMediaResolver:
                         int(result.get("width") or 1200),
                         int(result.get("height") or 800),
                         str(result.get("phash") or ""),
+                        str(result.get("sha256") or ""),
+                        str(result.get("visual_group_id") or ""),
+                        dict(result.get("visual_verification") or {}),
                     ))
                 if result.get("featured") and result.get("media_id"):
                     current_featured = FeaturedProgress(
                         FeaturedStatus.VALID,
                         int(result["media_id"]),
                         str(result.get("media_url") or ""),
+                        str(result.get("sha256") or ""),
+                        str(result.get("phash") or ""),
+                        str(result.get("visual_group_id") or ""),
+                        dict(result.get("visual_verification") or {}),
                     )
+            # Persist identity materialised for legacy accepted assets too.
+            by_id = {int(row.get("media_id")): row for row in baseline_inline_assets if row.get("media_id")}
+            current_inline = [
+                item if not by_id.get(item.media_id) else InlineMedia(
+                    item.media_id, item.media_url, item.slot, item.alt_text, item.credit_text,
+                    item.subject, item.item_number, item.section_heading, item.section_slot,
+                    item.width, item.height, str(by_id[item.media_id].get("phash") or item.phash),
+                    str(by_id[item.media_id].get("sha256") or item.sha256),
+                    str(by_id[item.media_id].get("visual_group_id") or item.visual_group_id),
+                    dict(by_id[item.media_id].get("visual_verification") or item.visual_verification),
+                ) for item in current_inline
+            ]
+            if current_featured.status is FeaturedStatus.VALID:
+                current_featured = FeaturedProgress(
+                    current_featured.status, current_featured.media_id, current_featured.media_url,
+                    str(baseline_featured_asset.get("sha256") or current_featured.sha256),
+                    str(baseline_featured_asset.get("phash") or current_featured.phash),
+                    str(baseline_featured_asset.get("visual_group_id") or current_featured.visual_group_id),
+                    dict(baseline_featured_asset.get("visual_verification") or current_featured.visual_verification),
+                )
             # Crash-safe incremental progress: an accepted asset is durable
             # before the resolver moves on to the next candidate/query.
             _write_v2_media_checkpoint(

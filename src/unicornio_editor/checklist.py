@@ -339,6 +339,28 @@ def run_pre_publish_checklist(
                 if isinstance(item, Mapping)
             ]
 
+    # Policy v4: media accepted after visual-identity rollout must carry a
+    # durable identity and a positive (INITIAL/DIFFERENT) verification.  The
+    # marker keeps historical serialized states backward compatible until the
+    # resolver has materialised their attachment fingerprints.
+    if isinstance(media_context, Mapping) and int(media_context.get("visual_identity_policy") or 0) >= 4:
+        identity_assets = [*inline_assets]
+        featured_payload = media_context.get("featured")
+        if isinstance(featured_payload, Mapping) and featured_payload.get("status") == "valid":
+            identity_assets.append(featured_payload)
+        missing_identity = [
+            str(asset.get("media_id") or "?") for asset in identity_assets
+            if not (
+                asset.get("sha256") and asset.get("phash") and asset.get("visual_group_id")
+                and str((asset.get("visual_verification") or {}).get("decision") or "") in {"INITIAL", "DIFFERENT"}
+            )
+        ]
+        check(
+            "visual_identity_verified",
+            not missing_identity,
+            "identidade visual persistida" if not missing_identity else "mídia sem identidade visual verificável: " + ", ".join(missing_identity),
+        )
+
     def _asset_descriptor(url: str, ordinal: int) -> dict[str, Any]:
         clean_url = str(url or "").strip()
         base_url = clean_url.split("?", 1)[0]

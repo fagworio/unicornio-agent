@@ -108,18 +108,36 @@ class FeaturedProgress:
     status: FeaturedStatus = FeaturedStatus.MISSING
     media_id: int | None = None
     media_url: str | None = None
+    # Identity is part of the accepted V2 state.  Older checkpoints simply
+    # deserialize with empty values and are materialised lazily by the media
+    # resolver before they can be used as a visual baseline.
+    sha256: str = ""
+    phash: str = ""
+    visual_group_id: str = ""
+    visual_verification: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, FeaturedStatus):
             object.__setattr__(self, "status", FeaturedStatus(self.status))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"status": self.status.value, "media_id": self.media_id, "media_url": self.media_url}
+        return {
+            "status": self.status.value, "media_id": self.media_id,
+            "media_url": self.media_url, "sha256": self.sha256,
+            "phash": self.phash, "visual_group_id": self.visual_group_id,
+            "visual_verification": self.visual_verification,
+        }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "FeaturedProgress":
         value = value or {}
-        return cls(value.get("status", "missing"), value.get("media_id"), value.get("media_url"))
+        verification = value.get("visual_verification")
+        return cls(
+            value.get("status", "missing"), value.get("media_id"), value.get("media_url"),
+            str(value.get("sha256") or ""), str(value.get("phash") or ""),
+            str(value.get("visual_group_id") or ""),
+            dict(verification) if isinstance(verification, dict) else {},
+        )
 
 
 @dataclass(frozen=True)
@@ -202,6 +220,9 @@ class InlineMedia:
     width: int = 1200
     height: int = 800
     phash: str = ""
+    sha256: str = ""
+    visual_group_id: str = ""
+    visual_verification: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.media_id < 1 or self.slot < 0:
@@ -225,6 +246,9 @@ class InlineMedia:
             "width": self.width,
             "height": self.height,
             "phash": self.phash,
+            "sha256": self.sha256,
+            "visual_group_id": self.visual_group_id,
+            "visual_verification": self.visual_verification,
         }
 
     @classmethod
@@ -244,6 +268,9 @@ class InlineMedia:
             int(value.get("width", 1200)),
             int(value.get("height", 800)),
             str(value.get("phash") or ""),
+            str(value.get("sha256") or ""),
+            str(value.get("visual_group_id") or ""),
+            dict(value.get("visual_verification") or {}),
         )
 
 
@@ -295,6 +322,7 @@ class MediaProgress:
                 "applied": self.waiver_applied,
                 "reason": self.waiver_reason,
             },
+            "visual_identity_policy": 4,
         }
 
     @classmethod

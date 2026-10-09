@@ -80,6 +80,8 @@ def register(
     subject: str = "",
     media_id: int | None = None,
     article_id: int | None = None,
+    sha256: str = "",
+    visual_group_id: str = "",
 ) -> None:
     """Registra um upload (ou reaproveitamento) no índice."""
     if not (phash or source_url or subject):
@@ -87,7 +89,8 @@ def register(
     with _LOCK:
         _registrar_sem_lock(root, phash=phash, source_url=source_url,
                             source_page=source_page, subject=subject,
-                            media_id=media_id, article_id=article_id)
+                            media_id=media_id, article_id=article_id,
+                            sha256=sha256, visual_group_id=visual_group_id)
 
 
 def _registrar_sem_lock(
@@ -99,6 +102,8 @@ def _registrar_sem_lock(
     subject: str = "",
     media_id: int | None = None,
     article_id: int | None = None,
+    sha256: str = "",
+    visual_group_id: str = "",
 ) -> None:
     dados = load_index(root)
     entradas = dados["entries"]
@@ -107,6 +112,10 @@ def _registrar_sem_lock(
             entrada.update({"phash": phash or entrada.get("phash", ""),
                             "source_page": source_page or entrada.get("source_page", ""),
                             "subject": subject or entrada.get("subject", "")})
+            if sha256:
+                entrada["sha256"] = sha256
+            if visual_group_id:
+                entrada["visual_group_id"] = visual_group_id
             if media_id:
                 entrada["media_id"] = media_id
             _salvar(root, dados)
@@ -119,6 +128,8 @@ def _registrar_sem_lock(
         "media_id": media_id,
         "article_id": article_id,
         "uses": 1,
+        "sha256": sha256,
+        "visual_group_id": visual_group_id,
     })
     _salvar(root, dados)
 

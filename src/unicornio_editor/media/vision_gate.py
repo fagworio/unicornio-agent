@@ -29,6 +29,7 @@ import json
 import re
 import tempfile
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -42,6 +43,35 @@ class VisionGateError(RuntimeError):
 
 class VisionInputUnavailable(RuntimeError):
     """Raised when one candidate cannot be materialized for vision."""
+
+
+VISUAL_DECISIONS = ("SAME_IMAGE", "SAME_ART_CROP", "DIFFERENT", "UNCERTAIN", "ERROR")
+
+
+@dataclass(frozen=True)
+class VisualComparison:
+    """A pixel-only comparison.  ``duplicate`` is deliberately conservative."""
+
+    decision: str
+    confidence: float
+    reference_id: str = ""
+    candidate_id: str = ""
+    reason: str = ""
+
+    @property
+    def duplicate(self) -> bool:
+        return self.decision in {"SAME_IMAGE", "SAME_ART_CROP"}
+
+    @property
+    def verified_different(self) -> bool:
+        return self.decision == "DIFFERENT"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision, "confidence": self.confidence,
+            "reference_id": self.reference_id, "candidate_id": self.candidate_id,
+            "reason": self.reason,
+        }
 
 
 # status allowed by the model.
@@ -88,6 +118,18 @@ def _image_data_url_from_bytes(data: bytes) -> str:
         raise VisionInputUnavailable("image MIME type is unsupported")
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def prepare_vision_image_input_from_path(path: str | Path) -> str:
+    """Return a data URL from already materialised image bytes.
+
+    Visual identity must compare the exact converted WebP bytes that will be
+    uploaded, never a remote URL which may later serve different pixels.
+    """
+    try:
+        return _image_data_url_from_bytes(Path(path).read_bytes())
+    except OSError as exc:
+        raise VisionInputUnavailable("image file is unavailable") from exc
 
 
 def _data_url_bytes(value: str) -> bytes | None:
@@ -354,6 +396,102 @@ def _call_vision(
     return _parse_response(answer)
 
 
+_VISUAL_COMPARISON_SYSTEM_PROMPT = (
+    "You compare TWO images using pixels only. Ignore filenames, URLs, ALT text, "
+    "captions and any external knowledge. Return ONLY JSON with decision, confidence "
+    "and reason. decision must be SAME_IMAGE (same underlying image), SAME_ART_CROP "
+    "(same artwork/frame but crop/resize/format differs), DIFFERENT, UNCERTAIN, or ERROR."
+)
+
+
+def _parse_visual_comparison(text: str, *, reference_id: str, candidate_id: str) -> VisualComparison:
+    try:
+        value = json.loads((text or "").strip())
+    except ValueError as exc:
+        raise VisionGateError("resposta de comparacao visual nao e JSON") from exc
+    decision = str(value.get("decision") or "").upper()
+    confidence = value.get("confidence")
+    if decision not in VISUAL_DECISIONS:
+        raise VisionGateError(f"decisao visual desconhecida: {decision!r}")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
+        raise VisionGateError("confidence de comparacao visual invalida")
+    return VisualComparison(
+        decision=decision, confidence=float(confidence), reference_id=reference_id,
+        candidate_id=candidate_id, reason=str(value.get("reason") or "")[:500],
+    )
+
+
+def _call_visual_comparison(
+    *, reference_image: str, candidate_image: str, reference_id: str, candidate_id: str,
+    api_key: str, base_url: str, model: str, detail: str, timeout: float, root: Any = None,
+) -> VisualComparison:
+    if not (_valid_image_input(reference_image) and _valid_image_input(candidate_image)):
+        raise VisionInputUnavailable("comparacao visual requer duas imagens materializadas")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _VISUAL_COMPARISON_SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Reference image A:"},
+                {"type": "image_url", "image_url": {"url": reference_image, "detail": detail}},
+                {"type": "text", "text": "Candidate image B:"},
+                {"type": "image_url", "image_url": {"url": candidate_image, "detail": detail}},
+            ]},
+        ],
+        "temperature": 0,
+        "max_tokens": 100,
+        "response_format": {"type": "json_object"},
+    }
+    request = Request(
+        f"{base_url.rstrip('/')}/chat/completions", data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        answer = body["choices"][0]["message"]["content"]
+    except HTTPError as exc:
+        _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
+                           operation="visual_comparison", erro=f"HTTP {exc.code}",
+                           candidate_ids=[reference_id, candidate_id], **_http_error_context(exc))
+        raise VisionGateError(f"API de comparacao visual respondeu HTTP {exc.code}") from exc
+    except (URLError, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
+                           operation="visual_comparison", erro=type(exc).__name__,
+                           candidate_ids=[reference_id, candidate_id])
+        raise VisionGateError("falha ao chamar a comparacao visual") from exc
+    _registrar_chamada(root, detail=detail, model=model, base_url=base_url,
+                       operation="visual_comparison", usage=body.get("usage") or {},
+                       candidate_ids=[reference_id, candidate_id])
+    return _parse_visual_comparison(str(answer), reference_id=reference_id, candidate_id=candidate_id)
+
+
+def compare_visual_assets(
+    reference_image: str, candidate_image: str, *, reference_id: str = "", candidate_id: str = "",
+    api_key: str, base_url: str, model: str, timeout: float = 30.0, root: Any = None,
+) -> VisualComparison:
+    """Compare two materialised images; LOW first and HIGH only if uncertain.
+
+    API/JSON failures are represented as ``ERROR`` so callers cannot mistake a
+    technical failure for proof that assets are distinct.
+    """
+    try:
+        result = _call_visual_comparison(
+            reference_image=reference_image, candidate_image=candidate_image,
+            reference_id=reference_id, candidate_id=candidate_id, api_key=api_key,
+            base_url=base_url, model=model, detail="low", timeout=timeout, root=root,
+        )
+        if result.decision != "UNCERTAIN":
+            return result
+        return _call_visual_comparison(
+            reference_image=reference_image, candidate_image=candidate_image,
+            reference_id=reference_id, candidate_id=candidate_id, api_key=api_key,
+            base_url=base_url, model=model, detail="high", timeout=timeout, root=root,
+        )
+    except (VisionGateError, VisionInputUnavailable) as exc:
+        return VisualComparison("ERROR", 0.0, reference_id, candidate_id, str(exc)[:500])
+
+
 def _call_vision_batch(
     *,
     items: list[dict[str, Any]],
@@ -502,6 +640,7 @@ def _registrar_chamada(
     erro: str = "",
     batch_size: int = 1,
     candidate_ids: list[str] | None = None,
+    operation: str = "subject_validation",
     **error_context: str,
 ) -> None:
     """Evento de UMA chamada HTTP à API de visão (com tokens quando houver)."""
@@ -521,6 +660,7 @@ def _registrar_chamada(
         )
         evento: dict[str, Any] = {
             "scope": "vision",
+            "operation": str(operation),
             "detail": str(detail),
             "model": str(model),
             "provider": str(base_url)[:120],
@@ -757,6 +897,10 @@ __all__ = [
     "verify_image_subject",
     "verify_image_subject_batch",
     "prepare_vision_image_input",
+    "prepare_vision_image_input_from_path",
+    "compare_visual_assets",
+    "VisualComparison",
+    "VISUAL_DECISIONS",
     "vision_config_ready",
     "VisionGateError",
     "VisionInputUnavailable",

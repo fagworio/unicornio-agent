@@ -13,14 +13,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
 VISION_CACHE_VERSION = "vision-v2"
+VISUAL_COMPARISON_CACHE_VERSION = "visual-compare-v1"
+_CACHE_LOCK = threading.Lock()
 
 
 def vision_cache_path(root: str | Path) -> Path:
     return Path(root) / "work" / "vision_cache.json"
+
+
+def visual_comparison_cache_path(root: str | Path) -> Path:
+    return Path(root) / "work" / "visual_comparison_cache.json"
 
 
 def _normalize_entity(entity: str) -> str:
@@ -67,14 +75,58 @@ def set_cached_decision(
         path.parent.mkdir(parents=True, exist_ok=True)
         cache = read_vision_cache(root)
         cache[cache_key(image_url, entity)] = decision
-        path.write_text(
-            json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        _atomic_write(path, cache)
+    except OSError:
+        pass
+
+
+def _atomic_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def visual_comparison_cache_key(reference_sha256: str, candidate_sha256: str) -> str:
+    """Symmetric key: comparison is about pixels, never URL or editorial subject."""
+    if not reference_sha256 or not candidate_sha256:
+        return ""
+    left, right = sorted((str(reference_sha256), str(candidate_sha256)))
+    return f"{left}:{right}:{VISUAL_COMPARISON_CACHE_VERSION}"
+
+
+def get_cached_visual_comparison(root: str | Path, reference_sha256: str, candidate_sha256: str) -> dict[str, Any] | None:
+    key = visual_comparison_cache_key(reference_sha256, candidate_sha256)
+    if not key:
+        return None
+    path = visual_comparison_cache_path(root)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get(key)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return dict(value) if isinstance(value, dict) and value.get("decision") else None
+
+
+def set_cached_visual_comparison(root: str | Path, reference_sha256: str, candidate_sha256: str, decision: dict[str, Any]) -> None:
+    key = visual_comparison_cache_key(reference_sha256, candidate_sha256)
+    if not key:
+        return
+    try:
+        path = visual_comparison_cache_path(root)
+        with _CACHE_LOCK:
+            try:
+                cache = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            except (OSError, ValueError):
+                cache = {}
+            if isinstance(cache, dict):
+                cache[key] = dict(decision)
+                _atomic_write(path, cache)
     except OSError:
         pass
 
 
 __all__ = [
-    "VISION_CACHE_VERSION", "vision_cache_path", "cache_key",
+    "VISION_CACHE_VERSION", "VISUAL_COMPARISON_CACHE_VERSION", "vision_cache_path", "visual_comparison_cache_path", "cache_key",
     "read_vision_cache", "get_cached_decision", "set_cached_decision",
+    "visual_comparison_cache_key", "get_cached_visual_comparison", "set_cached_visual_comparison",
 ]
