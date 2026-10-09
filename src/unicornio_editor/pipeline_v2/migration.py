@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
+from ..editorial_schema import EditorialValidationError, validate_editorial
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
 
 
@@ -22,6 +23,7 @@ HISTORICAL_EDITORIAL_QUALITY_IDS = frozenset({115002, 115004})
 HISTORICAL_VISION_PROVIDER_ID = 115025
 HISTORICAL_MEDIA_FUNNEL_INVARIANT_IDS = frozenset({115025})
 VISION_PROVIDER_RETRY_RELEASE_ID = 115025
+HISTORICAL_COMPOSE_RECOVERY_ID = 114987
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -293,6 +295,265 @@ def _repair_historical_media_state(state: WorkState, now: datetime) -> WorkState
         media=state.media,
         version=state.version,
     )
+
+
+def repair_compose_114987(
+    client: Any,
+    config: Any,
+    root: Path | str,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Dry-run-first recovery for the exact 114987 stale-COMPOSE signature.
+
+    This validates the four already accepted attachments and reconstructs the
+    candidate locally.  Applying the repair changes only the V2 work-state
+    meta to reopen COMPOSE; the next normal V2 run must compose, validate,
+    write and read back the post again.
+    """
+    from .lock import RunSessionLock
+    from .production_stages import ProductionComposeStage
+    from .runtime import _canonical_embedded_media_url
+
+    post_id = HISTORICAL_COMPOSE_RECOVERY_ID
+    root_path = Path(root)
+    current = _as_utc(now)
+    lock = RunSessionLock(root_path / "work" / "v2-run.lock")
+    if not lock.acquire():
+        return {
+            "command": "v2-repair-compose-114987",
+            "apply": bool(apply),
+            "post_id": post_id,
+            "eligible": False,
+            "reason": "v2_run_locked",
+            "read_only": not apply,
+        }
+    try:
+        post = client.get_post(post_id)
+        state = _read_state(post)
+        directory = root_path / "backups" / str(post_id)
+        journal_path = root_path / "work" / "v2-journal" / f"{post_id}.json"
+        journal: dict[str, Any] = {}
+        if journal_path.is_file():
+            try:
+                value = json.loads(journal_path.read_text(encoding="utf-8"))
+                journal = value if isinstance(value, dict) else {}
+            except (OSError, ValueError, json.JSONDecodeError):
+                journal = {}
+
+        checks: dict[str, Any] = {
+            "wordpress_pending": post.get("status") == "pending",
+            "v2_signature": bool(
+                state is not None
+                and state.state is LifecycleState.HUMAN_REQUIRED
+                and state.phase is Phase.COMPOSE
+                and state.blocker is BlockerCode.MANIFEST_INVALID
+            ),
+            "journal_committing": journal.get("status") == "committing",
+            "journal_post_id": journal.get("post_id") in {None, post_id},
+        }
+        expected_ids = (115134, 115135, 115136, 115137)
+        media_checks: list[dict[str, Any]] = []
+        if state is not None:
+            actual_ids = tuple(item.media_id for item in state.media.inline)
+            checks["accepted_media_signature"] = (
+                state.media.required == 4
+                and len(actual_ids) == 4
+                and set(actual_ids) == set(expected_ids)
+                and state.media.featured.status.value == "valid"
+            )
+            checks["accepted_media_ids"] = list(actual_ids)
+        else:
+            checks["accepted_media_signature"] = False
+            checks["accepted_media_ids"] = []
+
+        for media_id in expected_ids:
+            try:
+                attachment = client.get_media(media_id)
+                source_url = str((attachment or {}).get("source_url") or "").strip()
+                details = (attachment or {}).get("media_details") or {}
+                mime = str(details.get("mime_type") or (attachment or {}).get("mime_type") or "").lower()
+                media_checks.append({
+                    "media_id": media_id,
+                    "valid": bool(source_url)
+                    and (source_url.lower().split("?", 1)[0].endswith(".webp") or mime == "image/webp"),
+                    "source_url": source_url,
+                    "mime_type": mime or None,
+                    "provenance": "attachment_source_url_present" if source_url else "missing_source_url",
+                })
+            except Exception as exc:  # noqa: BLE001 - report per attachment
+                media_checks.append({"media_id": media_id, "valid": False, "reason": str(exc)})
+        checks["attachments_valid"] = bool(media_checks) and all(item.get("valid") for item in media_checks)
+        checks["attachment_identity"] = bool(state is not None) and all(
+            _canonical_embedded_media_url(str(item.get("source_url") or "")) == next(
+                (
+                    _canonical_embedded_media_url(str(media.media_url or ""))
+                    for media in state.media.inline
+                    if media.media_id == item["media_id"]
+                ),
+                None,
+            )
+            for item in media_checks
+            if item.get("valid")
+        )
+        checks["accepted_media_evidence"] = bool(state is not None) and all(
+            bool(item.media_url and item.subject and item.credit_text)
+            for item in state.media.inline
+        )
+
+        partial: dict[str, Any] = {}
+        draft: dict[str, Any] = {}
+        try:
+            partial_value = json.loads((directory / "editorial.partial.json").read_text(encoding="utf-8"))
+            partial = partial_value if isinstance(partial_value, dict) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        for name in ("editorial.draft.json", "editorial.latest.json"):
+            try:
+                draft_value = json.loads((directory / name).read_text(encoding="utf-8"))
+                if isinstance(draft_value, dict):
+                    draft = draft_value
+                    break
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        checks["partial_checkpoint"] = False
+        if state is not None and partial:
+            try:
+                from .model import MediaProgress
+
+                partial_media = MediaProgress.from_dict(partial)
+                checks["partial_checkpoint"] = (
+                    partial_media.required == state.media.required
+                    and {item.media_id for item in partial_media.inline}
+                    == {item.media_id for item in state.media.inline}
+                    and partial_media.featured.media_id == state.media.featured.media_id
+                )
+            except (TypeError, ValueError, KeyError):
+                checks["partial_checkpoint"] = False
+        checks["editorial_draft"] = bool(draft)
+        try:
+            validate_editorial(draft, min_confidence=float(getattr(config, "min_relevance_confidence", 0.8)))
+            checks["editorial_contract"] = True
+        except (EditorialValidationError, TypeError, ValueError):
+            checks["editorial_contract"] = False
+        current_html = str((post.get("content") or {}).get("raw") or "")
+        from ..media.relevance import iter_content_images
+
+        embedded_urls = {
+            _canonical_embedded_media_url(str(item.get("src") or ""))
+            for item in iter_content_images(current_html)
+        }
+        checks["accepted_media_absent_from_html"] = bool(state is not None) and all(
+            _canonical_embedded_media_url(str(item.media_url or "")) not in embedded_urls
+            for item in state.media.inline
+        )
+        checks["concurrent_run"] = True
+        required_checks = (
+            "wordpress_pending",
+            "v2_signature",
+            "journal_committing",
+            "journal_post_id",
+            "accepted_media_signature",
+            "attachments_valid",
+            "attachment_identity",
+            "accepted_media_evidence",
+            "partial_checkpoint",
+            "editorial_draft",
+            "editorial_contract",
+            "accepted_media_absent_from_html",
+            "concurrent_run",
+        )
+        checks["safe_signature"] = all(bool(checks.get(name)) for name in required_checks)
+
+        result: dict[str, Any] = {
+            "command": "v2-repair-compose-114987",
+            "post_id": post_id,
+            "apply": bool(apply),
+            "read_only": not apply,
+            "eligible": False,
+            "checks": checks,
+            "attachments": media_checks,
+            "journal": {
+                "path": str(journal_path),
+                "status": journal.get("status"),
+                "run_id": journal.get("run_id"),
+            },
+            "preserve": {
+                "attempts": state.retry.attempts if state else None,
+                "phase_attempts": state.retry.phase_attempts if state else None,
+                "media_ids": list(checks.get("accepted_media_ids") or []),
+            },
+        }
+        if not checks["safe_signature"] or state is None or not draft:
+            result["reason"] = "signature_or_checkpoints_not_verified"
+            return result
+
+        context = {
+            "post_id": post_id,
+            "post": post,
+            "title": (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or "",
+            "original_link": (post.get("meta") or {}).get("original_link"),
+        }
+        try:
+            candidate = ProductionComposeStage(config, root_path).compose_candidate(
+                context, draft, state.media, persist=False
+            )
+        except Exception as exc:  # noqa: BLE001 - dry-run must report, never mutate
+            result["reason"] = "composition_not_reconstructable"
+            result["composition_error"] = str(exc)
+            result["eligible"] = False
+            return result
+        result["reconstructed_content"] = candidate.get("content")
+        result["media_placements"] = candidate.get("media_placements") or []
+        reconstructed_urls = {
+            _canonical_embedded_media_url(str(image.get("src") or ""))
+            for image in iter_content_images(str(candidate.get("content") or ""))
+        }
+        reconstructed_ids = [
+            media_id
+            for media_id in checks["accepted_media_ids"]
+            if any(
+                _canonical_embedded_media_url(str(item.media_url or "")) in reconstructed_urls
+                for item in state.media.inline
+                if item.media_id == media_id
+            )
+        ]
+        result["validation"] = {
+            "accepted_media_in_reconstructed_content": reconstructed_ids,
+            "all_accepted_media_reconstructed": set(reconstructed_ids) == set(checks["accepted_media_ids"]),
+            "ready_written": False,
+            "new_uploads": 0,
+            "next_stage": "v2-run COMPOSE/checklist/writer/readback",
+        }
+        if not result["validation"]["all_accepted_media_reconstructed"]:
+            result["reason"] = "reconstructed_content_missing_accepted_media"
+            return result
+        result["eligible"] = True
+        if apply:
+            reopened = replace(
+                state,
+                state=LifecycleState.PENDING,
+                phase=Phase.COMPOSE,
+                blocker=BlockerCode.MANIFEST_INVALID,
+                retry=replace(state.retry, next_at=current.isoformat(timespec="seconds")),
+            )
+            meta = post.get("meta") if isinstance(post.get("meta"), dict) else None
+            if meta is None:
+                raise RuntimeError("post 114987 has no editable meta payload")
+            updated_meta = dict(meta)
+            updated_meta["_hermes_work_state"] = json.dumps(
+                reopened.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": updated_meta})
+            verified = _read_state(client.get_post(post_id))
+            if verified != reopened:
+                raise RuntimeError("114987 compose recovery read-back mismatch")
+            result["reopened_state"] = reopened.to_dict()
+            result["readback"] = True
+        return result
+    finally:
+        lock.release()
 
 
 def repair_historical_media_human_required(

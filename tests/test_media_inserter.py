@@ -1,6 +1,11 @@
 import unittest
 
-from unicornio_editor.media.inserter import MediaInsertionError, append_featured_credit, insert_media
+from unicornio_editor.media.inserter import (
+    MediaInsertionError,
+    append_featured_credit,
+    insert_media,
+    plan_normal_media_insertions,
+)
 
 
 def _item(index=1, url="https://media.example/image.webp", alt="Imagem de jogo",
@@ -16,6 +21,31 @@ def _item(index=1, url="https://media.example/image.webp", alt="Imagem de jogo",
 
 
 class MediaInserterTests(unittest.TestCase):
+    def test_planner_redistributes_normal_article_slots_from_current_html(self):
+        html = "".join("<p>Texto.</p>" for _ in range(13))
+        plan = [_item(index=99, url=f"https://media.example/{index}.webp") for index in range(4)]
+        planned = plan_normal_media_insertions(html, plan)
+        slots = [item["paragraph_index"] for item in planned]
+        self.assertEqual(slots, [0, 4, 7, 11])
+        self.assertTrue(all(b - a >= 3 for a, b in zip(slots, slots[1:])))
+
+    def test_planner_reports_structured_error_when_html_has_too_few_paragraphs(self):
+        with self.assertRaises(MediaInsertionError) as error:
+            plan_normal_media_insertions(
+                "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>",
+                [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(4)],
+            )
+        self.assertEqual(error.exception.code, "insufficient_paragraph_slots")
+
+    def test_planner_never_targets_after_final_valid_boundary(self):
+        html = "".join("<p>Texto.</p>" for _ in range(12))
+        planned = plan_normal_media_insertions(
+            html,
+            [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(4)],
+        )
+        assert [item["paragraph_index"] for item in planned] == [0, 3, 7, 10]
+        assert insert_media(html, planned).count("[caption id=\"\" align=\"aligncenter\"") == 4
+
     def test_adds_one_visible_featured_credit(self):
         credit = "Crédito da imagem: Omelete. Imagem promocional do trailer. Direitos autorais dos detentores."
         result = append_featured_credit("<p>Texto.</p><p>Continuação.</p>", credit)

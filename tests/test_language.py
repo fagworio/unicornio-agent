@@ -64,3 +64,45 @@ def test_english_body_fails_final_language_gate():
     assert report["language"] == "en"
     assert not report["passed"]
     assert "content" in report["failing_fields"]
+
+
+def test_official_english_names_do_not_fail_portuguese_paragraphs():
+    report = editorial_language_report(
+        title="The Last of Us chega ao Xbox Game Pass",
+        content=(
+            "<p>A série chega ao catálogo brasileiro com novidades para os fãs.</p>"
+            "<p>O episódio apresenta uma nova história e mantém o foco nos personagens.</p>"
+        ),
+        seo_title="The Last of Us no Xbox Game Pass",
+        meta_description="Confira as novidades da série no catálogo brasileiro e veja quando assistir.",
+    )
+    assert report["passed"]
+    assert report["english_editorial_paragraphs"] == 0
+
+
+def test_multiple_substantial_english_paragraphs_fail_even_when_document_is_mixed():
+    report = editorial_language_report(
+        title="Novidades do jogo chegam em breve",
+        content=(
+            "<p>A atualização chega ao Brasil e traz novos conteúdos para os jogadores.</p>"
+            "<p>The studio announced a new release for the game and confirmed the launch date.</p>"
+            "<p>Players will receive more details about the upcoming episode and new features.</p>"
+            "<p>Os jogadores brasileiros poderão conferir as novidades em breve.</p>"
+        ),
+    )
+    assert report["language"] in {"mixed", "pt-BR"}
+    assert report["english_editorial_paragraphs"] == 2
+    assert "content" in report["failing_fields"]
+
+
+def test_attributed_english_quote_is_not_editorial_language_failure():
+    report = editorial_language_report(
+        title="Diretor anuncia novidades para a série",
+        content=(
+            "<p>A produção prepara uma nova temporada para o público brasileiro.</p>"
+            "<blockquote><p>The studio announced a new season for the show.</p></blockquote>"
+            "<p>A equipe deve divulgar mais detalhes nos próximos meses.</p>"
+        ),
+    )
+    assert report["passed"]
+    assert report["english_editorial_paragraphs"] == 0

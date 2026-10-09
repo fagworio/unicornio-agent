@@ -602,6 +602,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_publication_parser.add_argument("post_ids", nargs="+", type=int)
 
+    audit_published_language_parser = subparsers.add_parser(
+        "v2-audit-published-language",
+        help="audita idioma de posts publicados por IDs explícitos, somente leitura",
+    )
+    audit_published_language_parser.add_argument("post_ids", nargs="+", type=int)
+
     reconcile_publication_parser = subparsers.add_parser(
         "v2-reconcile-publication",
         help="reconcilia somente V2 READY já publicado no WordPress (dry-run por padrão)",
@@ -632,6 +638,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair_media_funnel_parser.add_argument("--root", type=Path, default=Path("."))
     repair_media_funnel_parser.add_argument("--apply", action="store_true")
+
+    repair_compose_parser = subparsers.add_parser(
+        "v2-repair-compose-114987",
+        help="audita/reabre somente a assinatura COMPOSE stale do 114987 (dry-run por padrão)",
+    )
+    repair_compose_parser.add_argument("--root", type=Path, default=Path("."))
+    repair_compose_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="reabre somente a meta V2 após reconstrução e readback do dry-run",
+    )
 
     release_vision_retry_parser = subparsers.add_parser(
         "v2-release-vision-provider-retry",
@@ -2143,6 +2160,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 list(args.post_ids),
                 policy_version=config.policy_version,
             )
+        elif args.command == "v2-audit-published-language":
+            from .language import audit_published_language
+
+            result = audit_published_language(client, list(args.post_ids))
         elif args.command == "v2-reconcile-publication":
             from .pipeline_v2.publication import reconcile_published_v2
 
@@ -2257,6 +2278,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = repair_media_funnel_invariant_state(
                 client,
                 root=args.root,
+                apply=bool(getattr(args, "apply", False)),
+            )
+
+        elif args.command == "v2-repair-compose-114987":
+            from .pipeline_v2.migration import repair_compose_114987
+
+            result = repair_compose_114987(
+                client,
+                config,
+                args.root,
                 apply=bool(getattr(args, "apply", False)),
             )
 

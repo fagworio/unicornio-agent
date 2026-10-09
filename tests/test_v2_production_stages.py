@@ -135,6 +135,58 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     assert content.count(new) == 1
 
 
+def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path):
+    editorial = {
+        "cleaned_html": "".join(f"<p>Parágrafo {index} sobre videogame.</p>" for index in range(13)),
+        "seo": {},
+    }
+    media = MediaProgress(
+        required=4,
+        inline=tuple(
+            InlineMedia(
+                100 + index,
+                f"https://example.test/{index}.webp",
+                100 + index,
+                f"Imagem {index}",
+                f"Crédito da imagem: Fonte {index}",
+            )
+            for index in range(4)
+        ),
+    )
+    candidate = ProductionComposeStage(Config(), tmp_path)(
+        {"post_id": 16, "original_link": None}, editorial, media
+    )
+    content = candidate["content"]
+    assert content.count("[caption id=\"\" align=\"aligncenter\"") == 4
+    assert all(url in content for url in (f"https://example.test/{index}.webp" for index in range(4)))
+
+
+def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tmp_path):
+    editorial = {
+        "cleaned_html": "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>",
+        "seo": {},
+    }
+    media = MediaProgress(
+        required=4,
+        inline=tuple(
+            InlineMedia(
+                200 + index,
+                f"https://example.test/{index}.webp",
+                200 + index,
+                f"Imagem {index}",
+                f"Crédito da imagem: Fonte {index}",
+            )
+            for index in range(4)
+        ),
+    )
+    with pytest.raises(StageError, match="media_insertion:insufficient_paragraph_slots") as error:
+        ProductionComposeStage(Config(), tmp_path)(
+            {"post_id": 17, "original_link": None}, editorial, media
+        )
+    assert error.value.blocker is BlockerCode.STRUCTURE
+    assert error.value.phase is Phase.EDITORIAL
+
+
 def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     inline_url = "https://example.test/accepted.webp"
 

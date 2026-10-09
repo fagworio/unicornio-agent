@@ -21,7 +21,7 @@ from ..editorial_schema import validate_editorial
 from ..language import editorial_language_report
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
-from ..media.inserter import insert_media
+from ..media.inserter import MediaInsertionError, insert_media, plan_normal_media_insertions
 from ..media.vision_gate import VisionGateError
 from ..workflow import (
     MediaFunnelInvariantError,
@@ -339,6 +339,16 @@ class ProductionComposeStage:
         self.config, self.root = config, Path(root)
 
     def __call__(self, context: dict[str, Any], editorial: dict[str, Any], media: MediaProgress) -> dict[str, Any]:
+        return self.compose_candidate(context, editorial, media, persist=True)
+
+    def compose_candidate(
+        self,
+        context: dict[str, Any],
+        editorial: dict[str, Any],
+        media: MediaProgress,
+        *,
+        persist: bool = True,
+    ) -> dict[str, Any]:
         try:
             is_listicle = detect_list_format(
                 str(context.get("title") or ""),
@@ -370,6 +380,15 @@ class ProductionComposeStage:
                     "width": item.width,
                     "height": item.height,
                 })
+            if placements and not is_listicle:
+                placements = plan_normal_media_insertions(existing_html, placements)
+            placement_audit = [
+                {
+                    "media_url": str(item.get("media_url") or ""),
+                    "paragraph_index": int(item.get("paragraph_index", 0)),
+                }
+                for item in placements
+            ]
             working = dict(editorial)
             working["cleaned_html"] = insert_media(
                 str(editorial["cleaned_html"]),
@@ -379,9 +398,16 @@ class ProductionComposeStage:
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)
-            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": media.to_dict(), "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
-            _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
+            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            if persist:
+                _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
+        except MediaInsertionError as exc:
+            raise StageError(
+                BlockerCode.STRUCTURE,
+                Phase.EDITORIAL,
+                f"media_insertion:{exc.code}: {exc}",
+            ) from exc
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.COMPOSE, str(exc)) from exc
 
