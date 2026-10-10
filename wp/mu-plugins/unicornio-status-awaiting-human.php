@@ -43,10 +43,10 @@ add_filter( 'display_post_states', function ( $states, $post ) {
 	return $states;
 }, 10, 2 );
 
-// Saída do status awaiting_human -> pending (manual no WP ou via `retry`
-// do pipeline) reseta o estado operacional: o post volta a ser trilhado
-// como novo (NEW), sem tentativas/cooldown herdados. Entrada para
-// awaiting_human NÃO limpa nada (o apply acabou de gravar as metas).
+// Saída do status awaiting_human -> pending (manual no WP ou via `retry`)
+// registra evidência durável da reabertura. O V2 preserva tentativas, mídia,
+// histórico e cooldown; o marcador permite ao scheduler distinguir uma
+// reabertura humana de um pending deixado por falha parcial do writer.
 add_action( 'transition_post_status', function ( $new_status, $old_status, $post ) {
 	if ( $post->post_type !== 'post' ) {
 		return;
