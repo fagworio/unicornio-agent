@@ -52,15 +52,10 @@ add_action( 'transition_post_status', function ( $new_status, $old_status, $post
 		return;
 	}
 	if ( $new_status === 'pending' && $old_status === 'awaiting_human' ) {
-		foreach ( array(
-			'_hermes_state',
-			'_hermes_attempts',
-			'_hermes_next_retry_at',
-			'_hermes_last_error',
-			'_hermes_processed_at',
-		) as $key ) {
-			delete_post_meta( $post->ID, $key );
-		}
+		// Durable evidence used by V2 to distinguish an explicit human
+		// requeue from a partial writer failure that merely left WP pending.
+		update_post_meta( $post->ID, '_hermes_human_reopened_at', current_time( 'c' ) );
+		update_post_meta( $post->ID, '_hermes_human_reopened_from', 'awaiting_human' );
 	}
 }, 10, 3 );
 

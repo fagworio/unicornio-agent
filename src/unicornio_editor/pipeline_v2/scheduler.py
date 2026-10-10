@@ -5,9 +5,20 @@ from datetime import datetime, timezone
 from .model import BlockerCode, FeaturedStatus, LifecycleState, Phase, WorkState
 
 
-def rank(state: WorkState) -> int:
+def _manual_reopen_confirmed(item, state: WorkState) -> bool:
+    if state.state is not LifecycleState.HUMAN_REQUIRED or not isinstance(item, tuple) or len(item) < 2:
+        return False
+    context = item[1] if isinstance(item[1], dict) else {}
+    post = context.get("post") if isinstance(context.get("post"), dict) else {}
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    return post.get("status") == "pending" and bool(meta.get("_hermes_human_reopened_at"))
+
+
+def rank(state: WorkState, *, manually_reopened: bool = False) -> int:
     """Return a higher score for work closer to READY."""
-    if state.state.value in {"ready", "published", "skipped", "human_required"}:
+    if state.state.value in {"ready", "published", "skipped"} or (
+        state.state.value == "human_required" and not manually_reopened
+    ):
         return -1000
     if state.blocker in {BlockerCode.FEATURED_MISSING, BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION}:
         return 1000 if state.media.missing == 0 else 500 - state.media.missing
@@ -58,11 +69,15 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
     eligible = []
     for item in candidates:
         state = state_store.load(item[0])
-        if state.state is not LifecycleState.PENDING or not _cooldown_expired(state.retry.next_at, now):
+        reopened = _manual_reopen_confirmed(item, state)
+        if not reopened and (
+            state.state is not LifecycleState.PENDING
+            or not _cooldown_expired(state.retry.next_at, now)
+        ):
             continue
-        eligible.append((item, state))
-    eligible.sort(key=lambda pair: rank(pair[1]), reverse=True)
-    new_states = [(item, state) for item, state in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
+        eligible.append((item, state, reopened))
+    eligible.sort(key=lambda pair: rank(pair[1], manually_reopened=pair[2]), reverse=True)
+    new_states = [(item, state) for item, state, _reopened in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
     if limit == 1 and new_states:
         # Reserve one deterministic two-hour slot out of every three for an
         # aged NEW post. The other two slots remain retry-first, bounding
@@ -71,9 +86,9 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
         if aged_new and (now.hour // 2) % 3 == 0:
             return [min(aged_new, key=lambda item: _candidate_date(item))]
     if limit == 1 or not new_states:
-        return [item for item, _ in eligible[:limit]]
+        return [item for item, _state, _reopened in eligible[:limit]]
     new_item = new_states[0][0]
-    selected = [item for item, _ in eligible if item != new_item][: max(0, limit - 1)]
+    selected = [item for item, _state, _reopened in eligible if item != new_item][: max(0, limit - 1)]
     return selected + [new_item]
 
 

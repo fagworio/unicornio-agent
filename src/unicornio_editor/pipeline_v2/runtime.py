@@ -1211,6 +1211,11 @@ def run_v2(
             return (
                 context["v2_state"].state.value == "human_required"
                 and (context.get("post") or {}).get("status") == "pending"
+                and bool(
+                    ((context.get("post") or {}).get("meta") or {}).get(
+                        "_hermes_human_reopened_at"
+                    )
+                )
             )
 
         admitted_pending = [

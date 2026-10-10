@@ -45,6 +45,7 @@ def test_preview_requeues_human_required_when_human_moves_wp_status_to_pending(t
     state = WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=Phase.MEDIA)
     reopened = post(3, "2026-10-09T01:00:00Z", state)
     reopened["meta"]["_hermes_work_state"] = json.dumps(state.to_dict())
+    reopened["meta"]["_hermes_human_reopened_at"] = "2030-01-01T00:00:00+00:00"
     client = Client([reopened])
 
     cohort = tmp_path / "cohort.json"
@@ -55,6 +56,21 @@ def test_preview_requeues_human_required_when_human_moves_wp_status_to_pending(t
     assert result["queue"]["requested_pending"] is True
     assert result["queue"]["requested_eligible"] is True
     assert result["queue"]["selected_ids"] == [3]
+
+
+
+
+def test_preview_does_not_requeue_human_required_without_manual_reopen_marker(tmp_path):
+    state = WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=Phase.MEDIA)
+    reopened = post(4, "2026-10-09T01:00:00Z", state)
+    client = Client([reopened])
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
+
+    result = run_v2(client, config(cohort), tmp_path, post_id=4, preview=True)
+
+    assert result["selected"] == 0
+    assert result["queue"]["requested_eligible"] is False
 
 
 def test_preview_post_id_uses_admission_and_never_falls_back(tmp_path):

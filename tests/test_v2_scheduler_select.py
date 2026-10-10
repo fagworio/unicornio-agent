@@ -9,6 +9,20 @@ class Store:
     def load(self, post_id): return self.states[post_id]
 
 
+
+
+def test_select_requeues_human_required_only_with_confirmed_manual_reopen():
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(next_at="2030-01-02T00:00:00+00:00"),
+    )
+    item = (7, {"post": {"status": "pending", "meta": {"_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00"}}})
+    result = select([item], Store({7: state}), limit=1, now=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    assert [entry[0] for entry in result] == [7]
+
+
 def test_select_excludes_terminal_and_future_cooldown():
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     states = {
