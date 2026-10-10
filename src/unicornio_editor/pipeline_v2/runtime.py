@@ -1109,6 +1109,16 @@ class WordPressWriterV2:
         readback_meta = readback.get("meta") or {}
         if readback_meta.get("_hermes_work_state") != state_json:
             raise RuntimeError("V2 state read-back mismatch")
+        if outcome.type.value == "human_required":
+            # Keep the WP editor's manual-review queue synchronized with the
+            # canonical V2 lifecycle.  The native WP status must remain
+            # awaiting_human, otherwise a human moving it back to pending has
+            # no durable queue marker and the UI hides the work.
+            if readback.get("status") != "awaiting_human":
+                self.client.move_to_status(post_id, "awaiting_human")
+                readback = self.client.get_post(post_id)
+            if readback.get("status") != "awaiting_human":
+                raise RuntimeError("Awaiting Human status read-back mismatch")
         if apply_inline or outcome.type.value == "ready":
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
             embedded_readback_urls = set(_embedded_media_urls(readback_content))
@@ -1190,15 +1200,31 @@ def run_v2(
             cohort_error=cohort_error,
             cohort_configured=bool(cohort_path),
         )
+        def manually_reopened(context: dict[str, Any]) -> bool:
+            """A human WP status move explicitly requeues V2 work.
+
+            HUMAN_REQUIRED remains the canonical lifecycle until the editor
+            moves the custom WP status back to ``pending``. That transition is
+            the manual approval to re-enter the normal V2 loop; attempts and
+            media progress are intentionally preserved.
+            """
+            return (
+                context["v2_state"].state.value == "human_required"
+                and (context.get("post") or {}).get("status") == "pending"
+            )
+
         admitted_pending = [
             (post_id, context)
             for post_id, context in admitted
-            if context["v2_state"].state.value == "pending"
+            if context["v2_state"].state.value == "pending" or manually_reopened(context)
         ]
         candidates = [
             (post_id, context) for post_id, context in admitted_pending
-            if context["v2_state"].state.value == "pending"
-            and _cooldown_expired(context["v2_state"].retry.next_at, now)
+            if manually_reopened(context)
+            or (
+                context["v2_state"].state.value == "pending"
+                and _cooldown_expired(context["v2_state"].retry.next_at, now)
+            )
         ]
 
         class _SnapshotStore:

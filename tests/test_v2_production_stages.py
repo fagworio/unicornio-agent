@@ -284,6 +284,46 @@ def test_readback_identity_uses_img_elements_not_plain_text_urls():
     ) == ["https://example.test/a.webp"]
 
 
+def test_writer_moves_human_required_to_wordpress_awaiting_human(tmp_path):
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 141,
+                "status": "pending",
+                "content": {"raw": "<p>texto anterior</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.status_moves = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.post.update(update)
+
+        def move_to_status(self, post_id, status):
+            self.status_moves.append((post_id, status))
+            self.post["status"] = status
+            return self.post
+
+    client = Client()
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(required=4),
+    )
+    result = WordPressWriterV2(
+        client, tmp_path
+    ).commit(141, {"post_id": 141}, state, Outcome.human_required(Phase.MEDIA, BlockerCode.INLINE_MISSING))
+
+    assert result["readback"] is True
+    assert client.status_moves == [(141, "awaiting_human")]
+    assert client.post["status"] == "awaiting_human"
+
+
 def test_writer_does_not_apply_candidate_content_while_partial(tmp_path):
     inline_url = "https://example.test/partial.webp"
 
