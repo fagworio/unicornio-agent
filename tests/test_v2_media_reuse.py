@@ -74,6 +74,50 @@ def test_derived_final_disposition_without_original_evidence_is_reconsidered(tmp
     assert "https://cdn.test/reconsider-final.webp" not in history["urls"]
 
 
+def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    queries = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        item = batch["posts"][0]
+        queries.append(item["query"])
+        return {"posts": [{"audit_candidates": [{
+            "candidate_id": item["query"],
+            "direct_image_url": "https://cdn.test/" + ("featured" if "featured" in batch["batch_id"] else "inline") + ".webp",
+            "source_page_url": "https://source.test/article",
+            "subject": item["subject"], "evidence": {"verdict": "deterministic_match"},
+        }], "reuse": []}]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", lambda editorial, *_args, **_kwargs: ([{
+        "media_id": 501 if editorial["media_plan"][0].get("is_featured") else 502,
+        "media_url": editorial["media_plan"][0]["direct_image_url"],
+        "featured": bool(editorial["media_plan"][0].get("is_featured")),
+        "paragraph_index": 0,
+    }], None, None))
+
+    previous = MediaProgress(required=1)
+    ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115234, "title": "Ex-gerentes de PR da Nintendo dizem que sketch do SNL com Elon Musk como Wario"},
+        SimpleNamespace(media=previous), {"cleaned_html": "<p>texto editorial suficiente.</p>", "seo": {}}, previous,
+    )
+    assert any("Wario" in query and "Elon Musk" in query and "Saturday Night Live" in query or "SNL" in query for query in queries)
+
+
+def test_derived_rejection_with_fingerprint_but_without_cause_is_reconsidered(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-fingerprint"
+    batch.mkdir(parents=True)
+    (batch / "media.manifest.json").write_text(
+        '{"posts":[{"post_id":115234,"audit_candidates":[{"disposition":"reject_final",'
+        '"rejected_reason":"previously_rejected_candidate","phash":"abcd",'
+        '"url":"https://cdn.test/fingerprint.webp"}]}]}', encoding="utf-8",
+    )
+    assert "https://cdn.test/fingerprint.webp" not in _media_rejection_history(tmp_path, 115234)["urls"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

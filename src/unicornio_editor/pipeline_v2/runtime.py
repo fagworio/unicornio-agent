@@ -115,10 +115,15 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             # its own label become the reason for a permanent blacklist.
             derived_rejection = "previously_rejected_candidate" in raw_reason_value or verdict == "previously_rejected_candidate"
             evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            evidence_verdict = str(evidence.get("verdict") or "").casefold()
+            original_cause = " ".join(
+                str(row.get(key) or "")
+                for key in ("original_reason", "original_rejected_reason", "original_gate", "detail", "reason")
+            ).casefold()
             has_original_evidence = bool(
-                (evidence and str(evidence.get("verdict") or "").casefold() != "previously_rejected_candidate")
-                or row.get("original_reason") or row.get("gate")
-                or row.get("phash") or row.get("sha256") or row.get("visual_group_id")
+                row.get("original_reason") or row.get("original_rejected_reason") or row.get("original_gate")
+                or evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "unresolved_source"}
+                or any(token in original_cause for token in ("source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "width_below_minimum"))
             )
             if derived_rejection and not has_original_evidence:
                 continue
@@ -519,15 +524,26 @@ class ProductionMediaResolver:
             # than a grammatical phrase such as "ex-gerentes".
             subject_rows = [{"item": None, "heading": source_subjects[0], "subject": source_subjects[0]}]
 
-        def contextual_query(subject: str, *, extra: str = "") -> str:
-            base = item_query(subject, title, extra=extra)
+        def add_query_context(base: str) -> str:
             if is_listicle:
                 return base
+            primary_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or "")
+            primary_tokens = set(primary_subject.casefold().split())
+            ignored_context = {"review", "reviews", "sketch", "noticia", "news", "game", "jogo"}
             context_terms = [
-                value for value in source_subjects[1:3]
-                if value and value.casefold() != str(subject).casefold()
+                value for value in source_subjects[1:]
+                if value
+                and value.casefold() != primary_subject.casefold()
+                and value.casefold() not in {"nintendo", "switch", "steam", "playstation", "xbox"}
+                and value.casefold() not in ignored_context
+                and not (
+                    set(value.casefold().split()) - primary_tokens
+                ).issubset(ignored_context)
             ]
-            return " ".join(dict.fromkeys([base, *context_terms]))
+            return " ".join(dict.fromkeys([base, *context_terms[:3]]))
+
+        def contextual_query(subject: str, *, extra: str = "") -> str:
+            return add_query_context(item_query(subject, title, extra=extra))
         covered_items = {
             str(item.item_number)
             for item in previous.inline
@@ -583,7 +599,7 @@ class ProductionMediaResolver:
             # one unresolved subject, vary the visual role instead of asking
             # engines for the same cover/key art on every retry.
             queries = (
-                diverse_item_queries(subject, title, extra=focus_keyword)
+                [add_query_context(query) for query in diverse_item_queries(subject, title, extra=focus_keyword)]
                 if not is_listicle and len(missing_rows) == 1
                 else [contextual_query(subject, extra=focus_keyword)]
             )
