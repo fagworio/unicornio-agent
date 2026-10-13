@@ -38,6 +38,19 @@ def test_adaptive_history_reads_real_media_manifest(tmp_path):
     assert "abc" in history["fingerprints"]
 
 
+def test_deferred_invalid_media_does_not_blacklist_url(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-deferred"
+    batch.mkdir(parents=True)
+    (batch / "media.manifest.json").write_text(
+        '{"posts":[{"post_id":115152,"audit_candidates":[{"disposition":"defer_retry",'
+        '"detail":"source_page_unreachable","invalid_media":[{"url":"https://cdn.test/retry.webp"}]}]}]}',
+        encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115152)
+    assert "https://cdn.test/retry.webp" not in history["urls"]
+    assert "source_page_unreachable" not in history["reasons"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
