@@ -97,8 +97,13 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             if not isinstance(row, dict):
                 continue
             parent_reason = row.get("rejected_reason") or row.get("detail") or row.get("reason")
+            parent_disposition = str(row.get("disposition") or "").casefold()
             rows.extend(
-                {**item, "rejected_reason": item.get("rejected_reason") or parent_reason}
+                {
+                    **item,
+                    "disposition": item.get("disposition") or parent_disposition,
+                    "rejected_reason": item.get("rejected_reason") or parent_reason,
+                }
                 for item in (row.get("invalid_media") or []) if isinstance(item, dict)
             )
             verdict = str((row.get("evidence") or {}).get("verdict") or "").casefold()
@@ -445,6 +450,8 @@ class ProductionMediaResolver:
             slot = next((index for index, url in enumerate(_embedded_media_urls(
                 str(((context.get("post") or {}).get("content") or {}).get("raw") or "")
             )) if url == media_url and index not in used_slots), len(current_inline))
+            while slot in used_slots:
+                slot += 1
             current_inline.append(InlineMedia(
                 media_id, str(row.get("canonical_url") or ""), slot, subject=str(row.get("subject") or ""),
                 section_slot=row.get("section_slot"), phash=str(row.get("phash") or ""),
@@ -474,7 +481,7 @@ class ProductionMediaResolver:
                 str(registry_featured.get("phash") or ""),
                 str(registry_featured.get("visual_group_id") or ""),
             )
-            if registry_featured and previous.featured.status not in {FeaturedStatus.VALID, FeaturedStatus.VISION_REJECTED}
+            if registry_featured and previous.featured.status not in {FeaturedStatus.VALID, FeaturedStatus.VISION_REJECTED, FeaturedStatus.INVALID}
             and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
             else self._recover_existing_featured(context, editorial, previous)
         )
@@ -769,12 +776,16 @@ class ProductionMediaResolver:
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
                     temporary = any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
+                    definitive = any(token in detail.casefold() for token in (
+                        "duplicate", "duplicat", "unrelated", "sem relação", "width_below_minimum",
+                        "resolution", "resolu", "source_bytes_mismatch", "mismatch",
+                    ))
                     accepted = status in {"accepted", "ok"}
                     record_v2_candidate_decision(
                         self.root, post_id=int(context["post_id"]), run_id=run_id,
                         candidate=item, role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
-                        disposition="accepted" if accepted else "defer_retry" if temporary else "reject_final",
-                        reason_code="candidate_accepted" if accepted else "transient_provider_failure" if temporary else (detail[:120] or "candidate_rejected"),
+                        disposition="accepted" if accepted else "defer_retry" if temporary or not definitive else "reject_final",
+                        reason_code="candidate_accepted" if accepted else "transient_provider_failure" if temporary or not definitive else (detail[:120] or "candidate_rejected"),
                     )
             except Exception:
                 pass

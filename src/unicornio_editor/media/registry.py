@@ -364,7 +364,7 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
                       a.visual_group_id, a.subject, u.role, u.section_slot, u.status
                FROM media_usage AS u
                JOIN media_assets AS a ON a.asset_id = u.asset_id
-              WHERE u.post_id = ? AND u.status IN ('accepted', 'applied')
+              WHERE u.post_id = ? AND u.status = 'applied'
               ORDER BY u.usage_id DESC""",
             (int(post_id),),
         ).fetchall()

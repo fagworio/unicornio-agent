@@ -140,6 +140,7 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
         metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
         assert metrics["initial"]["missing"] == 1
         assert metrics["initial"]["queries_attempted"] == 2
+    assert load_v2_media(tmp_path, post_id=10) == []
 
     record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
     record_v2_observation(tmp_path, post_id=10, run_id="run-2", state=state, phase="media", outcome="started", applied=False)
