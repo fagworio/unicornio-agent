@@ -142,9 +142,11 @@ def editorial_subjects(
         "adiciona", "adicionam", "atualizacao", "atualizacoes", "emulacao",
         "emulador", "emuladores", "emulation", "emulator", "suporte", "supports",
         "recebe", "receber", "novo", "nova", "noticia", "software", "hardware",
+        "ex-gerente", "ex-gerentes", "gerente", "gerentes", "pr", "diz", "dizem",
     }
     generic_context_entities = {
         "nintendo", "sony", "microsoft", "playstation", "xbox", "switch", "steam",
+        "snl", "saturday night live",
     }
 
     def add(value: str) -> None:
@@ -175,15 +177,22 @@ def editorial_subjects(
     if is_listicle:
         for row in post_rows:
             add(str(row.get("subject") or ""))
-    add(str(game_name or ""))
-    add(str(focus_keyword or ""))
 
     # Proper-name groups are useful acquisition terms even when the title also
     # contains generic editorial wording such as "recebe suporte".  Prefer
     # these concrete entities to the grammatical principal subject.
-    for group in _NOME_PROPRIO_RE.findall(_TAG_RE.sub(" ", str(title or ""))):
+    named_groups = _NOME_PROPRIO_RE.findall(_TAG_RE.sub(" ", str(title or "")))
+    for group in reversed(named_groups):
         if normalize(group) not in generic_context_entities:
             add(group)
+    # Keep event/platform context available after a concrete entity has been
+    # selected, so callers can enrich the query without making it primary.
+    for group in named_groups:
+        if normalize(group) in generic_context_entities:
+            add(group)
+
+    add(str(game_name or ""))
+    add(str(focus_keyword or ""))
 
     if not is_listicle:
         for row in post_rows:

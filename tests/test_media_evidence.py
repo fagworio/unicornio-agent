@@ -37,11 +37,18 @@ class SubjectTests(unittest.TestCase):
 
     def test_aquisicao_prioriza_entidades_visuais_da_manchete(self):
         subjects = editorial_subjects(
-            title="Wario aparece com Elon Musk no Saturday Night Live da Nintendo",
+            title="Elon Musk aparece no Saturday Night Live da Nintendo como Wario",
             content_html="<p>ex-gerentes não é o assunto visual principal.</p>",
         )
         self.assertEqual(subjects[0], "Wario")
         self.assertNotEqual(subjects[0], "ex-gerentes")
+
+    def test_manchete_115234_ignora_contexto_gramatical_e_pr(self):
+        title = "Ex-gerentes de PR da Nintendo dizem que sketch do SNL com Elon Musk como Wario foi o destaque"
+        subjects = editorial_subjects(title=title, focus_keyword="notícia")
+        self.assertEqual(subjects[0], "Wario")
+        self.assertNotIn("ex-gerentes", subjects[:2])
+        self.assertNotIn("pr", subjects[:2])
 
     def test_listicle_um_subject_por_h2_com_o_nome_completo(self):
         subs = post_subjects(

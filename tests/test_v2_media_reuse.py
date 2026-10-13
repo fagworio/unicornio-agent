@@ -62,6 +62,18 @@ def test_derived_previous_rejection_is_not_root_evidence(tmp_path):
     assert "https://cdn.test/reconsider.webp" not in history["urls"]
 
 
+def test_derived_final_disposition_without_original_evidence_is_reconsidered(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-derived-final"
+    batch.mkdir(parents=True)
+    (batch / "media.manifest.json").write_text(
+        '{"posts":[{"post_id":115234,"audit_candidates":[{"disposition":"reject_final",'
+        '"rejected_reason":"previously_rejected_candidate",'
+        '"url":"https://cdn.test/reconsider-final.webp"}]}]}', encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert "https://cdn.test/reconsider-final.webp" not in history["urls"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

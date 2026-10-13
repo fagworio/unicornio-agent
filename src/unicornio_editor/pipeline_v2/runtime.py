@@ -113,7 +113,14 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             raw_reason_value = str(row.get("rejected_reason") or row.get("reason") or row.get("detail") or "").casefold()
             # This is a derived guard, not original gate evidence.  Do not let
             # its own label become the reason for a permanent blacklist.
-            if "previously_rejected_candidate" in raw_reason_value and raw_disposition != "reject_final":
+            derived_rejection = "previously_rejected_candidate" in raw_reason_value or verdict == "previously_rejected_candidate"
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            has_original_evidence = bool(
+                (evidence and str(evidence.get("verdict") or "").casefold() != "previously_rejected_candidate")
+                or row.get("original_reason") or row.get("gate")
+                or row.get("phash") or row.get("sha256") or row.get("visual_group_id")
+            )
+            if derived_rejection and not has_original_evidence:
                 continue
             is_rejection = bool(
                 row.get("rejected_reason")
@@ -511,6 +518,16 @@ class ProductionMediaResolver:
             # news, use the first concrete visual entity for discovery rather
             # than a grammatical phrase such as "ex-gerentes".
             subject_rows = [{"item": None, "heading": source_subjects[0], "subject": source_subjects[0]}]
+
+        def contextual_query(subject: str, *, extra: str = "") -> str:
+            base = item_query(subject, title, extra=extra)
+            if is_listicle:
+                return base
+            context_terms = [
+                value for value in source_subjects[1:3]
+                if value and value.casefold() != str(subject).casefold()
+            ]
+            return " ".join(dict.fromkeys([base, *context_terms]))
         covered_items = {
             str(item.item_number)
             for item in previous.inline
@@ -568,13 +585,13 @@ class ProductionMediaResolver:
             queries = (
                 diverse_item_queries(subject, title, extra=focus_keyword)
                 if not is_listicle and len(missing_rows) == 1
-                else [item_query(subject, title, extra=focus_keyword)]
+                else [contextual_query(subject, extra=focus_keyword)]
             )
             for query in queries:
                 add_query(subject, f"{query}{inline_suffix}")
         if focus_keyword and not is_listicle:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
-            add_query(main_subject, f"{item_query(focus_keyword, title)}{inline_suffix}")
+            add_query(main_subject, f"{contextual_query(focus_keyword)}{inline_suffix}")
         if not subject_queries and not is_listicle:
             add_query(title, f"{item_query(title, title, extra=focus_keyword)}{inline_suffix}")
 
@@ -837,7 +854,7 @@ class ProductionMediaResolver:
         if featured_needed:
             featured_row = subject_rows[0] if subject_rows else {}
             featured_subject = str(featured_row.get("subject") or title)
-            featured_query = item_query(featured_subject, title, extra=focus_keyword)
+            featured_query = contextual_query(featured_subject, extra=focus_keyword)
             featured_queries = [
                 (featured_subject, f"{featured_query} key art{featured_suffix}"),
                 (featured_subject, f"{featured_query}{featured_suffix}"),
