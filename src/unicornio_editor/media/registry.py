@@ -277,13 +277,25 @@ def record_v2_observation(
     checkpoints, candidate selection and publication gates remain authoritative.
     """
     media = getattr(state, "media", None)
-    planned = {
+    current_metrics = {
         "required": int(getattr(media, "required", 0) or 0),
         "accepted": int(getattr(media, "accepted", 0) or 0),
         "missing": int(getattr(media, "missing", 0) or 0),
         "phase": phase,
+        "queries_attempted": int(getattr(getattr(media, "search", None), "queries_attempted", 0) or 0),
     }
     with connect(root) as db:
+        previous = db.execute(
+            "SELECT planned_deficits FROM media_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        try:
+            history = json.loads(previous[0]) if previous and previous[0] else {}
+        except (TypeError, ValueError):
+            history = {}
+        planned = {
+            "initial": history.get("initial", current_metrics),
+            "final": current_metrics,
+        }
         db.execute(
             """INSERT INTO media_runs
             (run_id, post_id, planned_deficits, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
@@ -330,7 +342,7 @@ def record_v2_observation(
                 (post_id, asset_id, wordpress_media_id, role, section_slot, status, applied_at)
                 VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
                 ON CONFLICT(post_id, asset_id, role, COALESCE(section_slot, -1)) DO UPDATE SET
-                    status=excluded.status,
+                    status=CASE WHEN media_usage.status = 'applied' THEN 'applied' ELSE excluded.status END,
                     applied_at=COALESCE(excluded.applied_at, media_usage.applied_at)""",
                 (int(post_id), asset_id, getattr(item, "media_id", None), role,
                  getattr(item, "section_slot", None), "applied" if applied else "accepted", applied),

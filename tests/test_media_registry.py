@@ -1,8 +1,12 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from unicornio_editor.media.registry import RegistryError, connect, migrate_legacy_index, registry_path
+from unicornio_editor.media.registry import (
+    RegistryError, connect, migrate_legacy_index, record_v2_observation, registry_path,
+)
+from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
 
 
 def test_registry_is_per_root_and_migrates_legacy_index_idempotently(tmp_path):
@@ -120,3 +124,26 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
         with pytest.raises(Exception):
             migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
+
+
+def test_v2_observation_separates_state_readback_from_media_application(tmp_path):
+    media = MediaProgress(
+        required=2,
+        inline=(InlineMedia(7, "https://cdn.test/inline", 0, "alt", "credit", "subject"),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 8, "https://cdn.test/featured"),
+        search=MediaSearchProgress(queries_attempted=2),
+    )
+    state = SimpleNamespace(media=media)
+    record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="media", outcome="retry")
+    with connect(tmp_path) as db:
+        assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "accepted"
+        metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
+        assert metrics["initial"]["missing"] == 1
+        assert metrics["initial"]["queries_attempted"] == 2
+
+    record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
+    record_v2_observation(tmp_path, post_id=10, run_id="run-2", state=state, phase="media", outcome="started", applied=False)
+    with connect(tmp_path) as db:
+        assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "applied"
+        metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
+        assert metrics["final"]["phase"] == "validate"

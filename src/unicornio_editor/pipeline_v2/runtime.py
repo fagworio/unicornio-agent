@@ -1260,6 +1260,7 @@ class WordPressWriterV2:
                 readback = self.client.get_post(post_id)
             if readback.get("status") != "awaiting_human":
                 raise RuntimeError("Awaiting Human status read-back mismatch")
+        media_readback = False
         if apply_inline or outcome.type.value == "ready":
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
             embedded_readback_urls = set(_embedded_media_urls(readback_content))
@@ -1272,6 +1273,13 @@ class WordPressWriterV2:
                     "inline media read-back mismatch: "
                     + ", ".join(missing_inline[:5])
                 )
+            expected_featured_id = getattr(getattr(proposed_state, "media", None), "featured", None)
+            expected_featured_id = getattr(expected_featured_id, "media_id", None)
+            featured_readback = (
+                expected_featured_id is None
+                or readback.get("featured_media") == expected_featured_id
+            )
+            media_readback = not missing_inline and featured_readback
             try:
                 from ..observability import append_telemetry
 
@@ -1314,6 +1322,8 @@ class WordPressWriterV2:
         return {
             "wordpress_changed": changed,
             "readback": True,
+            "state_readback": True,
+            "media_readback": media_readback,
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
         }
@@ -1519,8 +1529,12 @@ def run_v2(
                         phase=initial.phase.value, outcome="started",
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    from ..observability import record_unexpected_error
+                    record_unexpected_error(
+                        root, exc, post_id=int(post_id), run_id=run_id,
+                        file="pipeline_v2/runtime.py", field="media_registry.start",
+                    )
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(
@@ -1560,10 +1574,14 @@ def run_v2(
                         root, post_id=post_id, run_id=run_id, state=buffered.state,
                         phase=buffered.state.phase.value, outcome=outcome.type.value,
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
-                        applied=bool(write.get("readback")),
+                        applied=bool(write.get("media_readback")),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    from ..observability import record_unexpected_error
+                    record_unexpected_error(
+                        root, exc, post_id=int(post_id), run_id=run_id,
+                        file="pipeline_v2/runtime.py", field="media_registry.finish",
+                    )
                 details.append({
                     "post_id": post_id,
                     "initial_state": initial.state.value,
