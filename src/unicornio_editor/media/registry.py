@@ -356,6 +356,53 @@ def record_v2_observation(
         db.commit()
 
 
+def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
+    """Return previously accepted/applied media for resolver-side reuse."""
+    with connect(root) as db:
+        rows = db.execute(
+            """SELECT a.wordpress_media_id, a.canonical_url, a.sha256, a.phash,
+                      a.visual_group_id, a.subject, u.role, u.section_slot, u.status
+               FROM media_usage AS u
+               JOIN media_assets AS a ON a.asset_id = u.asset_id
+              WHERE u.post_id = ? AND u.status IN ('accepted', 'applied')
+              ORDER BY u.usage_id""",
+            (int(post_id),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_v2_candidate_decision(
+    root: str | Path,
+    *,
+    post_id: int,
+    run_id: str,
+    candidate: dict[str, Any],
+    role: str,
+    disposition: str,
+    reason_code: str,
+) -> None:
+    """Store one sanitized candidate decision for future adaptive runs."""
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+    reference = json.dumps({
+        "verdict": str(evidence.get("verdict") or ""),
+        "source_domain": str(candidate.get("source_page_url") or "").split("/", 3)[2]
+        if "://" in str(candidate.get("source_page_url") or "") else "",
+    }, sort_keys=True)
+    with connect(root) as db:
+        db.execute(
+            """INSERT INTO media_decisions
+            (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, CURRENT_TIMESTAMP)""",
+            (int(post_id), run_id, candidate_id, role, str(candidate.get("subject") or ""),
+             reason_code, disposition, reference),
+        )
+        db.commit()
+
+
 __all__ = [
-    "SCHEMA_VERSION", "connect", "migrate_legacy_index", "record_v2_observation", "registry_path",
+    "SCHEMA_VERSION", "connect", "load_v2_media", "migrate_legacy_index",
+    "record_v2_candidate_decision", "record_v2_observation", "registry_path",
 ]

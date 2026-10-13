@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.media.registry import (
-    RegistryError, connect, migrate_legacy_index, record_v2_observation, registry_path,
+    RegistryError, connect, load_v2_media, migrate_legacy_index, record_v2_observation, registry_path,
 )
 from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
 
@@ -147,3 +147,6 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
         assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "applied"
         metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
         assert metrics["final"]["phase"] == "validate"
+    reused = load_v2_media(tmp_path, post_id=10)
+    assert {row["role"] for row in reused} == {"inline", "featured"}
+    assert all(row["status"] == "applied" for row in reused)

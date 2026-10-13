@@ -415,8 +415,42 @@ class ProductionMediaResolver:
         title = str(context.get("title") or "")
         focus_keyword = str((editorial.get("seo") or {}).get("focus_keyword") or "")
         total_required = _required_image_count_for_editorial(html, title=title)
+        registry_media: list[dict[str, Any]] = []
+        try:
+            from ..media.registry import load_v2_media
+            registry_media = load_v2_media(self.root, post_id=int(context["post_id"]))
+        except Exception:
+            registry_media = []
+        current_inline = list(previous.inline)
+        known_ids = {item.media_id for item in current_inline}
+        for row in registry_media:
+            if row.get("role") != "inline" or not row.get("wordpress_media_id") or row.get("wordpress_media_id") in known_ids:
+                continue
+            current_inline.append(InlineMedia(
+                int(row["wordpress_media_id"]), str(row.get("canonical_url") or ""),
+                len(current_inline), subject=str(row.get("subject") or ""),
+                section_slot=row.get("section_slot"), phash=str(row.get("phash") or ""),
+                sha256=str(row.get("sha256") or ""), visual_group_id=str(row.get("visual_group_id") or ""),
+            ))
+            known_ids.add(int(row["wordpress_media_id"]))
+        previous = replace(previous, inline=tuple(current_inline))
         inline_needed = max(0, total_required - previous.accepted)
-        featured = self._recover_existing_featured(context, editorial, previous)
+        registry_featured = next(
+            (row for row in registry_media if row.get("role") == "featured" and row.get("wordpress_media_id")),
+            None,
+        )
+        featured = (
+            FeaturedProgress(
+                FeaturedStatus.VALID,
+                int(registry_featured["wordpress_media_id"]),
+                str(registry_featured.get("canonical_url") or ""),
+                str(registry_featured.get("sha256") or ""),
+                str(registry_featured.get("phash") or ""),
+                str(registry_featured.get("visual_group_id") or ""),
+            )
+            if registry_featured and previous.featured.status is not FeaturedStatus.VALID
+            else self._recover_existing_featured(context, editorial, previous)
+        )
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
 
         from ..cli import _resolve_media_batch
@@ -602,6 +636,22 @@ class ProductionMediaResolver:
                     candidate["rejected_reason"] = "previously_rejected_candidate"
                     continue
                 filtered.append(candidate)
+            try:
+                from ..media.registry import record_v2_candidate_decision
+                run_id = str(context.get("v2_run_id") or "")
+                for candidate in candidates:
+                    candidate_url = _canonical_embedded_media_url(
+                        str(candidate.get("direct_image_url") or candidate.get("media_url") or "")
+                    )
+                    rejected = candidate_url in rejection_history["urls"]
+                    record_v2_candidate_decision(
+                        self.root, post_id=int(context["post_id"]), run_id=run_id,
+                        candidate=candidate, role=role,
+                        disposition="reject_final" if rejected else "accepted",
+                        reason_code="previously_rejected_candidate" if rejected else "candidate_accepted",
+                    )
+            except Exception:
+                pass
             return filtered
 
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
