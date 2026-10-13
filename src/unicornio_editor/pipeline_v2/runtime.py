@@ -1512,6 +1512,15 @@ def run_v2(
                 # process dies after an upload, recovery must not mistake the
                 # previous committed journal for a completed run.
                 _write_v2_journal_checkpoint(root, post_id, "running", initial, run_id=run_id)
+                try:
+                    from ..media.registry import record_v2_observation
+                    record_v2_observation(
+                        root, post_id=post_id, run_id=run_id, state=initial,
+                        phase=initial.phase.value, outcome="started",
+                        checkpoint_reference=f"work/v2-journal/{post_id}.json",
+                    )
+                except Exception:
+                    pass
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(
@@ -1545,6 +1554,16 @@ def run_v2(
                         pass
                     raise
                 completed += 1
+                try:
+                    from ..media.registry import record_v2_observation
+                    record_v2_observation(
+                        root, post_id=post_id, run_id=run_id, state=buffered.state,
+                        phase=buffered.state.phase.value, outcome=outcome.type.value,
+                        checkpoint_reference=f"work/v2-journal/{post_id}.json",
+                        applied=bool(write.get("readback")),
+                    )
+                except Exception:
+                    pass
                 details.append({
                     "post_id": post_id,
                     "initial_state": initial.state.value,

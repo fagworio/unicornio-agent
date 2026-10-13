@@ -260,4 +260,90 @@ def migrate_legacy_index(root: str | Path) -> dict[str, int]:
     return report
 
 
-__all__ = ["SCHEMA_VERSION", "connect", "migrate_legacy_index", "registry_path"]
+def record_v2_observation(
+    root: str | Path,
+    *,
+    post_id: int,
+    run_id: str,
+    state: Any,
+    phase: str,
+    outcome: str = "",
+    checkpoint_reference: str = "",
+    applied: bool = False,
+) -> None:
+    """Persist a best-effort V2 observation without affecting pipeline state.
+
+    This is deliberately a write-only integration point.  Existing V2
+    checkpoints, candidate selection and publication gates remain authoritative.
+    """
+    media = getattr(state, "media", None)
+    planned = {
+        "required": int(getattr(media, "required", 0) or 0),
+        "accepted": int(getattr(media, "accepted", 0) or 0),
+        "missing": int(getattr(media, "missing", 0) or 0),
+        "phase": phase,
+    }
+    with connect(root) as db:
+        db.execute(
+            """INSERT INTO media_runs
+            (run_id, post_id, planned_deficits, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(run_id) DO UPDATE SET
+                planned_deficits=excluded.planned_deficits,
+                acquisition_outcome=excluded.acquisition_outcome,
+                checkpoint_reference=excluded.checkpoint_reference,
+                completion_reason=excluded.completion_reason""",
+            (run_id, int(post_id), json.dumps(planned, sort_keys=True), outcome,
+             checkpoint_reference, "readback_confirmed" if applied else phase),
+        )
+        assets = []
+        inline = getattr(media, "inline", ()) if media is not None else ()
+        assets.extend(inline)
+        featured = getattr(media, "featured", None)
+        if featured is not None and getattr(featured, "media_id", None):
+            assets.append(featured)
+        for item in assets:
+            url = str(getattr(item, "media_url", "") or "").strip()
+            if not url:
+                continue
+            db.execute(
+                """INSERT INTO media_assets
+                (canonical_url, source_type, sha256, phash, visual_group_id,
+                 wordpress_media_id, subject, status)
+                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, 'known')
+                ON CONFLICT(canonical_url) DO UPDATE SET
+                    sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
+                    phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
+                    visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
+                    wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_assets.wordpress_media_id),
+                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END""",
+                (url, str(getattr(item, "sha256", "") or ""), str(getattr(item, "phash", "") or ""),
+                 str(getattr(item, "visual_group_id", "") or ""), getattr(item, "media_id", None),
+                 str(getattr(item, "subject", "") or "")),
+            )
+            asset_id = db.execute(
+                "SELECT asset_id FROM media_assets WHERE canonical_url = ?", (url,)
+            ).fetchone()[0]
+            role = "featured" if item is featured else "inline"
+            db.execute(
+                """INSERT INTO media_usage
+                (post_id, asset_id, wordpress_media_id, role, section_slot, status, applied_at)
+                VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                ON CONFLICT(post_id, asset_id, role, COALESCE(section_slot, -1)) DO UPDATE SET
+                    status=excluded.status,
+                    applied_at=COALESCE(excluded.applied_at, media_usage.applied_at)""",
+                (int(post_id), asset_id, getattr(item, "media_id", None), role,
+                 getattr(item, "section_slot", None), "applied" if applied else "accepted", applied),
+            )
+        db.execute(
+            """INSERT INTO media_decisions
+            (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
+            VALUES (?, ?, '', 'run', '', ?, ?, 'post', ?, CURRENT_TIMESTAMP)""",
+            (int(post_id), run_id, phase, outcome or phase, checkpoint_reference),
+        )
+        db.commit()
+
+
+__all__ = [
+    "SCHEMA_VERSION", "connect", "migrate_legacy_index", "record_v2_observation", "registry_path",
+]
