@@ -103,6 +103,24 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                     **item,
                     "disposition": item.get("disposition") or parent_disposition,
                     "rejected_reason": item.get("rejected_reason") or parent_reason,
+                    # ``invalid_media`` is derived evidence. Preserve the
+                    # parent's original cause so a guard label such as
+                    # ``previously_rejected_candidate`` cannot hide whether
+                    # the source was actually transient or definitive.
+                    "original_reason": (
+                        item.get("original_reason")
+                        or item.get("original_rejected_reason")
+                        or row.get("original_reason")
+                        or row.get("original_rejected_reason")
+                        or row.get("detail")
+                        or row.get("reason")
+                    ),
+                    "original_rejected_reason": (
+                        item.get("original_rejected_reason")
+                        or row.get("original_rejected_reason")
+                    ),
+                    "original_gate": item.get("original_gate") or row.get("original_gate"),
+                    "evidence": item.get("evidence") or row.get("evidence"),
                 }
                 for item in (row.get("invalid_media") or []) if isinstance(item, dict)
             )
@@ -122,14 +140,14 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             ).casefold()
             definitive_causes = (
                 "source_mismatch", "duplicate_existing_frame", "duplicate_frame",
-                "unrelated", "width_below_minimum", "reject_final",
+                "unrelated", "width_below_minimum",
             )
             transient_causes = (
                 "timeout", "network_error", "network", "source_page_unreachable",
                 "unreachable", "tempor", "cdn",
             )
             has_definitive_cause = bool(
-                evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "unresolved_source"}
+                evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated"}
                 or any(token in original_cause for token in definitive_causes)
             )
             has_transient_cause = any(token in original_cause for token in transient_causes)
@@ -140,14 +158,23 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             is_rejection = bool(
                 row.get("rejected_reason")
                 or raw_disposition in {"reject_final", "defer_retry"}
-                or verdict in {"reject", "unresolved_source", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "previously_rejected_candidate"}
+                or verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "previously_rejected_candidate"}
                 or any(token in raw_reason_value for token in ("duplicate", "rejeit", "unrelated", "inacess", "diverg"))
             )
             if not is_rejection:
                 continue
-            raw_reason = str(row.get("detail") or row.get("reason") or row.get("rejected_reason") or "").strip()
+            raw_reason = str(
+                row.get("original_reason")
+                or row.get("original_rejected_reason")
+                or row.get("detail")
+                or row.get("reason")
+                or row.get("rejected_reason")
+                or ""
+            ).strip()
             lowered = raw_reason.casefold()
-            if "duplicate_existing_frame" in lowered or "duplicate" in lowered or "duplicat" in lowered:
+            if "source_mismatch" in lowered:
+                reason = "source_mismatch"
+            elif "duplicate_existing_frame" in lowered or "duplicate" in lowered or "duplicat" in lowered:
                 reason = "duplicate_existing_frame"
             elif "width_below_minimum" in lowered or "px wide" in lowered or "resolu" in lowered:
                 reason = "width_below_minimum"

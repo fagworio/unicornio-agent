@@ -146,6 +146,58 @@ def test_derived_history_uses_original_cause_classification(tmp_path, cause, blo
     assert (url in history["urls"]) is blocked
 
 
+def test_invalid_media_inherits_original_definitive_cause(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-inherited-definitive"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/inherited-source-mismatch.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "previously_rejected_candidate",
+            "original_reason": "source_mismatch",
+            "invalid_media": [{"url": url}],
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url in history["urls"]
+    assert "source_mismatch" in history["reasons"]
+    assert "previously_rejected_candidate" not in history["reasons"]
+
+
+def test_invalid_media_inherits_transient_cause_without_blacklisting(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-inherited-transient"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/inherited-timeout.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "previously_rejected_candidate",
+            "original_reason": "timeout",
+            "invalid_media": [{"url": url}],
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+    assert "timeout" not in history["reasons"]
+
+
+def test_unresolved_source_does_not_override_transient_original_cause(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-unresolved-source"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/unresolved-timeout.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "previously_rejected_candidate",
+            "original_reason": "timeout",
+            "url": url,
+            "evidence": {"verdict": "unresolved_source"},
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
