@@ -625,15 +625,21 @@ class ProductionMediaResolver:
             # provider calls or uploads.  A structure failure is routed back
             # to EDITORIAL so the next attempt can reorganize the copy; this
             # never fabricates paragraphs or weakens the spacing policy.
-            from ..media.inserter import MediaInsertionError, plan_normal_media_insertions
+            from ..media.inserter import MediaInsertionError, normal_media_urls_to_insert, plan_normal_media_insertions
             from .errors import StageError
             from .model import BlockerCode
 
             try:
-                plan_normal_media_insertions(
-                    html,
-                    [{"media_url": ""} for _ in range(inline_needed)],
+                future_urls = [item.media_url for item in current_inline]
+                future_urls.extend(
+                    f"__v2_pending_media_{index}__" for index in range(inline_needed)
                 )
+                insertions = normal_media_urls_to_insert(
+                    html,
+                    future_urls,
+                    str(current_featured.media_url or ""),
+                )
+                plan_normal_media_insertions(html, [{"media_url": url} for url in insertions])
             except MediaInsertionError as exc:
                 raise StageError(
                     BlockerCode.STRUCTURE,

@@ -119,7 +119,7 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         assert "usage_id" in columns
         assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
         assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "2"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
         migrated.execute("INSERT INTO media_assets(asset_id, canonical_url) VALUES (3, 'https://cdn.test/b')")
         migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
         with pytest.raises(Exception):
@@ -160,3 +160,29 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
     by_role = {row["role"]: row for row in reused}
     assert by_role["inline"]["visual_verification"] == {"decision": "DIFFERENT", "method": "test"}
     assert by_role["featured"]["visual_verification"] == {"decision": "INITIAL", "method": "test"}
+
+
+def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):
+    shared_url = "https://cdn.test/shared.webp"
+    state_a = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(
+            7, shared_url, 0,
+            visual_verification={"decision": "DIFFERENT", "duplicate_of": "101"},
+        ),),
+    ))
+    state_b = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(
+            7, shared_url, 0,
+            visual_verification={"decision": "SAME_ART_CROP", "duplicate_of": "202"},
+        ),),
+    ))
+
+    record_v2_observation(tmp_path, post_id=101, run_id="run-a", state=state_a, phase="validate", applied=True)
+    record_v2_observation(tmp_path, post_id=202, run_id="run-b", state=state_b, phase="validate", applied=True)
+
+    evidence_a = load_v2_media(tmp_path, post_id=101)[0]["visual_verification"]
+    evidence_b = load_v2_media(tmp_path, post_id=202)[0]["visual_verification"]
+    assert evidence_a == {"decision": "DIFFERENT", "duplicate_of": "101"}
+    assert evidence_b == {"decision": "SAME_ART_CROP", "duplicate_of": "202"}

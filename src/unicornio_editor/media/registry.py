@@ -12,7 +12,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class RegistryError(RuntimeError):
@@ -110,6 +110,7 @@ def _migrate(db: sqlite3.Connection) -> None:
             role TEXT NOT NULL,
             list_item TEXT NOT NULL DEFAULT '',
             section_slot INTEGER,
+            identity_evidence TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL DEFAULT 'accepted',
             applied_at TEXT,
             usage_id INTEGER PRIMARY KEY
@@ -158,6 +159,13 @@ def _migrate(db: sqlite3.Connection) -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", tuple(row)
                 )
             db.execute("DROP TABLE media_usage_v1")
+        usage_columns_after = {
+            row[1] for row in db.execute("PRAGMA table_info(media_usage)")
+        }
+        if "identity_evidence" not in usage_columns_after:
+            db.execute(
+                "ALTER TABLE media_usage ADD COLUMN identity_evidence TEXT NOT NULL DEFAULT '{}'"
+            )
         # The legacy table may have carried an index with this name.  SQLite
         # binds index names globally, so recreating it must happen only after
         # the legacy table (and its indexes) has been removed.
@@ -325,18 +333,17 @@ def record_v2_observation(
             db.execute(
                 """INSERT INTO media_assets
                 (canonical_url, source_type, sha256, phash, visual_group_id,
-                 wordpress_media_id, subject, identity_evidence, status)
-                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, ?, 'known')
+                 wordpress_media_id, subject, status)
+                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, 'known')
                 ON CONFLICT(canonical_url) DO UPDATE SET
                     sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
                     phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
                     visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
                     wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_assets.wordpress_media_id),
-                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END,
-                    identity_evidence=CASE WHEN excluded.identity_evidence <> '{}' THEN excluded.identity_evidence ELSE media_assets.identity_evidence END""",
+                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END""",
                 (url, str(getattr(item, "sha256", "") or ""), str(getattr(item, "phash", "") or ""),
                  str(getattr(item, "visual_group_id", "") or ""), getattr(item, "media_id", None),
-                 str(getattr(item, "subject", "") or ""), identity_evidence),
+                 str(getattr(item, "subject", "") or "")),
             )
             asset_id = db.execute(
                 "SELECT asset_id FROM media_assets WHERE canonical_url = ?", (url,)
@@ -344,13 +351,16 @@ def record_v2_observation(
             role = "featured" if item is featured else "inline"
             db.execute(
                 """INSERT INTO media_usage
-                (post_id, asset_id, wordpress_media_id, role, section_slot, status, applied_at)
-                VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                (post_id, asset_id, wordpress_media_id, role, section_slot,
+                 identity_evidence, status, applied_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
                 ON CONFLICT(post_id, asset_id, role, COALESCE(section_slot, -1)) DO UPDATE SET
                     status=CASE WHEN media_usage.status = 'applied' THEN 'applied' ELSE excluded.status END,
-                    applied_at=COALESCE(excluded.applied_at, media_usage.applied_at)""",
+                    applied_at=COALESCE(excluded.applied_at, media_usage.applied_at),
+                    identity_evidence=CASE WHEN excluded.identity_evidence <> '{}' THEN excluded.identity_evidence ELSE media_usage.identity_evidence END""",
                 (int(post_id), asset_id, getattr(item, "media_id", None), role,
-                 getattr(item, "section_slot", None), "applied" if applied else "accepted", applied),
+                 getattr(item, "section_slot", None), identity_evidence,
+                 "applied" if applied else "accepted", applied),
             )
         db.execute(
             """INSERT INTO media_decisions
@@ -366,7 +376,7 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
     with connect(root) as db:
         rows = db.execute(
             """SELECT a.wordpress_media_id, a.canonical_url, a.sha256, a.phash,
-                      a.visual_group_id, a.subject, a.identity_evidence,
+                      a.visual_group_id, a.subject, u.identity_evidence,
                       u.role, u.section_slot, u.status
                FROM media_usage AS u
                JOIN media_assets AS a ON a.asset_id = u.asset_id

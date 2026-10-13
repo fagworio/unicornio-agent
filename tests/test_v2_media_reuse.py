@@ -146,6 +146,37 @@ def test_resolver_preflights_normal_article_slots_before_acquisition(monkeypatch
         )
 
 
+def test_resolver_preflight_counts_accepted_media_missing_from_html(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Subject"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: ["Subject"])
+    monkeypatch.setattr(
+        cli,
+        "_resolve_media_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("media acquisition must not run when final composition cannot fit")
+        ),
+    )
+    previous = MediaProgress(
+        required=4,
+        inline=tuple(
+            InlineMedia(index, f"https://cdn.test/accepted-{index}.webp", index)
+            for index in range(1, 4)
+        ),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    with pytest.raises(StageError, match="media_preflight:insufficient_paragraph_slots"):
+        ProductionMediaResolver(object(), Config(), tmp_path)(
+            {"post_id": 115234, "title": "Subject"},
+            SimpleNamespace(media=previous),
+            {"cleaned_html": _article_html(4), "seo": {}},
+            previous,
+        )
+
+
 def test_derived_rejection_with_fingerprint_but_without_cause_is_reconsidered(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-fingerprint"
     batch.mkdir(parents=True)
@@ -447,7 +478,7 @@ def test_media_resolver_refreshes_required_on_noop_retry(tmp_path):
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": _article_html(3), "seo": {}},
+        {"cleaned_html": _article_html(), "seo": {}},
         previous,
     )
     assert result.required == 2
@@ -498,7 +529,7 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": _article_html(3), "seo": {}},
+        {"cleaned_html": _article_html(), "seo": {}},
         previous,
     )
 
@@ -554,7 +585,7 @@ def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_pa
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 115088, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": _article_html(3), "seo": {}},
+        {"cleaned_html": _article_html(), "seo": {}},
         previous,
     )
 

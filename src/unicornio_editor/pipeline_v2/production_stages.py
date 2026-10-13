@@ -22,7 +22,7 @@ from ..language import editorial_language_report
 from ..html_cleaner import normalize_h1_headings
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
-from ..media.inserter import MediaInsertionError, insert_media, plan_normal_media_insertions, remove_media_urls
+from ..media.inserter import MediaInsertionError, insert_media, normal_media_urls_to_insert, plan_normal_media_insertions, remove_media_urls
 from ..media.vision_gate import VisionGateError
 from ..workflow import (
     MediaFunnelInvariantError,
@@ -437,14 +437,17 @@ class ProductionComposeStage:
                 _visual_reconcile_urls(self.root, int(context["post_id"]), media),
             )
             featured_url = str(media.featured.media_url or "").strip()
+            insertable_urls = set(normal_media_urls_to_insert(
+                existing_html,
+                [str(item.media_url or "") for item in media.inline],
+                featured_url,
+            ))
             seen_urls: set[str] = set()
             placements: list[dict[str, Any]] = []
             for index, item in enumerate(media.inline):
                 media_url = str(item.media_url or "").strip()
                 if (
-                    not media_url
-                    or media_url in existing_html
-                    or media_url == featured_url
+                    media_url not in insertable_urls
                     or media_url in seen_urls
                 ):
                     continue

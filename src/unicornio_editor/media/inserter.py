@@ -70,6 +70,31 @@ def remove_media_urls(html: str, urls: list[str] | tuple[str, ...] | set[str]) -
     return output
 
 
+def normal_media_urls_to_insert(
+    html: str,
+    media_urls: list[str] | tuple[str, ...],
+    featured_url: str = "",
+) -> list[str]:
+    """Return normal-article media URLs that still need HTML insertion.
+
+    This is the shared accounting used by MEDIA preflight and COMPOSE. It
+    excludes URLs already present in the current HTML, the featured asset,
+    empty values, and duplicates while preserving first-seen order.
+    """
+    if not isinstance(html, str) or not isinstance(media_urls, (list, tuple)):
+        raise MediaInsertionError("HTML and media URLs have invalid types")
+    featured = str(featured_url or "").strip()
+    selected: list[str] = []
+    seen: set[str] = set()
+    for value in media_urls:
+        media_url = str(value or "").strip()
+        if not media_url or media_url in html or media_url == featured or media_url in seen:
+            continue
+        selected.append(media_url)
+        seen.add(media_url)
+    return selected
+
+
 def plan_normal_media_insertions(
     html: str,
     plan: list[Mapping[str, Any]],
