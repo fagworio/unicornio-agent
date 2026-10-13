@@ -56,8 +56,14 @@ def _migrate(db: sqlite3.Connection) -> None:
             raise RegistryError(f"schema de registry futuro nao suportado: {version}")
     else:
         version = 0
-    db.executescript(
-        """
+    db.execute("BEGIN")
+    try:
+        usage_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(media_usage)")
+        } if current else set()
+        if usage_columns and "usage_id" not in usage_columns:
+            db.execute("ALTER TABLE media_usage RENAME TO media_usage_v1")
+        schema_sql = """
         CREATE TABLE IF NOT EXISTS schema_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -118,49 +124,101 @@ def _migrate(db: sqlite3.Connection) -> None:
             completion_reason TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS registry_migration_log (
+            migration_id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_media_decisions_post ON media_decisions(post_id);
         CREATE INDEX IF NOT EXISTS idx_media_decisions_candidate ON media_decisions(candidate_id);
-        CREATE INDEX IF NOT EXISTS idx_media_assets_phash ON media_assets(phash);
-        CREATE INDEX IF NOT EXISTS idx_media_assets_wp ON media_assets(wordpress_media_id);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_media_usage_position
             ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1));
         """
-    )
-    if version < 2:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(media_assets)")}
-        if "subject" not in columns:
-            db.execute("ALTER TABLE media_assets ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
-        if "article_id" not in columns:
-            db.execute("ALTER TABLE media_assets ADD COLUMN article_id INTEGER")
-        if "legacy_uses" not in columns:
-            db.execute("ALTER TABLE media_assets ADD COLUMN legacy_uses INTEGER NOT NULL DEFAULT 0")
-    db.execute(
-        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
-    db.commit()
+        for statement in schema_sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                db.execute(statement)
+        if usage_columns and "usage_id" not in usage_columns:
+            old_rows = db.execute(
+                "SELECT post_id, asset_id, wordpress_media_id, role, list_item, section_slot, status, applied_at "
+                "FROM media_usage_v1 ORDER BY rowid"
+            ).fetchall()
+            seen: set[tuple[Any, ...]] = set()
+            for row in old_rows:
+                key = (row[0], row[1], row[3], row[5] if row[5] is not None else -1)
+                if key in seen:
+                    db.execute(
+                        "INSERT INTO registry_migration_log(kind, detail) VALUES('usage_consolidated', ?)",
+                        (json.dumps(dict(row), default=str),),
+                    )
+                    continue
+                seen.add(key)
+                db.execute(
+                    """INSERT INTO media_usage
+                    (post_id, asset_id, wordpress_media_id, role, list_item, section_slot, status, applied_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", tuple(row)
+                )
+            db.execute("DROP TABLE media_usage_v1")
+        if version < 2:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(media_assets)")}
+            additions = {
+                "source_page_url": "TEXT NOT NULL DEFAULT ''",
+                "source_type": "TEXT NOT NULL DEFAULT ''",
+                "sha256": "TEXT NOT NULL DEFAULT ''",
+                "phash": "TEXT NOT NULL DEFAULT ''",
+                "visual_group_id": "TEXT NOT NULL DEFAULT ''",
+                "width": "INTEGER",
+                "height": "INTEGER",
+                "mime_type": "TEXT NOT NULL DEFAULT ''",
+                "wordpress_media_id": "INTEGER",
+                "subject": "TEXT NOT NULL DEFAULT ''",
+                "article_id": "INTEGER",
+                "legacy_uses": "INTEGER NOT NULL DEFAULT 0",
+                "provenance_evidence": "TEXT NOT NULL DEFAULT '{}'",
+                "identity_evidence": "TEXT NOT NULL DEFAULT '{}'",
+                "status": "TEXT NOT NULL DEFAULT 'known'",
+                "policy_version": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE media_assets ADD COLUMN {name} {definition}")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_phash ON media_assets(phash)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_wp ON media_assets(wordpress_media_id)")
+        db.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
-def migrate_legacy_index(root: str | Path) -> int:
-    """Import ``work/media_index.json`` idempotently; return inserted count."""
+def migrate_legacy_index(root: str | Path) -> dict[str, int]:
+    """Reconcile ``work/media_index.json`` without replacing better evidence."""
     legacy = Path(root) / "work" / "media_index.json"
     if not legacy.is_file():
-        return 0
+        return {"scanned": 0, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     try:
         payload = json.loads(legacy.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return 0
+        return {"scanned": 0, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     entries = payload.get("entries") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
-        return 0
-    inserted = 0
+        return {"scanned": 0, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
+    report = {"scanned": 0, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     with connect(root) as db:
         for entry in entries:
             if not isinstance(entry, dict):
+                report["skipped"] += 1
                 continue
+            report["scanned"] += 1
             url = str(entry.get("source_url") or "").strip()
             if not url:
+                report["skipped"] += 1
                 continue
+            before = db.execute("SELECT * FROM media_assets WHERE canonical_url=?", (url,)).fetchone()
             db.execute(
                 """INSERT INTO media_assets
                 (canonical_url, source_page_url, source_type, sha256, phash,
@@ -168,7 +226,7 @@ def migrate_legacy_index(root: str | Path) -> int:
                  legacy_uses, status)
                 VALUES (?, ?, 'legacy_index', ?, ?, ?, ?, ?, ?, ?, 'known')
                 ON CONFLICT(canonical_url) DO UPDATE SET
-                    source_page_url=excluded.source_page_url,
+                    source_page_url=CASE WHEN excluded.source_page_url <> '' THEN excluded.source_page_url ELSE media_assets.source_page_url END,
                     sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
                     phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
                     visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
@@ -181,9 +239,15 @@ def migrate_legacy_index(root: str | Path) -> int:
                  entry.get("media_id"), str(entry.get("subject") or ""),
                  entry.get("article_id"), int(entry.get("uses") or 0)),
             )
-            inserted += 1
+            after = db.execute("SELECT * FROM media_assets WHERE canonical_url=?", (url,)).fetchone()
+            if before is None:
+                report["inserted"] += 1
+            elif tuple(before) == tuple(after):
+                report["unchanged"] += 1
+            else:
+                report["updated"] += 1
         db.commit()
-    return inserted
+    return report
 
 
 __all__ = ["SCHEMA_VERSION", "connect", "migrate_legacy_index", "registry_path"]

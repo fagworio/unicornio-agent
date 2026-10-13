@@ -15,8 +15,12 @@ def test_registry_is_per_root_and_migrates_legacy_index_idempotently(tmp_path):
         "media_id": 42,
     }]}), encoding="utf-8")
 
-    assert migrate_legacy_index(tmp_path) == 1
-    assert migrate_legacy_index(tmp_path) == 1  # reconciliação é idempotente, não duplicadora
+    assert migrate_legacy_index(tmp_path) == {
+        "scanned": 1, "inserted": 1, "updated": 0, "unchanged": 0, "skipped": 0,
+    }
+    assert migrate_legacy_index(tmp_path) == {
+        "scanned": 1, "inserted": 0, "updated": 0, "unchanged": 1, "skipped": 0,
+    }
     assert registry_path(tmp_path).is_file()
     with connect(tmp_path) as db:
         row = db.execute("SELECT canonical_url, wordpress_media_id FROM media_assets").fetchone()
@@ -38,6 +42,32 @@ def test_registry_reconciles_legacy_metadata_and_keeps_roots_independent(tmp_pat
         assert db.execute("SELECT subject FROM media_assets").fetchone()[0] == "b"
 
 
+def test_legacy_reconciliation_preserves_stronger_existing_evidence(tmp_path):
+    with connect(tmp_path) as db:
+        db.execute(
+            "INSERT INTO media_assets(canonical_url, source_page_url, phash, subject, legacy_uses) VALUES (?, ?, ?, ?, ?)",
+            ("https://cdn.test/a.webp", "https://trusted.test/a", "abcd", "existing", 9),
+        )
+        db.commit()
+    legacy = tmp_path / "work" / "media_index.json"
+    legacy.write_text(json.dumps({"entries": [{"source_url": "https://cdn.test/a.webp", "uses": 1}]}), encoding="utf-8")
+
+    assert migrate_legacy_index(tmp_path)["unchanged"] == 1
+    with connect(tmp_path) as db:
+        row = db.execute("SELECT source_page_url, phash, subject, legacy_uses FROM media_assets").fetchone()
+        assert tuple(row) == ("https://trusted.test/a", "abcd", "existing", 9)
+
+
+def test_legacy_report_counts_invalid_entries_as_skipped(tmp_path):
+    legacy = tmp_path / "work" / "media_index.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"entries": [None, {}, {"source_url": ""}]}), encoding="utf-8")
+
+    assert migrate_legacy_index(tmp_path) == {
+        "scanned": 2, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": 3,
+    }
+
+
 def test_registry_rejects_future_schema_without_downgrade(tmp_path):
     with connect(tmp_path) as db:
         db.execute("UPDATE schema_meta SET value='99' WHERE key='schema_version'")
@@ -54,4 +84,33 @@ def test_registry_schema_has_decisions_usage_and_runs(tmp_path):
         db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
         with pytest.raises(Exception):
             db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
-    assert {"media_assets", "media_decisions", "media_usage", "media_runs"} <= tables
+    assert {"media_assets", "media_decisions", "media_usage", "media_runs", "registry_migration_log"} <= tables
+
+
+def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
+    path = registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    import sqlite3
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta VALUES ('schema_version', '1');
+        CREATE TABLE media_assets (asset_id INTEGER PRIMARY KEY, canonical_url TEXT NOT NULL UNIQUE);
+        INSERT INTO media_assets(asset_id, canonical_url) VALUES (2, 'https://cdn.test/a');
+        CREATE TABLE media_usage (
+            post_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, wordpress_media_id INTEGER,
+            role TEXT NOT NULL, list_item TEXT NOT NULL DEFAULT '', section_slot INTEGER,
+            status TEXT NOT NULL DEFAULT 'accepted', applied_at TEXT
+        );
+        INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 2, 'inline');
+        INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 2, 'inline');
+    """)
+    db.commit()
+    db.close()
+
+    with connect(tmp_path) as migrated:
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(media_usage)")}
+        assert "usage_id" in columns
+        assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
+        assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "2"
