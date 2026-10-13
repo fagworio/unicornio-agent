@@ -1843,14 +1843,21 @@ def _is_final_phash_duplicate(final_phash: str, baseline_phashes: list[str] | tu
     if not final_phash:
         return False
     try:
-        import imagehash
-        candidate = imagehash.hex_to_hash(str(final_phash))
-        return any(
-            int(candidate - imagehash.hex_to_hash(str(previous))) <= threshold
-            for previous in baseline_phashes
-            if str(previous).strip()
-        )
-    except (ImportError, TypeError, ValueError):
+        candidate_text = str(final_phash).strip().lower()
+        if not candidate_text or any(char not in "0123456789abcdef" for char in candidate_text):
+            return False
+        candidate = int(candidate_text, 16)
+        for previous in baseline_phashes:
+            previous_text = str(previous or "").strip().lower()
+            if (
+                previous_text
+                and len(previous_text) == len(candidate_text)
+                and all(char in "0123456789abcdef" for char in previous_text)
+                and (candidate ^ int(previous_text, 16)).bit_count() <= threshold
+            ):
+                return True
+        return False
+    except (TypeError, ValueError, OverflowError):
         return False
 
 

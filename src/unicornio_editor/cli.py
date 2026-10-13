@@ -1758,7 +1758,7 @@ def _enriquecer_candidatos(
         "source_resolution", "source_resolution_query",
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
-        "already_in_library", "library_media_id", "phash", "capacity_deferred",
+        "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
         "local_image_path", "sha256", "mime", "width", "height",
     )
     _DISCOVERY_IDENTITY_FIELDS = (
@@ -1867,21 +1867,6 @@ def _enriquecer_candidatos(
             str(cand.get("visual_group_id") or ""),
         }
         if str(cand.get("direct_image_url") or "") in blocked_urls or blocked_fingerprints.intersection(candidate_fingerprints):
-            cand["rejected_reason"] = "previously_rejected_candidate"
-            cand["evidence"] = {"verdict": "previously_rejected_candidate", "gate": "history", "score": 0}
-            cand["evidence_score"] = 0
-            rejeitados.append(cand)
-            _guardar_memo(cand)
-            return
-        candidate_url = str(cand.get("direct_image_url") or "")
-        blocked_urls = (excluded_urls or {}).get(int(post_id), set())
-        blocked_fingerprints = (excluded_fingerprints or {}).get(int(post_id), set())
-        candidate_fingerprints = {
-            str(cand.get("phash") or ""),
-            str(cand.get("sha256") or ""),
-            str(cand.get("visual_group_id") or ""),
-        }
-        if candidate_url in blocked_urls or blocked_fingerprints.intersection(candidate_fingerprints):
             cand["rejected_reason"] = "previously_rejected_candidate"
             cand["evidence"] = {"verdict": "previously_rejected_candidate", "gate": "history", "score": 0}
             cand["evidence_score"] = 0
@@ -2075,6 +2060,7 @@ def _enriquecer_candidatos(
                 )
                 cand["already_in_library"] = bool(ja)
                 if ja and ja.get("media_id"):
+                    cand["media_library_id"] = ja.get("media_id")
                     cand["library_media_id"] = ja.get("media_id")
         except Exception:  # noqa: BLE001 - índice é otimização
             pass
