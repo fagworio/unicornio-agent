@@ -12,7 +12,19 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+class RegistryError(RuntimeError):
+    """Raised when a registry cannot be safely opened or migrated."""
+
+
+class _RegistryConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
 
 
 def registry_path(root: str | Path) -> Path:
@@ -22,14 +34,28 @@ def registry_path(root: str | Path) -> Path:
 def connect(root: str | Path) -> sqlite3.Connection:
     path = registry_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(path, timeout=30, factory=_RegistryConnection)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA busy_timeout = 30000")
+    db.execute("PRAGMA journal_mode = WAL")
     _migrate(db)
     return db
 
 
 def _migrate(db: sqlite3.Connection) -> None:
+    current = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()
+    if current:
+        version_row = db.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        version = int(version_row[0]) if version_row else 0
+        if version > SCHEMA_VERSION:
+            raise RegistryError(f"schema de registry futuro nao suportado: {version}")
+    else:
+        version = 0
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_meta (
@@ -48,6 +74,9 @@ def _migrate(db: sqlite3.Connection) -> None:
             height INTEGER,
             mime_type TEXT NOT NULL DEFAULT '',
             wordpress_media_id INTEGER,
+            subject TEXT NOT NULL DEFAULT '',
+            article_id INTEGER,
+            legacy_uses INTEGER NOT NULL DEFAULT 0,
             provenance_evidence TEXT NOT NULL DEFAULT '{}',
             identity_evidence TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL DEFAULT 'known',
@@ -77,7 +106,7 @@ def _migrate(db: sqlite3.Connection) -> None:
             section_slot INTEGER,
             status TEXT NOT NULL DEFAULT 'accepted',
             applied_at TEXT,
-            PRIMARY KEY (post_id, asset_id, role, section_slot)
+            usage_id INTEGER PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS media_runs (
             run_id TEXT PRIMARY KEY,
@@ -93,8 +122,18 @@ def _migrate(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_media_decisions_candidate ON media_decisions(candidate_id);
         CREATE INDEX IF NOT EXISTS idx_media_assets_phash ON media_assets(phash);
         CREATE INDEX IF NOT EXISTS idx_media_assets_wp ON media_assets(wordpress_media_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_usage_position
+            ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1));
         """
     )
+    if version < 2:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(media_assets)")}
+        if "subject" not in columns:
+            db.execute("ALTER TABLE media_assets ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
+        if "article_id" not in columns:
+            db.execute("ALTER TABLE media_assets ADD COLUMN article_id INTEGER")
+        if "legacy_uses" not in columns:
+            db.execute("ALTER TABLE media_assets ADD COLUMN legacy_uses INTEGER NOT NULL DEFAULT 0")
     db.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -122,17 +161,27 @@ def migrate_legacy_index(root: str | Path) -> int:
             url = str(entry.get("source_url") or "").strip()
             if not url:
                 continue
-            before = db.total_changes
             db.execute(
-                """INSERT OR IGNORE INTO media_assets
+                """INSERT INTO media_assets
                 (canonical_url, source_page_url, source_type, sha256, phash,
-                 visual_group_id, wordpress_media_id, status)
-                VALUES (?, ?, 'legacy_index', ?, ?, ?, ?, 'known')""",
+                 visual_group_id, wordpress_media_id, subject, article_id,
+                 legacy_uses, status)
+                VALUES (?, ?, 'legacy_index', ?, ?, ?, ?, ?, ?, ?, 'known')
+                ON CONFLICT(canonical_url) DO UPDATE SET
+                    source_page_url=excluded.source_page_url,
+                    sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
+                    phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
+                    visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
+                    wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_assets.wordpress_media_id),
+                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END,
+                    article_id=COALESCE(excluded.article_id, media_assets.article_id),
+                    legacy_uses=MAX(excluded.legacy_uses, media_assets.legacy_uses)""",
                 (url, str(entry.get("source_page") or ""), str(entry.get("sha256") or ""),
                  str(entry.get("phash") or ""), str(entry.get("visual_group_id") or ""),
-                 entry.get("media_id")),
+                 entry.get("media_id"), str(entry.get("subject") or ""),
+                 entry.get("article_id"), int(entry.get("uses") or 0)),
             )
-            inserted += int(db.total_changes > before)
+            inserted += 1
         db.commit()
     return inserted
 
