@@ -119,7 +119,7 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         assert "usage_id" in columns
         assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
         assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
         migrated.execute("INSERT INTO media_assets(asset_id, canonical_url) VALUES (3, 'https://cdn.test/b')")
         migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
         with pytest.raises(Exception):
@@ -167,14 +167,14 @@ def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):
     state_a = SimpleNamespace(media=MediaProgress(
         required=1,
         inline=(InlineMedia(
-            7, shared_url, 0,
+            101, shared_url, 0, "alt", "credit", "Subject A",
             visual_verification={"decision": "DIFFERENT", "duplicate_of": "101"},
         ),),
     ))
     state_b = SimpleNamespace(media=MediaProgress(
         required=1,
         inline=(InlineMedia(
-            7, shared_url, 0,
+            202, shared_url, 0, "alt", "credit", "Subject B",
             visual_verification={"decision": "SAME_ART_CROP", "duplicate_of": "202"},
         ),),
     ))
@@ -182,7 +182,62 @@ def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):
     record_v2_observation(tmp_path, post_id=101, run_id="run-a", state=state_a, phase="validate", applied=True)
     record_v2_observation(tmp_path, post_id=202, run_id="run-b", state=state_b, phase="validate", applied=True)
 
-    evidence_a = load_v2_media(tmp_path, post_id=101)[0]["visual_verification"]
-    evidence_b = load_v2_media(tmp_path, post_id=202)[0]["visual_verification"]
-    assert evidence_a == {"decision": "DIFFERENT", "duplicate_of": "101"}
-    assert evidence_b == {"decision": "SAME_ART_CROP", "duplicate_of": "202"}
+    media_a = load_v2_media(tmp_path, post_id=101)[0]
+    media_b = load_v2_media(tmp_path, post_id=202)[0]
+    assert media_a["wordpress_media_id"] == 101
+    assert media_a["subject"] == "Subject A"
+    assert media_a["visual_verification"] == {"decision": "DIFFERENT", "duplicate_of": "101"}
+    assert media_b["wordpress_media_id"] == 202
+    assert media_b["subject"] == "Subject B"
+    assert media_b["visual_verification"] == {"decision": "SAME_ART_CROP", "duplicate_of": "202"}
+
+
+def test_registry_migrates_v2_applied_usage_without_losing_readback(tmp_path):
+    import sqlite3
+
+    path = registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta VALUES ('schema_version', '2');
+        CREATE TABLE media_assets (
+            asset_id INTEGER PRIMARY KEY, canonical_url TEXT NOT NULL UNIQUE,
+            source_page_url TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '',
+            sha256 TEXT NOT NULL DEFAULT '', phash TEXT NOT NULL DEFAULT '',
+            visual_group_id TEXT NOT NULL DEFAULT '', width INTEGER, height INTEGER,
+            mime_type TEXT NOT NULL DEFAULT '', wordpress_media_id INTEGER,
+            subject TEXT NOT NULL DEFAULT '', article_id INTEGER,
+            legacy_uses INTEGER NOT NULL DEFAULT 0, provenance_evidence TEXT NOT NULL DEFAULT '{}',
+            identity_evidence TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'known',
+            policy_version TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO media_assets(asset_id, canonical_url, wordpress_media_id, subject)
+        VALUES (7, 'https://cdn.test/legacy.webp', 700, 'Legacy subject');
+        CREATE TABLE media_usage (
+            post_id INTEGER NOT NULL, asset_id INTEGER NOT NULL,
+            wordpress_media_id INTEGER, role TEXT NOT NULL,
+            list_item TEXT NOT NULL DEFAULT '', section_slot INTEGER,
+            status TEXT NOT NULL DEFAULT 'accepted', applied_at TEXT,
+            usage_id INTEGER PRIMARY KEY
+        );
+        INSERT INTO media_usage(post_id, asset_id, wordpress_media_id, role, status, applied_at)
+        VALUES (115234, 7, NULL, 'inline', 'applied', '2026-10-13 00:00:00');
+    """)
+    db.commit()
+    db.close()
+
+    with connect(tmp_path) as migrated:
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(media_usage)")}
+        assert {"identity_evidence", "subject"} <= columns
+        assert migrated.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "4"
+        row = migrated.execute(
+            "SELECT status, applied_at FROM media_usage WHERE post_id=115234"
+        ).fetchone()
+        assert tuple(row) == ("applied", "2026-10-13 00:00:00")
+
+    reused = load_v2_media(tmp_path, post_id=115234)
+    assert reused[0]["wordpress_media_id"] == 700
+    assert reused[0]["subject"] == "Legacy subject"
