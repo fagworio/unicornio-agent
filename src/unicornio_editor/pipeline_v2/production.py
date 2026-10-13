@@ -14,6 +14,7 @@ from typing import Any
 # Keep the legacy symbol available to integrations that patch this module;
 # production execution uses the canonical HTML-aware helper below.
 from ..checklist import required_image_count, required_image_count_for_content
+from ..batch import BatchError, wordpress_text
 from .legacy import LegacyStateLoader
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
@@ -42,9 +43,11 @@ class ProductionContextLoader:
             return {}
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return value if isinstance(value, dict) else {}
+        except (OSError, ValueError) as exc:
+            raise BatchError(f"JSON invalido em {path}: {exc}") from exc
+        if not isinstance(value, dict):
+            raise BatchError(f"JSON em {path} precisa ser objeto")
+        return value
 
     def load(self, post: dict[str, Any]) -> dict[str, Any]:
         post_id = int(post["id"])
@@ -57,15 +60,15 @@ class ProductionContextLoader:
         return {
             "post": post,
             "post_id": post_id,
-            "title": (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or "",
-            "content": (post.get("content") or {}).get("raw") or "",
+            "title": wordpress_text(post.get("title"), field="title"),
+            "content": wordpress_text(post.get("content"), field="content"),
             "featured_media": post.get("featured_media"),
-            "meta": post.get("meta") or {},
+            "meta": post.get("meta") if isinstance(post.get("meta"), dict) else {},
             "draft": draft,
             "editorial": draft or None,
             "candidate": candidate or None,
             "manifest": manifest,
-            "original_link": (post.get("meta") or {}).get("original_link"),
+            "original_link": (post.get("meta") or {}).get("original_link") if isinstance(post.get("meta"), dict) else None,
             # The scheduler uses the persisted publication date to reserve
             # occasional turns for old NEW posts.
             "date": post.get("date_gmt") or post.get("date"),

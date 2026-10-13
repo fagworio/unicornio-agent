@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
-from ..batch import load_editorial_batch, prepare_batch
+from ..batch import BatchError, load_editorial_batch, prepare_batch, wordpress_text
 from ..checklist import run_pre_publish_checklist
 # Preserve the module-level seam used by older integrations while all stage
 # calculations use the canonical HTML-aware helper.
@@ -33,6 +33,7 @@ from ..workflow import (
     validate_media_plan,)
 from .errors import StageError
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
+from ..observability import record_unexpected_error
 
 
 def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> Path:
@@ -114,6 +115,16 @@ def _post(context: dict[str, Any]) -> dict[str, Any]:
     return post
 
 
+def _json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BatchError(f"JSON invalido em {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise BatchError(f"JSON em {path} precisa ser objeto")
+    return value
+
+
 def _repair_focus_keyword_draft(
     editorial: dict[str, Any],
     post: dict[str, Any],
@@ -126,7 +137,7 @@ def _repair_focus_keyword_draft(
     if current and keyword_occurs_naturally(current, title, content):
         return None
     subjects = post_subjects(
-        title=title or str((post.get("title") or {}).get("raw") or ""),
+        title=title or wordpress_text(post.get("title"), field="title"),
         content_html=content,
         focus_keyword=current,
         game_name=editorial.get("game_name"),
@@ -159,16 +170,21 @@ class ProductionEditorialStage:
             if prepared.get("prepared") != 1:
                 raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, "post preparation failed")
             input_path = Path(prepared["editorial_input"])
-            input_payload = json.loads(input_path.read_text(encoding="utf-8"))
+            input_payload = _json_object(input_path)
+            posts = input_payload.get("posts")
+            if not isinstance(posts, list) or not posts or not all(isinstance(item, dict) for item in posts):
+                raise BatchError(f"posts invalido em {input_path}")
             input_post = next(
-                (item for item in input_payload.get("posts", [])
+                (item for item in posts
                  if int(item.get("post_id") or 0) == post_id),
                 {},
             )
+            if not input_post:
+                raise BatchError(f"post_id {post_id} ausente em {input_path}")
             localization = input_post.get("localization") if isinstance(input_post, dict) else {}
             must_localize = bool(isinstance(localization, dict) and localization.get("required"))
             draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
-            previous_editorial = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
+            previous_editorial = _json_object(draft_path) if draft_path.is_file() else None
             if (
                 not must_localize
                 and
@@ -182,7 +198,7 @@ class ProductionEditorialStage:
                     return repaired
             validation_path = self.root / "backups" / str(post_id) / "editorial.validation.json"
             if state.phase is Phase.EDITORIAL and validation_path.is_file():
-                validation = json.loads(validation_path.read_text(encoding="utf-8"))
+                validation = _json_object(validation_path)
                 editorial_gates = {"qualidade_texto", "seo", "estrutura", "fonte", "schema_editorial", "conteudo_nao_vazio", "conteudo_sem_metadados_operacionais", "estrutura_lista", "cta_canonico"}
                 failures = [failure for failure in validation.get("failures", []) if failure.get("gate") in editorial_gates]
                 input_payload["posts"][0]["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": failures, "previous_editorial": previous_editorial or {}}
@@ -258,7 +274,7 @@ class ProductionEditorialStage:
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
             editorial["cleaned_html"] = normalize_h1_headings(
                 normalize_editorial_dashes(editorial.get("cleaned_html", "")),
-                post_title=str((input_post.get("title") or {}).get("raw") or ""),
+                post_title=wordpress_text(input_post.get("title"), field="title"),
             )
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
@@ -275,7 +291,14 @@ class ProductionEditorialStage:
         except EditorialProviderError as exc:
             _write_json(self.root, post_id, "editorial.error.json", {"reason": str(exc), "status": "provider_error"})
             raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, str(exc)) from exc
+        except BatchError as exc:
+            raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, str(exc)) from exc
         except Exception as exc:
+            record_unexpected_error(
+                self.root, exc, post_id=post_id,
+                run_id=str(context.get("run_id") or context.get("batch_id") or ""),
+                file="pipeline_v2/production_stages.py", field="ProductionEditorialStage",
+            )
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, str(exc)) from exc
 
 

@@ -149,6 +149,23 @@ class BatchContextTests(unittest.TestCase):
         with self.assertRaises(BatchError):
             validate_batch_id("../outside")
 
+    def test_prepare_batch_accepts_string_title_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            post = _post(115222, "Título string do WordPress")
+            post["title"] = "Título string do WordPress"
+            result = prepare_batch(BatchClient({115222: post}), self.config(), Path(directory), [115222], batch_id="batch-string-title")
+            assert result["prepared"] == 1
+            payload = json.loads(Path(result["editorial_input"]).read_text(encoding="utf-8"))
+            assert payload["posts"][0]["title"] == "Título string do WordPress"
+
+    def test_prepare_batch_rejects_invalid_title_type_as_contract_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            post = _post(115228, "Título")
+            post["title"] = ["Título"]
+            result = prepare_batch(BatchClient({115228: post}), self.config(), Path(directory), [115228], batch_id="batch-invalid-title")
+            assert result["failed"] == 1
+            assert result["items"][0]["error_class"] == "contract"
+
     def test_editorial_batch_rejects_duplicate_ids_before_apply(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "editorial.json"

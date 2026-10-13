@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,17 @@ from typing import Any, TextIO
 
 _VERSION = "0.1.0"
 _SENSITIVE_PARTS = ("password", "token", "secret", "authorization", "cookie", "api_key")
+
+
+def _redact_text(value: str) -> str:
+    lines = []
+    for line in str(value).splitlines():
+        lower = line.casefold()
+        if any(part in lower for part in _SENSITIVE_PARTS):
+            lines.append("[redacted sensitive traceback line]")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def build_processing_markers(
@@ -141,7 +153,7 @@ def run_context() -> dict[str, Any]:
     fonte_db = info["source"]
     if origem:
         pass
-    elif fonte_db == "cron":
+    elif fonte_db in {"cron", "no_agent"}:
         origem = "cron"
     elif fonte_db in {"cli", "telegram", "whatsapp", "api", "web"}:
         origem = "manual"
@@ -150,7 +162,7 @@ def run_context() -> dict[str, Any]:
         origem = "subagent"
     elif fonte_db:
         origem = fonte_db
-    elif sessao.startswith("cron_"):
+    elif sessao.startswith(("cron_", "no_agent_")):
         origem = "cron"
     elif sessao:
         origem = "manual"
@@ -165,6 +177,9 @@ def run_context() -> dict[str, Any]:
             partes = candidato.split("_")
             if len(partes) >= 3 and partes[0] == "cron":
                 job = partes[1]
+                break
+            if len(partes) >= 4 and partes[:2] == ["no", "agent"]:
+                job = partes[2]
                 break
         else:
             if not job:
@@ -385,6 +400,30 @@ def append_telemetry(root: str | Path, event: str, **fields: Any) -> None:
         event,
         ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **fields,
+    )
+
+
+def record_unexpected_error(
+    root: str | Path,
+    exc: BaseException,
+    *,
+    post_id: int | None = None,
+    run_id: str = "",
+    file: str = "",
+    field: str = "",
+) -> None:
+    """Record a redacted internal failure with enough correlation to debug it."""
+    kind = "provider" if exc.__class__.__name__.endswith("ProviderError") else "internal"
+    append_telemetry(
+        root,
+        "v2_unexpected_error",
+        error_class=kind,
+        exception_type=type(exc).__name__,
+        traceback=_redact_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-6000:]),
+        post_id=post_id,
+        run_id=str(run_id or ""),
+        file=str(file or ""),
+        field=str(field or ""),
     )
 
 

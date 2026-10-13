@@ -7,6 +7,7 @@ import pytest
 from unicornio_editor.pipeline_v2.errors import StageError
 from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
+from unicornio_editor.pipeline_v2.production import ProductionContextLoader
 from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, _embedded_media_urls
 from unicornio_editor.workflow import MediaFunnelInvariantError
 
@@ -32,6 +33,19 @@ def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     result = stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=2, inline=(existing,))), {})
     assert result.accepted == 1
     assert (tmp_path / "backups/7/editorial.partial.json").exists()
+
+
+@pytest.mark.parametrize("title", ["Título string", {"raw": "Título bruto"}, {"rendered": "Título renderizado"}])
+def test_production_context_loader_normalizes_wordpress_title(tmp_path, title):
+    context = ProductionContextLoader(object(), tmp_path).load({
+        "id": 115230, "title": title, "content": "<p>texto</p>", "meta": {},
+    })
+    assert context["title"].startswith("Título")
+
+
+def test_production_context_loader_rejects_invalid_title_type(tmp_path):
+    with pytest.raises(ValueError, match="title"):
+        ProductionContextLoader(object(), tmp_path).load({"id": 115232, "title": ["ruim"]})
 
 
 def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):

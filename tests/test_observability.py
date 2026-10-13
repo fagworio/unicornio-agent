@@ -6,6 +6,7 @@ from pathlib import Path
 
 from unicornio_editor.observability import (
     append_telemetry,
+    run_context,
     build_processing_markers,
     log_event,
     read_telemetry_summary,
@@ -14,6 +15,22 @@ from unicornio_editor.observability import (
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_no_agent_cron_session_is_attributed_to_cron(self):
+        import os
+        old = {key: os.environ.get(key) for key in ("HERMES_SESSION_ID", "HERMES_EDITORIAL_CRON_JOB_ID", "UNICORNIO_RUN_SOURCE")}
+        try:
+            os.environ["HERMES_SESSION_ID"] = "no_agent_editorial_20261013_120000"
+            os.environ["HERMES_EDITORIAL_CRON_JOB_ID"] = "editorial"
+            os.environ.pop("UNICORNIO_RUN_SOURCE", None)
+            assert run_context()["run_source"] == "cron"
+            assert run_context()["cron_job_id"] == "editorial"
+        finally:
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_markers_contain_only_safe_processing_metadata(self):
         markers = build_processing_markers("process", 0.95, processed_at="2026-08-20T12:00:00Z")
         self.assertEqual(markers["_ai_editor_decision"], "process")

@@ -34,6 +34,23 @@ class BatchError(ValueError):
     """Raised when a batch envelope cannot be safely created or read."""
 
 
+def wordpress_text(value: Any, *, field: str) -> str:
+    """Normalize a WordPress text field without assuming its wire shape."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        raw = value.get("raw")
+        rendered = value.get("rendered")
+        if raw is not None and not isinstance(raw, str):
+            raise BatchError(f"{field}.raw precisa ser string")
+        if rendered is not None and not isinstance(rendered, str):
+            raise BatchError(f"{field}.rendered precisa ser string")
+        return str(raw or rendered or "").strip()
+    if value is None:
+        return ""
+    raise BatchError(f"{field} precisa ser string ou objeto WordPress")
+
+
 def load_editorial_batch(path: Path | str) -> dict[str, Any]:
     """Load and validate the stateless editorial response envelope.
 
@@ -234,17 +251,11 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 def _post_title(post: dict[str, Any]) -> str:
-    title = post.get("title")
-    if isinstance(title, dict):
-        return str(title.get("raw") or title.get("rendered") or "").strip()
-    return str(title or "").strip()
+    return wordpress_text(post.get("title"), field="title")
 
 
 def _post_content(post: dict[str, Any]) -> str:
-    content = post.get("content")
-    if isinstance(content, dict):
-        return str(content.get("raw") or content.get("rendered") or "")
-    return str(content or "")
+    return wordpress_text(post.get("content"), field="content")
 
 
 def _seo_snapshot(post: dict[str, Any]) -> dict[str, str]:
@@ -465,12 +476,17 @@ def prepare_batch(
                     "backup": prepared.get("backup"),
                 }
             )
+        except BatchError as exc:
+            items.append({"post_id": post_id, "status": "error", "error": str(exc)[:240], "error_class": "contract"})
         except Exception as exc:  # noqa: BLE001 - isolate one post in a batch
+            from .observability import record_unexpected_error
+            record_unexpected_error(root, exc, post_id=post_id, run_id=batch_id, file="batch.py", field="prepare_batch")
             items.append(
                 {
                     "post_id": post_id,
                     "status": "error",
                     "error": str(exc)[:240],
+                    "error_class": "internal",
                 }
             )
 
@@ -512,6 +528,7 @@ def prepare_batch(
 __all__ = [
     "BATCH_SCHEMA_VERSION",
     "BatchError",
+    "wordpress_text",
     "batch_directory",
     "new_batch_id",
     "load_editorial_batch",
