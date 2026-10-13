@@ -1318,6 +1318,8 @@ class WordPressWriterV2:
             readback_title = str((readback.get("title") or {}).get("raw") or "").strip()
             if readback_title != candidate_title:
                 raise RuntimeError("candidate title read-back mismatch")
+        if outcome.type.value == "ready" and not media_readback:
+            raise RuntimeError("media read-back mismatch: featured or inline media diverged")
         journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
             "wordpress_changed": changed,
@@ -1531,10 +1533,13 @@ def run_v2(
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error
-                    record_unexpected_error(
-                        root, exc, post_id=int(post_id), run_id=run_id,
-                        file="pipeline_v2/runtime.py", field="media_registry.start",
-                    )
+                    try:
+                        record_unexpected_error(
+                            root, exc, post_id=int(post_id), run_id=run_id,
+                            file="pipeline_v2/runtime.py", field="media_registry.start",
+                        )
+                    except Exception:
+                        pass
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(
@@ -1578,10 +1583,13 @@ def run_v2(
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error
-                    record_unexpected_error(
-                        root, exc, post_id=int(post_id), run_id=run_id,
-                        file="pipeline_v2/runtime.py", field="media_registry.finish",
-                    )
+                    try:
+                        record_unexpected_error(
+                            root, exc, post_id=int(post_id), run_id=run_id,
+                            file="pipeline_v2/runtime.py", field="media_registry.finish",
+                        )
+                    except Exception:
+                        pass
                 details.append({
                     "post_id": post_id,
                     "initial_state": initial.state.value,
