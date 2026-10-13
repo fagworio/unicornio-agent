@@ -1234,6 +1234,8 @@ def _resolve_media_batch(
     *,
     full: bool = False,
     allow_reuse: bool = True,
+    excluded_urls: dict[int, set[str]] | None = None,
+    excluded_fingerprints: dict[int, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
 
@@ -1252,6 +1254,8 @@ def _resolve_media_batch(
     from .observability import append_telemetry
 
     posts = batch["posts"]
+    excluded_urls = excluded_urls or {}
+    excluded_fingerprints = excluded_fingerprints or {}
     reuse_by_post: dict[int, list[dict]] = {}
     needed_web_by_post: dict[int, int] = {}
     searchable = []
@@ -1274,6 +1278,17 @@ def _resolve_media_batch(
         if not spec:
             return 0
         post_id = int(spec["post_id"])
+        blocked_urls = excluded_urls.get(post_id, set())
+        blocked_fingerprints = excluded_fingerprints.get(post_id, set())
+        novos = [
+            candidate for candidate in novos
+            if str(candidate.get("direct_image_url") or "") not in blocked_urls
+            and not blocked_fingerprints.intersection({
+                str(candidate.get("phash") or ""),
+                str(candidate.get("sha256") or ""),
+                str(candidate.get("visual_group_id") or ""),
+            })
+        ]
         aprovados, _rejeitados, _deferidos = _enriquecer_candidatos(
             novos,
             subject=str(spec["subject"]),
@@ -1826,6 +1841,21 @@ def _enriquecer_candidatos(
     def _classificar(cand: dict) -> None:
         """Evidência + proveniência + pHash de UM candidato (fase por candidato)."""
         cand["subject"] = subject
+        candidate_url = str(cand.get("direct_image_url") or "")
+        blocked_urls = (excluded_urls or {}).get(int(post_id), set())
+        blocked_fingerprints = (excluded_fingerprints or {}).get(int(post_id), set())
+        candidate_fingerprints = {
+            str(cand.get("phash") or ""),
+            str(cand.get("sha256") or ""),
+            str(cand.get("visual_group_id") or ""),
+        }
+        if candidate_url in blocked_urls or blocked_fingerprints.intersection(candidate_fingerprints):
+            cand["rejected_reason"] = "previously_rejected_candidate"
+            cand["evidence"] = {"verdict": "previously_rejected_candidate", "gate": "history", "score": 0}
+            cand["evidence_score"] = 0
+            rejeitados.append(cand)
+            _guardar_memo(cand)
+            return
         if cand.get("capacity_deferred"):
             # NÃO é rejeição: nada foi verificado contra este candidato, ele
             # apenas deixou de ser necessário. Contagem própria (deferidos) para

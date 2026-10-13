@@ -26,6 +26,18 @@ def test_adaptive_media_planning_uses_persisted_rejection_reasons(tmp_path):
     assert "https://cdn.test/old.webp" in history["urls"]
 
 
+def test_adaptive_history_reads_real_media_manifest(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-1"
+    batch.mkdir(parents=True)
+    (batch / "media.manifest.json").write_text(
+        '{"posts":[{"post_id":115152,"audit_candidates":[{"direct_image_url":"https://cdn.test/same.webp","rejected_reason":"UNRELATED 0.90 other","phash":"abc"}]}]}',
+        encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115152)
+    assert "unrelated" in history["reasons"]
+    assert "abc" in history["fingerprints"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

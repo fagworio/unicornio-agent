@@ -73,10 +73,11 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
     urls: set[str] = set()
     fingerprints: set[str] = set()
     queries: set[str] = set()
-    paths = (
+    paths = [
         root / "backups" / str(post_id) / "editorial.validation.json",
         root / "backups" / str(post_id) / "editorial.candidate.json",
-    )
+    ]
+    paths.extend(root.glob(f"work/batches/*/media.manifest.json"))
     for path in paths:
         if not path.is_file():
             continue
@@ -89,11 +90,29 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
         rows = list(payload.get("failures") or [])
         rows.extend(payload.get("media_plan_results") or [])
         rows.extend(payload.get("rejected") or [])
+        for post in payload.get("posts") or []:
+            if isinstance(post, dict) and int(post.get("post_id") or 0) == int(post_id):
+                rows.extend(post.get("audit_candidates") or [])
         for row in rows:
             if not isinstance(row, dict):
                 continue
             rows.extend(item for item in (row.get("invalid_media") or []) if isinstance(item, dict))
-            reason = str(row.get("detail") or row.get("reason") or row.get("rejected_reason") or "").strip()
+            raw_reason = str(row.get("detail") or row.get("reason") or row.get("rejected_reason") or "").strip()
+            lowered = raw_reason.casefold()
+            if "duplicate_existing_frame" in lowered or "duplicate" in lowered or "duplicat" in lowered:
+                reason = "duplicate_existing_frame"
+            elif "width_below_minimum" in lowered or "px wide" in lowered or "resolu" in lowered:
+                reason = "width_below_minimum"
+            elif "source_page_unreachable" in lowered or "inacessível" in lowered or "unreachable" in lowered:
+                reason = "source_page_unreachable"
+            elif "source_bytes_mismatch" in lowered or "bytes" in lowered and "diverg" in lowered:
+                reason = "source_bytes_mismatch"
+            elif "unrelated" in lowered or "sem relação" in lowered:
+                reason = "unrelated"
+            elif "baseline_identity_unavailable" in lowered:
+                reason = "baseline_identity_unavailable"
+            else:
+                reason = raw_reason
             if reason:
                 reasons.add(reason)
             for key in ("url", "media_url", "direct_image_url", "source_image_url"):
@@ -515,8 +534,12 @@ class ProductionMediaResolver:
                 }],
             }
             try:
+                blocked_urls = {int(context["post_id"]): set(rejection_history["urls"])}
+                blocked_fingerprints = {int(context["post_id"]): set(rejection_history["fingerprints"])}
                 resolved = _resolve_media_batch(
-                    self.client, self.config, self.root, batch, full=True, allow_reuse=True
+                    self.client, self.config, self.root, batch, full=True, allow_reuse=True,
+                    excluded_urls=blocked_urls,
+                    excluded_fingerprints=blocked_fingerprints,
                 )
             except Exception:
                 from ..media.google_browser import cleanup_browser_artifacts
