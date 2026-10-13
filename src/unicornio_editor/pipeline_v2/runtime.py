@@ -136,7 +136,10 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             evidence_verdict = str(evidence.get("verdict") or "").casefold()
             original_cause = " ".join(
                 str(row.get(key) or "")
-                for key in ("original_reason", "original_rejected_reason", "original_gate", "detail", "reason")
+                for key in (
+                    "original_reason", "original_rejected_reason", "original_gate",
+                    "rejected_reason", "detail", "reason",
+                )
             ).casefold()
             definitive_causes = (
                 "source_mismatch", "duplicate_existing_frame", "duplicate_frame",
@@ -154,6 +157,12 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             if has_transient_cause and not has_definitive_cause:
                 continue
             if derived_rejection and not has_definitive_cause:
+                continue
+            # ``unresolved_source`` is an inconclusive provider/provenance
+            # result, not proof that a URL is permanently invalid. Keep it
+            # eligible for a later acquisition unless another explicit,
+            # definitive cause accompanies the record.
+            if evidence_verdict == "unresolved_source" and not has_definitive_cause:
                 continue
             is_rejection = bool(
                 row.get("rejected_reason")

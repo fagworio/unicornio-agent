@@ -198,6 +198,36 @@ def test_unresolved_source_does_not_override_transient_original_cause(tmp_path):
     assert url not in history["urls"]
 
 
+def test_unresolved_source_without_original_cause_is_reconsidered(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-unresolved-only"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/unresolved-only.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "url": url,
+            "evidence": {"verdict": "unresolved_source"},
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+
+
+def test_source_unreachable_in_rejected_reason_is_reconsidered(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-unreachable-reason"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/source-unreachable.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "source_page_unreachable",
+            "url": url,
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+
+
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
