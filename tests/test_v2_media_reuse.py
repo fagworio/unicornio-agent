@@ -213,6 +213,21 @@ def test_unresolved_source_without_original_cause_is_reconsidered(tmp_path):
     assert url not in history["urls"]
 
 
+def test_unresolved_source_in_rejected_reason_is_reconsidered(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-unresolved-reason"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/unresolved-reason.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "unresolved_source",
+            "url": url,
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+
+
 def test_source_unreachable_in_rejected_reason_is_reconsidered(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-unreachable-reason"
     batch.mkdir(parents=True)

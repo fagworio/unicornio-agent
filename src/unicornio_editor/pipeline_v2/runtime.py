@@ -162,7 +162,11 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             # result, not proof that a URL is permanently invalid. Keep it
             # eligible for a later acquisition unless another explicit,
             # definitive cause accompanies the record.
-            if evidence_verdict == "unresolved_source" and not has_definitive_cause:
+            unresolved_source = (
+                evidence_verdict == "unresolved_source"
+                or "unresolved_source" in raw_reason_value
+            )
+            if unresolved_source and not has_definitive_cause:
                 continue
             is_rejection = bool(
                 row.get("rejected_reason")
