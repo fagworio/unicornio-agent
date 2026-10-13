@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
-from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver
+from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver, _adaptive_query_suffix, _media_rejection_history
 
 
 class Config:
@@ -10,6 +10,20 @@ class Config:
     http_timeout = 1
     vision_enabled = False
     remote_url_policy = "audit"
+
+
+def test_adaptive_media_planning_uses_persisted_rejection_reasons(tmp_path):
+    post_dir = tmp_path / "backups" / "115152"
+    post_dir.mkdir(parents=True)
+    (post_dir / "editorial.validation.json").write_text(
+        '{"failures":[{"detail":"duplicate_existing_frame", "invalid_media":[{"url":"https://cdn.test/old.webp"}]}]}',
+        encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115152)
+    suffix, reason = _adaptive_query_suffix(history, role="inline")
+    assert "alternate scene" in suffix
+    assert reason == "avoid_previous_duplicate"
+    assert "https://cdn.test/old.webp" in history["urls"]
 
 
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):

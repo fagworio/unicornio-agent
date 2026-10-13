@@ -67,6 +67,66 @@ def _required_image_count_for_editorial(content: str, *, title: str = "") -> int
     return required_image_count_for_content(body, title=title)
 
 
+def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
+    """Read prior media rejection evidence without changing checkpoints."""
+    reasons: set[str] = set()
+    urls: set[str] = set()
+    fingerprints: set[str] = set()
+    queries: set[str] = set()
+    paths = (
+        root / "backups" / str(post_id) / "editorial.validation.json",
+        root / "backups" / str(post_id) / "editorial.candidate.json",
+    )
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        rows = list(payload.get("failures") or [])
+        rows.extend(payload.get("media_plan_results") or [])
+        rows.extend(payload.get("rejected") or [])
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rows.extend(item for item in (row.get("invalid_media") or []) if isinstance(item, dict))
+            reason = str(row.get("detail") or row.get("reason") or row.get("rejected_reason") or "").strip()
+            if reason:
+                reasons.add(reason)
+            for key in ("url", "media_url", "direct_image_url", "source_image_url"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    urls.add(_canonical_embedded_media_url(value))
+            for key in ("sha256", "phash", "visual_group_id"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    fingerprints.add(value)
+            query = str(row.get("search_query") or row.get("query") or "").strip()
+            if query:
+                queries.add(query.casefold())
+    return {"reasons": reasons, "urls": urls, "fingerprints": fingerprints, "queries": queries}
+
+
+def _adaptive_query_suffix(history: dict[str, Any], *, role: str) -> tuple[str, str]:
+    reasons = {str(value).casefold() for value in history.get("reasons") or ()}
+    if "duplicate_existing_frame" in reasons or "duplicat" in " ".join(reasons):
+        return " alternate scene different composition", "avoid_previous_duplicate"
+    if "width_below_minimum" in reasons or "dimens" in " ".join(reasons):
+        return " original high resolution", "prefer_verified_high_resolution"
+    if "source_page_unreachable" in reasons or "source_bytes_mismatch" in reasons:
+        return " official source press kit", "seek_alternative_verifiable_source"
+    if "unrelated" in reasons:
+        return " official artwork character specific", "increase_entity_specificity"
+    if "baseline_identity_unavailable" in reasons:
+        return " alternate official artwork", "avoid_unverified_baseline"
+    if role == "featured":
+        return " official key art wide", "fill_featured_deficit"
+    return "", ""
+
+
 class BufferedStateStore:
     def __init__(self, initial):
         self.state = initial
@@ -373,6 +433,9 @@ class ProductionMediaResolver:
                 waiver_applied=previous.waiver_applied,
                 waiver_reason=previous.waiver_reason,
             )
+        rejection_history = _media_rejection_history(self.root, int(context["post_id"]))
+        inline_suffix, inline_reason = _adaptive_query_suffix(rejection_history, role="inline")
+        featured_suffix, featured_reason = _adaptive_query_suffix(rejection_history, role="featured")
         subject_queries: list[tuple[str, str]] = []
         seen_queries: set[str] = set()
         subject_meta: dict[str, dict[str, Any]] = {}
@@ -397,12 +460,23 @@ class ProductionMediaResolver:
                 else [item_query(subject, title, extra=focus_keyword)]
             )
             for query in queries:
-                add_query(subject, query)
+                add_query(subject, f"{query}{inline_suffix}")
         if focus_keyword and not is_listicle:
             main_subject = str((subject_rows[0] if subject_rows else {}).get("subject") or focus_keyword)
-            add_query(main_subject, item_query(focus_keyword, title))
+            add_query(main_subject, f"{item_query(focus_keyword, title)}{inline_suffix}")
         if not subject_queries and not is_listicle:
-            add_query(title, item_query(title, title, extra=focus_keyword))
+            add_query(title, f"{item_query(title, title, extra=focus_keyword)}{inline_suffix}")
+
+        from ..observability import append_telemetry
+
+        if inline_reason or featured_reason:
+            append_telemetry(
+                self.root, "media_adaptive_planning", post_id=int(context["post_id"]),
+                inline_deficit=max(0, inline_needed), featured_deficit=featured_needed,
+                inline_reason=inline_reason, featured_reason=featured_reason,
+                prior_rejection_count=len(rejection_history["reasons"]),
+                prior_candidate_urls=len(rejection_history["urls"]),
+            )
 
         search_runs: list[dict[str, Any]] = []
         current_inline = list(previous.inline)
@@ -481,7 +555,16 @@ class ProductionMediaResolver:
                 candidate["section_heading"] = metadata.get("heading") or subject
                 candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
-            return candidates
+            filtered: list[dict[str, Any]] = []
+            for candidate in candidates:
+                candidate_url = _canonical_embedded_media_url(
+                    str(candidate.get("direct_image_url") or candidate.get("media_url") or "")
+                )
+                if candidate_url and candidate_url in rejection_history["urls"]:
+                    candidate["rejected_reason"] = "previously_rejected_candidate"
+                    continue
+                filtered.append(candidate)
+            return filtered
 
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Execute one candidate batch and merge only final accepted media."""
@@ -620,8 +703,8 @@ class ProductionMediaResolver:
             featured_subject = str(featured_row.get("subject") or title)
             featured_query = item_query(featured_subject, title, extra=focus_keyword)
             featured_queries = [
-                (featured_subject, f"{featured_query} key art"),
-                (featured_subject, featured_query),
+                (featured_subject, f"{featured_query} key art{featured_suffix}"),
+                (featured_subject, f"{featured_query}{featured_suffix}"),
             ]
             for subject, query in featured_queries:
                 if current_featured.status is FeaturedStatus.VALID:
@@ -701,6 +784,10 @@ class ProductionMediaResolver:
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
+                    candidate_url = _canonical_embedded_media_url(str(candidate.get("direct_image_url") or ""))
+                    if candidate_url and candidate_url in rejection_history["urls"]:
+                        candidate["rejected_reason"] = "previously_rejected_candidate"
+                        continue
                     source_attempted += 1
                     subject = str(candidate.get("subject") or (source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)))
                     candidate["subject"] = subject
