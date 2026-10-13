@@ -132,8 +132,6 @@ def _migrate(db: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_media_decisions_post ON media_decisions(post_id);
         CREATE INDEX IF NOT EXISTS idx_media_decisions_candidate ON media_decisions(candidate_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_usage_position
-            ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1));
         """
         for statement in schema_sql.split(";"):
             statement = statement.strip()
@@ -160,6 +158,18 @@ def _migrate(db: sqlite3.Connection) -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", tuple(row)
                 )
             db.execute("DROP TABLE media_usage_v1")
+        # The legacy table may have carried an index with this name.  SQLite
+        # binds index names globally, so recreating it must happen only after
+        # the legacy table (and its indexes) has been removed.
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_media_usage_position
+            ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1))"""
+        )
+        index_columns = {
+            row[2] for row in db.execute("PRAGMA index_info(uq_media_usage_position)")
+        }
+        if not index_columns:
+            raise RegistryError("indice uq_media_usage_position nao foi criado")
         if version < 2:
             columns = {row[1] for row in db.execute("PRAGMA table_info(media_assets)")}
             additions = {

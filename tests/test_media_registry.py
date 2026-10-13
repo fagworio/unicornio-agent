@@ -104,6 +104,8 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         );
         INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 2, 'inline');
         INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 2, 'inline');
+        CREATE INDEX uq_media_usage_position
+            ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1));
     """)
     db.commit()
     db.close()
@@ -114,3 +116,7 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
         assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
         assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "2"
+        migrated.execute("INSERT INTO media_assets(asset_id, canonical_url) VALUES (3, 'https://cdn.test/b')")
+        migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
+        with pytest.raises(Exception):
+            migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
