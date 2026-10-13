@@ -103,7 +103,11 @@ def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch)
 def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
     editorial = {
         "cleaned_html": "<p>one</p><p>two</p><p>three</p><p>four</p>",
-        "seo": {},
+        "seo": {
+            "title": "Título SEO",
+            "meta_description": "Descrição editorial com contexto suficiente para validar o fluxo seguro de publicação e confirmar os dados principais.",
+            "focus_keyword": "título",
+        },
     }
     media = MediaProgress(required=0)
     candidate = ProductionComposeStage(Config(), tmp_path)(
@@ -288,6 +292,54 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     )
     result = WordPressWriterV2(client, tmp_path).commit(13, {"post_id": 13}, state, Outcome.ready())
     assert result["readback"] is True
+
+
+def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diverges(tmp_path):
+    inline_url = "https://example.test/inline.webp"
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 130,
+                "status": "pending",
+                "content": {"raw": "<p>antigo</p>"},
+                "featured_media": 0,
+                "meta": {"_hermes_state": "partial"},
+            }
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            # Simulate WordPress accepting the request but ignoring the
+            # featured attachment update.
+            self.post.update({key: value for key, value in update.items() if key != "featured_media"})
+
+    backup = tmp_path / "backups" / "130"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(json.dumps({
+        "content": f'<p>texto</p><img src="{inline_url}" />',
+        "featured_media": 99,
+        "title": "Título",
+        "seo": {
+            "title": "Título SEO",
+            "meta_description": "Descrição editorial com contexto suficiente para validar o fluxo seguro de publicação e confirmar os dados principais. Extra.",
+            "focus_keyword": "título",
+        },
+    }), encoding="utf-8")
+    state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+        media=MediaProgress(
+            required=1,
+            inline=(InlineMedia(13, inline_url, 0),),
+            featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://example.test/featured.webp"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="featured media read-back mismatch"):
+        WordPressWriterV2(Client(), tmp_path).commit(130, {"post_id": 130}, state, Outcome.ready())
 
 
 def test_readback_identity_uses_img_elements_not_plain_text_urls():

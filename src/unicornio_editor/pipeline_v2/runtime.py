@@ -1230,7 +1230,48 @@ class WordPressWriterV2:
         if outcome.type.value == "ready" and content:
             update["featured_media"] = candidate.get("featured_media")
         current = post.get("content") or {}
-        if (
+        ready_two_phase = outcome.type.value == "ready" and bool(content)
+
+        def assert_media_readback(readback_post: dict[str, Any]) -> None:
+            readback_content = _html.unescape(str((readback_post.get("content") or {}).get("raw") or ""))
+            embedded_readback_urls = set(_embedded_media_urls(readback_content))
+            missing_inline = [
+                url for url in expected_inline_urls
+                if _canonical_embedded_media_url(url) not in embedded_readback_urls
+            ]
+            if missing_inline:
+                raise RuntimeError(
+                    "inline media read-back mismatch: " + ", ".join(missing_inline[:5])
+                )
+            expected_featured = getattr(getattr(proposed_state, "media", None), "featured", None)
+            expected_featured_id = getattr(expected_featured, "media_id", None)
+            if expected_featured_id is not None and readback_post.get("featured_media") != expected_featured_id:
+                raise RuntimeError("featured media read-back mismatch")
+
+        if ready_two_phase:
+            # Keep the WordPress lifecycle pending while media is verified. If
+            # the second metadata write fails, the post remains eligible for
+            # the next V2 run instead of being stranded as READY.
+            media_update: dict[str, Any] = {"content": {"raw": content}}
+            if outcome.type.value == "ready":
+                media_update["featured_media"] = candidate.get("featured_media")
+            journal.write_text(
+                json.dumps({**intent, "status": "media_committing"}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.client.update_post(post_id, media_update)
+            media_readback_post = self.client.get_post(post_id)
+            if not isinstance(media_readback_post, dict):
+                raise RuntimeError("WordPress media read-back missing")
+            assert_media_readback(media_readback_post)
+            journal.write_text(
+                json.dumps({**intent, "status": "committing"}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.client.update_post(post_id, update)
+            readback = self.client.get_post(post_id)
+            changed = True
+        elif (
             (not apply_inline or update.get("content", {}).get("raw") == current.get("raw"))
             and "title" not in update
             and meta.get("_hermes_work_state") == state_json
@@ -1262,17 +1303,10 @@ class WordPressWriterV2:
                 raise RuntimeError("Awaiting Human status read-back mismatch")
         media_readback = False
         if apply_inline or outcome.type.value == "ready":
+            assert_media_readback(readback)
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
             embedded_readback_urls = set(_embedded_media_urls(readback_content))
-            missing_inline = [
-                url for url in expected_inline_urls
-                if _canonical_embedded_media_url(url) not in embedded_readback_urls
-            ]
-            if missing_inline:
-                raise RuntimeError(
-                    "inline media read-back mismatch: "
-                    + ", ".join(missing_inline[:5])
-                )
+            missing_inline = []
             expected_featured_id = getattr(getattr(proposed_state, "media", None), "featured", None)
             expected_featured_id = getattr(expected_featured_id, "media_id", None)
             featured_readback = (
