@@ -21,6 +21,23 @@ EDITOR_DRY_RUN=true
 
 ## Smoke test
 
+### Paridade do ambiente de testes
+
+Os testes de `source_verify` dependem dos codecs e das versões declaradas no
+projeto. Execute-os em um ambiente virtual, especialmente em hosts Debian que
+bloqueiam instalação global via PEP 668:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[test]'
+python -m pytest -q tests/test_source_verify.py tests/test_source_verify_fase5.py
+```
+
+Não use `pip install --user` no Python do sistema. Se `ImageHash` estiver
+ausente, os testes de recompressão visual falham fechados por projeto; isso é
+diferença de ambiente, não autorização para relaxar a verificação de origem.
+
 ```bash
 unicornio-editor list-pending
 unicornio-editor prepare ID
