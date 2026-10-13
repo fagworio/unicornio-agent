@@ -14,14 +14,23 @@
 # Robustez (janelas nao falham): falha transitória de API/Cloudflare nao
 # derruba a janela — o comando e re-executado com backoff (3 tentativas) e o
 # resultado (ou o erro final) e gravado em work/publish-window.log.
-set -uo pipefail
+set -euo pipefail
 ROOT="${UNICORNIO_AGENT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
+if [[ ! -f "$ROOT/.env" ]]; then
+  echo "Configuracao ausente: $ROOT/.env" >&2
+  exit 1
+fi
 set -a
 source .env
 set +a
+
+if [[ "${PUBLISH_ENABLED:-false}" != "true" ]]; then
+  echo "Publicacao desabilitada: PUBLISH_ENABLED precisa ser true" >&2
+  exit 0
+fi
+
 export EDITOR_DRY_RUN=false
-export PUBLISH_ENABLED=true
 
 # PUBLISH_LIMIT=5 = teto de cinco publicacoes efetivas por janela.
 # Menos de cinco READY sao publicados sem aguardar completar o lote; os

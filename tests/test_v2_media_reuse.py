@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
+from unicornio_editor.pipeline_v2.errors import StageError
 from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver, _adaptive_query_suffix, _media_rejection_history
 
 
@@ -13,6 +14,14 @@ class Config:
     http_timeout = 1
     vision_enabled = False
     remote_url_policy = "audit"
+
+
+def _article_html(paragraphs: int = 6) -> str:
+    body = (
+        "A equipe confirmou uma atualização importante nesta semana, com detalhes "
+        "sobre personagens, sistemas e conteúdo adicional para os jogadores."
+    )
+    return "".join(f"<p>{body} ({index})</p>" for index in range(paragraphs))
 
 
 def test_adaptive_media_planning_uses_persisted_rejection_reasons(tmp_path):
@@ -105,7 +114,7 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
     previous = MediaProgress(required=1)
     ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 115234, "title": "Ex-gerentes de PR da Nintendo dizem que sketch do SNL com Elon Musk como Wario"},
-        SimpleNamespace(media=previous), {"cleaned_html": "<p>texto editorial suficiente.</p>", "seo": {}}, previous,
+        SimpleNamespace(media=previous), {"cleaned_html": _article_html(), "seo": {}}, previous,
     )
     inline_queries = [item["query"] for item in queries if "-inline-" in item["batch_id"]]
     assert any(
@@ -113,6 +122,28 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
         and ("SNL" in query or "Saturday Night Live" in query)
         for query in inline_queries
     )
+
+
+def test_resolver_preflights_normal_article_slots_before_acquisition(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Subject"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: ["Subject"])
+
+    def unexpected_acquisition(*_args, **_kwargs):
+        raise AssertionError("media acquisition must not run before structure preflight")
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", unexpected_acquisition)
+    previous = MediaProgress(required=1)
+    with pytest.raises(StageError, match="media_preflight:insufficient_"):
+        ProductionMediaResolver(object(), Config(), tmp_path)(
+            {"post_id": 115234, "title": "Subject"},
+            SimpleNamespace(media=previous),
+            {"cleaned_html": "<p>curto</p><p>também curto</p>", "seo": {}},
+            previous,
+        )
 
 
 def test_derived_rejection_with_fingerprint_but_without_cause_is_reconsidered(tmp_path):
@@ -265,12 +296,67 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
     previous = MediaProgress(required=2)
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
-        {"post_id": 1, "title": "Test"}, SimpleNamespace(media=previous), {"cleaned_html": "<p>one</p>", "seo": {}}, previous
+        {"post_id": 1, "title": "Test"}, SimpleNamespace(media=previous), {"cleaned_html": _article_html(), "seo": {}}, previous
     )
     assert seen["plans"][0][0]["direct_image_url"] == "https://cdn.test/existing.webp"
     assert seen["plans"][0][0]["source_page_url"] == "https://source.test/page"
     assert seen["featured_visual_asset"] is None
     assert result.accepted == 1
+
+
+def test_media_resolver_restores_visual_verification_from_registry(monkeypatch, tmp_path):
+    import unicornio_editor.media.registry as registry
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    rows = [
+        {
+            "wordpress_media_id": 77,
+            "canonical_url": "https://cdn.test/inline.webp",
+            "sha256": "inline-sha",
+            "phash": "inline-phash",
+            "visual_group_id": "inline-group",
+            "visual_verification": {"decision": "DIFFERENT", "method": "registry"},
+            "subject": "Subject",
+            "role": "inline",
+            "section_slot": 0,
+            "status": "applied",
+        },
+        {
+            "wordpress_media_id": 88,
+            "canonical_url": "https://cdn.test/featured.webp",
+            "sha256": "featured-sha",
+            "phash": "featured-phash",
+            "visual_group_id": "featured-group",
+            "visual_verification": {"decision": "INITIAL", "method": "registry"},
+            "subject": "",
+            "role": "featured",
+            "section_slot": None,
+            "status": "applied",
+        },
+    ]
+
+    class Client:
+        def get_media(self, media_id):
+            return {"source_url": f"https://cdn.test/{'inline' if media_id == 77 else 'featured'}.webp"}
+
+    monkeypatch.setattr(registry, "load_v2_media", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    previous = MediaProgress(required=1, featured=FeaturedProgress(FeaturedStatus.MISSING))
+    result = ProductionMediaResolver(Client(), Config(), tmp_path)(
+        {
+            "post_id": 115234,
+            "title": "Subject",
+            "post": {
+                "featured_media": 88,
+                "content": {"raw": '<p>texto</p><img src="https://cdn.test/inline.webp">'},
+            },
+        },
+        SimpleNamespace(media=previous),
+        {"cleaned_html": "<p>texto editorial.</p>", "seo": {}},
+        previous,
+    )
+    assert result.inline[0].visual_verification == {"decision": "DIFFERENT", "method": "registry"}
+    assert result.featured.visual_verification == {"decision": "INITIAL", "method": "registry"}
 
 
 def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tmp_path):
@@ -361,7 +447,7 @@ def test_media_resolver_refreshes_required_on_noop_retry(tmp_path):
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        {"cleaned_html": _article_html(3), "seo": {}},
         previous,
     )
     assert result.required == 2
@@ -412,7 +498,7 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        {"cleaned_html": _article_html(3), "seo": {}},
         previous,
     )
 
@@ -468,7 +554,7 @@ def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_pa
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 115088, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test content.</p>", "seo": {}},
+        {"cleaned_html": _article_html(3), "seo": {}},
         previous,
     )
 
@@ -713,7 +799,7 @@ def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, 
     ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 114838, "title": "Star Fox game review"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test.</p>", "seo": {}}, previous,
+        {"cleaned_html": _article_html(), "seo": {}}, previous,
     )
 
     assert queries == [
@@ -779,7 +865,7 @@ def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 115102, "title": "Test"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        {"cleaned_html": _article_html(3), "seo": {}},
         previous,
     )
 
@@ -865,7 +951,7 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test", "original_link": "https://source.test/article"},
         SimpleNamespace(media=previous),
-        {"cleaned_html": "<p>Test.</p>", "seo": {}},
+        {"cleaned_html": _article_html(3), "seo": {}},
         previous,
     )
     assert result.accepted == 1

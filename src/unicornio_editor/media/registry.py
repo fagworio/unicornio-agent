@@ -318,20 +318,25 @@ def record_v2_observation(
             url = str(getattr(item, "media_url", "") or "").strip()
             if not url:
                 continue
+            visual_verification = getattr(item, "visual_verification", {})
+            if not isinstance(visual_verification, dict):
+                visual_verification = {}
+            identity_evidence = json.dumps(visual_verification, sort_keys=True)
             db.execute(
                 """INSERT INTO media_assets
                 (canonical_url, source_type, sha256, phash, visual_group_id,
-                 wordpress_media_id, subject, status)
-                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, 'known')
+                 wordpress_media_id, subject, identity_evidence, status)
+                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, ?, 'known')
                 ON CONFLICT(canonical_url) DO UPDATE SET
                     sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
                     phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
                     visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
                     wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_assets.wordpress_media_id),
-                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END""",
+                    subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END,
+                    identity_evidence=CASE WHEN excluded.identity_evidence <> '{}' THEN excluded.identity_evidence ELSE media_assets.identity_evidence END""",
                 (url, str(getattr(item, "sha256", "") or ""), str(getattr(item, "phash", "") or ""),
                  str(getattr(item, "visual_group_id", "") or ""), getattr(item, "media_id", None),
-                 str(getattr(item, "subject", "") or "")),
+                 str(getattr(item, "subject", "") or ""), identity_evidence),
             )
             asset_id = db.execute(
                 "SELECT asset_id FROM media_assets WHERE canonical_url = ?", (url,)
@@ -361,14 +366,25 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
     with connect(root) as db:
         rows = db.execute(
             """SELECT a.wordpress_media_id, a.canonical_url, a.sha256, a.phash,
-                      a.visual_group_id, a.subject, u.role, u.section_slot, u.status
+                      a.visual_group_id, a.subject, a.identity_evidence,
+                      u.role, u.section_slot, u.status
                FROM media_usage AS u
                JOIN media_assets AS a ON a.asset_id = u.asset_id
               WHERE u.post_id = ? AND u.status = 'applied'
               ORDER BY u.usage_id DESC""",
             (int(post_id),),
         ).fetchall()
-    return [dict(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw_identity = item.pop("identity_evidence", "{}")
+        try:
+            identity = json.loads(raw_identity) if raw_identity else {}
+        except (TypeError, ValueError):
+            identity = {}
+        item["visual_verification"] = identity if isinstance(identity, dict) else {}
+        result.append(item)
+    return result
 
 
 def record_v2_candidate_decision(

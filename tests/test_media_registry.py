@@ -129,8 +129,14 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
 def test_v2_observation_separates_state_readback_from_media_application(tmp_path):
     media = MediaProgress(
         required=2,
-        inline=(InlineMedia(7, "https://cdn.test/inline", 0, "alt", "credit", "subject"),),
-        featured=FeaturedProgress(FeaturedStatus.VALID, 8, "https://cdn.test/featured"),
+        inline=(InlineMedia(
+            7, "https://cdn.test/inline", 0, "alt", "credit", "subject",
+            visual_verification={"decision": "DIFFERENT", "method": "test"},
+        ),),
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID, 8, "https://cdn.test/featured",
+            visual_verification={"decision": "INITIAL", "method": "test"},
+        ),
         search=MediaSearchProgress(queries_attempted=2),
     )
     state = SimpleNamespace(media=media)
@@ -151,3 +157,6 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
     reused = load_v2_media(tmp_path, post_id=10)
     assert {row["role"] for row in reused} == {"inline", "featured"}
     assert all(row["status"] == "applied" for row in reused)
+    by_role = {row["role"]: row for row in reused}
+    assert by_role["inline"]["visual_verification"] == {"decision": "DIFFERENT", "method": "test"}
+    assert by_role["featured"]["visual_verification"] == {"decision": "INITIAL", "method": "test"}

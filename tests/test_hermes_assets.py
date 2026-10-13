@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -27,6 +29,25 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("until 5 reach READY", content)
         self.assertIn("does not consume the quota", content)
         self.assertNotIn("EDITOR_DRY_RUN=false", content)
+
+    def test_publish_cron_is_fail_closed_when_publication_is_disabled(self):
+        script = ROOT / "hermes" / "publish-cron.sh"
+        content = script.read_text()
+        self.assertIn("set -euo pipefail", content)
+        self.assertIn("PUBLISH_ENABLED:-false", content)
+        self.assertNotIn("export PUBLISH_ENABLED=true", content)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").write_text("PUBLISH_ENABLED=false\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root)},
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Publicacao desabilitada", result.stderr)
 
     def test_cron_installer_wires_monitor_script_and_references(self):
         script = ROOT / "hermes" / "cron-install.sh"

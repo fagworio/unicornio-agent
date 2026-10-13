@@ -522,11 +522,11 @@ class ProductionMediaResolver:
                 media_id, str(row.get("canonical_url") or ""), slot, subject=str(row.get("subject") or ""),
                 section_slot=row.get("section_slot"), phash=str(row.get("phash") or ""),
                 sha256=str(row.get("sha256") or ""), visual_group_id=str(row.get("visual_group_id") or ""),
+                visual_verification=dict(row.get("visual_verification") or {}),
             ))
             known_ids.add(media_id)
             used_slots.add(slot)
         previous = replace(previous, inline=tuple(current_inline))
-        inline_needed = max(0, total_required - previous.accepted)
         registry_featured = next(
             (row for row in registry_media if row.get("role") == "featured" and row.get("wordpress_media_id")),
             None,
@@ -546,12 +546,14 @@ class ProductionMediaResolver:
                 str(registry_featured.get("sha256") or ""),
                 str(registry_featured.get("phash") or ""),
                 str(registry_featured.get("visual_group_id") or ""),
+                dict(registry_featured.get("visual_verification") or {}),
             )
             if registry_featured and previous.featured.status not in {FeaturedStatus.VALID, FeaturedStatus.VISION_REJECTED, FeaturedStatus.INVALID}
             and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
             else self._recover_existing_featured(context, editorial, previous)
         )
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
+        current_featured = featured
 
         from ..cli import _resolve_media_batch
 
@@ -596,12 +598,12 @@ class ProductionMediaResolver:
             return add_query_context(item_query(subject, title, extra=extra))
         covered_items = {
             str(item.item_number)
-            for item in previous.inline
+            for item in current_inline
             if item.item_number is not None
         }
         covered_subjects = {
             item.subject.casefold().strip()
-            for item in previous.inline
+            for item in current_inline
             if item.subject.strip()
         }
         missing_rows = [
@@ -612,16 +614,37 @@ class ProductionMediaResolver:
                 and str(row.get("subject") or "").casefold().strip() not in covered_subjects
             )
         ]
+        inline_needed = max(0, total_required - len(current_inline))
         if is_listicle:
             # A migrated listicle may have accepted media without item_number.
             # It must cover every item and still satisfy the word-count
             # minimum when that is larger than the item count.
-            inline_needed = max(total_required - previous.accepted, len(missing_rows))
+            inline_needed = max(inline_needed, len(missing_rows))
+        if inline_needed and not is_listicle:
+            # Validate the current editorial structure before spending any
+            # provider calls or uploads.  A structure failure is routed back
+            # to EDITORIAL so the next attempt can reorganize the copy; this
+            # never fabricates paragraphs or weakens the spacing policy.
+            from ..media.inserter import MediaInsertionError, plan_normal_media_insertions
+            from .errors import StageError
+            from .model import BlockerCode
+
+            try:
+                plan_normal_media_insertions(
+                    html,
+                    [{"media_url": ""} for _ in range(inline_needed)],
+                )
+            except MediaInsertionError as exc:
+                raise StageError(
+                    BlockerCode.STRUCTURE,
+                    Phase.EDITORIAL,
+                    f"media_preflight:{exc.code}: {exc}",
+                ) from exc
         if inline_needed == 0 and featured_needed == 0:
             return MediaProgress(
                 required=total_required,
-                inline=previous.inline,
-                featured=featured,
+                inline=tuple(current_inline),
+                featured=current_featured,
                 search=previous.search,
                 enrichment_round=previous.enrichment_round,
                 waiver_applied=previous.waiver_applied,
@@ -673,8 +696,6 @@ class ProductionMediaResolver:
             )
 
         search_runs: list[dict[str, Any]] = []
-        current_inline = list(previous.inline)
-        current_featured = featured
         # One shared allowance for every query/plan of this post.  The visual
         # comparator itself increments per HTTP call (LOW and optional HIGH).
         visual_comparison_budget = [0]
