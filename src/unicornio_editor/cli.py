@@ -1262,6 +1262,17 @@ def _resolve_media_batch(
     for item in posts:
         post_id = int(item["post_id"])
         reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"])) if allow_reuse else []
+        blocked_urls = excluded_urls.get(post_id, set())
+        blocked_fingerprints = excluded_fingerprints.get(post_id, set())
+        existing_urls = set(item.get("existing_media_urls") or [])
+        existing_fingerprints = set((item.get("existing_media_phashes") or {}).values())
+        reuse = [
+            asset for asset in reuse
+            if str(asset.get("url") or asset.get("media_url") or "") not in blocked_urls
+            and str(asset.get("url") or asset.get("media_url") or "") not in existing_urls
+            and not blocked_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
+            and not existing_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
+        ]
         reuse_by_post[post_id] = reuse
         needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
         if needed_web_by_post[post_id] > 0:
@@ -1300,6 +1311,8 @@ def _resolve_media_batch(
             post_id=post_id,
             existing_media_urls=spec.get("existing_media_urls") or [],
             existing_media_phashes=spec.get("existing_media_phashes") or {},
+            excluded_urls=blocked_urls,
+            excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
         )
         accepted_urls_by_query[str(query)].update(
@@ -1351,6 +1364,8 @@ def _resolve_media_batch(
             post_id=post_id,
             existing_media_urls=item.get("existing_media_urls") or [],
             existing_media_phashes=item.get("existing_media_phashes") or {},
+            excluded_urls=excluded_urls.get(post_id, set()),
+            excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1669,6 +1684,8 @@ def _enriquecer_candidatos(
     post_id: int | None = None,
     existing_media_urls: list[str] | tuple[str, ...] | None = None,
     existing_media_phashes: dict[str, str] | None = None,
+    excluded_urls: set[str] | None = None,
+    excluded_fingerprints: set[str] | None = None,
     emit_terminal: bool = True,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
@@ -1715,6 +1732,7 @@ def _enriquecer_candidatos(
                 f"{candidate.get('engine','')}|{candidate.get('query', termo)}|{candidate.get('direct_image_url','')}".encode()
             ).hexdigest()[:20]
         candidate.setdefault("discovery_image_url", candidate.get("direct_image_url", ""))
+        candidate["media_library_id"] = candidate.get("media_library_id") or candidate.get("library_media_id")
     aprovados: list[dict] = []
     rejeitados: list[dict] = []
     deferidos: list[dict] = []
@@ -1841,6 +1859,20 @@ def _enriquecer_candidatos(
     def _classificar(cand: dict) -> None:
         """Evidência + proveniência + pHash de UM candidato (fase por candidato)."""
         cand["subject"] = subject
+        blocked_urls = excluded_urls or set()
+        blocked_fingerprints = excluded_fingerprints or set()
+        candidate_fingerprints = {
+            str(cand.get("phash") or ""),
+            str(cand.get("sha256") or ""),
+            str(cand.get("visual_group_id") or ""),
+        }
+        if str(cand.get("direct_image_url") or "") in blocked_urls or blocked_fingerprints.intersection(candidate_fingerprints):
+            cand["rejected_reason"] = "previously_rejected_candidate"
+            cand["evidence"] = {"verdict": "previously_rejected_candidate", "gate": "history", "score": 0}
+            cand["evidence_score"] = 0
+            rejeitados.append(cand)
+            _guardar_memo(cand)
+            return
         candidate_url = str(cand.get("direct_image_url") or "")
         blocked_urls = (excluded_urls or {}).get(int(post_id), set())
         blocked_fingerprints = (excluded_fingerprints or {}).get(int(post_id), set())

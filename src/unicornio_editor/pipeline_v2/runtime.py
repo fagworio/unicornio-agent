@@ -96,7 +96,22 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            rows.extend(item for item in (row.get("invalid_media") or []) if isinstance(item, dict))
+            parent_reason = row.get("rejected_reason") or row.get("detail") or row.get("reason")
+            rows.extend(
+                {**item, "rejected_reason": item.get("rejected_reason") or parent_reason}
+                for item in (row.get("invalid_media") or []) if isinstance(item, dict)
+            )
+            verdict = str((row.get("evidence") or {}).get("verdict") or "").casefold()
+            raw_disposition = str(row.get("disposition") or "").casefold()
+            raw_reason_value = str(row.get("rejected_reason") or row.get("reason") or row.get("detail") or "").casefold()
+            is_rejection = bool(
+                row.get("rejected_reason")
+                or raw_disposition in {"reject_final", "defer_retry"}
+                or verdict in {"reject", "unresolved_source", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "previously_rejected_candidate"}
+                or any(token in raw_reason_value for token in ("duplicate", "rejeit", "unrelated", "inacess", "diverg"))
+            )
+            if not is_rejection:
+                continue
             raw_reason = str(row.get("detail") or row.get("reason") or row.get("rejected_reason") or "").strip()
             lowered = raw_reason.casefold()
             if "duplicate_existing_frame" in lowered or "duplicate" in lowered or "duplicat" in lowered:
