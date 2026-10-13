@@ -365,7 +365,7 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
                FROM media_usage AS u
                JOIN media_assets AS a ON a.asset_id = u.asset_id
               WHERE u.post_id = ? AND u.status IN ('accepted', 'applied')
-              ORDER BY u.usage_id""",
+              ORDER BY u.usage_id DESC""",
             (int(post_id),),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -402,7 +402,22 @@ def record_v2_candidate_decision(
         db.commit()
 
 
+def invalidate_v2_media(root: str | Path, *, post_id: int, media_ids: list[int]) -> None:
+    """Retain history while removing explicitly invalidated uses from reuse."""
+    ids = sorted({int(value) for value in media_ids if int(value) > 0})
+    if not ids:
+        return
+    with connect(root) as db:
+        placeholders = ",".join("?" for _ in ids)
+        db.execute(
+            f"UPDATE media_usage SET status='invalidated' WHERE post_id=? AND wordpress_media_id IN ({placeholders})",
+            (int(post_id), *ids),
+        )
+        db.commit()
+
+
 __all__ = [
     "SCHEMA_VERSION", "connect", "load_v2_media", "migrate_legacy_index",
     "record_v2_candidate_decision", "record_v2_observation", "registry_path",
+    "invalidate_v2_media",
 ]

@@ -103,6 +103,8 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             )
             verdict = str((row.get("evidence") or {}).get("verdict") or "").casefold()
             raw_disposition = str(row.get("disposition") or "").casefold()
+            if raw_disposition == "defer_retry":
+                continue
             raw_reason_value = str(row.get("rejected_reason") or row.get("reason") or row.get("detail") or "").casefold()
             is_rejection = bool(
                 row.get("rejected_reason")
@@ -422,23 +424,47 @@ class ProductionMediaResolver:
         except Exception:
             registry_media = []
         current_inline = list(previous.inline)
+        post_content_urls = set(_embedded_media_urls(str(((context.get("post") or {}).get("content") or {}).get("raw") or "")))
+        used_slots = {item.slot for item in current_inline}
         known_ids = {item.media_id for item in current_inline}
         for row in registry_media:
-            if row.get("role") != "inline" or not row.get("wordpress_media_id") or row.get("wordpress_media_id") in known_ids:
+            media_id = int(row.get("wordpress_media_id") or 0)
+            media_url = _canonical_embedded_media_url(str(row.get("canonical_url") or ""))
+            if (
+                row.get("role") != "inline" or not media_id or media_id in known_ids
+                or row.get("status") != "applied" or media_url not in post_content_urls
+            ):
                 continue
+            try:
+                attachment = self.client.get_media(media_id)
+                attachment_url = _canonical_embedded_media_url(str((attachment or {}).get("source_url") or ""))
+            except Exception:
+                continue
+            if attachment_url != media_url:
+                continue
+            slot = next((index for index, url in enumerate(_embedded_media_urls(
+                str(((context.get("post") or {}).get("content") or {}).get("raw") or "")
+            )) if url == media_url and index not in used_slots), len(current_inline))
             current_inline.append(InlineMedia(
-                int(row["wordpress_media_id"]), str(row.get("canonical_url") or ""),
-                len(current_inline), subject=str(row.get("subject") or ""),
+                media_id, str(row.get("canonical_url") or ""), slot, subject=str(row.get("subject") or ""),
                 section_slot=row.get("section_slot"), phash=str(row.get("phash") or ""),
                 sha256=str(row.get("sha256") or ""), visual_group_id=str(row.get("visual_group_id") or ""),
             ))
-            known_ids.add(int(row["wordpress_media_id"]))
+            known_ids.add(media_id)
+            used_slots.add(slot)
         previous = replace(previous, inline=tuple(current_inline))
         inline_needed = max(0, total_required - previous.accepted)
         registry_featured = next(
             (row for row in registry_media if row.get("role") == "featured" and row.get("wordpress_media_id")),
             None,
         )
+        if registry_featured:
+            try:
+                attachment = self.client.get_media(int(registry_featured["wordpress_media_id"]))
+                if _canonical_embedded_media_url(str((attachment or {}).get("source_url") or "")) != _canonical_embedded_media_url(str(registry_featured.get("canonical_url") or "")):
+                    registry_featured = None
+            except Exception:
+                registry_featured = None
         featured = (
             FeaturedProgress(
                 FeaturedStatus.VALID,
@@ -448,7 +474,8 @@ class ProductionMediaResolver:
                 str(registry_featured.get("phash") or ""),
                 str(registry_featured.get("visual_group_id") or ""),
             )
-            if registry_featured and previous.featured.status is not FeaturedStatus.VALID
+            if registry_featured and previous.featured.status not in {FeaturedStatus.VALID, FeaturedStatus.VISION_REJECTED}
+            and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
             else self._recover_existing_featured(context, editorial, previous)
         )
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
@@ -636,22 +663,6 @@ class ProductionMediaResolver:
                     candidate["rejected_reason"] = "previously_rejected_candidate"
                     continue
                 filtered.append(candidate)
-            try:
-                from ..media.registry import record_v2_candidate_decision
-                run_id = str(context.get("v2_run_id") or "")
-                for candidate in candidates:
-                    candidate_url = _canonical_embedded_media_url(
-                        str(candidate.get("direct_image_url") or candidate.get("media_url") or "")
-                    )
-                    rejected = candidate_url in rejection_history["urls"]
-                    record_v2_candidate_decision(
-                        self.root, post_id=int(context["post_id"]), run_id=run_id,
-                        candidate=candidate, role=role,
-                        disposition="reject_final" if rejected else "accepted",
-                        reason_code="previously_rejected_candidate" if rejected else "candidate_accepted",
-                    )
-            except Exception:
-                pass
             return filtered
 
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -750,6 +761,23 @@ class ProductionMediaResolver:
                         str(result.get("visual_group_id") or ""),
                         dict(result.get("visual_verification") or {}),
                     )
+            try:
+                from ..media.registry import record_v2_candidate_decision
+                run_id = str(context.get("v2_run_id") or "")
+                for index, result in enumerate(results):
+                    item = plan[index] if index < len(plan) else plan[0]
+                    status = str(result.get("status") or "").casefold()
+                    detail = str(result.get("detail") or result.get("reason") or "")
+                    temporary = any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
+                    accepted = status in {"accepted", "ok"}
+                    record_v2_candidate_decision(
+                        self.root, post_id=int(context["post_id"]), run_id=run_id,
+                        candidate=item, role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                        disposition="accepted" if accepted else "defer_retry" if temporary else "reject_final",
+                        reason_code="candidate_accepted" if accepted else "transient_provider_failure" if temporary else (detail[:120] or "candidate_rejected"),
+                    )
+            except Exception:
+                pass
             # Persist identity materialised for legacy accepted assets too.
             by_id = {int(row.get("media_id")): row for row in baseline_inline_assets if row.get("media_id")}
             current_inline = [
@@ -1658,7 +1686,17 @@ def run_v2(
                     raise
                 completed += 1
                 try:
-                    from ..media.registry import record_v2_observation
+                    from ..media.registry import invalidate_v2_media, record_v2_observation
+                    previous_ids = {
+                        item.media_id for item in initial.media.inline
+                    }
+                    current_ids = {
+                        item.media_id for item in buffered.state.media.inline
+                    }
+                    invalidate_v2_media(
+                        root, post_id=int(post_id),
+                        media_ids=sorted(previous_ids - current_ids),
+                    )
                     record_v2_observation(
                         root, post_id=post_id, run_id=run_id, state=buffered.state,
                         phase=buffered.state.phase.value, outcome=outcome.type.value,
