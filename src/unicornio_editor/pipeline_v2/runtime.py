@@ -680,7 +680,23 @@ class ProductionMediaResolver:
                         limit=max(8, inline_remaining() * 4),
                         stats=source_stats,
                     )
-                except Exception:
+                except Exception as exc:
+                    from ..observability import record_unexpected_error
+
+                    record_unexpected_error(
+                        self.root, exc, post_id=int(context["post_id"]),
+                        run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                        file="pipeline_v2/runtime.py", field="source_discovery",
+                    )
+                    from ..observability import append_telemetry
+
+                    append_telemetry(
+                        self.root, "media_source_discovery_failed",
+                        post_id=int(context["post_id"]),
+                        source_page=source_url[:500],
+                        failure_kind="source_extractor_error",
+                        candidates_found=int(source_stats.get("raw_assets") or 0),
+                    )
                     source_candidates = []
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
@@ -1132,7 +1148,7 @@ class WordPressWriterV2:
                     + ", ".join(missing_inline[:5])
                 )
             try:
-                from .observability import append_telemetry
+                from ..observability import append_telemetry
 
                 embedded_candidate_urls = set(_embedded_media_urls(_html.unescape(content)))
                 append_telemetry(
@@ -1152,8 +1168,14 @@ class WordPressWriterV2:
                     readback=True,
                     partial=outcome.type.value != "ready",
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..observability import record_unexpected_error
+
+                record_unexpected_error(
+                    self.root, exc, post_id=int(post_id),
+                    run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                    file="pipeline_v2/runtime.py", field="media_apply_readback",
+                )
         if outcome.type.value == "ready":
             if (readback.get("content") or {}).get("raw") != content:
                 raise RuntimeError("candidate content read-back mismatch")

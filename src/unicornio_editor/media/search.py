@@ -1017,7 +1017,10 @@ def search_web_images(
         # poderiam ter imagens boas, nunca eram consultados.
         if accept is not None:
             try:
-                if int(accept(novos) or 0) >= alvo:
+                # The acceptance callback must see the distinct accumulated
+                # candidates. A provider may return an unapproved batch while
+                # a previous provider already supplied enough valid frames.
+                if int(accept(acumulado) or 0) >= alvo:
                     break
             except Exception:  # noqa: BLE001 - aceite é do chamador
                 pass
