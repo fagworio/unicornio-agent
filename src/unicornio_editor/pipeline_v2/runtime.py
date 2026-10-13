@@ -111,6 +111,10 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             if raw_disposition == "defer_retry":
                 continue
             raw_reason_value = str(row.get("rejected_reason") or row.get("reason") or row.get("detail") or "").casefold()
+            # This is a derived guard, not original gate evidence.  Do not let
+            # its own label become the reason for a permanent blacklist.
+            if "previously_rejected_candidate" in raw_reason_value and raw_disposition != "reject_final":
+                continue
             is_rejection = bool(
                 row.get("rejected_reason")
                 or raw_disposition in {"reject_final", "defer_retry"}
@@ -501,7 +505,12 @@ class ProductionMediaResolver:
             focus_keyword=focus_keyword,
             game_name=editorial.get("game_name"),
         )
-        is_listicle = detect_list_format(title, html) is not None
+        is_listicle = detect_list_format(title, html) is not None or len(subject_rows) > 1
+        if not is_listicle and source_subjects:
+            # Keep listicle coverage driven by its H2 subjects.  For ordinary
+            # news, use the first concrete visual entity for discovery rather
+            # than a grammatical phrase such as "ex-gerentes".
+            subject_rows = [{"item": None, "heading": source_subjects[0], "subject": source_subjects[0]}]
         covered_items = {
             str(item.item_number)
             for item in previous.inline

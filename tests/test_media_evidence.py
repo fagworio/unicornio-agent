@@ -13,6 +13,7 @@ from unicornio_editor.media.evidence import (
     LIMIAR_MATCH,
     evidence_score,
     post_subjects,
+    editorial_subjects,
     source_context,
     subject_for_image,
 )
@@ -33,6 +34,14 @@ class SubjectTests(unittest.TestCase):
             content_html="<p>x</p>",
         )
         self.assertEqual(subs[0]["subject"], "star fox")
+
+    def test_aquisicao_prioriza_entidades_visuais_da_manchete(self):
+        subjects = editorial_subjects(
+            title="Wario aparece com Elon Musk no Saturday Night Live da Nintendo",
+            content_html="<p>ex-gerentes não é o assunto visual principal.</p>",
+        )
+        self.assertEqual(subjects[0], "Wario")
+        self.assertNotEqual(subjects[0], "ex-gerentes")
 
     def test_listicle_um_subject_por_h2_com_o_nome_completo(self):
         subs = post_subjects(

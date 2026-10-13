@@ -143,6 +143,9 @@ def editorial_subjects(
         "emulador", "emuladores", "emulation", "emulator", "suporte", "supports",
         "recebe", "receber", "novo", "nova", "noticia", "software", "hardware",
     }
+    generic_context_entities = {
+        "nintendo", "sony", "microsoft", "playstation", "xbox", "switch", "steam",
+    }
 
     def add(value: str) -> None:
         normalized = " ".join(str(value or "").split()).strip()
@@ -162,20 +165,29 @@ def editorial_subjects(
         if key not in {normalize(item) for item in values}:
             values.append(normalized)
 
-    for row in post_subjects(
+    post_rows = post_subjects(
         title=title,
         content_html=content_html,
         focus_keyword=focus_keyword,
         game_name=game_name,
-    ):
-        add(str(row.get("subject") or ""))
+    )
+    is_listicle = len(post_rows) > 1
+    if is_listicle:
+        for row in post_rows:
+            add(str(row.get("subject") or ""))
     add(str(game_name or ""))
     add(str(focus_keyword or ""))
 
     # Proper-name groups are useful acquisition terms even when the title also
-    # contains generic editorial wording such as "recebe suporte".
+    # contains generic editorial wording such as "recebe suporte".  Prefer
+    # these concrete entities to the grammatical principal subject.
     for group in _NOME_PROPRIO_RE.findall(_TAG_RE.sub(" ", str(title or ""))):
-        add(group)
+        if normalize(group) not in generic_context_entities:
+            add(group)
+
+    if not is_listicle:
+        for row in post_rows:
+            add(str(row.get("subject") or ""))
 
     entities = extract_entities(
         title=title,
