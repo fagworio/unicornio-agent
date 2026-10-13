@@ -120,12 +120,22 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 str(row.get(key) or "")
                 for key in ("original_reason", "original_rejected_reason", "original_gate", "detail", "reason")
             ).casefold()
-            has_original_evidence = bool(
-                row.get("original_reason") or row.get("original_rejected_reason") or row.get("original_gate")
-                or evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "unresolved_source"}
-                or any(token in original_cause for token in ("source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "width_below_minimum"))
+            definitive_causes = (
+                "source_mismatch", "duplicate_existing_frame", "duplicate_frame",
+                "unrelated", "width_below_minimum", "reject_final",
             )
-            if derived_rejection and not has_original_evidence:
+            transient_causes = (
+                "timeout", "network_error", "network", "source_page_unreachable",
+                "unreachable", "tempor", "cdn",
+            )
+            has_definitive_cause = bool(
+                evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated", "unresolved_source"}
+                or any(token in original_cause for token in definitive_causes)
+            )
+            has_transient_cause = any(token in original_cause for token in transient_causes)
+            if has_transient_cause and not has_definitive_cause:
+                continue
+            if derived_rejection and not has_definitive_cause:
                 continue
             is_rejection = bool(
                 row.get("rejected_reason")

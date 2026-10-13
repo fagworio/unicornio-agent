@@ -1,5 +1,8 @@
+import json
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
 from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver, _adaptive_query_suffix, _media_rejection_history
@@ -82,7 +85,7 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
 
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         item = batch["posts"][0]
-        queries.append(item["query"])
+        queries.append({"batch_id": batch["batch_id"], "query": item["query"]})
         return {"posts": [{"audit_candidates": [{
             "candidate_id": item["query"],
             "direct_image_url": "https://cdn.test/" + ("featured" if "featured" in batch["batch_id"] else "inline") + ".webp",
@@ -104,7 +107,12 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
         {"post_id": 115234, "title": "Ex-gerentes de PR da Nintendo dizem que sketch do SNL com Elon Musk como Wario"},
         SimpleNamespace(media=previous), {"cleaned_html": "<p>texto editorial suficiente.</p>", "seo": {}}, previous,
     )
-    assert any("Wario" in query and "Elon Musk" in query and "Saturday Night Live" in query or "SNL" in query for query in queries)
+    inline_queries = [item["query"] for item in queries if "-inline-" in item["batch_id"]]
+    assert any(
+        "Wario" in query and "Elon Musk" in query
+        and ("SNL" in query or "Saturday Night Live" in query)
+        for query in inline_queries
+    )
 
 
 def test_derived_rejection_with_fingerprint_but_without_cause_is_reconsidered(tmp_path):
@@ -116,6 +124,26 @@ def test_derived_rejection_with_fingerprint_but_without_cause_is_reconsidered(tm
         '"url":"https://cdn.test/fingerprint.webp"}]}]}', encoding="utf-8",
     )
     assert "https://cdn.test/fingerprint.webp" not in _media_rejection_history(tmp_path, 115234)["urls"]
+
+
+@pytest.mark.parametrize("cause,blocked", [
+    ("timeout", False),
+    ("source_page_unreachable", False),
+    ("source_mismatch", True),
+    ("duplicate_existing_frame", True),
+])
+def test_derived_history_uses_original_cause_classification(tmp_path, cause, blocked):
+    batch = tmp_path / "work" / "batches" / f"batch-{cause}"
+    batch.mkdir(parents=True)
+    url = f"https://cdn.test/{cause}.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final", "rejected_reason": "previously_rejected_candidate",
+            "original_reason": cause, "url": url,
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert (url in history["urls"]) is blocked
 
 
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
