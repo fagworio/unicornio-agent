@@ -83,6 +83,28 @@ def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):
     assert error.value.phase is Phase.MEDIA
 
 
+def test_media_stage_logs_contract_error_with_run_identity_and_redacted_traceback(tmp_path):
+    stage = ProductionMediaStage(
+        object(), Config(), tmp_path,
+        resolver=lambda *_args: (_ for _ in ()).throw(TypeError("token=must-not-leak")),
+    )
+    with pytest.raises(StageError) as error:
+        stage(
+            {"post_id": 115152, "v2_run_id": "run-contract"},
+            SimpleNamespace(media=MediaProgress(required=1)),
+            {},
+        )
+    assert error.value.blocker is BlockerCode.INTERNAL_ERROR
+    event = json.loads((tmp_path / "work/telemetry.jsonl").read_text(encoding="utf-8"))
+    assert event["error_class"] == "contract"
+    assert event["post_id"] == 115152 and event["run_id"] == "run-contract"
+    assert event["file"] == "pipeline_v2/production_stages.py"
+    assert event["field"] == "ProductionMediaStage"
+    assert event["exception_type"] == "TypeError"
+    assert "[redacted sensitive traceback line]" in event["traceback"]
+    assert "must-not-leak" not in json.dumps(event)
+
+
 def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch):
     input_path = tmp_path / "input.json"
     input_path.write_text('{"posts":[{"post_id":115002}]}', encoding="utf-8")
@@ -189,6 +211,8 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     editorial = {
         "cleaned_html": (
             f'<p>{paragraph}</p><img src="{existing}" />'
+            f'<figure><img src="{featured}" /><p>Contexto independente da imagem.</p></figure>'
+            '<p>Crédito editorial independente.</p>'
             f"<p>{paragraph}</p><p>{paragraph}</p><p>{paragraph}</p>"
         ),
         "seo": {},
@@ -209,6 +233,8 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     assert content.count(existing) == 1
     assert content.count(featured) == 0
     assert content.count(new) == 1
+    assert "Contexto independente da imagem." in content
+    assert "Crédito editorial independente." in content
 
 
 def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path):
@@ -507,6 +533,89 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
     ]
     duplicate_evidence = json.loads(usages[1][3])
     assert duplicate_evidence["decision"] == "SAME_IMAGE"
+
+
+def test_writer_allows_only_listicle_final_repeat_of_featured(tmp_path):
+    class Client:
+        def __init__(self):
+            self.post = {"id": 133, "status": "pending", "content": {"raw": "old"}, "featured_media": 0, "meta": {}}
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.post.update(update)
+
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID, 100, "https://example.test/featured.webp",
+        "f" * 64, "f" * 16, "visual:" + "f" * 24, {"decision": "INITIAL"},
+    )
+    accepted = tuple(
+        _verified_inline(media_id, f"https://example.test/{media_id}.webp", index * 3)
+        for index, media_id in enumerate((201, 202, 203, 204))
+    )
+    repeated = InlineMedia(
+        205, featured.media_url, 12,
+        sha256=featured.sha256, phash=featured.phash, visual_group_id=featured.visual_group_id,
+        visual_verification={"decision": "SAME_IMAGE", "duplicate_of": "100"},
+    )
+    media = MediaProgress(required=4, inline=(*accepted, repeated), featured=featured)
+    content = (
+        "<h2>1. Primeiro</h2>" + f'<img src="{accepted[0].media_url}">'
+        + "<h2>2. Segundo</h2>" + f'<img src="{accepted[1].media_url}">'
+        + f'<img src="{accepted[2].media_url}"><img src="{accepted[3].media_url}">'
+        + f'<img src="{featured.media_url}">'
+    )
+    backup = tmp_path / "backups" / "133"
+    backup.mkdir(parents=True)
+    candidate = {
+        "title": "Top 2 jogos", "content": content,
+        "editorial": {"cleaned_html": content, "seo": {}},
+        "seo": {"title": "Top 2 jogos", "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.", "focus_keyword": "jogos"},
+        "featured_media": featured.media_id, "media": media.to_dict(),
+    }
+    (backup / "editorial.candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+    proposed = WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True, media=media)
+
+    result = WordPressWriterV2(Client(), tmp_path).commit(
+        133, {"post_id": 133}, proposed, Outcome.ready(),
+    )
+
+    assert result["media_readback"] is True
+    assert len(_embedded_media_urls(content)) == 5
+
+
+def test_writer_rejects_listicle_duplicate_not_at_final_position(tmp_path):
+    class Client:
+        def get_post(self, _post_id):
+            return {"id": 134, "status": "pending", "content": {"raw": "old"}, "featured_media": 0, "meta": {}}
+
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID, 100, "https://example.test/featured.webp",
+        "f" * 64, "f" * 16, "visual:" + "f" * 24, {"decision": "INITIAL"},
+    )
+    first = _verified_inline(201, "https://example.test/201.webp", 0)
+    repeated = InlineMedia(
+        205, featured.media_url, 3,
+        sha256=featured.sha256, phash=featured.phash, visual_group_id=featured.visual_group_id,
+        visual_verification={"decision": "SAME_IMAGE", "duplicate_of": "100"},
+    )
+    media = MediaProgress(required=1, inline=(first, repeated), featured=featured)
+    content = (
+        "<h2>1. Primeiro</h2>" + f'<img src="{featured.media_url}">'
+        + "<h2>2. Segundo</h2>" + f'<img src="{first.media_url}">'
+    )
+    backup = tmp_path / "backups" / "134"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(json.dumps({
+        "title": "Top 2 jogos", "content": content, "editorial": {"cleaned_html": content, "seo": {}},
+        "seo": {"title": "Top 2 jogos", "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.", "focus_keyword": "jogos"},
+        "featured_media": featured.media_id, "media": media.to_dict(),
+    }), encoding="utf-8")
+    proposed = WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True, media=media)
+
+    with pytest.raises(RuntimeError, match="ineligible visual media"):
+        WordPressWriterV2(Client(), tmp_path).commit(134, {"post_id": 134}, proposed, Outcome.ready())
 
 
 def test_readback_identity_uses_img_elements_not_plain_text_urls():

@@ -65,6 +65,7 @@ class PipelineRunner:
         media: MediaProgress = previous.media
         media_completed = False
         media_stage_error = False
+        recovered_media: MediaProgress | None = None
         validation: dict[str, Any] | None = None
         media_base_no_progress = (
             previous.retry.no_progress
@@ -124,11 +125,12 @@ class PipelineRunner:
                 )
                 outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
             except StageError as exc:
-                media_stage_error = exc.blocker in MEDIA_BLOCKERS and exc.phase is Phase.MEDIA
+                media_stage_error = exc.phase is Phase.MEDIA
+                recovered_media = exc.media_progress
                 outcome = classify_stage_error(
                     previous,
                     exc,
-                    no_progress=media_base_no_progress + 1 if media_stage_error else None,
+                    no_progress=media_base_no_progress if media_stage_error else None,
                     **self._policy(),
                 )
         # Reconcile first, then measure progress. A newly uploaded asset that
@@ -139,7 +141,7 @@ class PipelineRunner:
         # that failed. The failed attempt cannot invalidate media accepted in
         # a previous run; only checklist identities may do that.
         if media_stage_error:
-            effective_media = previous.media
+            effective_media = recovered_media if isinstance(recovered_media, MediaProgress) else previous.media
         else:
             effective_media = self._reconcile_media_for_outcome(
                 media,
@@ -157,27 +159,15 @@ class PipelineRunner:
             for failure in (validation or {}).get("failures", [])
         )
         if technical_media_error:
-            effective_media = previous.media
-        media_attempt = (media_completed and not technical_media_error) or (
-            media_stage_error
-            or (previous.phase is Phase.MEDIA and outcome.blocker in MEDIA_BLOCKERS)
-        )
+            effective_media = media
+        # Only a completed acquisition/validation attempt consumes this budget.
+        # Operational failures retain both progress and the existing counter.
+        media_attempt = media_completed and not technical_media_error
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
         current_no_progress = (
             (0 if progress else media_base_no_progress + 1)
             if media_attempt else media_base_no_progress
         )
-        if (
-            media_attempt
-            and outcome.type is OutcomeType.RETRY
-            and current_no_progress >= self._policy()["max_media_no_progress"]
-            and outcome.blocker in MEDIA_BLOCKERS
-        ):
-            outcome = Outcome.human_required(
-                outcome.phase or Phase.MEDIA,
-                outcome.blocker,
-                detail=outcome.detail,
-            )
         if media_completed and validation is not None:
             corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())
             if corrected != outcome:

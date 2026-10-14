@@ -5,6 +5,7 @@ These adapters deliberately reuse the mature V1 functions.  They do not call
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -26,8 +27,8 @@ from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import MediaInsertionError, insert_media, normal_media_urls_to_insert, plan_normal_media_insertions, remove_media_urls
 from ..media.vision_gate import VisionGateError
+from ..wordpress import WordPressError
 from ..workflow import (
-    MediaFunnelInvariantError,
     _execute_media_plan,
     compose_final_content,
     attach_trailer_audit,
@@ -36,7 +37,7 @@ from ..workflow import (
 from .errors import StageError
 from .media_accounting import reconcile_working_visual_media
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
-from ..observability import record_unexpected_error
+from ..observability import _redact_text, record_unexpected_error
 
 
 def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> Path:
@@ -318,6 +319,8 @@ class ProductionMediaStage:
         self.client, self.config, self.root, self.resolver = client, config, Path(root), resolver
 
     def __call__(self, context: dict[str, Any], state: Any, editorial: dict[str, Any]) -> MediaProgress:
+        # Only snapshots produced by this invocation may survive its failure.
+        context.pop("_v2_media_progress", None)
         previous = state.media
         required = required_image_count_for_content(
             str(editorial.get("cleaned_html") or ""),
@@ -402,14 +405,36 @@ class ProductionMediaStage:
                 )
             _write_json(self.root, int(context["post_id"]), "editorial.partial.json", media.to_dict())
             return media
-        except StageError:
-            raise
-        except MediaFunnelInvariantError as exc:
-            raise StageError(BlockerCode.INTERNAL_ERROR, Phase.MEDIA, str(exc)) from exc
-        except VisionGateError as exc:
-            raise StageError(BlockerCode.PROVIDER_ERROR, Phase.MEDIA, str(exc)) from exc
         except Exception as exc:
-            raise StageError(BlockerCode.MEDIA_INVALID, Phase.MEDIA, str(exc)) from exc
+            progress = context.get("_v2_media_progress")
+            progress = progress if isinstance(progress, MediaProgress) else None
+            if isinstance(exc, StageError):
+                exc.media_progress = progress or exc.media_progress
+                raise
+            blocker = BlockerCode.INTERNAL_ERROR
+            if isinstance(exc, (VisionGateError, TimeoutError, ConnectionError)):
+                blocker = BlockerCode.PROVIDER_ERROR
+            elif isinstance(exc, WordPressError):
+                blocker = BlockerCode.WORDPRESS_ERROR
+            error_class = (
+                "provider" if blocker is BlockerCode.PROVIDER_ERROR else
+                "wordpress" if blocker is BlockerCode.WORDPRESS_ERROR else
+                "contract" if isinstance(exc, TypeError) else
+                "internal"
+            )
+            try:
+                record_unexpected_error(
+                    self.root, exc, post_id=int(context["post_id"]),
+                    run_id=str(context.get("v2_run_id") or ""),
+                    file="pipeline_v2/production_stages.py", field="ProductionMediaStage",
+                    error_class=error_class,
+                )
+            except Exception:  # diagnostics must not mask durable progress
+                pass
+            raise StageError(
+                blocker, Phase.MEDIA, _redact_text(f"{type(exc).__name__}: {exc}"),
+                media_progress=progress,
+            ) from exc
 
     @staticmethod
     def _from_result(result: Any, required: int, accepted: dict[int, InlineMedia], featured: FeaturedProgress) -> MediaProgress:
@@ -472,6 +497,8 @@ class ProductionComposeStage:
                 [*_visual_reconcile_urls(self.root, int(context["post_id"]), media), *duplicate_urls],
             )
             featured_url = str(media.featured.media_url or "").strip()
+            if featured_url and not is_listicle:
+                existing_html = remove_media_urls(existing_html, [featured_url])
             insertable_urls = set(normal_media_urls_to_insert(
                 existing_html,
                 [str(item.media_url or "") for item in media.inline if item.media_id in valid_ids],
@@ -622,8 +649,14 @@ class ProductionValidateStage:
                 if item.get("phase"):
                     failure["phase"] = item["phase"]
                 failures.append(failure)
-            _write_json(self.root, int(context["post_id"]), "editorial.validation.json", {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist})
-            return {"passed": bool(checklist.get("all_passed")), "failures": failures, "checklist": checklist}
+            result = {
+                "passed": bool(checklist.get("all_passed")), "failures": failures,
+                "checklist": checklist, "_v2_run_id": str(context.get("v2_run_id") or ""),
+                "candidate_run_id": str(candidate.get("_v2_run_id") or ""),
+                "candidate_hash": hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest(),
+            }
+            _write_json(self.root, int(context["post_id"]), "editorial.validation.json", result)
+            return result
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.VALIDATE, str(exc)) from exc
 

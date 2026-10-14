@@ -24,7 +24,7 @@ from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase, WorkState
 from .media_accounting import account_visual_media, reconcile_working_visual_media
-from .production import ProductionCandidateReader
+from .production import ProductionCandidateReader, validation_matches_candidate
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
 from .scheduler import _cooldown_expired, select
@@ -573,6 +573,19 @@ class ProductionMediaResolver:
         )
         current_inline = list(recovered_media.inline)
         featured = recovered_media.featured
+        current_featured = featured
+
+        def persist_progress() -> None:
+            snapshot = replace(
+                recovered_media, inline=tuple(current_inline), featured=current_featured,
+                accepted_count=None,
+            )
+            # Publish in memory first: even an I/O error cannot roll back an
+            # upload that has already been confirmed by WordPress.
+            context["_v2_media_progress"] = snapshot
+            _write_v2_media_checkpoint(self.root, int(context["post_id"]), snapshot)
+
+        persist_progress()
         media_reconciliation = reconcile_working_visual_media(
             recovered_media,
             required_inline=total_required,
@@ -874,6 +887,27 @@ class ProductionMediaResolver:
                 filtered.append(candidate)
             return filtered
 
+        def accept_result(result: dict[str, Any], plan_item: dict[str, Any]) -> None:
+            nonlocal current_featured, current_inline
+            if result.get("status") not in {None, "accepted", "ok"}:
+                return
+            if not result.get("media_id") or not result.get("media_url"):
+                return
+            if result.get("featured"):
+                current_featured = FeaturedProgress.from_dict({**result, "status": "valid"})
+            else:
+                media_id = int(result["media_id"])
+                existing = next((item for item in current_inline if item.media_id == media_id), None)
+                slot = existing.slot if existing else int(result.get("paragraph_index", 0))
+                occupied = {item.slot for item in current_inline if item.media_id != media_id}
+                while slot in occupied:
+                    slot += 3
+                item = InlineMedia.from_dict({**plan_item, **result, "slot": slot})
+                current_inline = [item if old.media_id == media_id else old for old in current_inline]
+                if existing is None:
+                    current_inline.append(item)
+            persist_progress()
+
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Execute one candidate batch and merge only final accepted media."""
             nonlocal current_featured, current_inline
@@ -932,44 +966,14 @@ class ProductionMediaResolver:
                     previous_inline_visual_assets=baseline_inline_assets,
                     featured_visual_asset=baseline_featured_asset,
                     visual_comparison_budget=visual_comparison_budget,
+                    on_accepted=lambda result: accept_result(result, plan[0]),
                 )
             finally:
                 from ..media.google_browser import cleanup_browser_artifacts
 
                 cleanup_browser_artifacts()
             for result in results:
-                status = result.get("status")
-                if status and status not in {"accepted", "ok"}:
-                    continue
-                plan_item = plan[0]
-                if result.get("media_id") and result.get("media_url") and not result.get("featured"):
-                    current_inline.append(InlineMedia(
-                        int(result["media_id"]),
-                        str(result["media_url"]),
-                        int(result.get("paragraph_index", 0)),
-                        str(result.get("alt_text", "")),
-                        str(result.get("credit_text", "")),
-                        str(plan_item.get("subject") or ""),
-                        plan_item.get("item_number"),
-                        str(plan_item.get("section_heading") or ""),
-                        plan_item.get("section_slot"),
-                        int(result.get("width") or 1200),
-                        int(result.get("height") or 800),
-                        str(result.get("phash") or ""),
-                        str(result.get("sha256") or ""),
-                        str(result.get("visual_group_id") or ""),
-                        dict(result.get("visual_verification") or {}),
-                    ))
-                if result.get("featured") and result.get("media_id"):
-                    current_featured = FeaturedProgress(
-                        FeaturedStatus.VALID,
-                        int(result["media_id"]),
-                        str(result.get("media_url") or ""),
-                        str(result.get("sha256") or ""),
-                        str(result.get("phash") or ""),
-                        str(result.get("visual_group_id") or ""),
-                        dict(result.get("visual_verification") or {}),
-                    )
+                accept_result(result, plan[0])
             try:
                 from ..media.registry import record_v2_candidate_decision
                 run_id = str(context.get("v2_run_id") or "")
@@ -1013,17 +1017,7 @@ class ProductionMediaResolver:
                 )
             # Crash-safe incremental progress: an accepted asset is durable
             # before the resolver moves on to the next candidate/query.
-            _write_v2_media_checkpoint(
-                self.root,
-                int(context["post_id"]),
-                MediaProgress(
-                    required=total_required,
-                    inline=tuple({item.media_id: item for item in current_inline}.values()),
-                    featured=current_featured,
-                    search=previous.search,
-                    enrichment_round=enrichment_round,
-                ),
-            )
+            persist_progress()
             return results
 
         featured_queries: list[tuple[str, str]] = []
@@ -1052,7 +1046,9 @@ class ProductionMediaResolver:
             for item in current_inline
             if item.media_id in valid_inline_ids and (item.item_number is not None or item.subject)
         }
-        used_slots = {item.slot for item in current_inline if item.media_id in valid_inline_ids}
+        # Historical rejected media stays auditable in the working set; its
+        # slots remain occupied until COMPOSE builds the eligible projection.
+        used_slots = {item.slot for item in current_inline}
 
         def inline_remaining() -> int:
             current_accounting = account_visual_media(
@@ -1503,6 +1499,14 @@ class WordPressWriterV2:
             # make all derived editorial writes unavailable for this commit.
             candidate = {}
         content = str(candidate.get("content") or "")
+        validation_path = candidate_path.with_name("editorial.validation.json")
+        try:
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            validation = {}
+        validation_fresh = isinstance(validation, dict) and validation_matches_candidate(
+            validation, candidate, expected_run_id,
+        )
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
         meta = dict(post.get("meta") or {})
@@ -1563,13 +1567,34 @@ class WordPressWriterV2:
             ):
                 raise RuntimeError("approved candidate media diverges from validated V2 state")
             candidate_accounting = account_visual_media(candidate_media)
+            candidate_featured = getattr(candidate_media, "featured", None)
+            duplicate_rows = [
+                item for item in candidate_inline
+                if str((item.visual_verification or {}).get("decision") or "")
+                in {"SAME_IMAGE", "SAME_ART_CROP"}
+            ]
+            content_urls = _embedded_media_urls(content)
+            final_content_url = content_urls[-1] if content_urls else ""
+            listicle = detect_list_format(
+                str(candidate.get("title") or context.get("title") or ""), content,
+            ) is not None
+            permitted_list_repeat = (
+                listicle
+                and len(duplicate_rows) == 1
+                and getattr(candidate_featured, "media_id", None) is not None
+                and str((duplicate_rows[0].visual_verification or {}).get("duplicate_of") or "")
+                == str(candidate_featured.media_id)
+                and _canonical_embedded_media_url(str(duplicate_rows[0].media_url or ""))
+                == final_content_url
+            )
+            permitted_duplicate_ids = {duplicate_rows[0].media_id} if permitted_list_repeat else set()
             if (
-                len(candidate_accounting.valid_inline_ids) != len(candidate_inline_ids)
-                or candidate_accounting.confirmed_duplicate_count
+                len(candidate_accounting.valid_inline_ids) + len(permitted_duplicate_ids)
+                != len(candidate_inline_ids)
+                or candidate_accounting.confirmed_duplicate_count != len(permitted_duplicate_ids)
                 or candidate_accounting.unverified_count
             ):
                 raise RuntimeError("approved candidate contains ineligible visual media")
-            candidate_featured = getattr(candidate_media, "featured", None)
             proposed_featured = getattr(proposed_media, "featured", None)
             if (
                 getattr(candidate_featured, "media_id", None)
@@ -1640,6 +1665,8 @@ class WordPressWriterV2:
         journal = journal_dir / f"{post_id}.json"
         intent = {
             "status": "prepared", "post_id": post_id,
+            "run_id": expected_run_id,
+            "validation_fresh": validation_fresh,
             "state": proposed_state.to_dict(), "ready_hash": ready_hash,
             "candidate_hash": hashlib.sha256(content.encode()).hexdigest(),
             "candidate_fresh": candidate_fresh,

@@ -27,14 +27,15 @@ def test_expected_stage_error_becomes_retry_and_persists_cooldown_path():
 
 @pytest.mark.parametrize(
     "blocker",
-    [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.INTERNAL_ERROR],
+    [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.INTERNAL_ERROR,
+     BlockerCode.MEDIA_INVALID],
 )
 def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     store = Store()
     store.state = WorkState(
         phase=Phase.MEDIA,
         blocker=blocker,
-        retry=RetryInfo(attempts=10, no_progress=1),
+        retry=RetryInfo(attempts=35, no_progress=28),
         relevance_approved=True,
     )
     stages = {
@@ -48,7 +49,8 @@ def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     assert result.blocker is blocker
     assert store.state.state is LifecycleState.PENDING
     assert store.state.state.value == "pending"
-    assert store.state.retry.no_progress == 1
+    assert store.state.retry.no_progress == 28
+    assert store.state.retry.attempts == 36
 
 
 def test_provider_error_from_checklist_does_not_consume_media_budget():
@@ -64,7 +66,9 @@ def test_provider_error_from_checklist_does_not_consume_media_budget():
     store.state = previous
     stages = {
         "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
-        "media": lambda _context, state, _editorial: state.media,
+        "media": lambda _context, state, _editorial: MediaProgress(
+            2, (*state.media.inline, InlineMedia(18, "https://cdn.test/new.webp", 3)),
+        ),
         "compose": lambda *args: {"content": "candidate"},
         "validate": lambda *args: {
             "passed": False,
@@ -75,6 +79,7 @@ def test_provider_error_from_checklist_does_not_consume_media_budget():
     assert result.type is OutcomeType.RETRY
     assert result.blocker is BlockerCode.PROVIDER_ERROR
     assert store.state.retry.no_progress == 1
+    assert [item.media_id for item in store.state.media.inline] == [17, 18]
 
 
 def test_internal_media_error_does_not_consume_media_budget():

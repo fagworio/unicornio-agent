@@ -411,9 +411,10 @@ def record_unexpected_error(
     run_id: str = "",
     file: str = "",
     field: str = "",
+    error_class: str | None = None,
 ) -> None:
     """Record a redacted internal failure with enough correlation to debug it."""
-    kind = "provider" if exc.__class__.__name__.endswith("ProviderError") else "internal"
+    kind = error_class or ("provider" if exc.__class__.__name__.endswith("ProviderError") else "internal")
     append_telemetry(
         root,
         "v2_unexpected_error",

@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .backup import SnapshotStore, atomic_write_text
@@ -1873,6 +1873,7 @@ def _execute_media_plan(
     previous_inline_visual_assets: list[dict[str, Any]] | None = None,
     featured_visual_asset: dict[str, Any] | None = None,
     visual_comparison_budget: list[int] | None = None,
+    on_accepted: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -2010,6 +2011,7 @@ def _execute_media_plan(
             )
         return results, None, None
     outcomes: dict[int, dict[str, Any]] = {}
+    confirmed_uploads: set[int] = set()
     # Compartilhado entre threads; o lock elimina buscas duplicadas da mesma
     # pagina de origem e conserva a verificacao byte-a-byte por imagem.
     page_cache: dict[str, list[str] | None] = {}
@@ -2209,6 +2211,23 @@ def _execute_media_plan(
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
                     raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
+                accepted_result = {
+                    "status": "accepted",
+                    "paragraph_index": item["paragraph_index"],
+                    "media_id": media_id, "media_url": media_url,
+                    "alt_text": item["alt_text"], "credit_text": item["credit_text"],
+                    "subject": item.get("subject"), "item_number": item.get("item_number"),
+                    "section_heading": item.get("section_heading"), "section_slot": item.get("section_slot"),
+                    "featured": is_featured, "width": width, "height": height,
+                    "transparency": transparency, "phash": final_phash,
+                    "sha256": identity.sha256, "visual_group_id": identity.visual_group_id,
+                    "visual_verification": visual_record,
+                }
+                confirmed_uploads.add(position)
+                # Commit verified work before index/cache/telemetry can fail.
+                if on_accepted is not None:
+                    on_accepted(accepted_result)
                 # Fase 13: persiste o fingerprint/proveniencia da midia. Assim a
                 # proxima busca do mesmo subject (ou do mesmo frame recomprimido)
                 # reusa a imagem em vez de baixar e subir de novo.
@@ -2252,30 +2271,11 @@ def _execute_media_plan(
                         {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
                     )
                 _funnel("upload", "passed", item, position)
-                visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
                 if identity.sha256:
                     visual_baseline.append({**identity.to_dict(), "media_id": int(media_id), "media_url": str(media_url), "local_path": str(webp)})
                 if final_phash:
                     accepted_final_phashes.add(final_phash)
-                return position, {
-                    "paragraph_index": item["paragraph_index"],
-                    "media_id": media_id,
-                    "media_url": media_url,
-                    "alt_text": item["alt_text"],
-                    "credit_text": item["credit_text"],
-                    "subject": item.get("subject"),
-                    "item_number": item.get("item_number"),
-                    "section_heading": item.get("section_heading"),
-                    "section_slot": item.get("section_slot"),
-                    "featured": is_featured,
-                    "width": width,
-                    "height": height,
-                    "transparency": transparency,
-                    "phash": final_phash,
-                    "sha256": identity.sha256,
-                    "visual_group_id": identity.visual_group_id,
-                    "visual_verification": visual_record,
-                }
+                return position, accepted_result
 
             # Visual identity has a mutable accepted baseline.  Process serially:
             # this is stronger than an in-memory reservation and prevents two
@@ -2290,6 +2290,8 @@ def _execute_media_plan(
                 try:
                     processed.append(_process_item(pair))
                 except Exception as exc:  # noqa: BLE001 - report one failed item
+                    if on_accepted is not None and position in confirmed_uploads:
+                        raise
                     _funnel("worker", "error", item, position, str(exc))
                     processed.append((position, {"paragraph_index": item.get("paragraph_index"), "status": "error", "detail": f"processamento de midia: {str(exc)[:160]}"}))
 

@@ -6,6 +6,7 @@ state transitions and writes remain in the runner/writer layers.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,19 @@ from .media_accounting import account_visual_media
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
+
+
+def validation_matches_candidate(validation: dict, candidate: dict, run_id: str) -> bool:
+    """A historical checklist is not evidence of a new interrupted run."""
+    candidate_run_id = str(candidate.get("_v2_run_id") or "").strip()
+    return bool(
+        run_id
+        and candidate_run_id
+        and validation.get("_v2_run_id") == run_id
+        and validation.get("candidate_run_id") == candidate_run_id
+        and validation.get("candidate_hash")
+        == hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest()
+    )
 
 
 class _WordPressStateBackend:
@@ -160,6 +174,9 @@ class ProductionCandidateReader:
         rejected_ids: set[int] = set()
         rejected_urls: set[str] = set()
         validation = self.context_loader._read_json(directory / "editorial.validation.json")
+        candidate_payload = self.context_loader._read_json(directory / "editorial.candidate.json")
+        if not validation_matches_candidate(validation, candidate_payload, str(journal.get("run_id") or "")):
+            validation = {}
         for failure in validation.get("failures") or []:
             if not isinstance(failure, dict):
                 continue
