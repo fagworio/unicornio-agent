@@ -247,16 +247,72 @@ class ChecklistTests(unittest.TestCase):
             ]},
             "featured": {"status": "valid", "media_id": 115170, "media_url": "https://media.example/115170.webp", "sha256": "a", "phash": "1", "visual_group_id": "v:a", "visual_verification": {"decision": "INITIAL"}},
         }
-        content = "".join(
+        images = "".join(
             f'<p>Texto substantivo.</p><img src="https://media.example/{media_id}.webp">'
             for media_id in (115171, 115172, 115173)
         )
+        content = images + "<p>" + ("palavra " * 601) + "</p>"
 
-        result = self._run_checklist(content=content, media_context=media_context)
+        result = self._run_checklist(
+            editorial=editorial_payload(cleaned_html=content),
+            content=content,
+            media_context=media_context,
+        )
 
         self.assertEqual(result["media_decision"]["accepted"], 1)
         self.assertEqual(result["media_decision"]["missing"], 3)
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
+
+    def test_v2_featured_url_identity_uses_current_attachment_canonical_url(self):
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 2, "accepted": []},
+            "featured": {
+                "status": "valid",
+                "media_id": 7,
+                "media_url": "https://media.example/redfall.webp",
+                "sha256": "a",
+                "phash": "b",
+                "visual_group_id": "v:a",
+                "visual_verification": {"decision": "INITIAL"},
+            },
+        }
+        content = '<p>Texto sobre Redfall e videogame.</p>'
+
+        result = self._run_checklist(content=content, media_context=media_context)
+
+        item = next(
+            item for item in result["items"]
+            if item["name"] == "featured_identity_matches_current_attachment"
+        )
+        # The current WP attachment URL is redfall-1280x720.webp; size variants
+        # resolve to the same canonical attachment URL.
+        self.assertEqual(item["status"], "pass")
+
+    def test_v2_featured_url_mismatch_does_not_pass_identity_check(self):
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 2, "accepted": []},
+            "featured": {
+                "status": "valid",
+                "media_id": 7,
+                "media_url": "https://other.example/not-the-featured.webp",
+                "sha256": "a",
+                "phash": "b",
+                "visual_group_id": "v:a",
+                "visual_verification": {"decision": "INITIAL"},
+            },
+        }
+        result = self._run_checklist(
+            content='<p>Texto sobre Redfall e videogame.</p>',
+            media_context=media_context,
+        )
+
+        item = next(
+            item for item in result["items"]
+            if item["name"] == "featured_identity_matches_current_attachment"
+        )
+        self.assertEqual(item["status"], "fail")
 
     def test_listicle_does_not_exempt_final_duplicate_of_another_inline(self):
         content = "<h2>1. Jogo A</h2><p>Descrição.</p><img src=\"https://media.example/other.webp\"><h2>2. Jogo B</h2><p>Descrição.</p><img src=\"https://media.example/crop.webp\">"
@@ -303,6 +359,16 @@ class ChecklistTests(unittest.TestCase):
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         self.assertIn(">= 2 imagens", item["detail"])
+
+    def test_stale_zero_media_required_cannot_reduce_editorial_quota(self):
+        editorial_body = "<p>" + ("palavra videogame noticia lancamento " * 155) + "</p>"
+        result = self._run_checklist(
+            editorial=editorial_payload(cleaned_html=editorial_body),
+            content=editorial_body,
+            media_context={"visual_identity_policy": 4, "inline": {"required": 0, "accepted": []}},
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertIn(">= 4 imagens", item["detail"])
 
     def test_irrelevant_image_fails_relevance_gate(self):
         # A real bat is NOT a valid image for a videogame news post.

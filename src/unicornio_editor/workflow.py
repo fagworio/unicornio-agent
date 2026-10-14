@@ -2743,7 +2743,7 @@ def _publish_v2_media_context(
         and len(accepted_urls) == len(accepted)
         and featured_is_mapping
         and bool(accepted_urls)
-        and accepted_urls == current_urls
+        and accepted_urls.issubset(current_urls)
         and featured_matches
     )
     context: dict[str, Any] = {
@@ -2924,6 +2924,12 @@ def _publish_post_unlocked(
             "state": state,
         }
     backup = SnapshotStore(root).save(post_id, post)
+    checklist_media_context = publish_media_context
+    if publish_media_context is not None:
+        checklist_media_context = {
+            **publish_media_context,
+            "quota_content": editorial["cleaned_html"],
+        }
     checklist = run_pre_publish_checklist(
         post=post,
         editorial=editorial,
@@ -2931,7 +2937,7 @@ def _publish_post_unlocked(
         backup_path=backup,
         config=config,
         client=client,
-        media_context=publish_media_context,
+        media_context=checklist_media_context,
     )
     if checklist["failed"]:
         # Registra o bloqueio SEM remover editorial.latest.json: o post

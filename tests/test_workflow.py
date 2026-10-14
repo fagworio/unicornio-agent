@@ -140,6 +140,41 @@ class WorkflowTests(unittest.TestCase):
     def config(self, dry_run):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=dry_run)
 
+    def _attach_v2_ready_media(self, client, *, duplicate=False):
+        featured_url = client.get_media(7)["source_url"]
+        featured = FeaturedProgress(
+            FeaturedStatus.VALID,
+            media_id=7,
+            media_url=featured_url,
+            sha256="f" * 64,
+            phash="f" * 16,
+            visual_group_id="visual:featured",
+            visual_verification={"decision": "INITIAL"},
+        )
+        inline = tuple(
+            InlineMedia(
+                media_id=8 + slot,
+                media_url=f"https://s3.example/noticia-importante-{slot + 1}.webp",
+                slot=slot,
+                sha256=str(slot + 1) * 64,
+                phash=str(slot + 1) * 16,
+                visual_group_id=f"visual:inline:{slot}",
+                visual_verification=(
+                    {"decision": "SAME_ART_CROP", "duplicate_of": "7"}
+                    if duplicate and slot == 1
+                    else {"decision": "DIFFERENT"}
+                ),
+            )
+            for slot in range(2)
+        )
+        state = WorkState(
+            state=LifecycleState.READY,
+            phase=Phase.VALIDATE,
+            relevance_approved=True,
+            media=MediaProgress(required=2, inline=inline, featured=featured),
+        )
+        client.post["meta"]["_hermes_work_state"] = json.dumps(state.to_dict())
+
     def post(self):
         # Data dinamica (now - 2d): o build_queue_report so lista como
         # "recent" posts com < 7 dias; data fixa tornava o teste sensivel ao
@@ -1970,43 +2005,7 @@ class WorkflowTests(unittest.TestCase):
             root = Path(directory)
             client = FakeClient(self.post())
             apply_editorial(client, self.config(False), root, 42, editorial_payload())
-            featured = FeaturedProgress(
-                FeaturedStatus.VALID,
-                media_id=7,
-                media_url="https://s3.example/featured.webp",
-                sha256="f" * 64,
-                phash="f" * 16,
-                visual_group_id="visual:featured",
-                visual_verification={"decision": "INITIAL"},
-            )
-            duplicate_inline = InlineMedia(
-                media_id=8,
-                media_url="https://s3.example/noticia-importante-1.webp",
-                slot=0,
-                sha256="i" * 64,
-                phash="i" * 16,
-                visual_group_id="visual:inline",
-                visual_verification={
-                    "decision": "SAME_ART_CROP",
-                    "duplicate_of": "7",
-                },
-            )
-            v2_state = WorkState(
-                state=LifecycleState.READY,
-                phase=Phase.VALIDATE,
-                relevance_approved=True,
-                media=MediaProgress(
-                    required=2,
-                    inline=(duplicate_inline,),
-                    featured=featured,
-                ),
-            )
-            client.post["meta"]["_hermes_work_state"] = json.dumps(v2_state.to_dict())
-            seen = {}
-
-            def failed_visual_check(**kwargs):
-                seen.update(kwargs["media_context"])
-                return {"failed": 1, "items": [{"name": "media_duplicate_confirmed", "status": "fail"}]}
+            self._attach_v2_ready_media(client, duplicate=True)
 
             config = Config(
                 "wordpress", "http://wp.test", "/wp-json/wp/v2",
@@ -2020,14 +2019,41 @@ class WorkflowTests(unittest.TestCase):
                     policy_version=config.policy_version,
                 )
             )
-            with mock.patch("unicornio_editor.workflow.run_pre_publish_checklist", side_effect=failed_visual_check):
-                outcome = publish_post(client, config, root, 42)
+            outcome = publish_post(client, config, root, 42)
 
             self.assertEqual(outcome["status"], "blocked")
-            self.assertEqual(seen["visual_identity_policy"], 4)
-            self.assertFalse(seen["visual_identity_evidence_valid"])
-            self.assertEqual(seen["inline"]["accepted"][0]["visual_verification"]["decision"], "SAME_ART_CROP")
+            failures = {
+                item["name"] for item in outcome["checklist"]["items"]
+                if item["status"] in {"fail", "error"}
+            }
+            self.assertIn("media_duplicate_confirmed", failures)
             self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
+
+    def test_publish_v2_ready_with_valid_media_passes_real_checklist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            client.post["content"]["raw"] += (
+                '<figure><img src="https://s3.example/existing-inline.webp" '
+                'alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
+                "<figcaption>Crédito: Autor. Licença CC BY 4.0.</figcaption></figure>"
+            )
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+
+            outcome = publish_post(client, config, root, 42)
+
+            failed_items = [
+                item for item in outcome.get("checklist", {}).get("items", [])
+                if item.get("status") in {"fail", "error"}
+            ]
+            self.assertEqual(outcome["status"], "published", failed_items)
+            self.assertEqual(outcome["integrity"], "revalidated")
+            self.assertTrue(any(payload.get("status") == "publish" for _, payload in client.updated))
 
     def test_publish_ready_from_previous_policy_revalidates_before_publish(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -253,36 +253,40 @@ def run_pre_publish_checklist(
     #    minimum ALWAYS holds — an image-less post must not be published.
     #    Listicles get their own floor (max(2, item count)) so the 2/4/6 rule
     #    never conflicts with the one-image-per-item structural rule.
-    words = word_count(content)
-    title_str = str((post.get("title") or {}).get("raw") or "")
-    media_required = None
-    if isinstance(media_context, Mapping):
-        inline_context = media_context.get("inline")
-        if isinstance(inline_context, Mapping):
-            raw_required = inline_context.get("required")
-            if (
-                isinstance(raw_required, int)
-                and not isinstance(raw_required, bool)
-                and raw_required >= 0
-            ):
-                media_required = raw_required
-    required = (
-        media_required
-        if media_required is not None
-        else _required_image_count(words, title=title_str, content=content)
-    )
-    from .media.relevance import iter_content_images
-
-    img_items = iter_content_images(content)
-    inline_images = [str(item.get("src") or "").strip() for item in img_items]
-    inline_images = [url for url in inline_images if url]
-    inline_assets: list[Mapping[str, Any]] = []
     visual_identity_policy = 0
     if isinstance(media_context, Mapping):
         try:
             visual_identity_policy = int(media_context.get("visual_identity_policy") or 0)
         except (TypeError, ValueError):
             visual_identity_policy = 0
+    quota_content = (
+        media_context.get("quota_content")
+        if isinstance(media_context, Mapping)
+        else None
+    )
+    quota_content = quota_content if isinstance(quota_content, str) and quota_content.strip() else content
+    words = word_count(quota_content)
+    raw_title = post.get("title")
+    if isinstance(raw_title, Mapping):
+        title_str = str(raw_title.get("raw") or raw_title.get("rendered") or "")
+    else:
+        title_str = str(raw_title or "")
+    # V2 publisher supplies the original editorial body (without composed
+    # CTA/source boilerplate) so current policy, not stale serialized
+    # `required`, determines the quota. Preserve the legacy contract elsewhere.
+    required = _required_image_count(words, title=title_str, content=quota_content)
+    if visual_identity_policy < 4 and isinstance(media_context, Mapping):
+        inline_context = media_context.get("inline")
+        raw_required = inline_context.get("required") if isinstance(inline_context, Mapping) else None
+        if isinstance(raw_required, int) and not isinstance(raw_required, bool) and raw_required >= 0:
+            required = raw_required
+    from .media.relevance import iter_content_images
+
+    img_items = iter_content_images(content)
+    inline_images = [str(item.get("src") or "").strip() for item in img_items]
+    inline_images = [url for url in inline_images if url]
+    inline_assets: list[Mapping[str, Any]] = []
+    if isinstance(media_context, Mapping):
         inline_payload = media_context.get("inline")
         if isinstance(inline_payload, Mapping):
             inline_assets = [item for item in (inline_payload.get("accepted") or []) if isinstance(item, Mapping)]
@@ -672,6 +676,32 @@ def run_pre_publish_checklist(
             featured_url = str((client.get_media(featured).get("source_url") or "")).strip()
         except Exception:
             featured_url = ""
+    if visual_identity_policy >= 4 and isinstance(media_context, Mapping):
+        featured_payload = media_context.get("featured")
+        stored_featured_url = (
+            str(featured_payload.get("media_url") or "").strip()
+            if isinstance(featured_payload, Mapping)
+            else ""
+        )
+        if featured_url and stored_featured_url:
+            same_attachment_url = (
+                _canonical_image_url(featured_url)
+                == _canonical_image_url(stored_featured_url)
+            )
+            check(
+                "featured_identity_matches_current_attachment",
+                same_attachment_url,
+                "URL canônica da featured corresponde ao attachment atual"
+                if same_attachment_url
+                else "URL canônica da featured diverge do attachment atual",
+            )
+        else:
+            check(
+                "featured_identity_matches_current_attachment",
+                True,
+                "URL do attachment indisponível; demais gates de featured continuam ativos",
+                skipped=True,
+            )
     inline_ids_by_url: dict[str, int] = {}
     if isinstance(media_context, Mapping):
         inline_context = media_context.get("inline")
