@@ -320,6 +320,47 @@ def load_historical_cohort(path: str | Path | None) -> tuple[dict[int, dict[str,
     return result, None
 
 
+def load_v2_quarantine(path: str | Path) -> tuple[dict[int, dict[str, str]], str | None]:
+    """Read explicit post quarantines; malformed/missing policy fails closed."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {}, f"V2 quarantine policy could not be read: {type(exc).__name__}"
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return {}, "V2 quarantine schema version must be 1"
+    rows = payload.get("posts")
+    releases = payload.get("release_history")
+    if not isinstance(rows, list) or not isinstance(releases, list):
+        return {}, "V2 quarantine posts and release_history must be lists"
+    result: dict[int, dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return {}, "V2 quarantine contains a non-object post"
+        try:
+            post_id = int(row["post_id"])
+        except (KeyError, TypeError, ValueError):
+            return {}, "V2 quarantine post_id must be an integer"
+        reason_code = str(row.get("reason_code") or "").strip()
+        reason = str(row.get("reason") or "").strip()
+        if post_id < 1 or post_id in result or not reason_code or not reason:
+            return {}, "V2 quarantine has duplicate/invalid post or missing reason"
+        result[post_id] = {"reason_code": reason_code, "reason": reason}
+    for release in releases:
+        if (
+            not isinstance(release, dict)
+            or not str(release.get("authorization_id") or "").strip()
+            or not str(release.get("authorized_by") or "").strip()
+            or not str(release.get("reason") or "").strip()
+        ):
+            return {}, "V2 quarantine release history requires authorization_id, authorized_by and reason"
+        try:
+            if int(release.get("post_id") or 0) < 1:
+                return {}, "V2 quarantine release history has invalid post_id"
+        except (TypeError, ValueError):
+            return {}, "V2 quarantine release history has invalid post_id"
+    return result, None
+
+
 def admit_v2_candidates(
     snapshot: list[tuple[int, dict[str, Any]]],
     admission_after: Any,
@@ -1941,6 +1982,22 @@ def run_v2(
                 and _cooldown_expired(context["v2_state"].retry.next_at, now)
             )
         ]
+        pre_quarantine_candidates = candidates
+        quarantine_path = Path(root) / "config" / "v2-quarantine.json"
+        quarantines, quarantine_error = load_v2_quarantine(quarantine_path)
+        quarantine_candidates = [
+            (candidate_id, context) for candidate_id, context in candidates
+            if candidate_id in quarantines
+        ]
+        if quarantine_error:
+            # The quarantine file is a safety policy. Missing or malformed
+            # policy must never silently reopen the editorial queue.
+            candidates = []
+        else:
+            candidates = [
+                (candidate_id, context) for candidate_id, context in candidates
+                if candidate_id not in quarantines
+            ]
 
         class _SnapshotStore:
             def __init__(self, items):
@@ -1952,10 +2009,12 @@ def run_v2(
         requested_admission = None
         requested_pending = None
         requested_eligible = None
+        requested_quarantine = None
         if post_id is not None:
             requested_admission = any(candidate_id == post_id for candidate_id, _ in admitted)
             requested_pending = any(candidate_id == post_id for candidate_id, _ in admitted_pending)
             requested_eligible = any(candidate_id == post_id for candidate_id, _ in candidates)
+            requested_quarantine = quarantines.get(post_id)
             # An explicit post request is never allowed to fall back to another
             # queue item.  The same admission/cooldown filters still apply.
             selected = [item for item in candidates if item[0] == post_id] if requested_eligible else []
@@ -1967,6 +2026,8 @@ def run_v2(
             (post_id, context) for post_id, context in admitted_pending
             if context["v2_state"].state.value == "pending"
             and post_id not in eligible_ids
+            and post_id not in quarantines
+            and not quarantine_error
         ]
         blockers: dict[str, int] = {}
         for context in pending:
@@ -1980,6 +2041,15 @@ def run_v2(
             "pending": len(pending),
             **admission,
             "eligible": len(candidates),
+            "pre_quarantine_eligible": len(pre_quarantine_candidates),
+            "quarantined": len(quarantine_candidates),
+            "quarantined_ids": sorted(quarantines),
+            "quarantined_posts": [
+                {"post_id": candidate_id, **quarantines[candidate_id]}
+                for candidate_id, _context in quarantine_candidates
+            ],
+            "quarantine_policy_error": quarantine_error,
+            "quarantine_fail_closed": bool(quarantine_error),
             "cooldown": len(cooldown),
             "ready": sum(
                 1 for _post_id, context in admitted
@@ -2023,7 +2093,13 @@ def run_v2(
             queue["requested_admitted"] = requested_admission
             queue["requested_pending"] = requested_pending
             queue["requested_eligible"] = requested_eligible
+            queue["requested_quarantine"] = requested_quarantine
             queue["request_reason"] = (
+                "quarantine_policy_invalid"
+                if quarantine_error
+                else "quarantined"
+                if requested_quarantine
+                else
                 "eligible"
                 if requested_eligible
                 else "not_admitted"

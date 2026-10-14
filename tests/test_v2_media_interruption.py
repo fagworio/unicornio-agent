@@ -163,6 +163,12 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     })
     config = Config("wordpress", "https://wp.test", "/wp-json/wp/v2", dry_run=False,
                     internal_links_enabled=False, v2_admission_allowlist=(115152,))
+    quarantine_file = tmp_path / "config" / "v2-quarantine.json"
+    quarantine_file.parent.mkdir(parents=True, exist_ok=True)
+    quarantine_file.write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
     result = run_v2(client, config, tmp_path, post_id=115152)
     assert result["failed"] == 0, result
     assert client.uploads == 1, [row.get("detail") for row in result["details"]]

@@ -82,6 +82,23 @@ alterados. O relatório do `v2-run` também expõe `pending_total`,
 `admitted_pending`, `eligible_ids`, `cooldown_ids` e
 `historical_excluded_ids` para auditoria.
 
+### Quarentena operacional por post
+
+`config/v2-quarantine.json` é uma política obrigatória para o scheduler. Um
+arquivo ausente ou inválido bloqueia a seleção de todos os posts (o preview
+expõe `quarantine_policy_error`). A entrada atual mantém o post `115152` fora
+do cron e também bloqueia `v2-run --post-id 115152`, porque os marcadores de
+reentrada disponíveis não comprovam autoria humana. O preview mostra
+`request_reason=quarantined` e o motivo registrado sem alterar lifecycle,
+tentativas ou cooldown.
+
+Para retirar uma quarentena, use uma alteração revisada da política: remova a
+entrada ativa e acrescente em `release_history` o `post_id`, `authorization_id`,
+`authorized_by` e o motivo da liberação. A revisão deve conferir a autorização
+em fonte independente; os campos do arquivo são trilha declarativa, não prova
+criptográfica de identidade. Não edite a política diretamente em produção nem
+reative crons antes de verificar o preview individual e a aprovação humana.
+
 ## Discovery de mídia via navegador
 
 O `media-search-web --engine auto` tenta Google Images em Chromium real antes de

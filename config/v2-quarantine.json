@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "posts": [
+    {
+      "post_id": 115152,
+      "reason_code": "human_reentry_unverified",
+      "reason": "WordPress is pending and carries reopen markers, but the available markers do not verify that a human initiated the transition. Keep out of automatic and explicitly requested V2 runs until reviewed."
+    }
+  ],
+  "release_history": []
+}
