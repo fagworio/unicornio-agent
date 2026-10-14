@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from unicornio_editor.config import Config
+from unicornio_editor.batch import prepare_batch
+from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch
 from unicornio_editor.pipeline_v2.media_recovery import recover_historical_attachment
 from unicornio_editor.pipeline_v2.publication import (
     reconcile_published_v2,
@@ -78,6 +81,34 @@ def test_apply_and_publish_stop_before_wordpress_or_local_side_effects(tmp_path)
     assert not (tmp_path / "backups" / str(POST_ID)).exists()
 
 
+def test_legacy_cron_batch_paths_guard_before_reads_snapshots_or_media_search(tmp_path):
+    _quarantine(tmp_path)
+    client = NoWriteClient()
+    config = Config("wordpress", "https://wp.test", "/wp-json/wp/v2", dry_run=False)
+
+    prepared = prepare_batch(client, config, tmp_path, [POST_ID], batch_id="quarantine-test")
+    assert prepared["items"][0]["status"] == "quarantined"
+    assert client.calls == []
+    assert not (tmp_path / "backups" / str(POST_ID)).exists()
+
+    applied = _apply_editorial_batch(
+        client, config, tmp_path,
+        {"schema_version": 1, "batch_id": "quarantine-apply", "items": [
+            {"post_id": POST_ID, "status": "needs_retry"},
+        ]},
+    )
+    assert applied["quarantined"] == 1
+    assert client.calls == []
+
+    with patch("unicornio_editor.media.search.search_web_images_batch") as search:
+        with pytest.raises(PostQuarantinedError):
+            _resolve_media_batch(
+                client, config, tmp_path,
+                {"posts": [{"post_id": POST_ID}]},
+            )
+        search.assert_not_called()
+
+
 def test_quarantine_policy_missing_or_invalid_fails_closed(tmp_path):
     missing_root = tmp_path / "missing-policy"
     missing_root.mkdir()
@@ -88,6 +119,16 @@ def test_quarantine_policy_missing_or_invalid_fails_closed(tmp_path):
     path.write_text('{"version": 1, "posts": "wrong", "release_history": []}', encoding="utf-8")
     with pytest.raises(QuarantinePolicyError):
         assert_post_not_quarantined(tmp_path, 42, operation="retry")
+
+    for payload in (
+        {"version": True, "posts": [], "release_history": []},
+        {"version": 1, "posts": [{
+            "post_id": "115152", "reason_code": "hold", "reason": "review",
+        }], "release_history": []},
+    ):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(QuarantinePolicyError):
+            assert_post_not_quarantined(tmp_path, 42, operation="retry")
 
 
 def test_quarantined_post_is_not_offered_in_queue_or_cards(tmp_path):

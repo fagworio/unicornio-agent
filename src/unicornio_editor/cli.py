@@ -1034,6 +1034,22 @@ def _apply_editorial_batch(
     try:
         for index, item in enumerate(batch["items"]):
             post_id = int(item["post_id"])
+            from .pipeline_v2.quarantine import (
+                PostQuarantinedError,
+                QuarantinePolicyError,
+                assert_post_not_quarantined,
+            )
+
+            try:
+                assert_post_not_quarantined(root, post_id, operation="apply_batch")
+            except (PostQuarantinedError, QuarantinePolicyError) as exc:
+                outcomes.append({
+                    "post_id": post_id,
+                    "status": "quarantined",
+                    "wordpress_changed": False,
+                    "error": str(exc)[:240],
+                })
+                continue
             if str(item.get("status") or "ok") == "needs_retry":
                 retry_mode = str(item.get("retry_mode") or "")
                 current = client.get_post(post_id)
@@ -1198,6 +1214,7 @@ def _apply_editorial_batch(
             1 for item in outcomes if item.get("status") == "needs_rework"
         ),
         "errors": sum(1 for item in outcomes if item.get("status") == "error"),
+        "quarantined": sum(1 for item in outcomes if item.get("status") == "quarantined"),
         "stopped": stopped,
         "remaining_post_ids": remaining,
         "posts": outcomes,
@@ -1280,6 +1297,12 @@ def _resolve_media_batch(
     from .observability import append_telemetry
 
     posts = batch["posts"]
+    from .pipeline_v2.quarantine import assert_post_not_quarantined
+
+    for item in posts:
+        assert_post_not_quarantined(
+            root, int(item["post_id"]), operation="media_resolve_batch"
+        )
     excluded_urls = excluded_urls or {}
     excluded_fingerprints = excluded_fingerprints or {}
     reuse_by_post: dict[int, list[dict]] = {}

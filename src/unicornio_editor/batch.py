@@ -442,6 +442,13 @@ def prepare_batch(
             continue
         seen.add(post_id)
         try:
+            from .pipeline_v2.quarantine import (
+                PostQuarantinedError,
+                QuarantinePolicyError,
+                assert_post_not_quarantined,
+            )
+
+            assert_post_not_quarantined(root, post_id, operation="prepare_batch")
             post = client.get_post(post_id)
             prepared = prepare_post(client, root, post_id)
             envelope = _context_for_post(
@@ -476,6 +483,13 @@ def prepare_batch(
                     "backup": prepared.get("backup"),
                 }
             )
+        except (PostQuarantinedError, QuarantinePolicyError) as exc:
+            items.append({
+                "post_id": post_id,
+                "status": "quarantined",
+                "error": str(exc)[:240],
+                "error_class": "quarantine",
+            })
         except BatchError as exc:
             items.append({"post_id": post_id, "status": "error", "error": str(exc)[:240], "error_class": "contract"})
         except Exception as exc:  # noqa: BLE001 - isolate one post in a batch

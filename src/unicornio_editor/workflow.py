@@ -108,6 +108,7 @@ def _acquire_post_lock(root: Path, config: Config, post_id: int):
 
 
 def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str, Any]:
+    assert_post_not_quarantined(root, post_id, operation="prepare")
     post = client.get_post(post_id)
     _require_pending(post)
     backup = SnapshotStore(root).save(post_id, post)
