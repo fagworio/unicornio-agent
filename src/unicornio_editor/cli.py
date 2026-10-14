@@ -121,10 +121,6 @@ def build_parser() -> argparse.ArgumentParser:
     v2_adopt_media_parser.add_argument("--authorization-reason", required=True)
     v2_adopt_media_parser.add_argument("--confirm-adoption", action="store_true", required=True)
     v2_adopt_media_parser.add_argument("--root", type=Path, default=Path("."))
-    v2_adopt_media_parser.add_argument(
-        "--apply", action="store_true",
-        help="persiste somente estado/checkpoint/índices; exige EDITOR_DRY_RUN=false",
-    )
 
     queue_parser.add_argument("--root", type=Path, default=Path("."))
     queue_parser.add_argument(
@@ -2336,7 +2332,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 authorized_by=args.authorized_by,
                 authorization_reason=args.authorization_reason,
                 confirm_adoption=bool(args.confirm_adoption),
-                apply=bool(args.apply),
             )
         elif args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)

@@ -390,6 +390,15 @@ def _adoption_evidence(evidence, evidence_path):
     return evidence_path
 
 
+def _set_article(root, client, *, title, html, focus_keyword=""):
+    client.post["title"] = {"raw": title}
+    path = root / "backups/115152/editorial.draft.json"
+    editorial = json.loads(path.read_text())
+    editorial["cleaned_html"] = html
+    editorial["seo"] = {"title": title, "focus_keyword": focus_keyword}
+    path.write_text(json.dumps(editorial), encoding="utf-8")
+
+
 def test_adoption_requires_explicit_confirmation_and_authorization(tmp_path):
     root, _state, _evidence, evidence_path, client, config = _fixture(tmp_path)
     with pytest.raises(ValueError, match="--confirm-adoption"):
@@ -401,9 +410,25 @@ def test_adoption_requires_explicit_confirmation_and_authorization(tmp_path):
     assert client.get_calls == 0 and client.updates == []
 
 
-def test_adoption_preview_is_separate_from_historical_provenance(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("title", "html"),
+    [
+        ("Naruto recebe nova arte", "<p>Naruto aparece na nova arte divulgada.</p>"),
+        (
+            "Três obras para acompanhar",
+            "<h2>1. Naruto: nova temporada</h2><p>Naruto retorna.</p>"
+            "<h2>2. Bleach: novos episódios</h2><p>Ichigo retorna.</p>",
+        ),
+    ],
+)
+def test_adoption_preview_requires_article_grounding_and_preserves_listicle_items(
+    tmp_path, monkeypatch, title, html
+):
     root, original, evidence, evidence_path, client, config = _fixture(tmp_path)
     evidence_path = _adoption_evidence(evidence, evidence_path)
+    evidence["subject"] = "Naruto"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    _set_article(root, client, title=title, html=html, focus_keyword="Naruto")
     historical = (root / "work/v2-journal/115152.json").read_text()
     from unicornio_editor.media.registry import connect
     with connect(root) as db:
@@ -432,29 +457,62 @@ def test_adoption_preview_is_separate_from_historical_provenance(tmp_path, monke
     assert registry_after == registry_before
 
 
-def test_adoption_apply_records_editorial_authorization_without_fabricating_history(tmp_path, monkeypatch):
+def test_adoption_rejects_source_relevant_only_to_operator_declared_subject(tmp_path):
+    root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    evidence_path = _adoption_evidence(evidence, evidence_path)
+    evidence["subject"] = "Naruto"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    _set_article(
+        root, client, title="GTA VI recebe novidades", focus_keyword="GTA VI",
+        html="<p>O próximo jogo da Rockstar traz mudanças em Los Santos.</p>",
+    )
+
+    with pytest.raises(ValueError, match="not grounded in the current article"):
+        adopt_existing_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path, authorization_id="editorial-approval-44",
+            authorized_by="editor@example.test", authorization_reason="approved for this article",
+            confirm_adoption=True,
+        )
+    assert client.updates == []
+
+
+def test_adoption_apply_is_disabled_without_verifiable_authorization(tmp_path, monkeypatch):
     root, original, evidence, evidence_path, client, config = _fixture(tmp_path)
     evidence_path = _adoption_evidence(evidence, evidence_path)
     _mock_validation(monkeypatch, tmp_path)
 
+    with pytest.raises(ValueError, match="authorization can be independently verified"):
+        adopt_existing_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path, authorization_id="editorial-approval-43",
+            authorized_by="editor@example.test", authorization_reason="approved for this article",
+            confirm_adoption=True, apply=True,
+        )
+    assert client.updates == []
+    assert not (root / "work/v2-media-recovery").exists()
+
+
+def test_adoption_preview_redacts_signed_provenance_urls(tmp_path, monkeypatch):
+    root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    evidence_path = _adoption_evidence(evidence, evidence_path)
+    evidence["subject"] = "Naruto"
+    evidence["source_page_url"] = "https://source.test/article?token=secret"
+    evidence["direct_image_url"] = "https://source.test/naruto.webp?sig=secret"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    _set_article(
+        root, client, title="Naruto recebe nova arte", focus_keyword="Naruto",
+        html="<p>Naruto aparece na nova arte.</p>",
+    )
+    _mock_validation(monkeypatch, tmp_path)
+
     result = adopt_existing_attachment(
         client, config, root, post_id=115152, media_id=115305,
-        evidence_path=evidence_path, authorization_id="editorial-approval-43",
+        evidence_path=evidence_path, authorization_id="editorial-approval-45",
         authorized_by="editor@example.test", authorization_reason="approved for this article",
-        confirm_adoption=True, apply=True,
+        confirm_adoption=True,
     )
 
-    state = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
-    adopted = state.media.inline[-1]
-    assert result["operation"] == "editorial_adoption" and result["writes"] == 1
-    assert state.state is LifecycleState.HUMAN_REQUIRED
-    assert state.phase is original.phase and state.retry == original.retry
-    assert adopted.visual_verification["recovery"]["operation"] == "editorial_adoption"
-    assert adopted.visual_verification["recovery"]["authorization"]["authorization_id"] == "editorial-approval-43"
-    assert "source_run_id" not in adopted.visual_verification["recovery"]
-    journal = json.loads(next((root / "work/v2-media-recovery").glob("*.json")).read_text())
-    assert journal["operation"] == "editorial_adoption"
-    assert journal["authorization"]["authorized_by"] == "editor@example.test"
-    assert journal["source_run_id"] is None
-    assert client.post["status"] == "pending"
-    assert client.post["meta"]["_hermes_human_reopened_from"] == "awaiting_human"
+    stored = json.dumps(result["proposed_state"], ensure_ascii=False)
+    assert "token=secret" not in stored and "sig=secret" not in stored
+    assert "source_page_url_sha256" in stored and "direct_image_url_sha256" in stored

@@ -10,11 +10,12 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ..backup import atomic_write_text
 from ..media.downloader import download_image
 from ..media.library_index import register as register_library_media
+from ..media.relevance import extract_entities
 from ..media.registry import record_v2_observation
 from ..media.source_verify import validate_discovered_candidate, verify_downloaded_against_source
 from ..media.visual_identity import fingerprint_path, verify_candidate_identity
@@ -63,6 +64,34 @@ def _wordpress_snapshot(post: dict[str, Any], state: WorkState) -> dict[str, Any
         "reopened_at": meta.get("_hermes_human_reopened_at"),
         "reopened_from": meta.get("_hermes_human_reopened_from"),
     }
+
+
+def _safe_persisted_url(value: str) -> str:
+    """Keep public URL identity while dropping credentials, queries and fragments."""
+    parsed = urlsplit(str(value or ""))
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port else hostname
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _adoption_subject_matches_article(
+    subject: str, *, title: str, body: str, editorial: dict[str, Any]
+) -> bool:
+    seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+    article_entities = extract_entities(
+        title=title,
+        content_html=body,
+        focus_keyword=str(seo.get("focus_keyword") or ""),
+        game_name=str(editorial.get("game_name") or ""),
+    )
+    subject_entities = extract_entities(title="", game_name=subject)
+    return bool(article_entities & subject_entities)
 
 
 def _verify_historical_linkage(root: Path, post_id: int, evidence: dict[str, Any]) -> None:
@@ -187,19 +216,13 @@ def adopt_existing_attachment(
     }
     if not all(authorization.values()):
         raise ValueError("adoption requires authorization_id, authorized_by and reason")
+    if apply:
+        raise ValueError(
+            "editorial adoption apply is disabled until authorization can be independently verified"
+        )
     root = Path(root)
     if post_id < 1 or media_id < 1:
         raise ValueError("post_id and media_id must be positive")
-    if apply and bool(getattr(config, "dry_run", True)):
-        raise ValueError("adoption apply requires EDITOR_DRY_RUN=false")
-    lock_path = root / "work" / "v2-run.lock"
-    if apply:
-        with _V2RecoveryLock(lock_path):
-            return _recover_locked(
-                client, config, root, post_id=post_id, media_id=media_id,
-                evidence_path=Path(evidence_path), apply=True,
-                adoption_authorization=authorization,
-            )
     return _recover_locked(
         client, config, root, post_id=post_id, media_id=media_id,
         evidence_path=Path(evidence_path), apply=False,
@@ -316,6 +339,10 @@ def _recover_locked(
     body = str(editorial.get("cleaned_html") or post_body or "")
     if not title or not body:
         raise ValueError("current WordPress title and persisted editorial body are required")
+    if is_adoption and not _adoption_subject_matches_article(
+        subject, title=title, body=body, editorial=editorial
+    ):
+        raise ValueError("adoption subject is not grounded in the current article title, SEO or content")
 
     existing_item = next((item for item in previous.media.inline if item.media_id == media_id), None)
     already_recovered = existing_item is not None
@@ -425,7 +452,10 @@ def _recover_locked(
                 **({"authorization": dict(adoption_authorization)} if is_adoption else {
                     "source_run_id": original_run_id, "candidate_id": candidate_id,
                 }),
-                "source_page_url": source_page, "direct_image_url": direct_url,
+                "source_page_url": _safe_persisted_url(source_page),
+                "direct_image_url": _safe_persisted_url(direct_url),
+                "source_page_url_sha256": hashlib.sha256(source_page.encode()).hexdigest(),
+                "direct_image_url_sha256": hashlib.sha256(direct_url.encode()).hexdigest(),
             },
         },
     )
@@ -512,7 +542,8 @@ def _recover_locked(
     checkpoint = root / "backups" / str(post_id) / "editorial.partial.json"
     atomic_write_text(checkpoint, json.dumps(candidate_media.to_dict(), ensure_ascii=False, sort_keys=True, indent=2))
     register_library_media(
-        root, phash=item.phash, source_url=direct_url, source_page=source_page,
+        root, phash=item.phash, source_url=_safe_persisted_url(direct_url),
+        source_page=_safe_persisted_url(source_page),
         subject=subject, media_id=media_id, article_id=post_id,
         sha256=item.sha256, visual_group_id=item.visual_group_id,
     )

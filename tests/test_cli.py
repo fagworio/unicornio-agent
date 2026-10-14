@@ -315,7 +315,14 @@ class CompactOutputTests(unittest.TestCase):
         ])
         self.assertEqual(args.command, "v2-adopt-media")
         self.assertTrue(args.confirm_adoption)
-        self.assertFalse(args.apply)
+        self.assertFalse(hasattr(args, "apply"))
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args([
+                "v2-adopt-media", "115152", "115305", "--evidence", "evidence.json",
+                "--authorization-id", "ticket-1", "--authorized-by", "editor",
+                "--authorization-reason", "approved", "--confirm-adoption", "--apply",
+            ])
 
     def test_media_search_listicle_parser_accepts_quoted_titles(self):
         from unicornio_editor.cli import build_parser
