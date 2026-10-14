@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+import unicornio_editor.workflow as workflow_module
 from unicornio_editor.config import Config
 from unicornio_editor.batch import prepare_batch
 from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch
@@ -123,6 +124,33 @@ def test_migrate_state_apply_preflights_quarantined_legacy_posts(tmp_path):
     config = Config("wordpress", "https://wp.test", "/wp-json/wp/v2", dry_run=False)
 
     with pytest.raises(PostQuarantinedError, match="115152.*migrate-state"):
+        migrate_legacy_state(client, config, tmp_path, apply=True)
+
+    assert not [call for call in client.calls if call[0] in {"update_post", "publish"}]
+
+
+def test_migrate_state_rechecks_quarantine_at_the_legacy_write_boundary(tmp_path, monkeypatch):
+    class LegacyClient(NoWriteClient):
+        def list_pending(self, *, status, per_page, page):
+            if status == "pending" and page == 1:
+                return [{"id": POST_ID, "status": "pending", "meta": {}}]
+            return []
+
+    client = LegacyClient()
+    config = Config("wordpress", "https://wp.test", "/wp-json/wp/v2", dry_run=False)
+    original_assert = workflow_module.assert_post_not_quarantined
+    calls = 0
+
+    def quarantine_after_preflight(root, post_id, *, operation):
+        nonlocal calls
+        original_assert(root, post_id, operation=operation)
+        calls += 1
+        if calls == 1:
+            _quarantine(root, post_id)
+
+    monkeypatch.setattr(workflow_module, "assert_post_not_quarantined", quarantine_after_preflight)
+
+    with pytest.raises(PostQuarantinedError, match="115152.*state_marker_write"):
         migrate_legacy_state(client, config, tmp_path, apply=True)
 
     assert not [call for call in client.calls if call[0] in {"update_post", "publish"}]

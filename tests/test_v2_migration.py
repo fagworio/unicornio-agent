@@ -118,6 +118,28 @@ def test_rebase_apply_preflights_quarantine_before_any_update(tmp_path):
     assert client.updates == []
 
 
+def test_rebase_rechecks_quarantine_at_the_final_write_boundary(tmp_path):
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    post_id = 115152
+    state = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(next_at="2026-10-06T23:00:00+00:00", policy_version=2),
+    )
+
+    class QuarantinedAfterPreflight(Client):
+        def get_post(self, requested_id):
+            _quarantine(tmp_path, post_id)
+            return super().get_post(requested_id)
+
+    client = QuarantinedAfterPreflight([_post(post_id, state)])
+
+    with pytest.raises(PostQuarantinedError, match="115152.*v2-rebase-cooldowns"):
+        rebase_media_cooldowns(client, root=tmp_path, apply=True, now=now)
+
+    assert client.updates == []
+
+
 def test_rebase_editorial_retries_resets_only_phase_budget():
     now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
     state = WorkState(

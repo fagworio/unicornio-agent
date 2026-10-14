@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .classifier import EDITORIAL_BLOCKERS, MEDIA_BLOCKERS
 from ..editorial_schema import EditorialValidationError, validate_editorial
 from ..media.inserter import MediaInsertionError, normalize_normal_article_paragraphs
+from .lock import RunSessionLock
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedStatus, LifecycleState, Phase, RetryInfo, WorkState
 from .quarantine import assert_post_not_quarantined
 
@@ -120,6 +121,28 @@ def _guard_migration_writes(root: Path | str, post_ids: list[int] | tuple[int, .
     """Validate the full write set before an administrative migration starts applying."""
     for post_id in post_ids:
         assert_post_not_quarantined(root, post_id, operation=operation)
+
+
+def _write_migration_state(
+    client: Any,
+    root: Path | str,
+    post_id: int,
+    state: WorkState,
+    *,
+    operation: str,
+    lock_held: bool = False,
+) -> None:
+    """Lock, recheck quarantine at the final boundary, then persist V2 state."""
+    serialized = json.dumps(state.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    lock = None if lock_held else RunSessionLock(Path(root) / "work" / "v2-run.lock")
+    if lock is not None and not lock.acquire():
+        raise RuntimeError(f"V2 run lock is held; refusing {operation} write for post {post_id}")
+    try:
+        assert_post_not_quarantined(root, post_id, operation=operation)
+        client.update_post(post_id, {"meta": {"_hermes_work_state": serialized}})
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def repair_schema_115142(
@@ -360,6 +383,7 @@ def repair_schema_115142(
             return result
         operation_id = f"schema-115142-{checks['draft_hash'][:12]}"
         backup_path = directory / f"editorial.draft.schema-recovery.{operation_id}.json"
+        _guard_migration_writes(root_path, [post_id], "v2-repair-schema")
         if not backup_path.exists():
             shutil.copy2(draft_path, backup_path)
         reopened = replace(
@@ -372,7 +396,6 @@ def repair_schema_115142(
         meta = latest_post.get("meta") if isinstance(latest_post.get("meta"), dict) else None
         if meta is None:
             raise RuntimeError("post 115142 has no editable meta payload")
-        updated_meta = {"_hermes_work_state": json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))}
         recovery_record = {
             "operation_id": operation_id,
             "post_id": post_id,
@@ -386,7 +409,10 @@ def repair_schema_115142(
         try:
             _atomic_json_file(draft_path, sanitized)
             _atomic_json_file(root_path / "work" / "v2-recovery" / str(post_id) / f"{operation_id}.json", recovery_record)
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root_path, post_id, reopened,
+                operation="v2-repair-schema", lock_held=True,
+            )
             verified = _read_state(client.get_post(post_id))
             if verified != reopened:
                 raise RuntimeError("115142 schema recovery read-back mismatch")
@@ -551,10 +577,9 @@ def rebase_media_cooldowns(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, migrated, operation="v2-rebase-cooldowns"
+            )
             verified = _read_state(client.get_post(post_id))
             if verified != migrated:
                 raise RuntimeError(f"V2 retry migration read-back mismatch for post {post_id}")
@@ -651,10 +676,9 @@ def rebase_editorial_retries(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, migrated, operation="v2-rebase-editorial-retries"
+            )
             verified = _read_state(client.get_post(post_id))
             if verified != migrated:
                 raise RuntimeError(f"V2 editorial retry migration read-back mismatch for post {post_id}")
@@ -1048,6 +1072,7 @@ def repair_compose_114987(
             backup_path = directory / f"editorial.draft.compose-recovery.{operation_id}.json"
             if not draft_path.is_file():
                 raise RuntimeError("canonical editorial draft disappeared before apply")
+            _guard_migration_writes(root_path, [post_id], "v2-repair-compose-114987")
             if not backup_path.exists():
                 shutil.copy2(draft_path, backup_path)
             recovery_record = {
@@ -1069,16 +1094,16 @@ def repair_compose_114987(
             meta = latest_post.get("meta") if isinstance(latest_post.get("meta"), dict) else None
             if meta is None:
                 raise RuntimeError("post 114987 has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                reopened.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
             try:
                 _atomic_json_file(draft_path, normalized_draft)
                 _atomic_json_file(
                     root_path / "work" / "v2-recovery" / str(post_id) / f"{operation_id}.json",
                     recovery_record,
                 )
-                client.update_post(post_id, {"meta": updated_meta})
+                _write_migration_state(
+                    client, root_path, post_id, reopened,
+                    operation="v2-repair-compose-114987", lock_held=True,
+                )
             except Exception:
                 shutil.copy2(backup_path, draft_path)
                 raise
@@ -1139,10 +1164,9 @@ def repair_historical_media_human_required(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, migrated, operation="v2-repair-historical-media"
+            )
             verified = _read_state(client.get_post(post_id))
             if verified != migrated:
                 raise RuntimeError(f"historical media repair read-back mismatch for post {post_id}")
@@ -1268,10 +1292,9 @@ def repair_known_terminal_states(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, migrated, operation="v2-repair-known-terminal-states"
+            )
             if _read_state(client.get_post(post_id)) != migrated:
                 raise RuntimeError(f"known terminal repair read-back mismatch for post {post_id}")
             migrated_ids.append(post_id)
@@ -1385,10 +1408,9 @@ def repair_media_provider_terminal_states(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                migrated.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, migrated, operation="v2-repair-media-provider-states"
+            )
             if _read_state(client.get_post(post_id)) != migrated:
                 raise RuntimeError(f"media provider repair read-back mismatch for post {post_id}")
             migrated_ids.append(post_id)
@@ -1473,10 +1495,10 @@ def repair_media_funnel_invariant_state(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                prepared.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root_path, post_id, prepared,
+                operation="v2-repair-media-funnel-invariant",
+            )
             if _read_state(client.get_post(post_id)) != prepared:
                 raise RuntimeError(f"media funnel invariant repair read-back mismatch for post {post_id}")
             migrated_ids.append(post_id)
@@ -1542,10 +1564,10 @@ def release_vision_provider_retry(
             meta = post.get("meta") if isinstance(post, dict) else None
             if not isinstance(meta, dict):
                 raise RuntimeError(f"post {post_id} has no editable meta payload")
-            updated_meta = {"_hermes_work_state": json.dumps(
-                prepared.to_dict(), ensure_ascii=False, separators=(",", ":")
-            )}
-            client.update_post(post_id, {"meta": updated_meta})
+            _write_migration_state(
+                client, root, post_id, prepared,
+                operation="v2-release-vision-provider-retry",
+            )
             if _read_state(client.get_post(post_id)) != prepared:
                 raise RuntimeError(f"Vision provider retry release read-back mismatch for post {post_id}")
             migrated = True

@@ -77,7 +77,12 @@ from .trailer import (
     find_game_trailer_with_status,
 )
 from .wordpress import WordPressClient
-from .pipeline_v2.quarantine import assert_post_not_quarantined, filter_quarantined_posts
+from .pipeline_v2.quarantine import (
+    QuarantinePolicyError,
+    assert_post_not_quarantined,
+    filter_quarantined_posts,
+)
+from .pipeline_v2.lock import RunSessionLock
 
 
 # Media plan: download/upload/verificacao sao I/O-bound (rede); threads
@@ -1007,27 +1012,28 @@ def _write_state_markers(
     """
     if config.dry_run:
         return True
+    if root is None:
+        raise QuarantinePolicyError("quarantine policy root is required before a WordPress state write")
+    state_markers = build_state_markers(
+        state,
+        attempts=attempts,
+        next_retry_at=next_retry_at,
+        last_error=last_error,
+        ready_hash=ready_hash,
+        media_search_attempts=media_search_attempts,
+        partial_kind=partial_kind,
+        partial_required=partial_required,
+        partial_completed=partial_completed,
+        partial_missing=partial_missing,
+        processing_passes=processing_passes,
+        no_progress_attempts=no_progress_attempts,
+        policy_version=config.policy_version,
+    )
+    # Repeat the caller's preflight at the lowest shared legacy metadata
+    # writer, after payload construction and immediately before the REST call.
+    assert_post_not_quarantined(root, post_id, operation="state_marker_write")
     try:
-        client.update_post(
-            post_id,
-            {
-                "meta": build_state_markers(
-                    state,
-                    attempts=attempts,
-                    next_retry_at=next_retry_at,
-                    last_error=last_error,
-                    ready_hash=ready_hash,
-                    media_search_attempts=media_search_attempts,
-                    partial_kind=partial_kind,
-                    partial_required=partial_required,
-                    partial_completed=partial_completed,
-                    partial_missing=partial_missing,
-                    processing_passes=processing_passes,
-                    no_progress_attempts=no_progress_attempts,
-                    policy_version=config.policy_version,
-                )
-            },
-        )
+        client.update_post(post_id, {"meta": state_markers})
         if state == STATE_PARTIAL:
             persisted = client.get_post(post_id)
             meta = persisted.get("meta") if isinstance(persisted, dict) else {}
@@ -3259,10 +3265,17 @@ def migrate_legacy_state(
             )
         for candidate in candidatos_escrita:
             registro = candidate["record"]
-            gravou = _write_state_markers(
-                client, config, registro["post_id"], candidate["state"], root=root,
-                attempts=candidate["attempts"],
-            )
+            write_lock = RunSessionLock(Path(root) / "work" / "v2-run.lock")
+            if not write_lock.acquire():
+                gravou = False
+            else:
+                try:
+                    gravou = _write_state_markers(
+                        client, config, registro["post_id"], candidate["state"], root=root,
+                        attempts=candidate["attempts"],
+                    )
+                finally:
+                    write_lock.release()
             registro["written"] = bool(gravou)
             if gravou:
                 aplicados += 1
