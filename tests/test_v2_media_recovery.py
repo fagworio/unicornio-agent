@@ -47,6 +47,12 @@ def _fixture(tmp_path):
         relevance_approved=True, media=media,
     )
     root = tmp_path / "install"
+    policy = root / "config" / "v2-quarantine.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
     backup = root / "backups" / "115152"
     backup.mkdir(parents=True)
     paragraph = "O jogo apresenta personagens novos e detalhes importantes do combate nesta atualização."

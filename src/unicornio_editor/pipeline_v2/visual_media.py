@@ -335,6 +335,10 @@ def reconcile_visual_media(client: Any, config: Any, root: Path, post_id: int, *
     normal COMPOSE rebuilds pending HTML from the retained V2 media state.
     """
     root = Path(root)
+    if apply:
+        from .quarantine import assert_post_not_quarantined
+
+        assert_post_not_quarantined(root, post_id, operation="visual_media_reconciliation")
     previous, post, report = _inspect(client, config, root, post_id)
     report.update({"command": "v2-reconcile-visual-media", "apply": apply})
     safe = (

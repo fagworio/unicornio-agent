@@ -77,6 +77,7 @@ from .trailer import (
     find_game_trailer_with_status,
 )
 from .wordpress import WordPressClient
+from .pipeline_v2.quarantine import assert_post_not_quarantined, filter_quarantined_posts
 
 
 # Media plan: download/upload/verificacao sao I/O-bound (rede); threads
@@ -226,6 +227,7 @@ def apply_editorial(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply an editorial result while exclusively owning the post."""
+    assert_post_not_quarantined(root, post_id, operation="apply")
     with _acquire_post_lock(root, config, post_id):
         return _apply_editorial_unlocked(client, config, root, post_id, payload)
 
@@ -2659,6 +2661,7 @@ def publish_post(
     post_id: int,
 ) -> dict[str, Any]:
     """Publish one post while excluding a concurrent editorial mutation."""
+    assert_post_not_quarantined(root, post_id, operation="publish")
     with _acquire_post_lock(root, config, post_id):
         return _publish_post_unlocked(client, config, root, post_id)
 
@@ -3320,6 +3323,7 @@ def build_queue_report(
         if isinstance(p.get("id"), int) and p["id"] not in _pending_ids:
             p["_wp_awaiting_human"] = True
             posts.append(p)
+    posts = filter_quarantined_posts(root, posts)
     rows: list[dict[str, Any]] = []
     unprocessed: list[int] = []
     recent_unprocessed: list[int] = []
@@ -3600,6 +3604,7 @@ def build_cards(
             posts.extend(chunk)
             if len(chunk) < page_size:
                 break
+    posts = filter_quarantined_posts(root, posts)
     seen: set[int] = set()
     ordered: list[dict[str, Any]] = []
     for post in posts:
@@ -4151,6 +4156,7 @@ def retry_post(
     (``next_retry_at`` vazio = elegível imediatamente), mantendo o estado
     BLOCKED para o agente ver o card e corrigir. Nunca força READY.
     """
+    assert_post_not_quarantined(root, post_id, operation="retry")
     post = client.get_post(post_id)
     if post.get("status") not in ("pending", "awaiting_human"):
         raise WorkflowError(f"post {post_id} nao esta pending/awaiting_human ({post.get('status')})")
@@ -4216,6 +4222,7 @@ def discard_post(
     Grava a decisão definitiva como ``SKIPPED`` — o post sai da agenda,
     nunca publica e não continua em UNCERTAIN/AWAITING_HUMAN.
     """
+    assert_post_not_quarantined(root, post_id, operation="discard")
     post = client.get_post(post_id)
     # O discard humano precisa funcionar exatamente onde o pipeline PARA:
     # `pending` (fila) e `awaiting_human` (3a falha / midia esgotada). Antes so
@@ -4316,6 +4323,7 @@ def mark_uncertain(
     O agente usava ``uncertain.json`` direto no filesystem; este comando
     valida e persiste também o estado no WordPress (fonte de verdade única).
     """
+    assert_post_not_quarantined(root, post_id, operation="mark_uncertain")
     if not reason or not reason.strip():
         raise WorkflowError("motivo obrigatorio para marcar uncertain")
     post = client.get_post(post_id)

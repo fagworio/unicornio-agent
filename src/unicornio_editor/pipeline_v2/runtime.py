@@ -24,6 +24,7 @@ from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase, WorkState
 from .media_accounting import account_visual_media, reconcile_working_visual_media
+from .quarantine import load_quarantine
 from .production import ProductionCandidateReader, validation_matches_candidate
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
@@ -322,43 +323,7 @@ def load_historical_cohort(path: str | Path | None) -> tuple[dict[int, dict[str,
 
 def load_v2_quarantine(path: str | Path) -> tuple[dict[int, dict[str, str]], str | None]:
     """Read explicit post quarantines; malformed/missing policy fails closed."""
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return {}, f"V2 quarantine policy could not be read: {type(exc).__name__}"
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        return {}, "V2 quarantine schema version must be 1"
-    rows = payload.get("posts")
-    releases = payload.get("release_history")
-    if not isinstance(rows, list) or not isinstance(releases, list):
-        return {}, "V2 quarantine posts and release_history must be lists"
-    result: dict[int, dict[str, str]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            return {}, "V2 quarantine contains a non-object post"
-        try:
-            post_id = int(row["post_id"])
-        except (KeyError, TypeError, ValueError):
-            return {}, "V2 quarantine post_id must be an integer"
-        reason_code = str(row.get("reason_code") or "").strip()
-        reason = str(row.get("reason") or "").strip()
-        if post_id < 1 or post_id in result or not reason_code or not reason:
-            return {}, "V2 quarantine has duplicate/invalid post or missing reason"
-        result[post_id] = {"reason_code": reason_code, "reason": reason}
-    for release in releases:
-        if (
-            not isinstance(release, dict)
-            or not str(release.get("authorization_id") or "").strip()
-            or not str(release.get("authorized_by") or "").strip()
-            or not str(release.get("reason") or "").strip()
-        ):
-            return {}, "V2 quarantine release history requires authorization_id, authorized_by and reason"
-        try:
-            if int(release.get("post_id") or 0) < 1:
-                return {}, "V2 quarantine release history has invalid post_id"
-        except (TypeError, ValueError):
-            return {}, "V2 quarantine release history has invalid post_id"
-    return result, None
+    return load_quarantine(path)
 
 
 def admit_v2_candidates(

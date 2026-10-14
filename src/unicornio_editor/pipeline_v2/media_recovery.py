@@ -180,6 +180,9 @@ def recover_historical_attachment(
     if apply and bool(getattr(config, "dry_run", True)):
         raise ValueError("recovery apply requires EDITOR_DRY_RUN=false")
     if apply:
+        from .quarantine import assert_post_not_quarantined
+
+        assert_post_not_quarantined(root, post_id, operation="media_recovery")
         with _V2RecoveryLock(root / "work" / "v2-run.lock"):
             return _recover_locked(
                 client, config, root, post_id=post_id, media_id=media_id,

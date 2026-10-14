@@ -254,6 +254,11 @@ def repair_lost_ready_hash(
 ) -> dict[str, Any]:
     """Restore a publisher-cleared Ready Hash only from committed journal proof."""
     root = Path(root)
+    if apply:
+        from .quarantine import assert_post_not_quarantined
+
+        for post_id in post_ids:
+            assert_post_not_quarantined(root, int(post_id), operation="ready_hash_repair")
     before = [
         _lost_ready_hash_report(client, root, post_id, policy_version=config.policy_version)
         for post_id in post_ids
@@ -359,6 +364,11 @@ def reconcile_published_v2(
     and rechecks the complete precondition after taking the per-post lock.
     """
     root = Path(root)
+    if apply:
+        from .quarantine import assert_post_not_quarantined
+
+        for post_id in post_ids:
+            assert_post_not_quarantined(root, int(post_id), operation="publication_reconciliation")
     before = audit_publication_posts(client, post_ids, policy_version=config.policy_version)
     reports = list(before["posts"])
     reconciled: list[int] = []
