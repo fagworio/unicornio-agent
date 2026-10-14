@@ -229,6 +229,8 @@ def _recover_locked(
     credit = str(evidence.get("credit_text") or "").strip()
     relevance = evidence.get("evidence")
     historical_identity = evidence.get("visual_verification")
+    if legacy_verified:
+        _verify_legacy_evidence(evidence, post_id=post_id, media_id=media_id)
     if (
         not original_run_id or not candidate_id or not subject or not source_page or not direct_url
         or not credit.casefold().startswith("crédito da imagem:")
@@ -242,9 +244,7 @@ def _recover_locked(
     for field in ("sha256", "phash", "visual_group_id"):
         if not str(evidence.get(field) or "").strip():
             raise ValueError(f"evidence is missing {field}")
-    if legacy_verified:
-        _verify_legacy_evidence(evidence, post_id=post_id, media_id=media_id)
-    else:
+    if not legacy_verified:
         _verify_historical_linkage(root, post_id, evidence)
 
     post = client.get_post(post_id)
