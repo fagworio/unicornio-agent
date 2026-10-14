@@ -73,6 +73,50 @@ def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, t
     assert recovered.visual_verification["decision"] == "INITIAL"
 
 
+def test_identity_recovery_does_not_mark_inline_initial_when_featured_is_unavailable(monkeypatch, tmp_path):
+    import unicornio_editor.pipeline_v2.visual_media as visual_media
+    from PIL import Image
+
+    image = tmp_path / "inline.webp"
+    Image.new("RGB", (32, 32), "blue").save(image, "WEBP")
+
+    def download(url, *_args, **_kwargs):
+        if "featured" in str(url):
+            raise TimeoutError("featured CDN unavailable")
+        return image
+
+    monkeypatch.setattr(visual_media, "download_image", download)
+
+    class Client:
+        def get_media(self, media_id):
+            name = "featured" if media_id == 115154 else "inline"
+            return {"id": media_id, "source_url": f"https://wp.test/{name}.webp"}
+
+    media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(115153, "https://wp.test/inline.webp", 0),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 115154, "https://wp.test/featured.webp"),
+    )
+    recovered = visual_media.materialize_media_identity(
+        Client(), Config(), tmp_path, media, post_id=115234,
+    )
+
+    inline = recovered.inline[0]
+    assert inline.sha256 and inline.phash and inline.visual_group_id
+    assert inline.visual_verification["decision"] == "UNVERIFIED"
+    assert inline.visual_verification["method"] == "baseline_identity_unavailable"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    failure = next(event for event in events if event["event"] == "visual_identity_recovery_failed")
+    assert failure["post_id"] == 115234
+    assert failure["media_id"] == 115154
+    assert failure["role"] == "featured"
+    assert failure["stage"] == "materialize"
+    assert "featured.webp" not in json.dumps(failure)
+
+
 def test_adaptive_history_reads_real_media_manifest(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-1"
     batch.mkdir(parents=True)

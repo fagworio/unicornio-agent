@@ -11,7 +11,7 @@ from typing import Any
 from ..backup import atomic_write_text
 from ..locking import LockManager
 from ..media.downloader import download_image
-from ..media.visual_identity import fingerprint_path, verify_candidate_identity
+from ..media.visual_identity import VisualIdentityDecision, fingerprint_path, verify_candidate_identity
 from ..observability import append_telemetry
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress
 from .operational import WordPressStateBackend
@@ -57,7 +57,14 @@ def _visual_record(decision: Any) -> dict[str, Any]:
     }
 
 
-def materialize_media_identity(client: Any, config: Any, root: Path, media: MediaProgress) -> MediaProgress:
+def materialize_media_identity(
+    client: Any,
+    config: Any,
+    root: Path,
+    media: MediaProgress,
+    *,
+    post_id: int | None = None,
+) -> MediaProgress:
     """Recover missing final-image identity without changing external state."""
     get_media = getattr(client, "get_media", None)
     if not callable(get_media):
@@ -75,6 +82,21 @@ def materialize_media_identity(client: Any, config: Any, root: Path, media: Medi
     updated_inline: list[InlineMedia] = []
     retained: list[dict[str, Any]] = []
     comparison_budget = [0]
+    baseline_unavailable = False
+
+    def recovery_error(exc: BaseException, *, media_id: int | None, role: str, stage: str) -> None:
+        fields: dict[str, Any] = {
+            "media_id": media_id,
+            "role": role,
+            "stage": stage,
+            "error": type(exc).__name__,
+        }
+        if post_id is not None:
+            fields["post_id"] = int(post_id)
+        try:
+            append_telemetry(root, "visual_identity_recovery_failed", **fields)
+        except Exception:  # noqa: BLE001 - diagnostics cannot change lifecycle
+            pass
 
     def attachment_url(media_id: int) -> str:
         attachment = get_media(media_id)
@@ -112,8 +134,13 @@ def materialize_media_identity(client: Any, config: Any, root: Path, media: Medi
                     verification,
                 )
                 retained.append({**row, "visual_verification": verification})
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - keep the post retryable
+                # A known featured asset whose bytes cannot be materialized is
+                # not the same as an absent baseline.  Do not let the first
+                # inline asset become INITIAL while this comparison anchor is
+                # unavailable.
+                baseline_unavailable = True
+                recovery_error(exc, media_id=int(featured.media_id), role="featured", stage="materialize")
 
         for item in media.inline:
             row = item.to_dict()
@@ -130,14 +157,30 @@ def materialize_media_identity(client: Any, config: Any, root: Path, media: Medi
                     updated_inline.append(item)
                     retained.append(row)
                     continue
-                identity_value, decision = verify_candidate_identity(
-                    local,
-                    candidate_id=str(item.media_id),
-                    baseline=retained,
-                    config=config,
-                    root=root,
-                    comparison_budget=comparison_budget,
-                )
+                if baseline_unavailable:
+                    identity_value = identity
+                    decision = VisualIdentityDecision(
+                        "UNVERIFIED", False,
+                        reason="baseline_identity_unavailable",
+                    )
+                else:
+                    try:
+                        identity_value, decision = verify_candidate_identity(
+                            local,
+                            candidate_id=str(item.media_id),
+                            baseline=retained,
+                            config=config,
+                            root=root,
+                            comparison_budget=comparison_budget,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - defer provider/runtime faults
+                        baseline_unavailable = True
+                        recovery_error(exc, media_id=int(item.media_id), role="inline", stage="compare")
+                        identity_value = identity
+                        decision = VisualIdentityDecision(
+                            "UNVERIFIED", False,
+                            reason="baseline_identity_unavailable",
+                        )
                 verification = _visual_record(decision)
                 updated_inline.append(replace(
                     item,
@@ -150,8 +193,9 @@ def materialize_media_identity(client: Any, config: Any, root: Path, media: Medi
                 row["visual_verification"] = verification
                 if decision.verified and decision.decision not in {"SAME_IMAGE", "SAME_ART_CROP"}:
                     retained.append(row)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - preserve evidence for retry
                 updated_inline.append(item)
+                recovery_error(exc, media_id=int(item.media_id), role="inline", stage="materialize")
 
     return replace(media, inline=tuple(updated_inline), featured=updated_featured)
 

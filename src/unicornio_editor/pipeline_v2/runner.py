@@ -206,13 +206,33 @@ class PipelineRunner:
         return media
 
     @staticmethod
+    def _identity_verified(item: InlineMedia | FeaturedProgress | None) -> bool:
+        if item is None:
+            return False
+        verification = item.visual_verification if isinstance(item.visual_verification, dict) else {}
+        return bool(
+            str(getattr(item, "sha256", "") or "")
+            and str(getattr(item, "phash", "") or "")
+            and str(getattr(item, "visual_group_id", "") or "")
+            and str(verification.get("decision") or "") in {"INITIAL", "DIFFERENT"}
+        )
+
+    @staticmethod
     def _media_progressed(previous: MediaProgress, media: MediaProgress) -> bool:
-        return (
-            media.accepted > previous.accepted
-            or (
-                previous.featured.status is not FeaturedStatus.VALID
-                and media.featured.status is FeaturedStatus.VALID
-            )
+        if media.accepted > previous.accepted:
+            return True
+        if (
+            previous.featured.status is not FeaturedStatus.VALID
+            and media.featured.status is FeaturedStatus.VALID
+        ):
+            return True
+        if not PipelineRunner._identity_verified(previous.featured) and PipelineRunner._identity_verified(media.featured):
+            return True
+        previous_inline = {item.media_id: item for item in previous.inline}
+        return any(
+            PipelineRunner._identity_verified(item)
+            and not PipelineRunner._identity_verified(previous_inline.get(item.media_id))
+            for item in media.inline
         )
 
     @staticmethod
@@ -289,16 +309,17 @@ class PipelineRunner:
             # newly acquired media that already carries a complete positive
             # identity. This avoids dropping verified progress when another
             # asset merely lacks a structured invalid_media descriptor.
-            previous_ids = {item.media_id for item in safe_previous_inline}
             merged = list(safe_previous_inline)
+            positions = {item.media_id: index for index, item in enumerate(merged)}
             for item in media.inline:
-                if item.media_id in previous_ids:
+                if item.media_id in positions:
+                    # A recovery pass may enrich an old checkpoint in place.
+                    # Keep the previous identity when the new observation is
+                    # inconclusive, but retain a complete positive identity.
+                    if PipelineRunner._identity_verified(item):
+                        merged[positions[item.media_id]] = item
                     continue
-                verification = item.visual_verification if isinstance(item.visual_verification, dict) else {}
-                if (
-                    item.sha256 and item.phash and item.visual_group_id
-                    and str(verification.get("decision") or "") in {"INITIAL", "DIFFERENT"}
-                ):
+                if PipelineRunner._identity_verified(item):
                     merged.append(item)
             return MediaProgress(required=media.required, inline=tuple(merged), featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
 

@@ -567,6 +567,7 @@ class ProductionMediaResolver:
                 waiver_applied=previous.waiver_applied,
                 waiver_reason=previous.waiver_reason,
             ),
+            post_id=int(context.get("post_id") or 0) or None,
         )
         current_inline = list(recovered_media.inline)
         featured = recovered_media.featured
@@ -1452,6 +1453,29 @@ class WordPressWriterV2:
         if getattr(proposed_featured, "media_id", None):
             media_ids.add(int(proposed_featured.media_id))
         media_ids = sorted(media_ids)
+        media_records = [
+            {
+                "role": "inline",
+                "media_id": int(item.media_id),
+                "media_url": str(item.media_url or ""),
+                "sha256": str(item.sha256 or ""),
+                "phash": str(item.phash or ""),
+                "visual_group_id": str(item.visual_group_id or ""),
+                "visual_verification": dict(item.visual_verification or {}),
+            }
+            for item in getattr(proposed_media, "inline", ())
+            if getattr(item, "media_id", None)
+        ]
+        if getattr(proposed_featured, "media_id", None):
+            media_records.insert(0, {
+                "role": "featured",
+                "media_id": int(proposed_featured.media_id),
+                "media_url": str(proposed_featured.media_url or ""),
+                "sha256": str(proposed_featured.sha256 or ""),
+                "phash": str(proposed_featured.phash or ""),
+                "visual_group_id": str(proposed_featured.visual_group_id or ""),
+                "visual_verification": dict(proposed_featured.visual_verification or {}),
+            })
         media_state = "accepted_working" if media_ids else "apply_not_attempted"
         media_readback_status = "not_attempted"
         journal = journal_dir / f"{post_id}.json"
@@ -1463,6 +1487,7 @@ class WordPressWriterV2:
             "candidate_run_id": candidate_run_id or None,
             "detail": outcome.detail or context.get("provider_reason"),
             "media_ids": media_ids,
+            "media_records": media_records,
             "media_state": media_state,
             "media_readback_status": media_readback_status,
         }

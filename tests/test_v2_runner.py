@@ -96,6 +96,47 @@ def test_featured_invalidations_are_not_counted_as_media_progress():
     assert not PipelineRunner._media_progressed(previous, invalid)
 
 
+def test_identity_recovery_counts_as_progress_once():
+    legacy = InlineMedia(10, "https://example.test/a.webp", 0)
+    recovered = InlineMedia(
+        10,
+        "https://example.test/a.webp",
+        0,
+        sha256="a" * 64,
+        phash="1" * 16,
+        visual_group_id="visual:" + "a" * 24,
+        visual_verification={"decision": "INITIAL"},
+    )
+    previous = MediaProgress(required=1, inline=(legacy,))
+    assert PipelineRunner._media_progressed(previous, MediaProgress(required=1, inline=(recovered,)))
+    assert not PipelineRunner._media_progressed(
+        MediaProgress(required=1, inline=(recovered,)),
+        MediaProgress(required=1, inline=(recovered,)),
+    )
+
+
+def test_reconciliation_keeps_enriched_identity_for_existing_media():
+    legacy = InlineMedia(10, "https://example.test/a.webp", 0)
+    recovered = InlineMedia(
+        10,
+        "https://example.test/a.webp",
+        0,
+        sha256="a" * 64,
+        phash="1" * 16,
+        visual_group_id="visual:" + "a" * 24,
+        visual_verification={"decision": "DIFFERENT"},
+    )
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+    validation = {"failures": [{"gate": "imagens_no_corpo"}]}
+    result = PipelineRunner._reconcile_media_for_outcome(
+        MediaProgress(required=1, inline=(recovered,)),
+        outcome,
+        validation,
+        previous_media=MediaProgress(required=1, inline=(legacy,)),
+    )
+    assert result.inline == (recovered,)
+
+
 def test_phase_attempts_reset_when_retry_changes_phase():
     previous = WorkState(
         phase=Phase.MEDIA,
