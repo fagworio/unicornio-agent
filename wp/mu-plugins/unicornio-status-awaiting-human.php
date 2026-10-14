@@ -57,6 +57,12 @@ add_action( 'transition_post_status', function ( $new_status, $old_status, $post
 		update_post_meta( $post->ID, '_hermes_human_reopened_at', current_time( 'c' ) );
 		update_post_meta( $post->ID, '_hermes_human_reopened_from', 'awaiting_human' );
 	}
+	if ( $new_status === 'awaiting_human' && $old_status !== 'awaiting_human' ) {
+		// Consome a autorização anterior quando o V2 volta a escalar o post.
+		// Sem isso, uma reabertura antiga poderia autorizar uma entrada posterior.
+		delete_post_meta( $post->ID, '_hermes_human_reopened_at' );
+		delete_post_meta( $post->ID, '_hermes_human_reopened_from' );
+	}
 }, 10, 3 );
 
 // Disponibiliza "Awaiting Human" no Quick Edit e Bulk Edit da listagem de

@@ -290,6 +290,15 @@ class CompactOutputTests(unittest.TestCase):
         args = build_parser().parse_args(["retry-all", "--states", "blocked", "--root", "."])
         self.assertEqual(args.states, "blocked")
 
+    def test_v2_media_recovery_parser_is_read_only_by_default(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args([
+            "v2-recover-media", "115152", "115305", "--evidence", "evidence.json",
+        ])
+        self.assertEqual(args.command, "v2-recover-media")
+        self.assertFalse(args.apply)
+
     def test_media_search_listicle_parser_accepts_quoted_titles(self):
         from unicornio_editor.cli import build_parser
 

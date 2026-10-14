@@ -96,6 +96,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview", action="store_true", help="mostra a seleção sem executar stages ou escrever"
     )
 
+    v2_recover_media_parser = subparsers.add_parser(
+        "v2-recover-media",
+        help="revalida e reconcilia um attachment V2 já existente; somente leitura por padrão",
+    )
+    v2_recover_media_parser.add_argument("post_id", type=int)
+    v2_recover_media_parser.add_argument("media_id", type=int)
+    v2_recover_media_parser.add_argument("--evidence", type=Path, required=True)
+    v2_recover_media_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_recover_media_parser.add_argument(
+        "--apply", action="store_true",
+        help="persiste somente o estado V2/checkpoint/índices; exige EDITOR_DRY_RUN=false",
+    )
+
     queue_parser.add_argument("--root", type=Path, default=Path("."))
     queue_parser.add_argument(
         "--monitor",
@@ -2283,6 +2296,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=int(args.limit),
                 post_id=getattr(args, "post_id", None),
                 preview=bool(getattr(args, "preview", False)),
+            )
+        elif args.command == "v2-recover-media":
+            from .pipeline_v2.media_recovery import recover_historical_attachment
+
+            result = recover_historical_attachment(
+                client, config, args.root,
+                post_id=args.post_id,
+                media_id=args.media_id,
+                evidence_path=args.evidence,
+                apply=bool(args.apply),
             )
         elif args.command == "list-pending":
             result = client.list_pending(page=args.page, per_page=config.batch_limit)

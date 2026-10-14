@@ -11,7 +11,11 @@ def _manual_reopen_confirmed(item, state: WorkState) -> bool:
     context = item[1] if isinstance(item[1], dict) else {}
     post = context.get("post") if isinstance(context.get("post"), dict) else {}
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
-    return post.get("status") == "pending" and bool(meta.get("_hermes_human_reopened_at"))
+    return (
+        post.get("status") == "pending"
+        and bool(meta.get("_hermes_human_reopened_at"))
+        and meta.get("_hermes_human_reopened_from") == "awaiting_human"
+    )
 
 
 def rank(state: WorkState, *, manually_reopened: bool = False) -> int:

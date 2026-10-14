@@ -63,4 +63,17 @@ add_action( 'init', function () {
 			'auth_callback'     => '__return_true',
 		) );
 	}
+
+	// A transição awaiting_human -> pending grava estes marcadores no hook PHP.
+	// Expô-los em context=edit permite que o scheduler comprove a reentrada,
+	// enquanto auth_callback=false impede que um POST REST os fabrique ou altere.
+	foreach ( array( '_hermes_human_reopened_at', '_hermes_human_reopened_from' ) as $key ) {
+		register_post_meta( 'post', $key, array(
+			'type'              => 'string',
+			'single'            => true,
+			'show_in_rest'      => true,
+			'sanitize_callback' => 'sanitize_text_field',
+			'auth_callback'     => '__return_false',
+		) );
+	}
 } );

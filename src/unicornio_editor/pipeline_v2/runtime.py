@@ -1923,6 +1923,9 @@ def run_v2(
                         "_hermes_human_reopened_at"
                     )
                 )
+                and ((context.get("post") or {}).get("meta") or {}).get(
+                    "_hermes_human_reopened_from"
+                ) == "awaiting_human"
             )
 
         admitted_pending = [

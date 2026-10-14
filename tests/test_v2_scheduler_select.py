@@ -18,9 +18,21 @@ def test_select_requeues_human_required_only_with_confirmed_manual_reopen():
         blocker=BlockerCode.INLINE_MISSING,
         retry=RetryInfo(next_at="2030-01-02T00:00:00+00:00"),
     )
-    item = (7, {"post": {"status": "pending", "meta": {"_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00"}}})
+    item = (7, {"post": {"status": "pending", "meta": {
+        "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+        "_hermes_human_reopened_from": "awaiting_human",
+    }}})
     result = select([item], Store({7: state}), limit=1, now=datetime(2030, 1, 1, tzinfo=timezone.utc))
     assert [entry[0] for entry in result] == [7]
+
+
+def test_select_requires_reopen_source_marker():
+    state = WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=Phase.MEDIA)
+    item = (7, {"post": {"status": "pending", "meta": {
+        "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+    }}})
+    result = select([item], Store({7: state}), limit=1, now=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    assert result == []
 
 
 def test_select_excludes_terminal_and_future_cooldown():
