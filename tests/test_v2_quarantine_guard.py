@@ -24,6 +24,7 @@ from unicornio_editor.workflow import (
     build_queue_report,
     discard_post,
     mark_uncertain,
+    migrate_legacy_state,
     publish_post,
     retry_post,
 )
@@ -107,6 +108,24 @@ def test_legacy_cron_batch_paths_guard_before_reads_snapshots_or_media_search(tm
                 {"posts": [{"post_id": POST_ID}]},
             )
         search.assert_not_called()
+
+
+def test_migrate_state_apply_preflights_quarantined_legacy_posts(tmp_path):
+    _quarantine(tmp_path)
+
+    class LegacyClient(NoWriteClient):
+        def list_pending(self, *, status, per_page, page):
+            if status == "pending" and page == 1:
+                return [{"id": POST_ID, "status": "pending", "meta": {}}]
+            return []
+
+    client = LegacyClient()
+    config = Config("wordpress", "https://wp.test", "/wp-json/wp/v2", dry_run=False)
+
+    with pytest.raises(PostQuarantinedError, match="115152.*migrate-state"):
+        migrate_legacy_state(client, config, tmp_path, apply=True)
+
+    assert not [call for call in client.calls if call[0] in {"update_post", "publish"}]
 
 
 def test_quarantine_policy_missing_or_invalid_fails_closed(tmp_path):

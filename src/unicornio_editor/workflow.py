@@ -3209,6 +3209,7 @@ def migrate_legacy_state(
     aplicados = 0
     falhas = 0
     erros: list[str] = []
+    candidatos_escrita: list[dict[str, Any]] = []
     for status_wp in ("publish", "pending", "draft", "awaiting_human"):
         pagina = 1
         while True:
@@ -3236,16 +3237,11 @@ def migrate_legacy_state(
                 destino = mapa[status_wp]
                 registro = {"post_id": post_id, "wp_status": status_wp, "state": destino}
                 if apply:
-                    gravou = _write_state_markers(
-                        client, config, post_id, destino, root=root,
-                        attempts=int(info.get("attempts") or 0),
-                    )
-                    registro["written"] = bool(gravou)
-                    if gravou:
-                        aplicados += 1
-                    else:
-                        falhas += 1
-                        registro["write_error"] = "estado nao persistiu no WordPress"
+                    candidatos_escrita.append({
+                        "record": registro,
+                        "state": destino,
+                        "attempts": int(info.get("attempts") or 0),
+                    })
                 migrados.append(registro)
             if len(posts) < 100:
                 break  # última página
@@ -3254,6 +3250,25 @@ def migrate_legacy_state(
                 break  # limite de segurança
         if limit and vistos >= limit:
             break
+    if apply and candidatos_escrita:
+        # Preflight the complete write set before the first mutation, so a
+        # quarantined legacy post cannot leave a partially-applied migration.
+        for candidate in candidatos_escrita:
+            assert_post_not_quarantined(
+                root, candidate["record"]["post_id"], operation="migrate-state"
+            )
+        for candidate in candidatos_escrita:
+            registro = candidate["record"]
+            gravou = _write_state_markers(
+                client, config, registro["post_id"], candidate["state"], root=root,
+                attempts=candidate["attempts"],
+            )
+            registro["written"] = bool(gravou)
+            if gravou:
+                aplicados += 1
+            else:
+                falhas += 1
+                registro["write_error"] = "estado nao persistiu no WordPress"
     return {
         "scanned": vistos,
         "legacy_found": len(migrados),

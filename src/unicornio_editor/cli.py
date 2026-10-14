@@ -2398,6 +2398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = rebase_media_cooldowns(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),
             )
@@ -2406,6 +2407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = rebase_editorial_retries(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),
             )
@@ -2414,6 +2416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = repair_historical_media_human_required(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "v2-repair-known-terminal-states":
@@ -2421,6 +2424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = repair_known_terminal_states(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "v2-repair-media-provider-states":
@@ -2428,6 +2432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = repair_media_provider_terminal_states(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "v2-repair-media-funnel-invariant":
@@ -2465,6 +2470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = release_vision_provider_retry(
                 client,
+                root=args.root,
                 apply=bool(getattr(args, "apply", False)),
             )
         elif args.command == "reconcile":

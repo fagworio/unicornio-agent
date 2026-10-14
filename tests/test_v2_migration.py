@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timezone
 from unittest import mock
 
+import pytest
+
 from unicornio_editor.pipeline_v2.migration import (
     repair_known_terminal_states,
     repair_historical_media_human_required,
@@ -22,6 +24,7 @@ from unicornio_editor.pipeline_v2.model import (
     RetryInfo,
     WorkState,
 )
+from unicornio_editor.pipeline_v2.quarantine import PostQuarantinedError
 
 
 class Client:
@@ -45,6 +48,16 @@ def _post(post_id, state):
     return {"id": post_id, "status": "pending", "meta": {"_hermes_work_state": json.dumps(state.to_dict())}}
 
 
+def _quarantine(root, post_id):
+    policy = root / "config" / "v2-quarantine.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(json.dumps({
+        "version": 1,
+        "posts": [{"post_id": post_id, "reason_code": "hold", "reason": "human review"}],
+        "release_history": [],
+    }), encoding="utf-8")
+
+
 def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
     now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
     state = WorkState(
@@ -62,6 +75,7 @@ def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
         _post(1, state),
         _post(2, WorkState(phase=Phase.EDITORIAL, retry=RetryInfo(next_at="2026-10-06T23:00:00+00:00"))),
     ])
+    client.posts[1]["meta"]["_hermes_human_reopened_at"] = "must-not-be-resubmitted"
 
     preview = rebase_media_cooldowns(client, now=now)
     assert preview["post_ids"] == [1]
@@ -71,6 +85,7 @@ def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
     result = rebase_media_cooldowns(client, apply=True, now=now)
     assert result["migrated"] == 1
     assert [post_id for post_id, _payload in client.updates] == [1]
+    assert client.updates[0][1]["meta"].keys() == {"_hermes_work_state"}
     migrated = WorkState.from_dict(json.loads(client.posts[1]["meta"]["_hermes_work_state"]))
     assert migrated.retry.attempts == 5
     assert migrated.retry.no_progress == 1
@@ -84,6 +99,23 @@ def test_rebase_media_cooldowns_is_narrow_idempotent_and_preserves_state():
     second = rebase_media_cooldowns(client, apply=True, now=now)
     assert second["candidates"] == 0
     assert len(client.updates) == 1
+
+
+def test_rebase_apply_preflights_quarantine_before_any_update(tmp_path):
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc)
+    post_id = 115152
+    state = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(next_at="2026-10-06T23:00:00+00:00", policy_version=2),
+    )
+    client = Client([_post(post_id, state)])
+    _quarantine(tmp_path, post_id)
+
+    with pytest.raises(PostQuarantinedError, match="115152.*v2-rebase-cooldowns"):
+        rebase_media_cooldowns(client, root=tmp_path, apply=True, now=now)
+
+    assert client.updates == []
 
 
 def test_rebase_editorial_retries_resets_only_phase_budget():
