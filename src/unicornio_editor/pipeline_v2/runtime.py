@@ -552,6 +552,24 @@ class ProductionMediaResolver:
             and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
             else self._recover_existing_featured(context, editorial, previous)
         )
+        from .visual_media import materialize_media_identity
+
+        recovered_media = materialize_media_identity(
+            self.client,
+            self.config,
+            self.root,
+            MediaProgress(
+                required=total_required,
+                inline=tuple(current_inline),
+                featured=featured,
+                search=previous.search,
+                enrichment_round=previous.enrichment_round,
+                waiver_applied=previous.waiver_applied,
+                waiver_reason=previous.waiver_reason,
+            ),
+        )
+        current_inline = list(recovered_media.inline)
+        featured = recovered_media.featured
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
         current_featured = featured
 
@@ -1411,11 +1429,6 @@ class WordPressWriterV2:
             latest = self.root / "backups" / str(post_id) / "editorial.latest.json"
             latest.parent.mkdir(parents=True, exist_ok=True)
             latest.write_text(json.dumps(candidate.get("editorial") or {}, ensure_ascii=False, indent=2), encoding="utf-8")
-        journal = journal_dir / f"{post_id}.json"
-        intent = {"status": "prepared", "post_id": post_id, "state": proposed_state.to_dict(), "ready_hash": ready_hash, "candidate_hash": hashlib.sha256(content.encode()).hexdigest(), "candidate_fresh": candidate_fresh, "candidate_run_id": candidate_run_id or None, "detail": outcome.detail or context.get("provider_reason")}
-        if not candidate_fresh and outcome.type.value == "ready":
-            raise RuntimeError("stale editorial candidate cannot produce READY")
-        journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
         import html as _html
 
@@ -1429,6 +1442,33 @@ class WordPressWriterV2:
             for item in getattr(getattr(proposed_state, "media", None), "inline", ())
             if str(item.media_url or "").strip()
         ]
+        proposed_media = getattr(proposed_state, "media", None)
+        media_ids = {
+            int(item.media_id)
+            for item in getattr(proposed_media, "inline", ())
+            if getattr(item, "media_id", None)
+        }
+        proposed_featured = getattr(proposed_media, "featured", None)
+        if getattr(proposed_featured, "media_id", None):
+            media_ids.add(int(proposed_featured.media_id))
+        media_ids = sorted(media_ids)
+        media_state = "accepted_working" if media_ids else "apply_not_attempted"
+        media_readback_status = "not_attempted"
+        journal = journal_dir / f"{post_id}.json"
+        intent = {
+            "status": "prepared", "post_id": post_id,
+            "state": proposed_state.to_dict(), "ready_hash": ready_hash,
+            "candidate_hash": hashlib.sha256(content.encode()).hexdigest(),
+            "candidate_fresh": candidate_fresh,
+            "candidate_run_id": candidate_run_id or None,
+            "detail": outcome.detail or context.get("provider_reason"),
+            "media_ids": media_ids,
+            "media_state": media_state,
+            "media_readback_status": media_readback_status,
+        }
+        if not candidate_fresh and outcome.type.value == "ready":
+            raise RuntimeError("stale editorial candidate cannot produce READY")
+        journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
         # A partial candidate is a checkpoint, never public/editor-facing
         # content.  Persist only lifecycle/media state until the complete
         # candidate passes every final gate and reaches READY.
@@ -1562,12 +1602,18 @@ class WordPressWriterV2:
                 raise RuntimeError("candidate title read-back mismatch")
         if outcome.type.value == "ready" and not media_readback:
             raise RuntimeError("media read-back mismatch: featured or inline media diverged")
-        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if media_readback:
+            media_state = "applied_readback_confirmed"
+            media_readback_status = "confirmed"
+        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True, "media_state": media_state, "media_readback_status": media_readback_status}, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
             "wordpress_changed": changed,
             "readback": True,
             "state_readback": True,
             "media_readback": media_readback,
+            "media_readback_status": media_readback_status,
+            "media_state": media_state,
+            "media_ids": media_ids,
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
         }

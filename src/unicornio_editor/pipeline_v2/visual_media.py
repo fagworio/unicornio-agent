@@ -13,7 +13,7 @@ from ..locking import LockManager
 from ..media.downloader import download_image
 from ..media.visual_identity import fingerprint_path, verify_candidate_identity
 from ..observability import append_telemetry
-from .model import LifecycleState
+from .model import FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress
 from .operational import WordPressStateBackend
 from .state_store import StateStore
 
@@ -34,6 +34,126 @@ def _decision_confidence(decision: Any) -> float | None:
         except (TypeError, ValueError, AttributeError):
             pass
     return None
+
+
+def _identity_complete(asset: Any) -> bool:
+    verification = getattr(asset, "visual_verification", {})
+    decision = str(verification.get("decision") or "") if isinstance(verification, dict) else ""
+    return bool(
+        str(getattr(asset, "sha256", "") or "")
+        and str(getattr(asset, "phash", "") or "")
+        and str(getattr(asset, "visual_group_id", "") or "")
+        and decision in {"INITIAL", "DIFFERENT"}
+    )
+
+
+def _visual_record(decision: Any) -> dict[str, Any]:
+    return {
+        "method": str(getattr(decision, "reason", "") or ""),
+        "decision": str(getattr(decision, "decision", "") or "UNVERIFIED"),
+        "duplicate_of": str(getattr(decision, "duplicate_of", "") or ""),
+        "confidence": _decision_confidence(decision),
+        "comparator_version": 1,
+    }
+
+
+def materialize_media_identity(client: Any, config: Any, root: Path, media: MediaProgress) -> MediaProgress:
+    """Recover missing final-image identity without changing external state."""
+    get_media = getattr(client, "get_media", None)
+    if not callable(get_media):
+        return media
+    needs_recovery = any(not _identity_complete(item) for item in media.inline) or (
+        media.featured.status is FeaturedStatus.VALID
+        and media.featured.media_id
+        and media.featured.media_url
+        and not _identity_complete(media.featured)
+    )
+    if not needs_recovery:
+        return media
+
+    updated_featured = media.featured
+    updated_inline: list[InlineMedia] = []
+    retained: list[dict[str, Any]] = []
+    comparison_budget = [0]
+
+    def attachment_url(media_id: int) -> str:
+        attachment = get_media(media_id)
+        source_url = str((attachment or {}).get("source_url") or "").strip()
+        if not source_url:
+            raise ValueError("attachment has no source_url")
+        return source_url
+
+    with tempfile.TemporaryDirectory(prefix="unicornio-identity-recovery-") as directory:
+        temp_root = Path(directory)
+        if (
+            media.featured.status is FeaturedStatus.VALID
+            and media.featured.media_id
+            and media.featured.media_url
+        ):
+            featured = media.featured
+            row = featured.to_dict()
+            try:
+                local = download_image(
+                    attachment_url(int(featured.media_id)),
+                    temp_root / f"featured-{featured.media_id}.img",
+                    url_policy=str(getattr(config, "remote_url_policy", "audit")),
+                )
+                identity = fingerprint_path(local)
+                row.update(identity.to_dict())
+                row["local_path"] = str(local)
+                verification = (
+                    dict(featured.visual_verification)
+                    if _identity_complete(featured)
+                    else {"decision": "INITIAL", "method": "fingerprint", "duplicate_of": "", "confidence": None, "comparator_version": 1}
+                )
+                updated_featured = FeaturedProgress(
+                    featured.status, featured.media_id, featured.media_url,
+                    identity.sha256, identity.phash, identity.visual_group_id,
+                    verification,
+                )
+                retained.append({**row, "visual_verification": verification})
+            except Exception:
+                pass
+
+        for item in media.inline:
+            row = item.to_dict()
+            try:
+                local = download_image(
+                    attachment_url(int(item.media_id)),
+                    temp_root / f"inline-{item.media_id}.img",
+                    url_policy=str(getattr(config, "remote_url_policy", "audit")),
+                )
+                identity = fingerprint_path(local)
+                row.update(identity.to_dict())
+                row["local_path"] = str(local)
+                if _identity_complete(item):
+                    updated_inline.append(item)
+                    retained.append(row)
+                    continue
+                identity_value, decision = verify_candidate_identity(
+                    local,
+                    candidate_id=str(item.media_id),
+                    baseline=retained,
+                    config=config,
+                    root=root,
+                    comparison_budget=comparison_budget,
+                )
+                verification = _visual_record(decision)
+                updated_inline.append(replace(
+                    item,
+                    sha256=identity_value.sha256,
+                    phash=identity_value.phash,
+                    visual_group_id=identity_value.visual_group_id,
+                    visual_verification=verification,
+                ))
+                row.update(identity_value.to_dict())
+                row["visual_verification"] = verification
+                if decision.verified and decision.decision not in {"SAME_IMAGE", "SAME_ART_CROP"}:
+                    retained.append(row)
+            except Exception:
+                updated_inline.append(item)
+
+    return replace(media, inline=tuple(updated_inline), featured=updated_featured)
 
 
 def _inspect(client: Any, config: Any, root: Path, post_id: int) -> tuple[Any, dict[str, Any], dict[str, Any]]:

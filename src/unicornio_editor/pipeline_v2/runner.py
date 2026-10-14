@@ -285,9 +285,22 @@ class PipelineRunner:
         safe_previous_inline = previous_media.inline if previous_media is not None else media.inline
         if not invalid_media:
             # A blocker without an asset identity cannot authorize destructive
-            # reconciliation. Keep the last known-good assets and discard only
-            # the untrusted delta from this attempt.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
+            # reconciliation. Preserve the previous baseline and retain only
+            # newly acquired media that already carries a complete positive
+            # identity. This avoids dropping verified progress when another
+            # asset merely lacks a structured invalid_media descriptor.
+            previous_ids = {item.media_id for item in safe_previous_inline}
+            merged = list(safe_previous_inline)
+            for item in media.inline:
+                if item.media_id in previous_ids:
+                    continue
+                verification = item.visual_verification if isinstance(item.visual_verification, dict) else {}
+                if (
+                    item.sha256 and item.phash and item.visual_group_id
+                    and str(verification.get("decision") or "") in {"INITIAL", "DIFFERENT"}
+                ):
+                    merged.append(item)
+            return MediaProgress(required=media.required, inline=tuple(merged), featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
 
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:

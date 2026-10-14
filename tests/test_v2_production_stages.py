@@ -439,6 +439,10 @@ def test_writer_does_not_apply_candidate_content_while_partial(tmp_path):
     assert len(client.updates) == 1
     assert "content" not in client.updates[0]
     assert "title" not in client.updates[0]
+    journal = json.loads((tmp_path / "work/v2-journal/14.json").read_text())
+    assert journal["media_state"] == "accepted_working"
+    assert journal["media_readback_status"] == "not_attempted"
+    assert journal["media_ids"] == [14]
 
     second = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
     assert second["readback"] is True

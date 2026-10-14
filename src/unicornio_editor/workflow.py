@@ -2180,7 +2180,7 @@ def _execute_media_plan(
                             "status": "rejected",
                             "detail": "duplicate_existing_frame",
                         }
-                    from .media.visual_identity import VisualIdentity, VisualIdentityDecision, verify_candidate_identity
+                    from .media.visual_identity import verify_candidate_identity
                     try:
                         identity, visual = verify_candidate_identity(
                             webp, candidate_id=str(item.get("candidate_id") or position),
@@ -2188,19 +2188,19 @@ def _execute_media_plan(
                             comparison_budget=visual_comparison_budget,
                         )
                     except Exception as exc:
-                        # A first asset has no duplicate baseline.  Keep the
-                        # historical upload contract resilient to a transient
-                        # local fingerprinting failure, but never use that
-                        # escape when a baseline needs comparison.
-                        if visual_baseline or visual_baseline_unavailable:
-                            return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{type(exc).__name__}"}
-                        identity = VisualIdentity("", str(final_phash or ""), "")
-                        visual = VisualIdentityDecision("INITIAL", True, reason="initial_identity_pending")
+                        # A missing baseline is not permission to accept an
+                        # asset without durable identity. Keep this path
+                        # fail-closed so the final checklist cannot be
+                        # guaranteed to fail after an irreversible upload.
+                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{type(exc).__name__}"}
                     if visual_baseline_unavailable:
                         visual = type(visual)("UNVERIFIED", False, reason="baseline_identity_unavailable")
                     if not visual.verified:
                         _funnel("visual_identity", "rejected", item, position, visual.reason)
                         return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{visual.reason}"}
+                    if not identity.sha256 or not identity.phash or not identity.visual_group_id:
+                        _funnel("visual_identity", "rejected", item, position, "identity_incomplete")
+                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "visual_identity_unverified:identity_incomplete"}
                     if visual.decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
                         _funnel("visual_identity", "rejected", item, position, visual.reason)
                         return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "duplicate_existing_frame"}

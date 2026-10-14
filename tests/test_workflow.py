@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from unicornio_editor.config import Config
+from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
 from unicornio_editor.workflow import (
     WorkflowError,
     _load_partial_manifest,
@@ -28,6 +29,12 @@ from unicornio_editor.workflow import (
     validate_media_plan,
 )
 from unicornio_editor.wordpress import WordPressError
+
+
+def _verified_media_identity():
+    return VisualIdentity("a" * 64, "1111111111111111", "visual:" + "a" * 24), VisualIdentityDecision(
+        "INITIAL", True, reason="test"
+    )
 def editorial_payload(decision="process"):
     # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
     # editorial valido — 2 imagens reais com credito + keyword no corpo.
@@ -1034,6 +1041,9 @@ class WorkflowTests(unittest.TestCase):
         ), mock.patch(
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
         ), mock.patch(
+            "unicornio_editor.media.visual_identity.verify_candidate_identity",
+            return_value=_verified_media_identity(),
+        ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             side_effect=lambda client, webp, evidence: {
                 "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
@@ -1081,6 +1091,9 @@ class WorkflowTests(unittest.TestCase):
         ), mock.patch(
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
         ), mock.patch(
+            "unicornio_editor.media.visual_identity.verify_candidate_identity",
+            return_value=_verified_media_identity(),
+        ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             side_effect=lambda client, webp, evidence: {
                 "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
@@ -1122,6 +1135,9 @@ class WorkflowTests(unittest.TestCase):
             "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
         ), mock.patch(
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.media.visual_identity.verify_candidate_identity",
+            return_value=_verified_media_identity(),
         ), mock.patch("unicornio_editor.workflow.upload_image", side_effect=upload_once):
             with tempfile.TemporaryDirectory() as directory:
                 report = apply_editorial(FakeClient(self.post()), self.config(False), Path(directory), 42, payload)
@@ -1402,6 +1418,9 @@ class WorkflowTests(unittest.TestCase):
             "unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "teste")
         ), mock.patch(
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.media.visual_identity.verify_candidate_identity",
+            return_value=_verified_media_identity(),
         ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             return_value={"id": 77, "source_url": "https://wp.test/uploads/reuse-featured-1280x720.webp"},
@@ -2224,6 +2243,9 @@ class WorkflowTests(unittest.TestCase):
         ), mock.patch(
             "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
         ), mock.patch(
+            "unicornio_editor.media.visual_identity.verify_candidate_identity",
+            return_value=_verified_media_identity(),
+        ), mock.patch(
             "unicornio_editor.workflow.upload_image",
             side_effect=[
                 {"id": 50, "source_url": "https://wp.test/50.webp"},
@@ -2561,6 +2583,7 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
          mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
          mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
          mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
          mock.patch("unicornio_editor.workflow.upload_image", create=True) as upload:
         upload.return_value = {"id": 115094, "source_url": "https://wp.test/115094.webp"}
         results, _, _ = _execute_media_plan(editorial, config, object(), tmp_path, preflight={"rejected": [], "featured_vision": []}, post_id=115088, previous_inline_phashes=("ccc04d9fb063ed1c",))
@@ -2568,6 +2591,44 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
     assert results[0]["media_id"] == 115094
     index = json.loads((tmp_path / "work" / "media_index.json").read_text())
     assert index["entries"][-1]["phash"] == "1111111111111111"
+
+
+def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp_path):
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/wolverine",
+        "direct_image_url": "https://source.example/wolverine-new.jpg",
+        "author": "Autor",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: Autor.",
+        "alt_text": "Wolverine novo",
+        "is_featured": False,
+    }
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Wolverine videogame.</p>",
+        "media_plan": [item],
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", side_effect=RuntimeError("fingerprint unavailable")), \
+         mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight={"rejected": [], "featured_vision": []}, post_id=115088,
+        )
+    upload.assert_not_called()
+    assert results[0]["status"] == "rejected"
+    assert "visual_identity_unverified" in results[0]["detail"]
 
 
 def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
@@ -2599,6 +2660,7 @@ def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
          mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
          mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
          mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="2222222222222222"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
          mock.patch("unicornio_editor.workflow.upload_image", return_value={"id": 115095, "source_url": "https://wp.test/115095.webp"}):
         results, _, _ = _execute_media_plan(
             editorial,

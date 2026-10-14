@@ -198,6 +198,27 @@ def test_reconciliation_preserves_previous_when_invalid_media_has_no_identity():
     assert result.inline == (first,)
 
 
+def test_reconciliation_preserves_new_verified_media_without_descriptor():
+    first = InlineMedia(10, "https://example.test/first.webp", 0)
+    second = InlineMedia(
+        11, "https://example.test/second.webp", 3,
+        phash="phash-11", sha256="sha-11", visual_group_id="visual:11",
+        visual_verification={"decision": "DIFFERENT", "method": "test"},
+    )
+    previous = MediaProgress(required=2, inline=(first,))
+    current = MediaProgress(required=2, inline=(first, second))
+    outcome = Outcome(OutcomeType.RETRY, Phase.MEDIA, BlockerCode.MEDIA_INVALID)
+
+    result = PipelineRunner._reconcile_media_for_outcome(
+        current,
+        outcome,
+        {"failures": [{"gate": "visual_identity_verified"}]},
+        previous_media=previous,
+    )
+
+    assert [item.media_id for item in result.inline] == [10, 11]
+
+
 def test_reconciliation_removes_only_explicitly_invalidated_asset():
     first = InlineMedia(10, "https://example.test/first.webp", 0)
     second = InlineMedia(11, "https://example.test/second.webp", 3)

@@ -38,6 +38,41 @@ def test_adaptive_media_planning_uses_persisted_rejection_reasons(tmp_path):
     assert "https://cdn.test/old.webp" in history["urls"]
 
 
+def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, tmp_path):
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.pipeline_v2.visual_media as visual_media
+    from PIL import Image
+
+    image = tmp_path / "legacy.webp"
+    Image.new("RGB", (32, 32), "red").save(image, "WEBP")
+    monkeypatch.setattr(visual_media, "download_image", lambda *_args, **_kwargs: image)
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+
+    class Client:
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": "https://wp.test/115152.webp"}
+
+    previous = MediaProgress(
+        required=1,
+        inline=(InlineMedia(115152, "https://wp.test/115152.webp", 0),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 999, ""),
+    )
+    result = ProductionMediaResolver(Client(), Config(), tmp_path)(
+        {"post_id": 115152, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    recovered = result.inline[0]
+    assert recovered.sha256
+    assert recovered.phash
+    assert recovered.visual_group_id
+    assert recovered.visual_verification["decision"] == "INITIAL"
+
+
 def test_adaptive_history_reads_real_media_manifest(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-1"
     batch.mkdir(parents=True)
