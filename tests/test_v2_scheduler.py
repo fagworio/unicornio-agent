@@ -2,7 +2,18 @@ from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaPr
 
 
 def mp(required, count):
-    return MediaProgress(required, tuple(InlineMedia(i, f"u{i}", i) for i in range(1, count + 1)))
+    return MediaProgress(required, tuple(
+        InlineMedia(
+            i,
+            f"u{i}",
+            i,
+            sha256=f"{i:064x}",
+            phash=f"{i:016x}",
+            visual_group_id=f"visual:{i:024x}",
+            visual_verification={"decision": "DIFFERENT"},
+        )
+        for i in range(1, count + 1)
+    ))
 from unicornio_editor.pipeline_v2.scheduler import rank
 
 

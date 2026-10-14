@@ -44,7 +44,7 @@ def append_featured_credit(html: str, credit_text: str) -> str:
 
 
 def remove_media_urls(html: str, urls: list[str] | tuple[str, ...] | set[str]) -> str:
-    """Remove only figures/images whose exact source URL was invalidated.
+    """Remove only images belonging to an invalidated attachment.
 
     Used by the V2 visual-reconciliation journal before a pending post is
     recomposed.  It never guesses by slot, ALT or filename; unrelated images
@@ -52,20 +52,82 @@ def remove_media_urls(html: str, urls: list[str] | tuple[str, ...] | set[str]) -
     """
     if not isinstance(html, str):
         raise MediaInsertionError("HTML must be a string")
-    targets = {str(url).strip() for url in urls if str(url).strip()}
+    def url_key(value: str) -> str:
+        parsed = urlparse(unescape(str(value or "").strip()))
+        if not parsed.scheme or not parsed.netloc:
+            return str(value or "").strip().split("?", 1)[0]
+        path = re.sub(r"-\d+x\d+(?=\.[^./]+$)", "", parsed.path)
+        return f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}{path.rstrip('/') or '/'}"
+
+    targets = {url_key(str(url)) for url in urls if str(url).strip()}
     if not targets:
         return html
 
-    def contains_target(fragment: str) -> bool:
-        return any(re.search(r"\bsrc\s*=\s*(['\"])" + re.escape(url) + r"\1", fragment, re.IGNORECASE) for url in targets)
+    def remove_invalid_image_sources(match: re.Match[str]) -> str:
+        fragment = match.group(0)
+        src = re.search(r"\bsrc\s*=\s*(['\"])(.*?)\1", fragment, re.IGNORECASE | re.DOTALL)
+        if src and url_key(src.group(2)) in targets:
+            return ""
+
+        def clean_srcset(attr: re.Match[str]) -> str:
+            quote, value = attr.group(2), attr.group(3)
+            kept = []
+            for part in value.split(","):
+                entry = part.strip()
+                if not entry:
+                    continue
+                candidate = entry.split()[0]
+                if url_key(candidate) not in targets:
+                    kept.append(entry)
+            return f"srcset={quote}{', '.join(kept)}{quote}" if kept else ""
+
+        fragment = re.sub(
+            r"\b(srcset)\s*=\s*(['\"])(.*?)\2",
+            clean_srcset,
+            fragment,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for name in ("data-src", "data-lazy-src"):
+            attr = re.search(r"\b" + name + r"\s*=\s*(['\"])(.*?)\1", fragment, re.IGNORECASE | re.DOTALL)
+            if attr and url_key(attr.group(2)) in targets:
+                fragment = fragment[:attr.start()] + fragment[attr.end():]
+        return fragment
 
     # A figure can legitimately contain gallery/credit markup and more than
     # one image. Remove only the exact ``img`` nodes; never discard siblings.
     output = re.sub(
         r"<img\b[^>]*>\s*",
-        lambda match: "" if contains_target(match.group(0)) else match.group(0),
+        remove_invalid_image_sources,
         html,
         flags=re.IGNORECASE,
+    )
+
+    def clean_empty_figure(match: re.Match[str]) -> str:
+        body = match.group(2)
+        if re.search(r"<img\b", body, flags=re.IGNORECASE):
+            return match.group(0)
+        body = re.sub(
+            r"<figcaption\b[^>]*>.*?</figcaption>\s*",
+            "",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        body = re.sub(
+            r"<(?:p|div)\b(?=[^>]*\bclass\s*=\s*['\"][^'\"]*(?:image-credit|wp-caption-text)[^'\"]*['\"])[^>]*>.*?</(?:p|div)>\s*",
+            "",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        plain = unescape(re.sub(r"<[^>]+>", "", body)).replace("\xa0", " ").strip()
+        if not plain:
+            return ""
+        return body
+
+    output = re.sub(
+        r"<figure\b([^>]*)>(.*?)</figure>\s*",
+        clean_empty_figure,
+        output,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     return output
 

@@ -121,8 +121,12 @@ def _media_diagnostics(state: WorkState, row: dict[str, Any] | None = None) -> d
         checklist = row["checklist"].get("all_passed")
     return {
         "required": media.required,
-        "accepted": media.accepted,
-        "missing": media.missing,
+        "accepted": media.valid_distinct_inline_count,
+        "accepted_working": media.accepted,
+        "missing": media.effective_missing,
+        "legacy_missing": media.missing,
+        "confirmed_duplicates": media.visual_accounting.confirmed_duplicate_count,
+        "unverified": media.visual_accounting.unverified_count,
         "inline_media_ids": [item.media_id for item in media.inline],
         "featured": media.featured.to_dict(),
         "search": media.search.to_dict(),

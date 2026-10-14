@@ -307,6 +307,21 @@ class MediaProgress:
     def missing(self) -> int:
         return max(0, self.required - self.accepted)
 
+    @property
+    def visual_accounting(self):
+        """Derived visual coverage; legacy ``accepted`` stays unchanged."""
+        from .media_accounting import account_visual_media
+
+        return account_visual_media(self)
+
+    @property
+    def valid_distinct_inline_count(self) -> int:
+        return self.visual_accounting.valid_distinct_inline_count
+
+    @property
+    def effective_missing(self) -> int:
+        return self.visual_accounting.effective_missing
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "inline": {

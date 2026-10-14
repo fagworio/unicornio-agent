@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.media.registry import (
-    RegistryError, connect, load_v2_media, migrate_legacy_index, record_v2_observation, registry_path,
+    RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index, record_v2_observation, registry_path,
 )
 from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
 
@@ -190,6 +190,29 @@ def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):
     assert media_b["wordpress_media_id"] == 202
     assert media_b["subject"] == "Subject B"
     assert media_b["visual_verification"] == {"decision": "SAME_ART_CROP", "duplicate_of": "202"}
+
+
+def test_invalidation_can_be_scoped_to_inline_role(tmp_path):
+    media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(55, "https://cdn.test/inline.webp", 0),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 55, "https://cdn.test/featured.webp"),
+    )
+    record_v2_observation(
+        tmp_path,
+        post_id=55,
+        run_id="run-role-scope",
+        state=SimpleNamespace(media=media),
+        phase="validate",
+        applied=True,
+    )
+
+    invalidate_v2_media(tmp_path, post_id=55, media_ids=[55], role="inline")
+
+    reused = load_v2_media(tmp_path, post_id=55)
+    assert [(row["role"], row["canonical_url"]) for row in reused] == [
+        ("featured", "https://cdn.test/featured.webp"),
+    ]
 
 
 def test_registry_migrates_v2_applied_usage_without_losing_readback(tmp_path):

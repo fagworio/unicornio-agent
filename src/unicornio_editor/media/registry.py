@@ -439,16 +439,24 @@ def record_v2_candidate_decision(
         db.commit()
 
 
-def invalidate_v2_media(root: str | Path, *, post_id: int, media_ids: list[int]) -> None:
+def invalidate_v2_media(
+    root: str | Path,
+    *,
+    post_id: int,
+    media_ids: list[int],
+    role: str | None = None,
+) -> None:
     """Retain history while removing explicitly invalidated uses from reuse."""
     ids = sorted({int(value) for value in media_ids if int(value) > 0})
     if not ids:
         return
     with connect(root) as db:
         placeholders = ",".join("?" for _ in ids)
+        role_clause = " AND role=?" if role else ""
+        params: tuple[Any, ...] = (int(post_id), *ids, *((str(role),) if role else ()))
         db.execute(
-            f"UPDATE media_usage SET status='invalidated' WHERE post_id=? AND wordpress_media_id IN ({placeholders})",
-            (int(post_id), *ids),
+            f"UPDATE media_usage SET status='invalidated' WHERE post_id=? AND wordpress_media_id IN ({placeholders}){role_clause}",
+            params,
         )
         db.commit()
 

@@ -53,13 +53,25 @@ def _fixture(tmp_path):
             f"assunto {index}",
             width=1280,
             height=720,
+            sha256=f"{index + 1:064x}",
+            phash=f"{index + 1:016x}",
+            visual_group_id=f"visual:{index + 1:024x}",
+            visual_verification={"decision": "DIFFERENT"},
         )
         for index, media_id in enumerate((115134, 115135, 115136, 115137))
     )
     media = MediaProgress(
         required=4,
         inline=inline,
-        featured=FeaturedProgress(FeaturedStatus.VALID, 115138, "https://media.example/featured.webp"),
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID,
+            115138,
+            "https://media.example/featured.webp",
+            "f" * 64,
+            "f" * 16,
+            "visual:" + "f" * 24,
+            {"decision": "INITIAL"},
+        ),
     )
     state = WorkState(
         state=LifecycleState.HUMAN_REQUIRED,

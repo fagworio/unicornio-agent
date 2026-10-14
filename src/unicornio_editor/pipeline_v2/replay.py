@@ -11,7 +11,16 @@ from .scheduler import next_action
 
 
 def _summary(state) -> dict[str, Any]:
-    return {"state": state.state.value, "phase": state.phase.value, "blocker": state.blocker.value if state.blocker else None, "required": state.media.required, "accepted": state.media.accepted, "missing": state.media.missing, "next_action": next_action(state)}
+    return {
+        "state": state.state.value,
+        "phase": state.phase.value,
+        "blocker": state.blocker.value if state.blocker else None,
+        "required": state.media.required,
+        "accepted": state.media.valid_distinct_inline_count,
+        "accepted_working": state.media.accepted,
+        "missing": state.media.effective_missing,
+        "next_action": next_action(state),
+    }
 
 
 def replay_snapshot(path: str | Path, stages: dict[str, Any]) -> dict[str, Any]:

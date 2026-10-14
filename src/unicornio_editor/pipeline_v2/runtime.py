@@ -23,6 +23,7 @@ from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
+from .media_accounting import account_visual_media, reconcile_working_visual_media
 from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
@@ -568,9 +569,44 @@ class ProductionMediaResolver:
                 waiver_reason=previous.waiver_reason,
             ),
             post_id=int(context.get("post_id") or 0) or None,
+            run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
         )
         current_inline = list(recovered_media.inline)
         featured = recovered_media.featured
+        media_reconciliation = reconcile_working_visual_media(
+            recovered_media,
+            required_inline=total_required,
+            featured=featured,
+        )
+        media_accounting = media_reconciliation.accounting
+        valid_inline_ids = set(media_accounting.valid_inline_ids)
+
+        def log_media_accounting(accounting, *, stage: str) -> None:
+            try:
+                from ..observability import append_telemetry
+
+                append_telemetry(
+                    self.root,
+                    "v2_media_accounting",
+                    post_id=int(context["post_id"]),
+                    run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                    stage=stage,
+                    required=accounting.required_inline,
+                    accepted_working=accounting.accepted_working_count,
+                    valid_distinct=accounting.valid_distinct_inline_count,
+                    duplicates_confirmed=accounting.confirmed_duplicate_count,
+                    unverified=accounting.unverified_count,
+                    effective_missing=accounting.effective_missing,
+                    featured_status=accounting.featured_identity_status,
+                    baseline_complete=accounting.baseline_complete,
+                    valid_inline_ids=list(accounting.valid_inline_ids),
+                    duplicate_inline_ids=list(accounting.duplicate_inline_ids),
+                    unverified_inline_ids=list(accounting.unverified_inline_ids),
+                )
+            except Exception:  # noqa: BLE001 - observability is fail-soft
+                pass
+
+        log_media_accounting(media_accounting, stage="after_identity_recovery")
         featured_needed = 0 if featured.status is FeaturedStatus.VALID else 1
         current_featured = featured
 
@@ -589,6 +625,33 @@ class ProductionMediaResolver:
             game_name=editorial.get("game_name"),
         )
         is_listicle = detect_list_format(title, html) is not None or len(subject_rows) > 1
+        if is_listicle:
+            media_reconciliation = reconcile_working_visual_media(
+                recovered_media,
+                required_inline=total_required,
+                featured=featured,
+                listicle_items=subject_rows,
+            )
+            media_accounting = media_reconciliation.accounting
+            valid_inline_ids = set(media_accounting.valid_inline_ids)
+            log_media_accounting(media_accounting, stage="before_acquisition")
+        try:
+            from ..observability import append_telemetry
+
+            append_telemetry(
+                self.root,
+                "v2_media_reconciliation",
+                post_id=int(context["post_id"]),
+                run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                valid_inline_ids=list(media_accounting.valid_inline_ids),
+                duplicate_inline_ids=list(media_accounting.duplicate_inline_ids),
+                unverified_inline_ids=list(media_accounting.unverified_inline_ids),
+                deficit_before_attachment_count=max(0, total_required - len(current_inline)),
+                effective_missing=media_accounting.effective_missing,
+                read_only=True,
+            )
+        except Exception:  # noqa: BLE001 - telemetry cannot change acquisition
+            pass
         if not is_listicle and source_subjects:
             # Keep listicle coverage driven by its H2 subjects.  For ordinary
             # news, use the first concrete visual entity for discovery rather
@@ -618,12 +681,12 @@ class ProductionMediaResolver:
         covered_items = {
             str(item.item_number)
             for item in current_inline
-            if item.item_number is not None
+            if item.media_id in valid_inline_ids and item.item_number is not None
         }
         covered_subjects = {
             item.subject.casefold().strip()
             for item in current_inline
-            if item.subject.strip()
+            if item.media_id in valid_inline_ids and item.subject.strip()
         }
         missing_rows = [
             (index, row) for index, row in enumerate(subject_rows)
@@ -633,7 +696,7 @@ class ProductionMediaResolver:
                 and str(row.get("subject") or "").casefold().strip() not in covered_subjects
             )
         ]
-        inline_needed = max(0, total_required - len(current_inline))
+        inline_needed = media_accounting.effective_missing
         if is_listicle:
             # A migrated listicle may have accepted media without item_number.
             # It must cover every item and still satisfy the word-count
@@ -649,7 +712,7 @@ class ProductionMediaResolver:
             from .model import BlockerCode
 
             try:
-                future_urls = [item.media_url for item in current_inline]
+                future_urls = [item.media_url for item in current_inline if item.media_id in valid_inline_ids]
                 future_urls.extend(
                     f"__v2_pending_media_{index}__" for index in range(inline_needed)
                 )
@@ -666,6 +729,7 @@ class ProductionMediaResolver:
                     f"media_preflight:{exc.code}: {exc}",
                 ) from exc
         if inline_needed == 0 and featured_needed == 0:
+            log_media_accounting(media_accounting, stage="acquisition_not_needed")
             return MediaProgress(
                 required=total_required,
                 inline=tuple(current_inline),
@@ -986,20 +1050,20 @@ class ProductionMediaResolver:
         covered_item_keys = {
             str(item.item_number or item.subject).casefold()
             for item in current_inline
-            if item.item_number is not None or item.subject
+            if item.media_id in valid_inline_ids and (item.item_number is not None or item.subject)
         }
-        used_slots = {item.slot for item in current_inline}
+        used_slots = {item.slot for item in current_inline if item.media_id in valid_inline_ids}
 
         def inline_remaining() -> int:
+            current_accounting = account_visual_media(
+                current_inline,
+                required_inline=total_required,
+                featured=current_featured,
+                listicle_items=subject_rows if is_listicle else (),
+            )
             if is_listicle:
-                uncovered = sum(
-                    1
-                    for _index, row in missing_rows
-                    if str(row.get("item") or row.get("subject") or "").casefold()
-                    not in covered_item_keys
-                )
-                return max(uncovered, total_required - len(current_inline))
-            return max(0, total_required - len(current_inline))
+                return current_accounting.effective_missing
+            return current_accounting.effective_missing
 
         if inline_needed:
             # The article's own Fonte is the first acquisition strategy.  Its
@@ -1078,7 +1142,6 @@ class ProductionMediaResolver:
                         slot = 0
                         while slot in used_slots:
                             slot += 3
-                        used_slots.add(slot)
                         before = len(current_inline)
                         execute_plan([
                             self._plan_item(source_candidate, subject, slot, False)
@@ -1087,7 +1150,15 @@ class ProductionMediaResolver:
                             source_accepted += 1
                             if source_candidate.get("media_library_id"):
                                 source_reused += 1
-                            covered_item_keys.add(str(subject).casefold())
+                            current_valid_ids = set(account_visual_media(
+                                current_inline,
+                                required_inline=total_required,
+                                featured=current_featured,
+                                listicle_items=subject_rows if is_listicle else (),
+                            ).valid_inline_ids)
+                            if current_inline[-1].media_id in current_valid_ids:
+                                used_slots.add(slot)
+                                covered_item_keys.add(str(subject).casefold())
                 from ..observability import append_telemetry
 
                 append_telemetry(
@@ -1138,13 +1209,21 @@ class ProductionMediaResolver:
                         slot = 0
                         while slot in used_slots:
                             slot += 3
-                        used_slots.add(slot)
                     before = len(current_inline)
                     execute_plan([
                         self._plan_item(candidate, candidate.get("subject") or title, slot, False)
                     ])
-                    if len(current_inline) > before:
+                    if len(current_inline) > before and current_inline[-1].media_id in set(
+                        account_visual_media(
+                            current_inline,
+                            required_inline=total_required,
+                            featured=current_featured,
+                            listicle_items=subject_rows if is_listicle else (),
+                        ).valid_inline_ids
+                    ):
                         covered_item_keys.add(candidate_key)
+                        if not is_listicle:
+                            used_slots.add(slot)
         if search_runs:
             capacity_reached = inline_remaining() <= 0
             queries_planned = len(search_runs) if capacity_reached else len(subject_queries)
@@ -1195,9 +1274,12 @@ class ProductionMediaResolver:
                 completion_reason=completion_reason,
             )
             final_distinct = {
-                str(item.phash or item.media_url)
-                for item in current_inline
-                if item.phash or item.media_url
+                item_id for item_id in account_visual_media(
+                    current_inline,
+                    required_inline=total_required,
+                    featured=current_featured,
+                    listicle_items=subject_rows if is_listicle else (),
+                ).valid_inline_ids
             }
             search_progress = replace(
                 search_progress,
@@ -1206,6 +1288,13 @@ class ProductionMediaResolver:
             )
         else:
             search_progress = previous.search
+        final_accounting = account_visual_media(
+            current_inline,
+            required_inline=total_required,
+            featured=current_featured,
+            listicle_items=subject_rows if is_listicle else (),
+        )
+        log_media_accounting(final_accounting, stage="after_acquisition")
         return MediaProgress(
             required=total_required,
             inline=tuple({item.media_id: item for item in current_inline}.values()),
@@ -1440,10 +1529,21 @@ class WordPressWriterV2:
 
         expected_inline_urls = [
             str(item.media_url or "").strip()
-            for item in getattr(getattr(proposed_state, "media", None), "inline", ())
+            for item in getattr(
+                MediaProgress.from_dict(candidate.get("media"))
+                if outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
+                else getattr(proposed_state, "media", None),
+                "inline",
+                (),
+            )
             if str(item.media_url or "").strip()
         ]
         proposed_media = getattr(proposed_state, "media", None)
+        candidate_media = (
+            MediaProgress.from_dict(candidate.get("media"))
+            if outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
+            else proposed_media
+        )
         media_ids = {
             int(item.media_id)
             for item in getattr(proposed_media, "inline", ())
@@ -1476,6 +1576,32 @@ class WordPressWriterV2:
                 "visual_group_id": str(proposed_featured.visual_group_id or ""),
                 "visual_verification": dict(proposed_featured.visual_verification or {}),
             })
+        applied_inline_ids = {
+            int(item.media_id)
+            for item in getattr(candidate_media, "inline", ())
+            if getattr(item, "media_id", None)
+        }
+        applied_featured = getattr(candidate_media, "featured", None)
+        applied_media_ids = set(applied_inline_ids)
+        if getattr(applied_featured, "media_id", None):
+            applied_media_ids.add(int(applied_featured.media_id))
+        apply_media_records = [
+            {
+                "role": "inline",
+                "media_id": int(item.media_id),
+                "media_url": str(item.media_url or ""),
+                "readback_status": "not_attempted",
+            }
+            for item in getattr(candidate_media, "inline", ())
+            if getattr(item, "media_id", None)
+        ]
+        if getattr(applied_featured, "media_id", None):
+            apply_media_records.insert(0, {
+                "role": "featured",
+                "media_id": int(applied_featured.media_id),
+                "media_url": str(applied_featured.media_url or ""),
+                "readback_status": "not_attempted",
+            })
         media_state = "accepted_working" if media_ids else "apply_not_attempted"
         media_readback_status = "not_attempted"
         journal = journal_dir / f"{post_id}.json"
@@ -1488,6 +1614,7 @@ class WordPressWriterV2:
             "detail": outcome.detail or context.get("provider_reason"),
             "media_ids": media_ids,
             "media_records": media_records,
+            "apply_media_records": apply_media_records,
             "media_state": media_state,
             "media_readback_status": media_readback_status,
         }
@@ -1506,6 +1633,7 @@ class WordPressWriterV2:
         ready_two_phase = outcome.type.value == "ready" and bool(content)
 
         def assert_media_readback(readback_post: dict[str, Any]) -> None:
+            nonlocal apply_media_records
             readback_content = _html.unescape(str((readback_post.get("content") or {}).get("raw") or ""))
             embedded_readback_urls = set(_embedded_media_urls(readback_content))
             missing_inline = [
@@ -1516,6 +1644,35 @@ class WordPressWriterV2:
                 raise RuntimeError(
                     "inline media read-back mismatch: " + ", ".join(missing_inline[:5])
                 )
+            for record in apply_media_records:
+                role = str(record.get("role") or "")
+                if role == "featured":
+                    confirmed = readback_post.get("featured_media") == record.get("media_id")
+                else:
+                    confirmed = _canonical_embedded_media_url(str(record.get("media_url") or "")) in embedded_readback_urls
+                record["readback_status"] = "confirmed" if confirmed else "failed"
+                if not confirmed:
+                    detail = f" for media_id={record.get('media_id')}"
+                    if role == "featured":
+                        raise RuntimeError("featured media read-back mismatch" + detail)
+                    raise RuntimeError("inline media read-back mismatch" + detail)
+            applied_ids = set(applied_media_ids)
+            excluded_duplicate_urls = [
+                str(record.get("media_url") or "")
+                for record in media_records
+                if record.get("role") == "inline"
+                and int(record.get("media_id") or 0) not in applied_ids
+                and str((record.get("visual_verification") or {}).get("decision") or "")
+                in {"SAME_IMAGE", "SAME_ART_CROP"}
+            ]
+            embedded_canonical = {
+                _canonical_embedded_media_url(url) for url in _embedded_media_urls(readback_content)
+            }
+            if any(
+                _canonical_embedded_media_url(url) in embedded_canonical
+                for url in excluded_duplicate_urls if url
+            ):
+                raise RuntimeError("confirmed duplicate media remained in WordPress read-back")
             expected_featured = getattr(getattr(proposed_state, "media", None), "featured", None)
             expected_featured_id = getattr(expected_featured, "media_id", None)
             if expected_featured_id is not None and readback_post.get("featured_media") != expected_featured_id:
@@ -1528,6 +1685,7 @@ class WordPressWriterV2:
             media_update: dict[str, Any] = {"content": {"raw": content}}
             if outcome.type.value == "ready":
                 media_update["featured_media"] = candidate.get("featured_media")
+            intent["media_state"] = "apply_started"
             journal.write_text(
                 json.dumps({**intent, "status": "media_committing"}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -1538,7 +1696,7 @@ class WordPressWriterV2:
                 raise RuntimeError("WordPress media read-back missing")
             assert_media_readback(media_readback_post)
             journal.write_text(
-                json.dumps({**intent, "status": "committing"}, ensure_ascii=False, indent=2),
+                json.dumps({**intent, "status": "committing", "media_state": "inline_readback_confirmed", "media_readback_status": "confirmed", "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             self.client.update_post(post_id, update)
@@ -1630,7 +1788,7 @@ class WordPressWriterV2:
         if media_readback:
             media_state = "applied_readback_confirmed"
             media_readback_status = "confirmed"
-        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True, "media_state": media_state, "media_readback_status": media_readback_status}, ensure_ascii=False, indent=2), encoding="utf-8")
+        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True, "media_state": media_state, "media_readback_status": media_readback_status, "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
             "wordpress_changed": changed,
             "readback": True,
@@ -1639,6 +1797,8 @@ class WordPressWriterV2:
             "media_readback_status": media_readback_status,
             "media_state": media_state,
             "media_ids": media_ids,
+            "applied_media_ids": sorted(applied_media_ids) if media_readback else [],
+            "applied_inline_ids": sorted(applied_inline_ids) if media_readback else [],
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
         }
@@ -1771,8 +1931,9 @@ def run_v2(
             "media": {
                 str(post_id): {
                     "required": context["v2_state"].media.required,
-                    "accepted": context["v2_state"].media.accepted,
-                    "missing": context["v2_state"].media.missing,
+                    "accepted": context["v2_state"].media.valid_distinct_inline_count,
+                    "accepted_working": context["v2_state"].media.accepted,
+                    "missing": context["v2_state"].media.effective_missing,
                     "featured": context["v2_state"].media.featured.status.value,
                 }
                 for post_id, context in admitted
@@ -1888,21 +2049,34 @@ def run_v2(
                 completed += 1
                 try:
                     from ..media.registry import invalidate_v2_media, record_v2_observation
-                    previous_ids = {
-                        item.media_id for item in initial.media.inline
-                    }
-                    current_ids = {
-                        item.media_id for item in buffered.state.media.inline
-                    }
-                    invalidate_v2_media(
-                        root, post_id=int(post_id),
-                        media_ids=sorted(previous_ids - current_ids),
-                    )
+                    observed_state = buffered.state
+                    applied = bool(write.get("media_readback"))
+                    if applied:
+                        candidate_path = root / "backups" / str(post_id) / "editorial.candidate.json"
+                        candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+                        applied_media = MediaProgress.from_dict(candidate_payload.get("media"))
+                        previous_ids = {item.media_id for item in initial.media.inline}
+                        applied_inline_ids = {item.media_id for item in applied_media.inline}
+                        invalidate_v2_media(
+                            root,
+                            post_id=int(post_id),
+                            media_ids=sorted(previous_ids - applied_inline_ids),
+                            role="inline",
+                        )
+                        observed_state = replace(
+                            buffered.state,
+                            media=replace(
+                                buffered.state.media,
+                                inline=applied_media.inline,
+                                featured=applied_media.featured,
+                                accepted_count=None,
+                            ),
+                        )
                     record_v2_observation(
-                        root, post_id=post_id, run_id=run_id, state=buffered.state,
+                        root, post_id=post_id, run_id=run_id, state=observed_state,
                         phase=buffered.state.phase.value, outcome=outcome.type.value,
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
-                        applied=bool(write.get("media_readback")),
+                        applied=applied,
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error

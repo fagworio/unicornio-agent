@@ -16,6 +16,7 @@ from typing import Any
 from ..checklist import required_image_count, required_image_count_for_content
 from ..batch import BatchError, wordpress_text
 from .legacy import LegacyStateLoader
+from .media_accounting import account_visual_media
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
@@ -186,12 +187,14 @@ class ProductionCandidateReader:
             return bool(actual) and (not stored or stored == actual)
 
         def valid_count(media: MediaProgress) -> int:
-            return sum(
-                1 for item in media.inline
+            confirmed_ids = {
+                item.media_id for item in media.inline
                 if item.media_id not in rejected_ids
                 and item.media_url not in rejected_urls
                 and verified(item.media_id, item.media_url)
-            )
+            }
+            accounting = account_visual_media(media, required_inline=current_required)
+            return len(confirmed_ids.intersection(accounting.valid_inline_ids))
 
         best = current_media
         best_score = (
@@ -227,7 +230,7 @@ class ProductionCandidateReader:
             except ValueError:
                 continue
             score = (
-                len(inline),
+                valid_count(recovered),
                 int(featured.status is FeaturedStatus.VALID),
             )
             if score > best_score:

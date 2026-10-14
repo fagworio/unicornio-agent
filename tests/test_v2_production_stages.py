@@ -25,6 +25,21 @@ class Config:
     internal_links_enabled = False
 
 
+def _verified_inline(media_id, url, slot, *, decision="DIFFERENT"):
+    digest = f"{media_id:064x}"
+    return InlineMedia(
+        media_id,
+        url,
+        slot,
+        alt_text=f"Imagem {media_id}",
+        credit_text=f"Crédito da imagem: Fonte {media_id}",
+        sha256=digest,
+        phash=f"{media_id:016x}",
+        visual_group_id=f"visual:{media_id:024x}",
+        visual_verification={"decision": decision},
+    )
+
+
 def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     existing = InlineMedia(10, "https://example.test/a.webp", 0, "A", "Crédito da imagem: A")
     stage = ProductionMediaStage(object(), Config(), tmp_path, resolver=lambda *_args: MediaProgress(
@@ -176,9 +191,9 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
     media = MediaProgress(
         required=2,
         inline=(
-            InlineMedia(10, existing, 0, "Existing", "Crédito da imagem: Existing"),
-            InlineMedia(11, featured, 3, "Featured", "Crédito da imagem: Featured"),
-            InlineMedia(12, new, 2, "New", "Crédito da imagem: New"),
+            _verified_inline(10, existing, 0),
+            _verified_inline(11, featured, 3),
+            _verified_inline(12, new, 2),
         ),
         featured=FeaturedProgress(FeaturedStatus.VALID, 11, featured),
     )
@@ -202,13 +217,7 @@ def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path)
     media = MediaProgress(
         required=4,
         inline=tuple(
-            InlineMedia(
-                100 + index,
-                f"https://example.test/{index}.webp",
-                100 + index,
-                f"Imagem {index}",
-                f"Crédito da imagem: Fonte {index}",
-            )
+                _verified_inline(100 + index, f"https://example.test/{index}.webp", 100 + index)
             for index in range(4)
         ),
     )
@@ -231,13 +240,7 @@ def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tm
     media = MediaProgress(
         required=4,
         inline=tuple(
-            InlineMedia(
-                200 + index,
-                f"https://example.test/{index}.webp",
-                200 + index,
-                f"Imagem {index}",
-                f"Crédito da imagem: Fonte {index}",
-            )
+                _verified_inline(200 + index, f"https://example.test/{index}.webp", 200 + index)
             for index in range(4)
         ),
     )
@@ -247,6 +250,45 @@ def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tm
         )
     assert error.value.blocker is BlockerCode.STRUCTURE
     assert error.value.phase is Phase.EDITORIAL
+
+
+def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_path):
+    duplicate_url = "https://example.test/duplicate.webp"
+    distinct_url = "https://example.test/distinct.webp"
+    body = "<p>Contexto editorial detalhado explica o jogo, a notícia e os principais acontecimentos recentes aos leitores.</p>"
+    editorial = {
+        "cleaned_html": (
+            f'<figure><img src="{duplicate_url}"><figcaption>Legenda antiga</figcaption></figure>'
+            + body * 8
+        ),
+        "seo": {},
+    }
+    duplicate = InlineMedia(
+        21, duplicate_url, 0,
+        sha256="b" * 64, phash="2" * 16, visual_group_id="visual:" + "b" * 24,
+        visual_verification={"decision": "SAME_ART_CROP", "duplicate_of": "20"},
+    )
+    distinct = _verified_inline(22, distinct_url, 3)
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        20,
+        "https://example.test/featured.webp",
+        "a" * 64,
+        "1" * 16,
+        "visual:" + "a" * 24,
+        {"decision": "INITIAL"},
+    )
+    media = MediaProgress(required=2, inline=(duplicate, distinct), featured=featured)
+
+    candidate = ProductionComposeStage(Config(), tmp_path)(
+        {"post_id": 22, "title": "Notícia", "original_link": None}, editorial, media,
+    )
+
+    assert duplicate_url not in candidate["content"]
+    assert "Legenda antiga" not in candidate["content"]
+    assert distinct_url in candidate["content"]
+    accepted_ids = [row["media_id"] for row in candidate["media"]["inline"]["accepted"]]
+    assert accepted_ids == [22]
 
 
 def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):

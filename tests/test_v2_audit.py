@@ -186,7 +186,10 @@ def test_cohort_report_joins_frozen_ids_with_current_state_without_mutation(tmp_
     assert report["count"] == 2
     assert report["counts"] == {"ready": 1, "published": 0, "missing_state": 1}
     assert report["posts"][0]["ready"] is True
-    assert report["posts"][0]["media"]["accepted"] == 2
+    assert report["posts"][0]["media"]["accepted"] == 0
+    assert report["posts"][0]["media"]["accepted_working"] == 2
+    assert report["posts"][0]["media"]["missing"] == 2
+    assert report["posts"][0]["media"]["unverified"] == 2
     assert report["posts"][0]["wordpress_status"] == "publish"
     assert report["posts"][0]["v2_state"] == "ready"
     assert report["posts"][0]["divergence"] == ["wordpress_publish_v2_ready"]

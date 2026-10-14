@@ -237,6 +237,27 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(statuses["media_duplicate_confirmed"], "pass")
         self.assertEqual(statuses["imagens_no_corpo"], "fail")
 
+    def test_visual_quota_uses_distinct_verified_inline_assets(self):
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 4, "accepted": [
+                {"media_id": 115171, "media_url": "https://media.example/115171.webp", "sha256": "b", "phash": "2", "visual_group_id": "v:b", "visual_verification": {"decision": "SAME_ART_CROP", "duplicate_of": "115170"}},
+                {"media_id": 115172, "media_url": "https://media.example/115172.webp", "sha256": "c", "phash": "3", "visual_group_id": "v:c", "visual_verification": {"decision": "SAME_ART_CROP", "duplicate_of": "115170"}},
+                {"media_id": 115173, "media_url": "https://media.example/115173.webp", "sha256": "d", "phash": "4", "visual_group_id": "v:d", "visual_verification": {"decision": "DIFFERENT"}},
+            ]},
+            "featured": {"status": "valid", "media_id": 115170, "media_url": "https://media.example/115170.webp", "sha256": "a", "phash": "1", "visual_group_id": "v:a", "visual_verification": {"decision": "INITIAL"}},
+        }
+        content = "".join(
+            f'<p>Texto substantivo.</p><img src="https://media.example/{media_id}.webp">'
+            for media_id in (115171, 115172, 115173)
+        )
+
+        result = self._run_checklist(content=content, media_context=media_context)
+
+        self.assertEqual(result["media_decision"]["accepted"], 1)
+        self.assertEqual(result["media_decision"]["missing"], 3)
+        self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
+
     def test_listicle_does_not_exempt_final_duplicate_of_another_inline(self):
         content = "<h2>1. Jogo A</h2><p>Descrição.</p><img src=\"https://media.example/other.webp\"><h2>2. Jogo B</h2><p>Descrição.</p><img src=\"https://media.example/crop.webp\">"
         media_context = {

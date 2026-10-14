@@ -47,13 +47,14 @@ def _identity_complete(asset: Any) -> bool:
     )
 
 
-def _visual_record(decision: Any) -> dict[str, Any]:
+def _visual_record(decision: Any, *, baseline_media_ids: list[int] | None = None) -> dict[str, Any]:
     return {
         "method": str(getattr(decision, "reason", "") or ""),
         "decision": str(getattr(decision, "decision", "") or "UNVERIFIED"),
         "duplicate_of": str(getattr(decision, "duplicate_of", "") or ""),
         "confidence": _decision_confidence(decision),
         "comparator_version": 1,
+        "baseline_media_ids": list(baseline_media_ids or []),
     }
 
 
@@ -64,6 +65,7 @@ def materialize_media_identity(
     media: MediaProgress,
     *,
     post_id: int | None = None,
+    run_id: str = "",
 ) -> MediaProgress:
     """Recover missing final-image identity without changing external state."""
     get_media = getattr(client, "get_media", None)
@@ -72,8 +74,7 @@ def materialize_media_identity(
     needs_recovery = any(not _identity_complete(item) for item in media.inline) or (
         media.featured.status is FeaturedStatus.VALID
         and media.featured.media_id
-        and media.featured.media_url
-        and not _identity_complete(media.featured)
+        and (not str(media.featured.media_url or "").strip() or not _identity_complete(media.featured))
     )
     if not needs_recovery:
         return media
@@ -84,15 +85,26 @@ def materialize_media_identity(
     comparison_budget = [0]
     baseline_unavailable = False
 
-    def recovery_error(exc: BaseException, *, media_id: int | None, role: str, stage: str) -> None:
+    def recovery_error(
+        exc: BaseException | None,
+        *,
+        media_id: int | None,
+        role: str,
+        stage: str,
+        cause: str = "",
+    ) -> None:
         fields: dict[str, Any] = {
             "media_id": media_id,
             "role": role,
             "stage": stage,
-            "error": type(exc).__name__,
+            "error": type(exc).__name__ if exc is not None else "comparison_inconclusive",
         }
         if post_id is not None:
             fields["post_id"] = int(post_id)
+        if run_id:
+            fields["run_id"] = str(run_id)
+        if cause:
+            fields["cause"] = str(cause)[:120]
         try:
             append_telemetry(root, "visual_identity_recovery_failed", **fields)
         except Exception:  # noqa: BLE001 - diagnostics cannot change lifecycle
@@ -110,13 +122,13 @@ def materialize_media_identity(
         if (
             media.featured.status is FeaturedStatus.VALID
             and media.featured.media_id
-            and media.featured.media_url
         ):
             featured = media.featured
             row = featured.to_dict()
             try:
+                resolved_url = attachment_url(int(featured.media_id))
                 local = download_image(
-                    attachment_url(int(featured.media_id)),
+                    resolved_url,
                     temp_root / f"featured-{featured.media_id}.img",
                     url_policy=str(getattr(config, "remote_url_policy", "audit")),
                 )
@@ -129,7 +141,7 @@ def materialize_media_identity(
                     else {"decision": "INITIAL", "method": "fingerprint", "duplicate_of": "", "confidence": None, "comparator_version": 1}
                 )
                 updated_featured = FeaturedProgress(
-                    featured.status, featured.media_id, featured.media_url,
+                    featured.status, featured.media_id, resolved_url,
                     identity.sha256, identity.phash, identity.visual_group_id,
                     verification,
                 )
@@ -153,10 +165,26 @@ def materialize_media_identity(
                 identity = fingerprint_path(local)
                 row.update(identity.to_dict())
                 row["local_path"] = str(local)
-                if _identity_complete(item):
+                existing_verification = item.visual_verification if isinstance(item.visual_verification, dict) else {}
+                existing_baselines = {
+                    str(value) for value in existing_verification.get("baseline_media_ids", [])
+                } if isinstance(existing_verification.get("baseline_media_ids", []), (list, tuple)) else set()
+                featured_id = str(media.featured.media_id or "") if media.featured.status is FeaturedStatus.VALID else ""
+                bytes_changed = bool(item.sha256 and item.sha256 != identity.sha256)
+                needs_featured_recheck = bool(
+                    _identity_complete(item)
+                    and featured_id
+                    and (
+                        str(existing_verification.get("decision") or "") == "INITIAL"
+                        or featured_id not in existing_baselines
+                    )
+                )
+                needs_identity_recheck = bytes_changed or needs_featured_recheck
+                if _identity_complete(item) and not needs_identity_recheck:
                     updated_inline.append(item)
                     retained.append(row)
                     continue
+                comparison_error_logged = False
                 if baseline_unavailable:
                     identity_value = identity
                     decision = VisualIdentityDecision(
@@ -165,6 +193,11 @@ def materialize_media_identity(
                     )
                 else:
                     try:
+                        baseline_media_ids = [
+                            int(value["media_id"])
+                            for value in retained
+                            if str(value.get("media_id") or "").isdigit()
+                        ]
                         identity_value, decision = verify_candidate_identity(
                             local,
                             candidate_id=str(item.media_id),
@@ -176,12 +209,18 @@ def materialize_media_identity(
                     except Exception as exc:  # noqa: BLE001 - defer provider/runtime faults
                         baseline_unavailable = True
                         recovery_error(exc, media_id=int(item.media_id), role="inline", stage="compare")
+                        comparison_error_logged = True
                         identity_value = identity
                         decision = VisualIdentityDecision(
                             "UNVERIFIED", False,
                             reason="baseline_identity_unavailable",
                         )
-                verification = _visual_record(decision)
+                baseline_media_ids = [
+                    int(value["media_id"])
+                    for value in retained
+                    if str(value.get("media_id") or "").isdigit()
+                ]
+                verification = _visual_record(decision, baseline_media_ids=baseline_media_ids)
                 updated_inline.append(replace(
                     item,
                     sha256=identity_value.sha256,
@@ -191,10 +230,24 @@ def materialize_media_identity(
                 ))
                 row.update(identity_value.to_dict())
                 row["visual_verification"] = verification
+                if decision.decision == "UNVERIFIED":
+                    # The bytes were recovered but the comparison anchor was
+                    # not. Later assets must not be promoted to INITIAL as if
+                    # this unresolved asset were absent.
+                    baseline_unavailable = True
+                    if not comparison_error_logged:
+                        recovery_error(
+                            None,
+                            media_id=int(item.media_id),
+                            role="inline",
+                            stage="compare",
+                            cause=str(decision.reason or "identity_unverified"),
+                        )
                 if decision.verified and decision.decision not in {"SAME_IMAGE", "SAME_ART_CROP"}:
                     retained.append(row)
             except Exception as exc:  # noqa: BLE001 - preserve evidence for retry
                 updated_inline.append(item)
+                baseline_unavailable = True
                 recovery_error(exc, media_id=int(item.media_id), role="inline", stage="materialize")
 
     return replace(media, inline=tuple(updated_inline), featured=updated_featured)

@@ -91,6 +91,35 @@ def test_controlled_html_cleanup_removes_only_explicit_duplicate_url():
     assert "Texto." in output and "Fim." in output and "legenda" in output
 
 
+def test_media_cleanup_removes_empty_figure_caption_and_credit():
+    html = (
+        '<p>Texto preservado.</p><figure><img src="https://wp.test/frame-300x200.webp">'
+        '<figcaption>Legenda da imagem inválida</figcaption>'
+        '<p class="image-credit">Crédito da imagem: Fonte</p></figure><p>Fim.</p>'
+    )
+
+    output = remove_media_urls(html, {"https://wp.test/frame.webp?quality=80"})
+
+    assert "<figure" not in output
+    assert "Legenda da imagem inválida" not in output
+    assert "image-credit" not in output
+    assert "Texto preservado." in output and "Fim." in output
+
+
+def test_media_cleanup_matches_srcset_variants_without_removing_other_image():
+    html = (
+        '<figure><img src="https://wp.test/keep.webp" '
+        'srcset="https://wp.test/remove-640x480.webp 640w, https://wp.test/keep.webp 1200w">'
+        '<figcaption>Caption remains with another image</figcaption></figure>'
+    )
+
+    output = remove_media_urls(html, {"https://wp.test/remove.webp"})
+
+    assert "remove-640x480.webp" not in output
+    assert 'src="https://wp.test/keep.webp"' in output
+    assert "Caption remains with another image" in output
+
+
 def test_compose_ignores_unconfirmed_or_stale_visual_journal(tmp_path: Path):
     path = tmp_path / "work" / "v2-visual-reconcile"
     path.mkdir(parents=True)

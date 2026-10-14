@@ -219,7 +219,7 @@ class PipelineRunner:
 
     @staticmethod
     def _media_progressed(previous: MediaProgress, media: MediaProgress) -> bool:
-        if media.accepted > previous.accepted:
+        if media.valid_distinct_inline_count > previous.valid_distinct_inline_count:
             return True
         if (
             previous.featured.status is not FeaturedStatus.VALID

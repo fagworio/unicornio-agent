@@ -6,9 +6,11 @@ These adapters deliberately reuse the mature V1 functions.  They do not call
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from ..batch import BatchError, load_editorial_batch, prepare_batch, wordpress_text
 from ..checklist import run_pre_publish_checklist
@@ -32,6 +34,7 @@ from ..workflow import (
     resolve_editorial_defaults,
     validate_media_plan,)
 from .errors import StageError
+from .media_accounting import reconcile_working_visual_media
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
 from ..observability import record_unexpected_error
 
@@ -43,6 +46,14 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
+
+
+def _canonical_media_ref(value: str) -> str:
+    parsed = urlsplit(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip().split("?", 1)[0]
+    path = re.sub(r"-\d+x\d+(?=\.[^./]+$)", "", parsed.path)
+    return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), path, "", ""))
 
 
 def _visual_reconcile_urls(root: Path, post_id: int, media: MediaProgress) -> list[str]:
@@ -432,19 +443,46 @@ class ProductionComposeStage:
                 str(editorial.get("cleaned_html") or ""),
                 post_title=str(context.get("title") or ""),
             )
+            reconciliation = reconcile_working_visual_media(media)
+            accounting = reconciliation.accounting
+            valid_ids = set(accounting.valid_inline_ids)
+            duplicate_ids = set(accounting.duplicate_inline_ids)
+            from ..media.relevance import iter_content_images
+
+            final_inline_urls = iter_content_images(existing_html)
+            final_url = _canonical_media_ref(str(final_inline_urls[-1].get("src") or "")) if final_inline_urls else ""
+            featured_id = media.featured.media_id
+            permitted_list_repeat_ids = {
+                item.media_id
+                for item in media.inline
+                if is_listicle
+                and item.media_id in duplicate_ids
+                and featured_id is not None
+                and str((item.visual_verification or {}).get("duplicate_of") or "") == str(featured_id)
+                and _canonical_media_ref(item.media_url) == final_url
+            }
+            duplicate_urls = [
+                item.media_url for item in media.inline
+                if item.media_id in duplicate_ids
+                and item.media_id not in permitted_list_repeat_ids
+                and item.media_url
+            ]
             existing_html = remove_media_urls(
                 existing_html,
-                _visual_reconcile_urls(self.root, int(context["post_id"]), media),
+                [*_visual_reconcile_urls(self.root, int(context["post_id"]), media), *duplicate_urls],
             )
             featured_url = str(media.featured.media_url or "").strip()
             insertable_urls = set(normal_media_urls_to_insert(
                 existing_html,
-                [str(item.media_url or "") for item in media.inline],
+                [str(item.media_url or "") for item in media.inline if item.media_id in valid_ids],
                 featured_url,
             ))
             seen_urls: set[str] = set()
             placements: list[dict[str, Any]] = []
-            for index, item in enumerate(media.inline):
+            eligible_inline = tuple(reconciliation.eligible_inline) + tuple(
+                item for item in media.inline if item.media_id in permitted_list_repeat_ids
+            )
+            for index, item in enumerate(eligible_inline):
                 media_url = str(item.media_url or "").strip()
                 if (
                     media_url not in insertable_urls
@@ -485,7 +523,8 @@ class ProductionComposeStage:
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)
-            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            candidate_media = replace(media, inline=eligible_inline, accepted_count=None)
+            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
             if persist:
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate

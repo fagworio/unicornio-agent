@@ -21,9 +21,9 @@ def rank(state: WorkState, *, manually_reopened: bool = False) -> int:
     ):
         return -1000
     if state.blocker in {BlockerCode.FEATURED_MISSING, BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION}:
-        return 1000 if state.media.missing == 0 else 500 - state.media.missing
+        return 1000 if state.media.effective_missing == 0 else 500 - state.media.effective_missing
     if state.blocker in {BlockerCode.INLINE_MISSING, BlockerCode.MEDIA_INVALID, BlockerCode.MEDIA_DUPLICATE, BlockerCode.MEDIA_ORIGIN}:
-        return 400 - state.media.missing
+        return 400 - state.media.effective_missing
     if state.phase is Phase.EDITORIAL:
         return 250
     if state.phase is Phase.RELEVANCE:
@@ -119,7 +119,7 @@ def next_action(state: WorkState) -> str:
         return "resolve_inline"
     if state.blocker in {BlockerCode.FEATURED_MISSING, BlockerCode.FEATURED_INVALID, BlockerCode.FEATURED_VISION}:
         return "resolve_featured"
-    if state.media.missing > 0:
+    if state.media.effective_missing > 0:
         return "resolve_inline"
     if state.media.featured.status is not FeaturedStatus.VALID:
         return "resolve_featured"

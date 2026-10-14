@@ -277,7 +277,12 @@ def run_pre_publish_checklist(
     inline_images = [str(item.get("src") or "").strip() for item in img_items]
     inline_images = [url for url in inline_images if url]
     inline_assets: list[Mapping[str, Any]] = []
+    visual_identity_policy = 0
     if isinstance(media_context, Mapping):
+        try:
+            visual_identity_policy = int(media_context.get("visual_identity_policy") or 0)
+        except (TypeError, ValueError):
+            visual_identity_policy = 0
         inline_payload = media_context.get("inline")
         if isinstance(inline_payload, Mapping):
             inline_assets = [item for item in (inline_payload.get("accepted") or []) if isinstance(item, Mapping)]
@@ -288,7 +293,21 @@ def run_pre_publish_checklist(
     }
     # The quota is based on final, canonical frames. WordPress size variants
     # of the same attachment do not inflate the 2/4/6 count.
-    image_count = len({_canonical_image_url(url) for url in inline_images} - confirmed_duplicate_urls)
+    if visual_identity_policy >= 4 and isinstance(media_context, Mapping):
+        from .pipeline_v2.media_accounting import account_visual_media
+
+        accounting = account_visual_media(media_context, required_inline=required)
+        valid_ids = set(accounting.valid_inline_ids)
+        proven_urls = {
+            _canonical_image_url(str(asset.get("media_url") or ""))
+            for asset in inline_assets
+            if str(asset.get("media_id") or "").isdigit()
+            and int(asset.get("media_id") or 0) in valid_ids
+            and str(asset.get("media_url") or "").strip()
+        }
+        image_count = len({_canonical_image_url(url) for url in inline_images} & proven_urls)
+    else:
+        image_count = len({_canonical_image_url(url) for url in inline_images} - confirmed_duplicate_urls)
 
     # Opcao A: o minimo e dimensionado pela DISPONIBILIDADE REAL de frames
     # visualmente distintos. O gate imagens_similares bloqueia as repetidas; o
@@ -344,7 +363,7 @@ def run_pre_publish_checklist(
     # durable identity and a positive (INITIAL/DIFFERENT) verification.  The
     # marker keeps historical serialized states backward compatible until the
     # resolver has materialised their attachment fingerprints.
-    if isinstance(media_context, Mapping) and int(media_context.get("visual_identity_policy") or 0) >= 4:
+    if isinstance(media_context, Mapping) and visual_identity_policy >= 4:
         identity_assets = [*inline_assets]
         featured_payload = media_context.get("featured")
         if isinstance(featured_payload, Mapping) and featured_payload.get("status") == "valid":

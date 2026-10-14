@@ -43,21 +43,36 @@ def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, t
     import unicornio_editor.pipeline_v2.visual_media as visual_media
     from PIL import Image
 
-    image = tmp_path / "legacy.webp"
-    Image.new("RGB", (32, 32), "red").save(image, "WEBP")
-    monkeypatch.setattr(visual_media, "download_image", lambda *_args, **_kwargs: image)
+    inline_image = tmp_path / "legacy.webp"
+    featured_image = tmp_path / "featured.webp"
+    Image.new("RGB", (32, 32), "blue").save(inline_image, "WEBP")
+    Image.new("RGB", (32, 32), "red").save(featured_image, "WEBP")
+    monkeypatch.setattr(
+        visual_media,
+        "download_image",
+        lambda url, *_args, **_kwargs: featured_image if "featured" in str(url) else inline_image,
+    )
+    monkeypatch.setattr(
+        visual_media,
+        "verify_candidate_identity",
+        lambda path, **_kwargs: (
+            visual_media.fingerprint_path(path),
+            visual_media.VisualIdentityDecision("DIFFERENT", True, reason="fixture"),
+        ),
+    )
     monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [])
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
 
     class Client:
         def get_media(self, media_id):
-            return {"id": media_id, "source_url": "https://wp.test/115152.webp"}
+            name = "featured" if media_id == 999 else "115152"
+            return {"id": media_id, "source_url": f"https://wp.test/{name}.webp"}
 
     previous = MediaProgress(
         required=1,
         inline=(InlineMedia(115152, "https://wp.test/115152.webp", 0),),
-        featured=FeaturedProgress(FeaturedStatus.VALID, 999, ""),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 999, "https://wp.test/featured.webp"),
     )
     result = ProductionMediaResolver(Client(), Config(), tmp_path)(
         {"post_id": 115152, "title": "Test"},
@@ -70,7 +85,7 @@ def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, t
     assert recovered.sha256
     assert recovered.phash
     assert recovered.visual_group_id
-    assert recovered.visual_verification["decision"] == "INITIAL"
+    assert recovered.visual_verification["decision"] == "DIFFERENT"
 
 
 def test_identity_recovery_does_not_mark_inline_initial_when_featured_is_unavailable(monkeypatch, tmp_path):
@@ -115,6 +130,111 @@ def test_identity_recovery_does_not_mark_inline_initial_when_featured_is_unavail
     assert failure["role"] == "featured"
     assert failure["stage"] == "materialize"
     assert "featured.webp" not in json.dumps(failure)
+
+
+def test_unavailable_earlier_inline_prevents_later_initial_promotion(monkeypatch, tmp_path):
+    import unicornio_editor.pipeline_v2.visual_media as visual_media
+    from PIL import Image
+
+    image = tmp_path / "later.webp"
+    Image.new("RGB", (32, 32), "green").save(image, "WEBP")
+
+    def download(url, *_args, **_kwargs):
+        if "115155" in str(url):
+            raise TimeoutError("earlier attachment unavailable")
+        return image
+
+    monkeypatch.setattr(visual_media, "download_image", download)
+
+    class Client:
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": f"https://wp.test/{media_id}.webp"}
+
+    media = MediaProgress(
+        required=2,
+        inline=(
+            InlineMedia(115155, "https://wp.test/115155.webp", 0),
+            InlineMedia(115156, "https://wp.test/115156.webp", 1),
+        ),
+    )
+    recovered = visual_media.materialize_media_identity(Client(), Config(), tmp_path, media, post_id=115234)
+
+    assert recovered.inline[0].visual_verification == {}
+    assert recovered.inline[1].visual_verification["decision"] == "UNVERIFIED"
+    assert recovered.inline[1].visual_verification["method"] == "baseline_identity_unavailable"
+
+
+def test_featured_without_url_is_resolved_from_attachment_id(monkeypatch, tmp_path):
+    import unicornio_editor.pipeline_v2.visual_media as visual_media
+    from PIL import Image
+
+    image = tmp_path / "featured.webp"
+    Image.new("RGB", (32, 32), "red").save(image, "WEBP")
+    monkeypatch.setattr(visual_media, "download_image", lambda *_args, **_kwargs: image)
+
+    class Client:
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": "https://wp.test/restored-featured.webp"}
+
+    media = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 115157, ""),
+    )
+    recovered = visual_media.materialize_media_identity(Client(), Config(), tmp_path, media, post_id=115234)
+
+    assert recovered.featured.media_url == "https://wp.test/restored-featured.webp"
+    assert recovered.featured.sha256
+    assert recovered.featured.visual_verification["decision"] == "INITIAL"
+
+
+def test_resolver_plans_reference_case_using_visual_deficit(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    planned = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        planned.append(batch["posts"][0]["needed"])
+        return {"posts": [{
+            "reuse": [],
+            "audit_candidates": [],
+            "search": {"completed": True, "queries_attempted": 1, "engines_attempted": ["bing"]},
+        }]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Jogo"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID, 115170, "https://wp.test/115170.webp",
+        "a" * 64, "1" * 16, "visual:" + "a" * 24,
+        {"decision": "INITIAL"},
+    )
+    inline = (
+        InlineMedia(115171, "https://wp.test/115171.webp", 0, phash="2" * 16, sha256="b" * 64,
+                    visual_group_id="visual:" + "b" * 24,
+                    visual_verification={"decision": "SAME_ART_CROP", "duplicate_of": "115170"}),
+        InlineMedia(115172, "https://wp.test/115172.webp", 1, phash="3" * 16, sha256="c" * 64,
+                    visual_group_id="visual:" + "c" * 24,
+                    visual_verification={"decision": "SAME_ART_CROP", "duplicate_of": "115170"}),
+        InlineMedia(115173, "https://wp.test/115173.webp", 2, phash="4" * 16, sha256="d" * 64,
+                    visual_group_id="visual:" + "d" * 24,
+                    visual_verification={"decision": "DIFFERENT"}),
+    )
+    previous = MediaProgress(required=4, inline=inline, featured=featured)
+
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115152, "title": "Jogo"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(12), "seo": {}},
+        previous,
+    )
+
+    assert planned
+    assert set(planned) == {3}
+    assert result.accepted == 3
+    assert result.search.exhausted is True
 
 
 def test_adaptive_history_reads_real_media_manifest(tmp_path):
@@ -546,7 +666,12 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
 
 def test_media_resolver_refreshes_required_on_noop_retry(tmp_path):
     inline = tuple(
-        InlineMedia(index, f"https://cdn.test/{index}.webp", index)
+        InlineMedia(
+            index, f"https://cdn.test/{index}.webp", index,
+            phash=f"{index:016x}", sha256=f"{index:064x}",
+            visual_group_id=f"visual:{index:024x}",
+            visual_verification={"decision": "DIFFERENT"},
+        )
         for index in range(1, 5)
     )
     previous = MediaProgress(
@@ -765,7 +890,13 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
 
 def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_path):
     import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.pipeline_v2.visual_media as visual_media
     import unicornio_editor.workflow as workflow
+    from PIL import Image
+
+    image = tmp_path / "featured.webp"
+    Image.new("RGB", (32, 32), "red").save(image, "WEBP")
+    monkeypatch.setattr(visual_media, "download_image", lambda *_args, **_kwargs: image)
 
     calls = []
 
@@ -1053,11 +1184,23 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
         "alt_text": "Test",
         "credit_text": "Crédito",
         "featured": False,
+        "sha256": "b" * 64,
+        "phash": "2" * 16,
+        "visual_group_id": "visual:" + "b" * 24,
+        "visual_verification": {"decision": "DIFFERENT"},
     }], None, None))
     monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
 
-    previous = MediaProgress(required=1, featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"))
+    previous = MediaProgress(required=1, featured=FeaturedProgress(
+        FeaturedStatus.VALID,
+        99,
+        "https://cdn.test/featured.webp",
+        "a" * 64,
+        "1" * 16,
+        "visual:" + "a" * 24,
+        {"decision": "INITIAL"},
+    ))
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
         {"post_id": 1, "title": "Test", "original_link": "https://source.test/article"},
         SimpleNamespace(media=previous),
