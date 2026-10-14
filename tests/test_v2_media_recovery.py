@@ -176,6 +176,39 @@ def _mock_validation(monkeypatch, tmp_path):
     return observed_roots
 
 
+def test_legacy_verified_requires_independent_upload_proof(tmp_path, monkeypatch):
+    root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    _mock_validation(monkeypatch, tmp_path)
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    with pytest.raises(ValueError, match="LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT"):
+        recover_historical_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path, legacy_verified=True,
+        )
+
+
+def test_legacy_verified_accepts_complete_independent_proof_in_preview(tmp_path, monkeypatch):
+    root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    evidence["legacy_proof"] = {
+        "upload_event": {"post_id": 115152, "media_id": 115305, "event_id": "upload-1"},
+        "attachment_get": {"post_id": 115152, "media_id": 115305},
+        "source_record": {
+            "source_page_url": evidence["source_page_url"],
+            "direct_image_url": evidence["direct_image_url"],
+        },
+        "run_binding": {"historical_run_id": evidence["run_id"], "upload_event_id": "upload-1"},
+    }
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    _mock_validation(monkeypatch, tmp_path)
+    result = recover_historical_attachment(
+        client, config, root, post_id=115152, media_id=115305,
+        evidence_path=evidence_path, legacy_verified=True,
+    )
+    assert result["recovery_policy"] == "legacy-verified"
+    assert result["writes"] == 0
+    assert result["missing"] == 2
+
+
 def test_recovery_preview_is_read_only_and_preserves_human_lifecycle(tmp_path, monkeypatch):
     root, original, _evidence, evidence_path, client, config = _fixture(tmp_path)
     observed_roots = _mock_validation(monkeypatch, tmp_path)

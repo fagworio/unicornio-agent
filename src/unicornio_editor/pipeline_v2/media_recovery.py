@@ -130,6 +130,28 @@ def _verify_historical_linkage(root: Path, post_id: int, evidence: dict[str, Any
         raise ValueError("candidate_id has no matching accepted V2 decision in MediaRegistry")
 
 
+def _verify_legacy_evidence(evidence: dict[str, Any], *, post_id: int, media_id: int) -> None:
+    """Require independent proof before bypassing the strict Registry linkage."""
+    proof = evidence.get("legacy_proof")
+    required = ("upload_event", "attachment_get", "source_record", "run_binding")
+    missing = [key for key in required if not isinstance(proof, dict) or not isinstance(proof.get(key), dict)]
+    if missing:
+        raise ValueError(
+            "LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: missing " + ", ".join(missing)
+        )
+    upload = proof["upload_event"]
+    attachment = proof["attachment_get"]
+    binding = proof["run_binding"]
+    if int(upload.get("post_id") or 0) != post_id or int(upload.get("media_id") or 0) != media_id:
+        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: upload event is not bound to post/attachment")
+    if int(attachment.get("post_id") or 0) not in {0, post_id} or int(attachment.get("media_id") or 0) != media_id:
+        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: attachment GET is not bound to the requested media")
+    if not binding.get("historical_run_id") or not binding.get("upload_event_id"):
+        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: upload event has no verifiable run binding")
+    if not proof["source_record"].get("source_page_url") or not proof["source_record"].get("direct_image_url"):
+        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: independent provenance is incomplete")
+
+
 def recover_historical_attachment(
     client: Any,
     config: Any,
@@ -138,6 +160,7 @@ def recover_historical_attachment(
     post_id: int,
     media_id: int,
     evidence_path: str | Path,
+    legacy_verified: bool = False,
     apply: bool = False,
 ) -> dict[str, Any]:
     """Reconcile one existing WordPress attachment; preview is the default.
@@ -154,12 +177,12 @@ def recover_historical_attachment(
         with _V2RecoveryLock(root / "work" / "v2-run.lock"):
             return _recover_locked(
                 client, config, root, post_id=post_id, media_id=media_id,
-                evidence_path=Path(evidence_path), apply=True,
+                evidence_path=Path(evidence_path), legacy_verified=legacy_verified, apply=True,
             )
     else:
         return _recover_locked(
             client, config, root, post_id=post_id, media_id=media_id,
-            evidence_path=Path(evidence_path), apply=False,
+            evidence_path=Path(evidence_path), legacy_verified=legacy_verified, apply=False,
         )
 
 
@@ -188,6 +211,7 @@ def _recover_locked(
     post_id: int,
     media_id: int,
     evidence_path: Path,
+    legacy_verified: bool,
     apply: bool,
 ) -> dict[str, Any]:
     evidence = _read_json(evidence_path)
@@ -218,7 +242,10 @@ def _recover_locked(
     for field in ("sha256", "phash", "visual_group_id"):
         if not str(evidence.get(field) or "").strip():
             raise ValueError(f"evidence is missing {field}")
-    _verify_historical_linkage(root, post_id, evidence)
+    if legacy_verified:
+        _verify_legacy_evidence(evidence, post_id=post_id, media_id=media_id)
+    else:
+        _verify_historical_linkage(root, post_id, evidence)
 
     post = client.get_post(post_id)
     if not isinstance(post, dict) or int(post.get("id") or 0) != post_id:
@@ -387,7 +414,8 @@ def _recover_locked(
 
     proposed = replace(previous, media=candidate_media)
     report = {
-        "mode": "apply" if apply else "preview", "post_id": post_id, "media_id": media_id,
+        "mode": "apply" if apply else "preview", "recovery_policy": "legacy-verified" if legacy_verified else "strict",
+        "post_id": post_id, "media_id": media_id,
         "source_run_id": original_run_id, "recovery_id": journal_id,
         "source_verification": source_check.get("verification_level"),
         "source_bytes": byte_reason, "visual_decision": decision.decision,

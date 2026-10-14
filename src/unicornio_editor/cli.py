@@ -105,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     v2_recover_media_parser.add_argument("--evidence", type=Path, required=True)
     v2_recover_media_parser.add_argument("--root", type=Path, default=Path("."))
     v2_recover_media_parser.add_argument(
+        "--legacy-verified", action="store_true",
+        help="usa recuperação legada somente com pacote de provas independentes completo",
+    )
+    v2_recover_media_parser.add_argument(
         "--apply", action="store_true",
         help="persiste somente o estado V2/checkpoint/índices; exige EDITOR_DRY_RUN=false",
     )
@@ -2305,6 +2309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 post_id=args.post_id,
                 media_id=args.media_id,
                 evidence_path=args.evidence,
+                legacy_verified=bool(args.legacy_verified),
                 apply=bool(args.apply),
             )
         elif args.command == "list-pending":
