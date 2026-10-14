@@ -370,6 +370,40 @@ class ChecklistTests(unittest.TestCase):
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         self.assertIn(">= 4 imagens", item["detail"])
 
+    def test_v2_quota_uses_current_wordpress_body_without_canonical_footer(self):
+        current_body = "<p>" + ("palavra videogame noticia lancamento " * 260) + "</p>"
+        content = (
+            current_body
+            + '<hr /><h3>Confira mais novidades em nosso Portal de Notícias!</h3><hr />'
+            + '<em>Fonte: <a href="https://source.example/news">Fonte</a>.</em>'
+        )
+        result = self._run_checklist(
+            editorial=editorial_payload(cleaned_html="<p>rascunho curto</p>"),
+            content=content,
+            media_context={"visual_identity_policy": 4, "inline": {"required": 0, "accepted": []}},
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertIn(">= 6 imagens", item["detail"])
+        self.assertEqual(result["media_decision"]["required"], 6)
+
+    def test_v2_featured_attachment_read_failure_is_retryable_error(self):
+        class UnavailableClient:
+            def get_media(self, media_id):
+                raise TimeoutError("temporary media API timeout")
+
+        result = self._run_checklist(
+            client=UnavailableClient(),
+            media_context={
+                "visual_identity_policy": 4,
+                "inline": {"required": 2, "accepted": []},
+                "featured": {"status": "valid", "media_id": 7, "media_url": "https://media.example/featured.webp"},
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "featured_identity_matches_current_attachment")
+        self.assertEqual(item["status"], "error")
+        self.assertTrue(item["retryable"])
+        self.assertGreater(result["failed"], 0)
+
     def test_irrelevant_image_fails_relevance_gate(self):
         # A real bat is NOT a valid image for a videogame news post.
         content = (

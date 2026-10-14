@@ -67,6 +67,25 @@ def append_canonical_footer(html: str, original_link: str | None) -> str:
     return f"{cleaned}\n\n{footer}" if cleaned else footer
 
 
+def strip_canonical_footer(html: str) -> str:
+    """Remove generated CTA/source footer before measuring editorial body text.
+
+    This deliberately strips only the canonical blocks emitted by
+    :func:`append_canonical_footer`; editorial paragraphs mentioning a source
+    or the portal remain part of the article.
+    """
+    if not isinstance(html, str):
+        raise TypeError("html must be a string")
+    cleaned = re.sub(
+        r'<h3>\s*Confira mais novidades em nosso Portal de .*?</h3>',
+        "",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(r'<em>\s*Fonte:\s*.*?</em>', "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"(?:\s*<hr\s*/?>\s*)+$", "", cleaned, flags=re.IGNORECASE).strip()
+
+
 def _validate_link(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BuilderError("original_link is required")

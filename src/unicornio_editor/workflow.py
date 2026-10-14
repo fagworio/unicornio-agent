@@ -2925,11 +2925,6 @@ def _publish_post_unlocked(
         }
     backup = SnapshotStore(root).save(post_id, post)
     checklist_media_context = publish_media_context
-    if publish_media_context is not None:
-        checklist_media_context = {
-            **publish_media_context,
-            "quota_content": editorial["cleaned_html"],
-        }
     checklist = run_pre_publish_checklist(
         post=post,
         editorial=editorial,
@@ -2940,6 +2935,31 @@ def _publish_post_unlocked(
         media_context=checklist_media_context,
     )
     if checklist["failed"]:
+        retryable_errors = [
+            item for item in checklist.get("items", [])
+            if isinstance(item, dict) and item.get("status") == "error" and item.get("retryable")
+        ]
+        if retryable_errors:
+            try:
+                from .observability import append_telemetry
+
+                append_telemetry(
+                    root,
+                    "publish_media_validation_retry",
+                    post_id=post_id,
+                    failed_checks=sorted({str(item.get("name") or "media_validation") for item in retryable_errors}),
+                )
+            except Exception:  # noqa: BLE001 - observability never changes publish safety
+                pass
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "validação técnica da mídia inconclusiva; publicação não realizada",
+                "checklist": checklist,
+                "retryable_errors": retryable_errors,
+                "state": state,
+            }
         # Registra o bloqueio SEM remover editorial.latest.json: o post
         # continua candidato nas proximas janelas (o conteudo no WP pode ja
         # estar bom — remover o latest orfana o post e o publish nunca mais o

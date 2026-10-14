@@ -158,10 +158,12 @@ def run_pre_publish_checklist(
         invalid_media: list[dict[str, Any]] | None = None,
         blocker: str | None = None,
         phase: str | None = None,
+        retryable: bool = False,
+        error: bool = False,
     ) -> None:
         item: dict[str, Any] = {
             "name": name,
-            "status": "skip" if skipped else ("pass" if ok else "fail"),
+            "status": "skip" if skipped else ("error" if error else ("pass" if ok else "fail")),
             "detail": detail,
         }
         if invalid_media:
@@ -170,6 +172,8 @@ def run_pre_publish_checklist(
             item["blocker"] = blocker
         if phase:
             item["phase"] = phase
+        if retryable:
+            item["retryable"] = True
         items.append(item)
 
     # 1. Backup snapshot before any processing.
@@ -259,12 +263,15 @@ def run_pre_publish_checklist(
             visual_identity_policy = int(media_context.get("visual_identity_policy") or 0)
         except (TypeError, ValueError):
             visual_identity_policy = 0
-    quota_content = (
-        media_context.get("quota_content")
-        if isinstance(media_context, Mapping)
-        else None
-    )
-    quota_content = quota_content if isinstance(quota_content, str) and quota_content.strip() else content
+    quota_content = content
+    if visual_identity_policy >= 4:
+        from .builder import strip_canonical_footer
+
+        quota_content = strip_canonical_footer(content)
+    elif isinstance(media_context, Mapping):
+        supplied_quota = media_context.get("quota_content")
+        if isinstance(supplied_quota, str) and supplied_quota.strip():
+            quota_content = supplied_quota
     words = word_count(quota_content)
     raw_title = post.get("title")
     if isinstance(raw_title, Mapping):
@@ -699,8 +706,11 @@ def run_pre_publish_checklist(
             check(
                 "featured_identity_matches_current_attachment",
                 True,
-                "URL do attachment indisponível; demais gates de featured continuam ativos",
-                skipped=True,
+                "URL do attachment indisponível; identidade da featured não pôde ser confirmada",
+                error=True,
+                retryable=True,
+                blocker="provider_error",
+                phase="media_validation",
             )
     inline_ids_by_url: dict[str, int] = {}
     if isinstance(media_context, Mapping):
@@ -1013,7 +1023,7 @@ def run_pre_publish_checklist(
 
     passed = sum(1 for item in items if item["status"] == "pass")
     skipped = sum(1 for item in items if item["status"] == "skip")
-    failed = sum(1 for item in items if item["status"] == "fail")
+    failed = sum(1 for item in items if item["status"] in {"fail", "error"})
     return {
         "post_id": post.get("id"),
         "items": items,

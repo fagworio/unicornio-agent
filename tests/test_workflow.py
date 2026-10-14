@@ -21,6 +21,7 @@ from unicornio_editor.pipeline_v2.model import (
 from unicornio_editor.workflow import (
     WorkflowError,
     _load_partial_manifest,
+    _publish_v2_media_context,
     _partial_retry,
     _recover_partial_featured,
     _execute_media_plan,
@@ -2035,14 +2036,17 @@ class WorkflowTests(unittest.TestCase):
             client = FakeClient(self.post())
             apply_editorial(client, self.config(False), root, 42, editorial_payload())
             self._attach_v2_ready_media(client)
-            client.post["content"]["raw"] += (
-                '<figure><img src="https://s3.example/existing-inline.webp" '
-                'alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
-                "<figcaption>Crédito: Autor. Licença CC BY 4.0.</figcaption></figure>"
-            )
             config = Config(
                 "wordpress", "http://wp.test", "/wp-json/wp/v2",
                 dry_run=False, publish_enabled=True,
+            )
+            self.assertTrue(
+                manifest_matches(
+                    client.post,
+                    parse_manifest(client.post["meta"]["_hermes_ready_manifest"]),
+                    client.post["meta"]["_hermes_ready_hash"],
+                    policy_version=config.policy_version,
+                )
             )
 
             outcome = publish_post(client, config, root, 42)
@@ -2054,6 +2058,44 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(outcome["status"], "published", failed_items)
             self.assertEqual(outcome["integrity"], "revalidated")
             self.assertTrue(any(payload.get("status") == "publish" for _, payload in client.updated))
+
+    def test_v2_context_keeps_accepted_media_valid_when_post_has_an_extra_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            state = json.loads(client.post["meta"]["_hermes_work_state"])
+            client.post["content"]["raw"] += (
+                '<figure><img src="https://s3.example/editor-added.webp" '
+                'alt="Título sobre videogame e lançamento importante" /></figure>'
+            )
+
+            context = _publish_v2_media_context(state, client.post)
+
+            self.assertIsNotNone(context)
+            self.assertTrue(context["visual_identity_evidence_valid"])
+
+    def test_publish_v2_featured_read_failure_retries_without_blocking_or_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            updates_before_publish = list(client.updated)
+            client.get_media = lambda media_id: (_ for _ in ()).throw(TimeoutError("temporary timeout"))
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+
+            outcome = publish_post(client, config, root, 42)
+
+            self.assertEqual(outcome["status"], "retry")
+            self.assertFalse(outcome["wordpress_changed"])
+            self.assertEqual(client.updated, updates_before_publish)
+            self.assertNotEqual(client.post["meta"].get("_hermes_state"), "blocked")
+            self.assertFalse((root / "backups/42/editorial.blocked.json").exists())
 
     def test_publish_ready_from_previous_policy_revalidates_before_publish(self):
         with tempfile.TemporaryDirectory() as directory:
