@@ -5,7 +5,13 @@ FAILURE = somente o necessario para corrigir. O relatorio completo fica em
 arquivo (apply.latest.json) para auditoria.
 """
 
+import io
+import json
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 
 from unicornio_editor.cli import (
     _compact_apply,
@@ -376,6 +382,42 @@ class CompactOutputTests(unittest.TestCase):
         report = {"posts": [{"id": 1, "title": "T", "state": "blocked", "attempts": 2, "last_error": "e" * 200}]}
         out = _compact_queue(report)
         self.assertEqual(len(out["posts"][0]["last_error"]), 80)
+
+    def test_publish_ready_reports_retry_results_even_without_publication(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        outcomes = [
+            {
+                "post_id": 115286,
+                "status": "retry",
+                "wordpress_changed": False,
+                "reason": "featured attachment lookup timed out",
+                "retryable_errors": [{"name": "featured_identity_matches_current_attachment"}],
+            },
+            {"post_id": 115287, "status": "skipped", "wordpress_changed": False},
+        ]
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "publish_ready_posts", return_value=outcomes), \
+                    redirect_stdout(output):
+                code = cli.main(["publish-ready", "--root", str(root)])
+
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(report["published"], 0)
+        self.assertEqual(report["retryable_count"], 1)
+        self.assertEqual(report["retryable_posts"][0]["post_id"], 115286)
+        self.assertEqual(
+            report["retryable_posts"][0]["checks"],
+            ["featured_identity_matches_current_attachment"],
+        )
+        self.assertEqual(report["quality_blocked"], 0)
 
 
 if __name__ == "__main__":

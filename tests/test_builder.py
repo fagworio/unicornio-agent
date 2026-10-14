@@ -1,6 +1,10 @@
 import unittest
 
-from unicornio_editor.builder import BuilderError, append_canonical_footer
+from unicornio_editor.builder import (
+    BuilderError,
+    append_canonical_footer,
+    strip_canonical_footer,
+)
 
 
 class BuilderTests(unittest.TestCase):
@@ -49,6 +53,20 @@ class BuilderTests(unittest.TestCase):
     def test_rejects_non_http_original_link(self):
         with self.assertRaises(BuilderError):
             append_canonical_footer("<p>Notícia.</p>", "javascript:alert(1)")
+
+    def test_strip_canonical_footer_removes_only_complete_trailing_footer(self):
+        body = (
+            '<p>Notícia com <em>Fonte: pesquisa interna</em> no meio do texto.</p>'
+            '<p>O parágrafo final também menciona a Fonte: documento oficial.</p>'
+        )
+        generated = append_canonical_footer("<p>marker</p>", "https://example.com/news")
+        footer = generated.removeprefix("<p>marker</p>")
+        composed = body + footer
+        self.assertEqual(strip_canonical_footer(composed), body)
+
+    def test_strip_canonical_footer_preserves_editorial_content_without_footer(self):
+        body = '<p>Fonte: documento oficial. Mais informações no corpo.</p><em>Fonte: redação</em>'
+        self.assertEqual(strip_canonical_footer(body), body)
 
 
 

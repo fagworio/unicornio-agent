@@ -3448,8 +3448,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
-            blocked = [o for o in outcomes if o.get("status") in ("blocked", "error")]
-            if published or blocked:
+            blocked = [o for o in outcomes if o.get("status") == "blocked"]
+            errors = [o for o in outcomes if o.get("status") == "error"]
+            retryable = [o for o in outcomes if o.get("status") == "retry"]
+            if published or blocked or errors or retryable:
                 result = {
                     "published": len(published),
                     "posts": [
@@ -3474,6 +3476,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ],
                         }
                         for outcome in blocked
+                    ],
+                    "error_count": len(errors),
+                    "error_posts": [
+                        {"post_id": o.get("post_id"), "reason": o.get("reason")}
+                        for o in errors
+                    ],
+                    "retryable_count": len(retryable),
+                    "retryable_posts": [
+                        {
+                            "post_id": o.get("post_id"),
+                            "reason": o.get("reason"),
+                            "checks": [
+                                item.get("name")
+                                for item in o.get("retryable_errors", [])
+                                if isinstance(item, dict) and item.get("name")
+                            ] or [
+                                item.get("name")
+                                for item in ((o.get("checklist") or {}).get("items") or [])
+                                if isinstance(item, dict) and item.get("retryable") and item.get("name")
+                            ],
+                        }
+                        for o in retryable
                     ],
                 }
             else:

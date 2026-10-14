@@ -76,14 +76,14 @@ def strip_canonical_footer(html: str) -> str:
     """
     if not isinstance(html, str):
         raise TypeError("html must be a string")
-    cleaned = re.sub(
-        r'<h3>\s*Confira mais novidades em nosso Portal de .*?</h3>',
-        "",
-        html,
+    canonical_footer = re.compile(
+        r"\s*<hr\s*/?>\s*"
+        r"<h3>\s*Confira mais novidades em nosso Portal de .*?</h3>\s*"
+        r"<hr\s*/?>\s*"
+        r"(?:<em>\s*Fonte:\s*.*?</em>\s*)?$",
         flags=re.IGNORECASE | re.DOTALL,
     )
-    cleaned = re.sub(r'<em>\s*Fonte:\s*.*?</em>', "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    return re.sub(r"(?:\s*<hr\s*/?>\s*)+$", "", cleaned, flags=re.IGNORECASE).strip()
+    return canonical_footer.sub("", html).strip()
 
 
 def _validate_link(value: str) -> str:
