@@ -889,10 +889,22 @@ class WorkflowTests(unittest.TestCase):
 
     def test_apply_processes_pending_without_sending_status(self):
         with tempfile.TemporaryDirectory() as directory:
-            client = FakeClient(self.post())
+            post = self.post()
+            post["meta"].update({
+                "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+                "_hermes_human_reopened_from": "awaiting_human",
+                "rank_math_robots": ["index"],
+            })
+            client = FakeClient(post)
             report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
             self.assertTrue(report["wordpress_changed"])
             self.assertNotIn("status", client.updated[0][1])
+            sent_meta = client.updated[0][1]["meta"]
+            self.assertNotIn("_hermes_human_reopened_at", sent_meta)
+            self.assertNotIn("_hermes_human_reopened_from", sent_meta)
+            self.assertNotIn("rank_math_robots", sent_meta)
+            self.assertEqual(client.post["meta"]["_hermes_human_reopened_from"], "awaiting_human")
+            self.assertEqual(client.post["meta"]["rank_math_robots"], ["index"])
             self.assertIn("Portal de", client.updated[0][1]["content"]["raw"])
             self.assertEqual(
                 client.updated[0][1]["meta"]["rank_math_focus_keyword"], "videogame"

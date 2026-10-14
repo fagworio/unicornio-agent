@@ -1,4 +1,6 @@
+import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -62,17 +64,48 @@ def _fixture(tmp_path):
     }
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate_content = "<p>Artigo aprovado no run histórico.</p>"
+    (backup / "editorial.candidate.json").write_text(json.dumps({
+        "_v2_run_id": evidence["run_id"],
+        "content": candidate_content,
+    }), encoding="utf-8")
+    journal_dir = root / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "115152.json").write_text(json.dumps({
+        "run_id": evidence["run_id"],
+        "candidate_run_id": evidence["run_id"],
+        "candidate_hash": hashlib.sha256(candidate_content.encode()).hexdigest(),
+    }), encoding="utf-8")
+    from unicornio_editor.media.registry import record_v2_candidate_decision
+    record_v2_candidate_decision(
+        root, post_id=115152, run_id=evidence["run_id"],
+        candidate={
+            "candidate_id": evidence["candidate_id"], "subject": evidence["subject"],
+            "source_page_url": evidence["source_page_url"],
+            "direct_image_url": evidence["direct_image_url"],
+            "evidence": evidence["evidence"],
+        }, role="inline", disposition="accepted", reason_code="candidate_accepted",
+    )
 
     class Client:
         def __init__(self):
             self.post = {
                 "id": 115152, "status": "pending", "title": {"raw": "Jogo"},
                 "content": {"raw": "<p>Conteúdo original preservado.</p>"},
-                "featured_media": 115170, "meta": {"_hermes_work_state": json.dumps(state.to_dict()), "other": "preserved"},
+                "featured_media": 115170, "meta": {
+                    "_hermes_work_state": json.dumps(state.to_dict()), "other": "preserved",
+                    "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+                    "_hermes_human_reopened_from": "awaiting_human",
+                },
             }
             self.updates = []
+            self.get_calls = 0
+            self.before_second_get = None
 
         def get_post(self, _post_id):
+            self.get_calls += 1
+            if self.get_calls == 2 and self.before_second_get:
+                self.before_second_get(self.post)
             return self.post
 
         def get_media(self, media_id):
@@ -84,8 +117,9 @@ def _fixture(tmp_path):
 
         def update_post(self, _post_id, payload):
             assert set(payload) == {"meta"}
+            assert set(payload["meta"]) == {"_hermes_work_state"}
             self.updates.append(payload)
-            self.post.update(payload)
+            self.post["meta"].update(payload["meta"])
 
     config = SimpleNamespace(
         dry_run=False, remote_url_policy="off", http_timeout=1,
@@ -120,16 +154,33 @@ def _mock_validation(monkeypatch, tmp_path):
         "valid": True, "source_verified": True, "verification_level": "EXACT_URL",
     })
     monkeypatch.setattr(recovery, "verify_downloaded_against_source", lambda **_k: (True, "same frame"))
-    monkeypatch.setattr(recovery, "verify_candidate_identity", lambda *_a, **_k: (
+    observed_roots = []
+
+    def verify_identity(*_args, **kwargs):
+        cache_root = Path(kwargs["root"])
+        observed_roots.append(cache_root)
+        cache_file = cache_root / "work" / "visual_comparison_cache.json"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text('{"simulated-comparison": {"decision": "DIFFERENT"}}')
+        return (
         VisualIdentity("e" * 64, "e" * 16, "visual:" + "e" * 24),
         VisualIdentityDecision("DIFFERENT", True, reason="fixture", comparisons=({"confidence": 0.95},)),
-    ))
-    monkeypatch.setattr(recovery, "validate_media_plan", lambda *_a, **_k: {"valid": 1, "rejected": []})
+        )
+
+    def validate_plan(*_args, **kwargs):
+        observed_roots.append(kwargs["root"])
+        return {"valid": 1, "rejected": []}
+
+    monkeypatch.setattr(recovery, "verify_candidate_identity", verify_identity)
+    monkeypatch.setattr(recovery, "validate_media_plan", validate_plan)
+    return observed_roots
 
 
 def test_recovery_preview_is_read_only_and_preserves_human_lifecycle(tmp_path, monkeypatch):
     root, original, _evidence, evidence_path, client, config = _fixture(tmp_path)
-    _mock_validation(monkeypatch, tmp_path)
+    observed_roots = _mock_validation(monkeypatch, tmp_path)
+    historical_journal = (root / "work/v2-journal/115152.json").read_text()
+    registry_before = (root / "work/media_registry.sqlite").read_bytes()
 
     result = recover_historical_attachment(
         client, config, root, post_id=115152, media_id=115305,
@@ -142,8 +193,13 @@ def test_recovery_preview_is_read_only_and_preserves_human_lifecycle(tmp_path, m
     assert result["attempts_preserved"] == 35 and result["no_progress_preserved"] == 28
     assert WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"])) == original
     assert client.updates == []
-    assert not (root / "work").exists()
+    assert (root / "work/v2-journal/115152.json").read_text() == historical_journal
+    assert (root / "work/media_registry.sqlite").read_bytes() == registry_before
+    assert not (root / "work/visual_comparison_cache.json").exists()
+    assert not (root / "work/telemetry.jsonl").exists()
+    assert not list((root / "work").glob("v2-media-recovery/*.json"))
     assert not (root / "backups/115152/editorial.partial.json").exists()
+    assert len(observed_roots) == 2 and all(value != root and not value.exists() for value in observed_roots)
 
 
 def test_recovery_apply_is_idempotent_and_never_marks_media_applied(tmp_path, monkeypatch):
@@ -161,6 +217,7 @@ def test_recovery_apply_is_idempotent_and_never_marks_media_applied(tmp_path, mo
     assert [item.media_id for item in state.media.inline] == [115171, 115172, 115173, 115305]
     assert client.post["status"] == "pending" and client.post["content"]["raw"] == "<p>Conteúdo original preservado.</p>"
     assert client.post["featured_media"] == 115170 and client.post["meta"]["other"] == "preserved"
+    assert client.post["meta"]["_hermes_human_reopened_from"] == "awaiting_human"
     checkpoint = json.loads((root / "backups/115152/editorial.partial.json").read_text())
     assert checkpoint["inline"]["accepted_count"] == 4
     from unicornio_editor.media.registry import connect
@@ -197,6 +254,65 @@ def test_recovery_apply_refuses_dry_run_and_insufficient_evidence(tmp_path, monk
         recover_historical_attachment(
             client, config, root, post_id=115152, media_id=115305,
             evidence_path=evidence_path,
+        )
+    assert client.updates == []
+
+
+def test_recovery_rejects_evidence_not_bound_to_candidate_or_journal(tmp_path, monkeypatch):
+    root, _state, _evidence, evidence_path, client, config = _fixture(tmp_path)
+    _mock_validation(monkeypatch, tmp_path)
+    candidate_path = root / "backups/115152/editorial.candidate.json"
+    candidate = json.loads(candidate_path.read_text())
+    candidate["_v2_run_id"] = "different-run"
+    candidate_path.write_text(json.dumps(candidate))
+
+    with pytest.raises(ValueError, match="historical V2 candidate and journal"):
+        recover_historical_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path,
+        )
+    assert client.updates == []
+
+
+def test_recovery_requires_exact_candidate_urls_in_registry_evidence(tmp_path, monkeypatch):
+    root, _state, evidence, evidence_path, client, config = _fixture(tmp_path)
+    _mock_validation(monkeypatch, tmp_path)
+    evidence["direct_image_url"] = "https://source.test/another-file.webp"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no matching accepted V2 decision"):
+        recover_historical_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path,
+        )
+    assert client.updates == []
+
+
+@pytest.mark.parametrize("changed_field", ["status", "state", "featured", "content", "reopen_marker"])
+def test_recovery_aborts_when_wordpress_changes_before_apply(tmp_path, monkeypatch, changed_field):
+    root, _state, _evidence, evidence_path, client, config = _fixture(tmp_path)
+    _mock_validation(monkeypatch, tmp_path)
+
+    def mutate_post(post):
+        if changed_field == "status":
+            post["status"] = "awaiting_human"
+        elif changed_field == "state":
+            value = json.loads(post["meta"]["_hermes_work_state"])
+            value["retry"]["attempts"] += 1
+            post["meta"]["_hermes_work_state"] = json.dumps(value)
+        elif changed_field == "featured":
+            post["featured_media"] = 999
+        elif changed_field == "content":
+            post["content"]["raw"] = "edição humana concorrente"
+        else:
+            post["meta"]["_hermes_human_reopened_at"] = "2031-01-01T00:00:00+00:00"
+
+    client.before_second_get = mutate_post
+
+    with pytest.raises(RuntimeError, match="post changed during media recovery"):
+        recover_historical_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path, apply=True,
         )
     assert client.updates == []
 

@@ -859,7 +859,7 @@ def _apply_editorial_unlocked(
     update_payload: dict[str, Any] = {
         "content": {"raw": content},
         "meta": {
-            **build_meta(editorial["seo"], latest.get("meta", {})),
+            **build_meta(editorial["seo"]),
             **build_processing_markers(
                 editorial["site_relevance"]["decision"],
                 editorial["site_relevance"]["confidence"],

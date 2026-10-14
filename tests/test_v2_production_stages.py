@@ -332,14 +332,23 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
                 "status": "pending",
                 "content": {"raw": "old"},
                 "featured_media": 0,
-                "meta": {},
+                "meta": {
+                    "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+                    "_hermes_human_reopened_from": "awaiting_human",
+                },
             }
+            self.updates = []
 
         def get_post(self, _post_id):
             return self.post
 
         def update_post(self, _post_id, update):
-            self.post.update(update)
+            self.updates.append(update)
+            if "meta" in update:
+                assert "_hermes_human_reopened_at" not in update["meta"]
+                assert "_hermes_human_reopened_from" not in update["meta"]
+                self.post["meta"].update(update["meta"])
+            self.post.update({key: value for key, value in update.items() if key != "meta"})
 
     client = Client()
     backup = tmp_path / "backups" / "13"
@@ -365,6 +374,12 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     )
     result = WordPressWriterV2(client, tmp_path).commit(13, {"post_id": 13}, state, Outcome.ready())
     assert result["readback"] is True
+    assert client.post["meta"]["_hermes_human_reopened_from"] == "awaiting_human"
+    assert all(
+        key not in update.get("meta", {})
+        for update in client.updates
+        for key in ("_hermes_human_reopened_at", "_hermes_human_reopened_from")
+    )
 
 
 def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diverges(tmp_path):

@@ -1509,14 +1509,14 @@ class WordPressWriterV2:
         )
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
-        meta = dict(post.get("meta") or {})
+        meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
         final_state = proposed_state
         state_json = json.dumps(proposed_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
         payload_meta: dict[str, Any] = {"_hermes_work_state": state_json}
         ready_hash = ""
         if outcome.type.value == "ready" and content:
-            seo_meta = build_meta({key: str(seo.get(key) or "") for key in ("title", "meta_description", "focus_keyword")}, existing=meta)
-            meta.update(seo_meta)
+            seo_meta = build_meta({key: str(seo.get(key) or "") for key in ("title", "meta_description", "focus_keyword")})
+            payload_meta.update(seo_meta)
             manifest = build_ready_manifest(post_id=post_id, content=content, featured_media=candidate.get("featured_media"), seo=seo, original_link=context.get("original_link"), editorial=candidate.get("editorial"), policy_version=self.policy_version)
             ready_hash = manifest_hash(manifest)
             payload_meta.update({"_hermes_ready_manifest": serialize_manifest(manifest), "_hermes_ready_hash": ready_hash})
@@ -1524,7 +1524,7 @@ class WordPressWriterV2:
             latest = self.root / "backups" / str(post_id) / "editorial.latest.json"
             latest.parent.mkdir(parents=True, exist_ok=True)
             latest.write_text(json.dumps(candidate.get("editorial") or {}, ensure_ascii=False, indent=2), encoding="utf-8")
-        update: dict[str, Any] = {"meta": {**meta, **payload_meta}}
+        update: dict[str, Any] = {"meta": dict(payload_meta)}
         import html as _html
 
         candidate_title = str(candidate.get("title") or "").strip()
@@ -1767,7 +1767,7 @@ class WordPressWriterV2:
                 )
                 state_json = json.dumps(final_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
                 payload_meta["_hermes_work_state"] = state_json
-                update["meta"] = {**meta, **payload_meta}
+                update["meta"] = dict(payload_meta)
                 intent["state"] = final_state.to_dict()
             journal.write_text(
                 json.dumps({**intent, "status": "committing", "media_state": "inline_readback_confirmed", "media_readback_status": "confirmed", "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2),

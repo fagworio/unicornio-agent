@@ -7,6 +7,7 @@ environment.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -423,10 +424,16 @@ def record_v2_candidate_decision(
     if not candidate_id:
         return
     evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+    direct_url = str(candidate.get("direct_image_url") or "").strip()
+    source_page_url = str(candidate.get("source_page_url") or "").strip()
     reference = json.dumps({
         "verdict": str(evidence.get("verdict") or ""),
-        "source_domain": str(candidate.get("source_page_url") or "").split("/", 3)[2]
-        if "://" in str(candidate.get("source_page_url") or "") else "",
+        "source_domain": str(source_page_url).split("/", 3)[2] if "://" in source_page_url else "",
+        # Hash URLs rather than storing their query strings: discovery URLs can
+        # contain signed parameters, but recovery needs an exact provenance
+        # binding for the candidate without retaining those secrets.
+        "direct_image_url_sha256": hashlib.sha256(direct_url.encode()).hexdigest() if direct_url else "",
+        "source_page_url_sha256": hashlib.sha256(source_page_url.encode()).hexdigest() if source_page_url else "",
     }, sort_keys=True)
     with connect(root) as db:
         db.execute(

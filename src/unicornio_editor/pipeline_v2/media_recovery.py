@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import tempfile
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..backup import atomic_write_text
 from ..media.downloader import download_image
@@ -45,6 +48,86 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _save_journal(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+def _wordpress_snapshot(post: dict[str, Any], state: WorkState) -> dict[str, Any]:
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    return {
+        "status": post.get("status"),
+        "state": hashlib.sha256(
+            json.dumps(state.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "featured_media": post.get("featured_media"),
+        "title": deepcopy(post.get("title")),
+        "content": deepcopy(post.get("content")),
+        "reopened_at": meta.get("_hermes_human_reopened_at"),
+        "reopened_from": meta.get("_hermes_human_reopened_from"),
+    }
+
+
+def _verify_historical_linkage(root: Path, post_id: int, evidence: dict[str, Any]) -> None:
+    """Bind a recovery bundle to the candidate, writer journal and registry decision."""
+    run_id = str(evidence.get("run_id") or "").strip()
+    candidate_id = str(evidence.get("candidate_id") or "").strip()
+    directory = root / "backups" / str(post_id)
+    candidate = _read_json(directory / "editorial.candidate.json")
+    journal = _read_json(root / "work" / "v2-journal" / f"{post_id}.json")
+    candidate_content = str(candidate.get("content") or "")
+    candidate_hash = hashlib.sha256(candidate_content.encode()).hexdigest()
+    journal_run = str(journal.get("run_id") or "").strip()
+    candidate_run = str(candidate.get("_v2_run_id") or "").strip()
+    if (
+        not run_id
+        or candidate_run != run_id
+        or journal_run != run_id
+        or str(journal.get("candidate_run_id") or "").strip() != run_id
+        or str(journal.get("candidate_hash") or "").strip() != candidate_hash
+    ):
+        raise ValueError("recovery evidence does not match the historical V2 candidate and journal")
+    registry_path = root / "work" / "media_registry.sqlite"
+    if not registry_path.is_file():
+        raise ValueError("historical media registry is unavailable")
+    try:
+        db = sqlite3.connect(f"{registry_path.resolve().as_uri()}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """SELECT role, subject, disposition, evidence_reference
+                 FROM media_decisions
+                WHERE post_id=? AND run_id=? AND candidate_id=? AND scope='candidate'""",
+            (post_id, run_id, candidate_id),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError("historical candidate decision is unavailable in MediaRegistry") from exc
+    finally:
+        if "db" in locals():
+            db.close()
+    expected_domain = (urlsplit(str(evidence.get("source_page_url") or "")).netloc or "").casefold()
+    direct_url_hash = hashlib.sha256(str(evidence.get("direct_image_url") or "").strip().encode()).hexdigest()
+    source_url_hash = hashlib.sha256(str(evidence.get("source_page_url") or "").strip().encode()).hexdigest()
+    expected_verdict = str((evidence.get("evidence") or {}).get("verdict") or "")
+    linked = False
+    for row in rows:
+        if (
+            row["role"] != "inline"
+            or row["subject"] != str(evidence.get("subject") or "")
+            or row["disposition"] != "accepted"
+        ):
+            continue
+        try:
+            reference = json.loads(row["evidence_reference"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(reference, dict)
+            and reference.get("verdict") == expected_verdict == "deterministic_match"
+            and str(reference.get("source_domain") or "").casefold() == expected_domain
+            and reference.get("direct_image_url_sha256") == direct_url_hash
+            and reference.get("source_page_url_sha256") == source_url_hash
+        ):
+            linked = True
+            break
+    if not linked:
+        raise ValueError("candidate_id has no matching accepted V2 decision in MediaRegistry")
 
 
 def recover_historical_attachment(
@@ -135,6 +218,7 @@ def _recover_locked(
     for field in ("sha256", "phash", "visual_group_id"):
         if not str(evidence.get(field) or "").strip():
             raise ValueError(f"evidence is missing {field}")
+    _verify_historical_linkage(root, post_id, evidence)
 
     post = client.get_post(post_id)
     if not isinstance(post, dict) or int(post.get("id") or 0) != post_id:
@@ -144,6 +228,7 @@ def _recover_locked(
     previous = _read_state(post)
     if previous.state is not LifecycleState.HUMAN_REQUIRED:
         raise ValueError("historical recovery only accepts a HUMAN_REQUIRED post")
+    initial_snapshot = _wordpress_snapshot(post, previous)
 
     attachment = client.get_media(media_id)
     attachment_url = str((attachment or {}).get("source_url") or "").strip()
@@ -185,7 +270,6 @@ def _recover_locked(
     if not already_recovered and current_accounting.effective_missing < 1:
         raise ValueError("no inline deficit remains; recovery would exceed the current quota")
 
-    state_meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
     journal_id = hashlib.sha256(
         f"v1:{post_id}:{media_id}:{original_run_id}:{evidence['sha256']}".encode()
     ).hexdigest()
@@ -244,7 +328,7 @@ def _recover_locked(
 
         fresh_identity, decision = verify_candidate_identity(
             attachment_path, candidate_id=candidate_id, baseline=baseline,
-            config=config, root=root, comparison_budget=[0],
+            config=config, root=temp_root if not apply else root, comparison_budget=[0],
         )
         if not decision.verified or decision.decision != "DIFFERENT":
             raise ValueError("attachment is not verified distinct from the post's current media")
@@ -289,12 +373,15 @@ def _recover_locked(
         "paragraph_index": slot, "alt_text": item.alt_text, "credit_text": credit,
         "evidence": relevance,
     }
-    preflight = validate_media_plan(
-        client, {**editorial, "cleaned_html": body, "media_plan": [plan_item]},
-        config=config, root=None, post_title=title,
-        existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None,
-        post_id=post_id,
-    )
+    with tempfile.TemporaryDirectory(
+        prefix="unicornio-media-recovery-preflight-" if not apply else None
+    ) as preflight_temp:
+        preflight = validate_media_plan(
+            client, {**editorial, "cleaned_html": body, "media_plan": [plan_item]},
+            config=config, root=Path(preflight_temp) if not apply else root, post_title=title,
+            existing_featured_id=featured.media_id if featured.status is FeaturedStatus.VALID else None,
+            post_id=post_id,
+        )
     if preflight.get("rejected") or int(preflight.get("valid") or 0) != 1:
         raise ValueError("recovered media failed the current V2 provenance/relevance preflight")
 
@@ -334,9 +421,14 @@ def _recover_locked(
     if already_recovered:
         readback = post
     else:
-        meta = dict(state_meta)
-        meta["_hermes_work_state"] = json.dumps(proposed.to_dict(), ensure_ascii=False, separators=(",", ":"))
-        client.update_post(post_id, {"meta": meta})
+        latest_post = client.get_post(post_id)
+        if not isinstance(latest_post, dict) or int(latest_post.get("id") or 0) != post_id:
+            raise RuntimeError("WordPress concurrency readback did not match post_id")
+        latest_state = _read_state(latest_post)
+        if _wordpress_snapshot(latest_post, latest_state) != initial_snapshot:
+            raise RuntimeError("WordPress post changed during media recovery; no write was attempted")
+        serialized_state = json.dumps(proposed.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        client.update_post(post_id, {"meta": {"_hermes_work_state": serialized_state}})
         readback = client.get_post(post_id)
     readback_state = _read_state(readback)
     if readback_state.to_dict() != proposed.to_dict() or readback.get("status") != post.get("status"):

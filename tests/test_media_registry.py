@@ -1,10 +1,12 @@
+import hashlib
 import json
 from types import SimpleNamespace
 
 import pytest
 
 from unicornio_editor.media.registry import (
-    RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index, record_v2_observation, registry_path,
+    RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index,
+    record_v2_candidate_decision, record_v2_observation, registry_path,
 )
 from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
 
@@ -89,6 +91,26 @@ def test_registry_schema_has_decisions_usage_and_runs(tmp_path):
         with pytest.raises(Exception):
             db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
     assert {"media_assets", "media_decisions", "media_usage", "media_runs", "registry_migration_log"} <= tables
+
+
+def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_path):
+    direct_url = "https://cdn.test/image.webp?token=private-signature"
+    source_url = "https://source.test/article?session=private"
+    record_v2_candidate_decision(
+        tmp_path, post_id=9, run_id="run-9",
+        candidate={
+            "candidate_id": "candidate-9", "subject": "Jogo",
+            "source_page_url": source_url, "direct_image_url": direct_url,
+            "evidence": {"verdict": "deterministic_match"},
+        }, role="inline", disposition="accepted", reason_code="candidate_accepted",
+    )
+
+    with connect(tmp_path) as db:
+        row = db.execute("SELECT evidence_reference FROM media_decisions").fetchone()
+    reference = json.loads(row[0])
+    assert reference["direct_image_url_sha256"] == hashlib.sha256(direct_url.encode()).hexdigest()
+    assert reference["source_page_url_sha256"] == hashlib.sha256(source_url.encode()).hexdigest()
+    assert "private" not in row[0]
 
 
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
