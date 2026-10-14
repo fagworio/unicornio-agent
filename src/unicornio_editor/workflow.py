@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from .backup import SnapshotStore, atomic_write_text
 from .builder import BuilderError, append_canonical_footer
-from .checklist import _required_image_count, run_pre_publish_checklist
+from .checklist import _canonical_image_url, _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import _repair_orphan_media, clean_html
@@ -2687,6 +2687,80 @@ def _read_v2_work_state(post: dict[str, Any]) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else {"state": "invalid"}
 
 
+def _publish_v2_media_context(
+    v2_state: dict[str, Any] | None,
+    post: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return fail-closed V2 media evidence for publisher checklist validation.
+
+    READY V2 posts use visual-identity policy 4. Missing or malformed evidence
+    must not silently downgrade the checklist to its legacy image-count rules.
+    """
+    if v2_state is None:
+        return None
+    raw_media = v2_state.get("media")
+    media = raw_media if isinstance(raw_media, dict) else {}
+    raw_inline = media.get("inline")
+    inline = raw_inline if isinstance(raw_inline, dict) else {}
+    required = inline.get("required", 0)
+    if not isinstance(required, int) or isinstance(required, bool) or required < 0:
+        required = 0
+    accepted = inline.get("accepted")
+    accepted_is_list = isinstance(accepted, list)
+    if not accepted_is_list:
+        accepted = []
+    featured = media.get("featured")
+    featured_is_mapping = isinstance(featured, dict)
+    if not featured_is_mapping:
+        featured = {}
+    accepted = [item for item in accepted if isinstance(item, dict)]
+    accepted_urls = {
+        _canonical_image_url(str(item.get("media_url") or ""))
+        for item in accepted
+        if str(item.get("media_url") or "").strip()
+        and isinstance(item.get("media_id"), int)
+        and not isinstance(item.get("media_id"), bool)
+        and item["media_id"] > 0
+    }
+    current_urls = {
+        _canonical_image_url(str(item.get("src") or ""))
+        for item in iter_content_images(_raw_content(post))
+        if str(item.get("src") or "").strip()
+    }
+    current_featured_id = post.get("featured_media")
+    featured_matches = (
+        isinstance(current_featured_id, int)
+        and not isinstance(current_featured_id, bool)
+        and current_featured_id > 0
+        and featured.get("status") == "valid"
+        and featured.get("media_id") == current_featured_id
+    )
+    evidence_matches_current_media = (
+        isinstance(raw_media, dict)
+        and isinstance(raw_inline, dict)
+        and accepted_is_list
+        and len(accepted) == len(raw_inline.get("accepted", []))
+        and len(accepted_urls) == len(accepted)
+        and featured_is_mapping
+        and bool(accepted_urls)
+        and accepted_urls == current_urls
+        and featured_matches
+    )
+    context: dict[str, Any] = {
+        "visual_identity_policy": 4,
+        "visual_identity_evidence_valid": evidence_matches_current_media,
+        "inline": {
+            "required": required,
+            "accepted": accepted,
+        },
+        "featured": featured,
+    }
+    for key in ("search", "enrichment_round"):
+        if key in media:
+            context[key] = media[key]
+    return context
+
+
 def _publish_post_unlocked(
     client: WordPressClient,
     config: Config,
@@ -2798,11 +2872,15 @@ def _publish_post_unlocked(
             "state": STATE_BLOCKED,
             "language": language_report,
         }
+    publish_media_context = _publish_v2_media_context(v2_state, post)
     if state == STATE_READY:
         raw_meta = post.get("meta")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         stored = parse_manifest(meta.get(META_READY_MANIFEST))
-        if manifest_matches(post, stored, state_info["ready_hash"], policy_version=config.policy_version):
+        if (
+            publish_media_context is None
+            and manifest_matches(post, stored, state_info["ready_hash"], policy_version=config.policy_version)
+        ):
             return _publish_now(
                 client,
                 config,
@@ -2853,6 +2931,7 @@ def _publish_post_unlocked(
         backup_path=backup,
         config=config,
         client=client,
+        media_context=publish_media_context,
     )
     if checklist["failed"]:
         # Registra o bloqueio SEM remover editorial.latest.json: o post

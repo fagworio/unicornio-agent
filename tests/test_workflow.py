@@ -7,7 +7,17 @@ from pathlib import Path
 from unittest import mock
 
 from unicornio_editor.config import Config
+from unicornio_editor.manifest import manifest_matches, parse_manifest
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
+from unicornio_editor.pipeline_v2.model import (
+    FeaturedProgress,
+    FeaturedStatus,
+    InlineMedia,
+    LifecycleState,
+    MediaProgress,
+    Phase,
+    WorkState,
+)
 from unicornio_editor.workflow import (
     WorkflowError,
     _load_partial_manifest,
@@ -1954,6 +1964,70 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(client.updated), 2)  # apply + publish (sem revalidacao)
             self.assertTrue(client.post["meta"]["_hermes_ready_hash"])
             self.assertTrue(client.post["meta"]["_hermes_ready_manifest"])
+
+    def test_publish_v2_ready_revalidates_visual_evidence_even_when_manifest_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            featured = FeaturedProgress(
+                FeaturedStatus.VALID,
+                media_id=7,
+                media_url="https://s3.example/featured.webp",
+                sha256="f" * 64,
+                phash="f" * 16,
+                visual_group_id="visual:featured",
+                visual_verification={"decision": "INITIAL"},
+            )
+            duplicate_inline = InlineMedia(
+                media_id=8,
+                media_url="https://s3.example/noticia-importante-1.webp",
+                slot=0,
+                sha256="i" * 64,
+                phash="i" * 16,
+                visual_group_id="visual:inline",
+                visual_verification={
+                    "decision": "SAME_ART_CROP",
+                    "duplicate_of": "7",
+                },
+            )
+            v2_state = WorkState(
+                state=LifecycleState.READY,
+                phase=Phase.VALIDATE,
+                relevance_approved=True,
+                media=MediaProgress(
+                    required=2,
+                    inline=(duplicate_inline,),
+                    featured=featured,
+                ),
+            )
+            client.post["meta"]["_hermes_work_state"] = json.dumps(v2_state.to_dict())
+            seen = {}
+
+            def failed_visual_check(**kwargs):
+                seen.update(kwargs["media_context"])
+                return {"failed": 1, "items": [{"name": "media_duplicate_confirmed", "status": "fail"}]}
+
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            self.assertTrue(
+                manifest_matches(
+                    client.post,
+                    parse_manifest(client.post["meta"]["_hermes_ready_manifest"]),
+                    client.post["meta"]["_hermes_ready_hash"],
+                    policy_version=config.policy_version,
+                )
+            )
+            with mock.patch("unicornio_editor.workflow.run_pre_publish_checklist", side_effect=failed_visual_check):
+                outcome = publish_post(client, config, root, 42)
+
+            self.assertEqual(outcome["status"], "blocked")
+            self.assertEqual(seen["visual_identity_policy"], 4)
+            self.assertFalse(seen["visual_identity_evidence_valid"])
+            self.assertEqual(seen["inline"]["accepted"][0]["visual_verification"]["decision"], "SAME_ART_CROP")
+            self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
 
     def test_publish_ready_from_previous_policy_revalidates_before_publish(self):
         with tempfile.TemporaryDirectory() as directory:

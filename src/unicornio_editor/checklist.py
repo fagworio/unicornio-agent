@@ -406,6 +406,15 @@ def run_pre_publish_checklist(
             "identidade visual persistida" if not missing_identity else "mídia sem identidade visual verificável: " + ", ".join(missing_identity),
         )
 
+        evidence_matches_current_media = media_context.get("visual_identity_evidence_valid", True) is True
+        check(
+            "visual_identity_matches_current_media",
+            evidence_matches_current_media,
+            "evidência visual corresponde às imagens e featured atuais"
+            if evidence_matches_current_media
+            else "evidência visual ausente, inválida ou divergente do conjunto atual de mídia",
+        )
+
         check(
             "media_duplicate_confirmed",
             not confirmed_duplicates or permitted_list_repeat,
