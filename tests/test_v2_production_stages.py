@@ -9,6 +9,11 @@ from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, Fe
 from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from unicornio_editor.pipeline_v2.production import ProductionContextLoader
 from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, _embedded_media_urls
+from unicornio_editor.media.registry import (
+    connect as connect_media_registry,
+    invalidate_v2_media,
+    record_v2_observation,
+)
 from unicornio_editor.workflow import MediaFunnelInvariantError
 
 
@@ -382,6 +387,126 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
 
     with pytest.raises(RuntimeError, match="featured media read-back mismatch"):
         WordPressWriterV2(Client(), tmp_path).commit(130, {"post_id": 130}, state, Outcome.ready())
+
+
+def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(tmp_path):
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 132,
+                "status": "pending",
+                "content": {"raw": "<p>conteúdo antigo</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.updates = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            self.post.update(update)
+
+    client = Client()
+    backup = tmp_path / "backups" / "132"
+    backup.mkdir(parents=True)
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        100,
+        "https://example.test/featured.webp",
+        "f" * 64,
+        "f" * 16,
+        "visual:" + "f" * 24,
+        {"decision": "INITIAL"},
+    )
+    accepted = tuple(
+        _verified_inline(media_id, f"https://example.test/{media_id}.webp", slot)
+        for media_id, slot in zip((201, 202, 203, 204), (0, 3, 6, 9))
+    )
+    duplicate = InlineMedia(
+        200,
+        "https://example.test/duplicate.webp",
+        12,
+        sha256=accepted[0].sha256,
+        phash=accepted[0].phash,
+        visual_group_id=accepted[0].visual_group_id,
+        visual_verification={"decision": "SAME_IMAGE", "duplicate_of": "201"},
+    )
+    media = MediaProgress(required=4, inline=(duplicate, *accepted), featured=featured)
+    candidate_media = MediaProgress(required=4, inline=accepted, featured=featured)
+    content = "<p>Texto editorial.</p>" + "".join(
+        f'<img src="{item.media_url}" />' for item in accepted
+    )
+    (backup / "editorial.candidate.json").write_text(json.dumps({
+        "content": content,
+        "editorial": {
+            "cleaned_html": content,
+            "seo": {
+                "title": "Título", "meta_description": "Descrição editorial com contexto suficiente para validar a aprovação do candidato e confirmar todos os dados relevantes da publicação.",
+                "focus_keyword": "título",
+            },
+        },
+        "seo": {
+            "title": "Título", "meta_description": "Descrição editorial com contexto suficiente para validar a aprovação do candidato e confirmar todos os dados relevantes da publicação.",
+            "focus_keyword": "título",
+        },
+        "featured_media": featured.media_id,
+        "media": candidate_media.to_dict(),
+    }), encoding="utf-8")
+    proposed = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+        media=media,
+    )
+
+    result = WordPressWriterV2(client, tmp_path).commit(
+        132, {"post_id": 132}, proposed, Outcome.ready()
+    )
+
+    persisted = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+    assert result["media_readback"] is True
+    assert [item.media_id for item in persisted.media.inline] == [201, 202, 203, 204]
+    assert result["applied_inline_ids"] == [201, 202, 203, 204]
+    assert len(_embedded_media_urls(client.post["content"]["raw"])) == 4
+    assert "meta" not in client.updates[0]
+    journal = json.loads((tmp_path / "work/v2-journal/132.json").read_text())
+    assert [row["media_id"] for row in journal["media_records"] if row["role"] == "inline"] == [200, 201, 202, 203, 204]
+    assert all(row["readback_status"] == "confirmed" for row in journal["apply_media_records"])
+    record_v2_observation(
+        tmp_path,
+        post_id=132,
+        run_id="run-132",
+        state=proposed,
+        phase="validate",
+        outcome="started",
+    )
+    invalidate_v2_media(tmp_path, post_id=132, media_ids=[200], role="inline")
+    record_v2_observation(
+        tmp_path,
+        post_id=132,
+        run_id="run-132",
+        state=persisted,
+        phase="validate",
+        outcome="ready",
+        applied=True,
+    )
+    with connect_media_registry(tmp_path) as db:
+        usages = db.execute(
+            "SELECT wordpress_media_id, role, status, identity_evidence FROM media_usage WHERE post_id=? ORDER BY wordpress_media_id",
+            (132,),
+        ).fetchall()
+    assert [(row[0], row[1], row[2]) for row in usages] == [
+        (100, "featured", "applied"),
+        (200, "inline", "invalidated"),
+        (201, "inline", "applied"),
+        (202, "inline", "applied"),
+        (203, "inline", "applied"),
+        (204, "inline", "applied"),
+    ]
+    duplicate_evidence = json.loads(usages[1][3])
+    assert duplicate_evidence["decision"] == "SAME_IMAGE"
 
 
 def test_readback_identity_uses_img_elements_not_plain_text_urls():

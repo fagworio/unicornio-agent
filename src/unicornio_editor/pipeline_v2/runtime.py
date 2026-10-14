@@ -22,7 +22,7 @@ from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
-from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
+from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase, WorkState
 from .media_accounting import account_visual_media, reconcile_working_visual_media
 from .production import ProductionCandidateReader
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
@@ -1506,6 +1506,7 @@ class WordPressWriterV2:
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
         meta = dict(post.get("meta") or {})
+        final_state = proposed_state
         state_json = json.dumps(proposed_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
         payload_meta: dict[str, Any] = {"_hermes_work_state": state_json}
         ready_hash = ""
@@ -1544,6 +1545,38 @@ class WordPressWriterV2:
             if outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
             else proposed_media
         )
+        candidate_media_present = outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
+        if candidate_media_present:
+            proposed_inline_by_id = {
+                int(item.media_id): item
+                for item in getattr(proposed_media, "inline", ())
+                if getattr(item, "media_id", None)
+            }
+            candidate_inline = tuple(getattr(candidate_media, "inline", ()))
+            candidate_inline_ids = [int(item.media_id) for item in candidate_inline]
+            if len(candidate_inline_ids) != len(set(candidate_inline_ids)):
+                raise RuntimeError("approved candidate contains repeated inline media ids")
+            if any(
+                media_id not in proposed_inline_by_id
+                or proposed_inline_by_id[media_id].to_dict() != item.to_dict()
+                for media_id, item in zip(candidate_inline_ids, candidate_inline)
+            ):
+                raise RuntimeError("approved candidate media diverges from validated V2 state")
+            candidate_accounting = account_visual_media(candidate_media)
+            if (
+                len(candidate_accounting.valid_inline_ids) != len(candidate_inline_ids)
+                or candidate_accounting.confirmed_duplicate_count
+                or candidate_accounting.unverified_count
+            ):
+                raise RuntimeError("approved candidate contains ineligible visual media")
+            candidate_featured = getattr(candidate_media, "featured", None)
+            proposed_featured = getattr(proposed_media, "featured", None)
+            if (
+                getattr(candidate_featured, "media_id", None)
+                != getattr(proposed_featured, "media_id", None)
+                or getattr(candidate_featured, "media_id", None) != candidate.get("featured_media")
+            ):
+                raise RuntimeError("approved candidate featured media diverges from validated V2 state")
         media_ids = {
             int(item.media_id)
             for item in getattr(proposed_media, "inline", ())
@@ -1695,6 +1728,20 @@ class WordPressWriterV2:
             if not isinstance(media_readback_post, dict):
                 raise RuntimeError("WordPress media read-back missing")
             assert_media_readback(media_readback_post)
+            if candidate_media_present:
+                final_state = replace(
+                    proposed_state,
+                    media=replace(
+                        proposed_media,
+                        inline=tuple(candidate_media.inline),
+                        featured=candidate_media.featured,
+                        accepted_count=None,
+                    ),
+                )
+                state_json = json.dumps(final_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
+                payload_meta["_hermes_work_state"] = state_json
+                update["meta"] = {**meta, **payload_meta}
+                intent["state"] = final_state.to_dict()
             journal.write_text(
                 json.dumps({**intent, "status": "committing", "media_state": "inline_readback_confirmed", "media_readback_status": "confirmed", "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -1799,6 +1846,7 @@ class WordPressWriterV2:
             "media_ids": media_ids,
             "applied_media_ids": sorted(applied_media_ids) if media_readback else [],
             "applied_inline_ids": sorted(applied_inline_ids) if media_readback else [],
+            "state": final_state.to_dict(),
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
         }
@@ -2046,6 +2094,10 @@ def run_v2(
                     except Exception:  # noqa: BLE001 - telemetry cannot mask failure
                         pass
                     raise
+                canonical_state = write.get("state")
+                if isinstance(canonical_state, dict):
+                    buffered.state = WorkState.from_dict(canonical_state)
+                    _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 completed += 1
                 try:
                     from ..media.registry import invalidate_v2_media, record_v2_observation
