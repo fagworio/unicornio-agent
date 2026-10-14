@@ -299,6 +299,24 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(args.command, "v2-recover-media")
         self.assertFalse(args.apply)
 
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args([
+                "v2-recover-media", "115152", "115305", "--evidence", "evidence.json",
+                "--legacy-verified",
+            ])
+
+    def test_v2_media_adoption_parser_requires_explicit_confirmation(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args([
+            "v2-adopt-media", "115152", "115305", "--evidence", "evidence.json",
+            "--authorization-id", "ticket-1", "--authorized-by", "editor",
+            "--authorization-reason", "approved for article", "--confirm-adoption",
+        ])
+        self.assertEqual(args.command, "v2-adopt-media")
+        self.assertTrue(args.confirm_adoption)
+        self.assertFalse(args.apply)
+
     def test_media_search_listicle_parser_accepts_quoted_titles(self):
         from unicornio_editor.cli import build_parser
 

@@ -130,28 +130,6 @@ def _verify_historical_linkage(root: Path, post_id: int, evidence: dict[str, Any
         raise ValueError("candidate_id has no matching accepted V2 decision in MediaRegistry")
 
 
-def _verify_legacy_evidence(evidence: dict[str, Any], *, post_id: int, media_id: int) -> None:
-    """Require independent proof before bypassing the strict Registry linkage."""
-    proof = evidence.get("legacy_proof")
-    required = ("upload_event", "attachment_get", "source_record", "run_binding")
-    missing = [key for key in required if not isinstance(proof, dict) or not isinstance(proof.get(key), dict)]
-    if missing:
-        raise ValueError(
-            "LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: missing " + ", ".join(missing)
-        )
-    upload = proof["upload_event"]
-    attachment = proof["attachment_get"]
-    binding = proof["run_binding"]
-    if int(upload.get("post_id") or 0) != post_id or int(upload.get("media_id") or 0) != media_id:
-        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: upload event is not bound to post/attachment")
-    if int(attachment.get("post_id") or 0) not in {0, post_id} or int(attachment.get("media_id") or 0) != media_id:
-        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: attachment GET is not bound to the requested media")
-    if not binding.get("historical_run_id") or not binding.get("upload_event_id"):
-        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: upload event has no verifiable run binding")
-    if not proof["source_record"].get("source_page_url") or not proof["source_record"].get("direct_image_url"):
-        raise ValueError("LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT: independent provenance is incomplete")
-
-
 def recover_historical_attachment(
     client: Any,
     config: Any,
@@ -160,7 +138,6 @@ def recover_historical_attachment(
     post_id: int,
     media_id: int,
     evidence_path: str | Path,
-    legacy_verified: bool = False,
     apply: bool = False,
 ) -> dict[str, Any]:
     """Reconcile one existing WordPress attachment; preview is the default.
@@ -177,13 +154,57 @@ def recover_historical_attachment(
         with _V2RecoveryLock(root / "work" / "v2-run.lock"):
             return _recover_locked(
                 client, config, root, post_id=post_id, media_id=media_id,
-                evidence_path=Path(evidence_path), legacy_verified=legacy_verified, apply=True,
+                evidence_path=Path(evidence_path), apply=True,
             )
     else:
         return _recover_locked(
             client, config, root, post_id=post_id, media_id=media_id,
-            evidence_path=Path(evidence_path), legacy_verified=legacy_verified, apply=False,
+            evidence_path=Path(evidence_path), apply=False,
         )
+
+
+def adopt_existing_attachment(
+    client: Any,
+    config: Any,
+    root: str | Path,
+    *,
+    post_id: int,
+    media_id: int,
+    evidence_path: str | Path,
+    authorization_id: str,
+    authorized_by: str,
+    authorization_reason: str,
+    confirm_adoption: bool = False,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Run a new editorial adoption, explicitly distinct from historic recovery."""
+    if not confirm_adoption:
+        raise ValueError("editorial adoption requires --confirm-adoption")
+    authorization = {
+        "authorization_id": str(authorization_id or "").strip(),
+        "authorized_by": str(authorized_by or "").strip(),
+        "reason": str(authorization_reason or "").strip(),
+    }
+    if not all(authorization.values()):
+        raise ValueError("adoption requires authorization_id, authorized_by and reason")
+    root = Path(root)
+    if post_id < 1 or media_id < 1:
+        raise ValueError("post_id and media_id must be positive")
+    if apply and bool(getattr(config, "dry_run", True)):
+        raise ValueError("adoption apply requires EDITOR_DRY_RUN=false")
+    lock_path = root / "work" / "v2-run.lock"
+    if apply:
+        with _V2RecoveryLock(lock_path):
+            return _recover_locked(
+                client, config, root, post_id=post_id, media_id=media_id,
+                evidence_path=Path(evidence_path), apply=True,
+                adoption_authorization=authorization,
+            )
+    return _recover_locked(
+        client, config, root, post_id=post_id, media_id=media_id,
+        evidence_path=Path(evidence_path), apply=False,
+        adoption_authorization=authorization,
+    )
 
 
 class _V2RecoveryLock:
@@ -211,10 +232,13 @@ def _recover_locked(
     post_id: int,
     media_id: int,
     evidence_path: Path,
-    legacy_verified: bool,
     apply: bool,
+    adoption_authorization: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     evidence = _read_json(evidence_path)
+    is_adoption = adoption_authorization is not None
+    if evidence.get("operation") == "editorial_adoption" and not is_adoption:
+        raise ValueError("adoption evidence must use the separate v2-adopt-media command")
     if (
         evidence.get("version") != 1
         or int(evidence.get("post_id") or 0) != post_id
@@ -223,28 +247,38 @@ def _recover_locked(
         raise ValueError("evidence version/post_id/media_id do not match requested recovery")
     original_run_id = str(evidence.get("run_id") or "").strip()
     candidate_id = str(evidence.get("candidate_id") or "").strip()
+    operation_id = (
+        adoption_authorization["authorization_id"] if is_adoption else original_run_id
+    )
+    if is_adoption:
+        candidate_id = f"editorial-adoption:{operation_id}"
     source_page = str(evidence.get("source_page_url") or "").strip()
     direct_url = str(evidence.get("direct_image_url") or "").strip()
     subject = str(evidence.get("subject") or "").strip()
     credit = str(evidence.get("credit_text") or "").strip()
     relevance = evidence.get("evidence")
     historical_identity = evidence.get("visual_verification")
-    if legacy_verified:
-        _verify_legacy_evidence(evidence, post_id=post_id, media_id=media_id)
     if (
-        not original_run_id or not candidate_id or not subject or not source_page or not direct_url
+        (not operation_id or (not is_adoption and not candidate_id))
+        or not subject or not source_page or not direct_url
         or not credit.casefold().startswith("crédito da imagem:")
         or not isinstance(relevance, dict)
         or relevance.get("verdict") != "deterministic_match"
         or not relevance.get("matched")
-        or not isinstance(historical_identity, dict)
-        or historical_identity.get("decision") != "DIFFERENT"
+        or (not is_adoption and (
+            not isinstance(historical_identity, dict)
+            or historical_identity.get("decision") != "DIFFERENT"
+        ))
     ):
-        raise ValueError("evidence lacks the original run, provenance, relevance, or visual decision")
-    for field in ("sha256", "phash", "visual_group_id"):
-        if not str(evidence.get(field) or "").strip():
-            raise ValueError(f"evidence is missing {field}")
-    if not legacy_verified:
+        label = "adoption" if is_adoption else "historical recovery"
+        raise ValueError(f"evidence lacks required {label} provenance or relevance")
+    if is_adoption:
+        evidence["operation"] = "editorial_adoption"
+        evidence["authorization"] = dict(adoption_authorization)
+    else:
+        for field in ("sha256", "phash", "visual_group_id"):
+            if not str(evidence.get(field) or "").strip():
+                raise ValueError(f"evidence is missing {field}")
         _verify_historical_linkage(root, post_id, evidence)
 
     post = client.get_post(post_id)
@@ -254,7 +288,8 @@ def _recover_locked(
         raise ValueError("post status is outside the human-review lifecycle")
     previous = _read_state(post)
     if previous.state is not LifecycleState.HUMAN_REQUIRED:
-        raise ValueError("historical recovery only accepts a HUMAN_REQUIRED post")
+        operation_name = "editorial adoption" if is_adoption else "historical recovery"
+        raise ValueError(f"{operation_name} only accepts a HUMAN_REQUIRED post")
     initial_snapshot = _wordpress_snapshot(post, previous)
 
     attachment = client.get_media(media_id)
@@ -287,7 +322,7 @@ def _recover_locked(
     if media_id == previous.media.featured.media_id:
         raise ValueError("attachment is already the featured image, not an inline recovery")
     if already_recovered and (
-        existing_item.sha256 != evidence.get("sha256")
+        (not is_adoption and existing_item.sha256 != evidence.get("sha256"))
         or existing_item.media_url != attachment_url
     ):
         raise ValueError("attachment id is already present with conflicting state")
@@ -298,7 +333,7 @@ def _recover_locked(
         raise ValueError("no inline deficit remains; recovery would exceed the current quota")
 
     journal_id = hashlib.sha256(
-        f"v1:{post_id}:{media_id}:{original_run_id}:{evidence['sha256']}".encode()
+        f"v1:{post_id}:{media_id}:{operation_id}:{evidence.get('sha256') or ''}".encode()
     ).hexdigest()
     journal_path = root / "work" / "v2-media-recovery" / f"{journal_id}.json"
     old_state_hash = hashlib.sha256(json.dumps(previous.to_dict(), sort_keys=True).encode()).hexdigest()
@@ -311,12 +346,16 @@ def _recover_locked(
             timeout=float(getattr(config, "http_timeout", 30)),
         )
         identity = fingerprint_path(attachment_path)
-        if (
+        if not is_adoption and (
             identity.sha256 != str(evidence["sha256"])
             or identity.phash != str(evidence["phash"])
             or identity.visual_group_id != str(evidence["visual_group_id"])
         ):
             raise ValueError("attachment bytes do not match historical SHA-256/pHash evidence")
+        if already_recovered and (
+            existing_item.sha256 != identity.sha256 or existing_item.media_url != attachment_url
+        ):
+            raise ValueError("attachment id is already present with conflicting state")
         source_check = validate_discovered_candidate(
             {"direct_image_url": direct_url, "source_page_url": source_page}, subject=subject,
         )
@@ -381,8 +420,13 @@ def _recover_locked(
         visual_verification={
             "decision": "DIFFERENT", "reason": decision.reason,
             "comparisons": list(decision.comparisons), "baseline_media_ids": sorted(attachments_by_id),
-            "recovery": {"source_run_id": original_run_id, "candidate_id": candidate_id,
-                         "source_page_url": source_page, "direct_image_url": direct_url},
+            "recovery": {
+                "operation": "editorial_adoption" if is_adoption else "historical_recovery",
+                **({"authorization": dict(adoption_authorization)} if is_adoption else {
+                    "source_run_id": original_run_id, "candidate_id": candidate_id,
+                }),
+                "source_page_url": source_page, "direct_image_url": direct_url,
+            },
         },
     )
     candidate_media = (
@@ -414,9 +458,10 @@ def _recover_locked(
 
     proposed = replace(previous, media=candidate_media)
     report = {
-        "mode": "apply" if apply else "preview", "recovery_policy": "legacy-verified" if legacy_verified else "strict",
-        "post_id": post_id, "media_id": media_id,
-        "source_run_id": original_run_id, "recovery_id": journal_id,
+        "mode": "apply" if apply else "preview", "post_id": post_id, "media_id": media_id,
+        "operation": "editorial_adoption" if is_adoption else "historical_recovery",
+        "source_run_id": original_run_id or None, "recovery_id": journal_id,
+        **({"authorization": dict(adoption_authorization)} if is_adoption else {}),
         "source_verification": source_check.get("verification_level"),
         "source_bytes": byte_reason, "visual_decision": decision.decision,
         "visual_confidence": confidence,
@@ -472,7 +517,8 @@ def _recover_locked(
         sha256=item.sha256, visual_group_id=item.visual_group_id,
     )
     record_v2_observation(
-        root, post_id=post_id, run_id=f"historical-recovery:{journal_id}",
+        root, post_id=post_id,
+        run_id=f"{'editorial-adoption' if is_adoption else 'historical-recovery'}:{journal_id}",
         state=proposed, phase="media_recovery", outcome="accepted",
         checkpoint_reference=f"work/v2-media-recovery/{journal_id}.json", applied=False,
     )
@@ -480,8 +526,11 @@ def _recover_locked(
     _save_journal(journal_path, journal)
     try:
         append_telemetry(
-            root, "v2_media_recovery_completed", post_id=post_id, media_id=media_id,
-            run_id=journal_id, source_run_id=original_run_id,
+            root, "v2_media_adoption_completed" if is_adoption else "v2_media_recovery_completed",
+            post_id=post_id, media_id=media_id,
+            run_id=journal_id,
+            **({"authorization_id": operation_id, "authorized_by": adoption_authorization["authorized_by"]}
+               if is_adoption else {"source_run_id": original_run_id}),
             lifecycle=previous.state.value, applied=False,
         )
     except Exception:

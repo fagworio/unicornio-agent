@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
-from unicornio_editor.pipeline_v2.media_recovery import recover_historical_attachment
+from unicornio_editor.pipeline_v2.media_recovery import (
+    adopt_existing_attachment,
+    recover_historical_attachment,
+)
 from unicornio_editor.pipeline_v2.model import (
     BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState,
     MediaProgress, Phase, RetryInfo, WorkState,
@@ -176,18 +179,7 @@ def _mock_validation(monkeypatch, tmp_path):
     return observed_roots
 
 
-def test_legacy_verified_requires_independent_upload_proof(tmp_path, monkeypatch):
-    root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
-    _mock_validation(monkeypatch, tmp_path)
-    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    with pytest.raises(ValueError, match="LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT"):
-        recover_historical_attachment(
-            client, config, root, post_id=115152, media_id=115305,
-            evidence_path=evidence_path, legacy_verified=True,
-        )
-
-
-def test_legacy_verified_accepts_complete_independent_proof_in_preview(tmp_path, monkeypatch):
+def test_user_supplied_legacy_proof_cannot_bypass_historical_linkage(tmp_path, monkeypatch):
     root, _original, evidence, evidence_path, client, config = _fixture(tmp_path)
     evidence["legacy_proof"] = {
         "upload_event": {"post_id": 115152, "media_id": 115305, "event_id": "upload-1"},
@@ -198,15 +190,17 @@ def test_legacy_verified_accepts_complete_independent_proof_in_preview(tmp_path,
         },
         "run_binding": {"historical_run_id": evidence["run_id"], "upload_event_id": "upload-1"},
     }
+    candidate_path = root / "backups/115152/editorial.candidate.json"
+    candidate = json.loads(candidate_path.read_text())
+    candidate["_v2_run_id"] = "forged-other-run"
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    _mock_validation(monkeypatch, tmp_path)
-    result = recover_historical_attachment(
-        client, config, root, post_id=115152, media_id=115305,
-        evidence_path=evidence_path, legacy_verified=True,
-    )
-    assert result["recovery_policy"] == "legacy-verified"
-    assert result["writes"] == 0
-    assert result["missing"] == 2
+    with pytest.raises(ValueError, match="historical V2 candidate and journal"):
+        recover_historical_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path,
+        )
+    assert client.updates == []
 
 
 def test_recovery_preview_is_read_only_and_preserves_human_lifecycle(tmp_path, monkeypatch):
@@ -283,7 +277,7 @@ def test_recovery_apply_refuses_dry_run_and_insufficient_evidence(tmp_path, monk
     config.dry_run = False
     evidence["evidence"] = {"verdict": "ambiguous", "matched": []}
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    with pytest.raises(ValueError, match="lacks the original run"):
+    with pytest.raises(ValueError, match="lacks required historical recovery provenance or relevance"):
         recover_historical_attachment(
             client, config, root, post_id=115152, media_id=115305,
             evidence_path=evidence_path,
@@ -385,3 +379,82 @@ def test_recovery_resumes_after_wordpress_commit_without_rewriting_state(tmp_pat
     assert result["writes"] == 1
     assert len(client.updates) == updates_after_first_attempt
     assert json.loads(journal_path.read_text())["status"] == "complete"
+
+
+def _adoption_evidence(evidence, evidence_path):
+    value = dict(evidence)
+    for key in ("run_id", "candidate_id", "sha256", "phash", "visual_group_id", "visual_verification"):
+        value.pop(key, None)
+    value["operation"] = "editorial_adoption"
+    evidence_path.write_text(json.dumps(value), encoding="utf-8")
+    return evidence_path
+
+
+def test_adoption_requires_explicit_confirmation_and_authorization(tmp_path):
+    root, _state, _evidence, evidence_path, client, config = _fixture(tmp_path)
+    with pytest.raises(ValueError, match="--confirm-adoption"):
+        adopt_existing_attachment(
+            client, config, root, post_id=115152, media_id=115305,
+            evidence_path=evidence_path, authorization_id="ticket-1",
+            authorized_by="editor@example.test", authorization_reason="editor approved",
+        )
+    assert client.get_calls == 0 and client.updates == []
+
+
+def test_adoption_preview_is_separate_from_historical_provenance(tmp_path, monkeypatch):
+    root, original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    evidence_path = _adoption_evidence(evidence, evidence_path)
+    historical = (root / "work/v2-journal/115152.json").read_text()
+    from unicornio_editor.media.registry import connect
+    with connect(root) as db:
+        registry_before = db.execute("SELECT COUNT(*) FROM media_decisions").fetchone()[0]
+    _mock_validation(monkeypatch, tmp_path)
+
+    result = adopt_existing_attachment(
+        client, config, root, post_id=115152, media_id=115305,
+        evidence_path=evidence_path, authorization_id="editorial-approval-42",
+        authorized_by="editor@example.test", authorization_reason="approved for this article",
+        confirm_adoption=True,
+    )
+
+    assert result["operation"] == "editorial_adoption" and result["writes"] == 0
+    assert result["authorization"] == {
+        "authorization_id": "editorial-approval-42",
+        "authorized_by": "editor@example.test",
+        "reason": "approved for this article",
+    }
+    assert result["lifecycle_preserved"] == "human_required"
+    assert WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"])) == original
+    assert client.updates == []
+    assert (root / "work/v2-journal/115152.json").read_text() == historical
+    with connect(root) as db:
+        registry_after = db.execute("SELECT COUNT(*) FROM media_decisions").fetchone()[0]
+    assert registry_after == registry_before
+
+
+def test_adoption_apply_records_editorial_authorization_without_fabricating_history(tmp_path, monkeypatch):
+    root, original, evidence, evidence_path, client, config = _fixture(tmp_path)
+    evidence_path = _adoption_evidence(evidence, evidence_path)
+    _mock_validation(monkeypatch, tmp_path)
+
+    result = adopt_existing_attachment(
+        client, config, root, post_id=115152, media_id=115305,
+        evidence_path=evidence_path, authorization_id="editorial-approval-43",
+        authorized_by="editor@example.test", authorization_reason="approved for this article",
+        confirm_adoption=True, apply=True,
+    )
+
+    state = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+    adopted = state.media.inline[-1]
+    assert result["operation"] == "editorial_adoption" and result["writes"] == 1
+    assert state.state is LifecycleState.HUMAN_REQUIRED
+    assert state.phase is original.phase and state.retry == original.retry
+    assert adopted.visual_verification["recovery"]["operation"] == "editorial_adoption"
+    assert adopted.visual_verification["recovery"]["authorization"]["authorization_id"] == "editorial-approval-43"
+    assert "source_run_id" not in adopted.visual_verification["recovery"]
+    journal = json.loads(next((root / "work/v2-media-recovery").glob("*.json")).read_text())
+    assert journal["operation"] == "editorial_adoption"
+    assert journal["authorization"]["authorized_by"] == "editor@example.test"
+    assert journal["source_run_id"] is None
+    assert client.post["status"] == "pending"
+    assert client.post["meta"]["_hermes_human_reopened_from"] == "awaiting_human"

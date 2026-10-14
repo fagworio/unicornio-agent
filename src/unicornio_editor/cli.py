@@ -105,12 +105,25 @@ def build_parser() -> argparse.ArgumentParser:
     v2_recover_media_parser.add_argument("--evidence", type=Path, required=True)
     v2_recover_media_parser.add_argument("--root", type=Path, default=Path("."))
     v2_recover_media_parser.add_argument(
-        "--legacy-verified", action="store_true",
-        help="usa recuperação legada somente com pacote de provas independentes completo",
-    )
-    v2_recover_media_parser.add_argument(
         "--apply", action="store_true",
         help="persiste somente o estado V2/checkpoint/índices; exige EDITOR_DRY_RUN=false",
+    )
+
+    v2_adopt_media_parser = subparsers.add_parser(
+        "v2-adopt-media",
+        help="adota editorialmente attachment existente com autorização explícita; preview por padrão",
+    )
+    v2_adopt_media_parser.add_argument("post_id", type=int)
+    v2_adopt_media_parser.add_argument("media_id", type=int)
+    v2_adopt_media_parser.add_argument("--evidence", type=Path, required=True)
+    v2_adopt_media_parser.add_argument("--authorization-id", required=True)
+    v2_adopt_media_parser.add_argument("--authorized-by", required=True)
+    v2_adopt_media_parser.add_argument("--authorization-reason", required=True)
+    v2_adopt_media_parser.add_argument("--confirm-adoption", action="store_true", required=True)
+    v2_adopt_media_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_adopt_media_parser.add_argument(
+        "--apply", action="store_true",
+        help="persiste somente estado/checkpoint/índices; exige EDITOR_DRY_RUN=false",
     )
 
     queue_parser.add_argument("--root", type=Path, default=Path("."))
@@ -2309,7 +2322,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 post_id=args.post_id,
                 media_id=args.media_id,
                 evidence_path=args.evidence,
-                legacy_verified=bool(args.legacy_verified),
+                apply=bool(args.apply),
+            )
+        elif args.command == "v2-adopt-media":
+            from .pipeline_v2.media_recovery import adopt_existing_attachment
+
+            result = adopt_existing_attachment(
+                client, config, args.root,
+                post_id=args.post_id,
+                media_id=args.media_id,
+                evidence_path=args.evidence,
+                authorization_id=args.authorization_id,
+                authorized_by=args.authorized_by,
+                authorization_reason=args.authorization_reason,
+                confirm_adoption=bool(args.confirm_adoption),
                 apply=bool(args.apply),
             )
         elif args.command == "list-pending":
