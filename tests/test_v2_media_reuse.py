@@ -1115,6 +1115,93 @@ def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
     assert result.featured.media_id == 91
 
 
+def test_featured_ambiguous_candidate_is_recorded_as_retryable_in_registry(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    from unicornio_editor.media.registry import connect
+
+    calls = []
+
+    def resolve(_client, _config, _root, batch, **_kwargs):
+        calls.append(batch["posts"][0]["query"])
+        candidates = [{
+            "candidate_id": "ambiguous-featured",
+            "direct_image_url": "https://cdn.test/uncertain-key-art.webp",
+            "source_page_url": "https://source.test/uncertain",
+            "role": "featured",
+            "subject": "Test",
+            "evidence": {"verdict": "ambiguous", "gate": "visual_match"},
+        }] if len(calls) == 1 else []
+        return {"posts": [{"reuse": [], "audit_candidates": candidates}]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", resolve)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    previous = MediaProgress(required=0, featured=FeaturedProgress(FeaturedStatus.MISSING))
+
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115286, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(3), "seo": {}},
+        previous,
+    )
+
+    assert len(calls) == 2
+    assert result.featured.status is FeaturedStatus.MISSING
+    with connect(tmp_path) as db:
+        decisions = db.execute(
+            "SELECT role, disposition, reason_code FROM media_decisions "
+            "WHERE post_id=? AND candidate_id=?",
+            (115286, "ambiguous-featured"),
+        ).fetchall()
+    assert [tuple(row) for row in decisions] == [
+        ("featured", "defer_retry", "ambiguous")
+    ]
+
+
+def test_featured_matching_candidate_with_incomplete_provenance_is_not_blacklisted(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    from unicornio_editor.media.registry import connect
+
+    calls = []
+
+    def resolve(_client, _config, _root, batch, **_kwargs):
+        calls.append(batch["posts"][0]["query"])
+        candidates = [{
+            "candidate_id": "incomplete-featured",
+            "direct_image_url": "https://cdn.test/incomplete-key-art.webp",
+            "role": "featured",
+            "subject": "Test",
+            "evidence": {"verdict": "deterministic_match", "gate": "article_source"},
+        }] if len(calls) == 1 else []
+        return {"posts": [{"reuse": [], "audit_candidates": candidates}]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", resolve)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    previous = MediaProgress(required=0, featured=FeaturedProgress(FeaturedStatus.MISSING))
+
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115286, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(3), "seo": {}},
+        previous,
+    )
+
+    assert len(calls) == 2
+    assert result.featured.status is FeaturedStatus.MISSING
+    with connect(tmp_path) as db:
+        decisions = db.execute(
+            "SELECT role, disposition, reason_code FROM media_decisions "
+            "WHERE post_id=? AND candidate_id=?",
+            (115286, "incomplete-featured"),
+        ).fetchall()
+    assert [tuple(row) for row in decisions] == [
+        ("featured", "defer_retry", "incomplete_provenance")
+    ]
+
+
 def test_vision_rejected_featured_is_not_recovered_from_wordpress(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
@@ -1209,6 +1296,98 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
     )
     assert result.accepted == 1
     assert result.inline[0].media_id == 44
+
+
+def test_featured_missing_searches_article_source_even_when_inline_is_complete(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.source_verify as source_verify
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    candidate = {
+        "candidate_id": "source-featured-1",
+        "direct_image_url": "https://cdn.test/source-key-art.webp",
+        "source_page_url": "https://source.test/article",
+        "author": "Source",
+        "license": "Uso com crédito",
+        "license_url": "https://source.test/article",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: source.test",
+        "alt_text": "Test key art",
+        "evidence": {"verdict": "deterministic_match"},
+    }
+    source_calls = []
+
+    def discover(url, **kwargs):
+        source_calls.append((url, kwargs))
+        return [dict(candidate)]
+
+    monkeypatch.setattr(source_verify, "discover_article_source_candidates", discover)
+    monkeypatch.setattr(
+        cli,
+        "_resolve_media_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("article Fonte must be tried before external featured search")
+        ),
+    )
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+
+    executed = []
+
+    def execute(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        executed.append(item)
+        return ([{
+            "status": "accepted",
+            "media_id": 99,
+            "media_url": item["direct_image_url"],
+            "paragraph_index": item["paragraph_index"],
+            "featured": True,
+            "sha256": "f" * 64,
+            "phash": "f" * 16,
+            "visual_group_id": "visual:" + "f" * 24,
+            "visual_verification": {"decision": "DIFFERENT"},
+        }], 99, "Crédito")
+
+    monkeypatch.setattr(runtime, "_execute_media_plan", execute)
+    inline = tuple(
+        InlineMedia(
+            media_id,
+            f"https://wp.test/inline-{media_id}.webp",
+            slot,
+            sha256=letter * 64,
+            phash=letter * 16,
+            visual_group_id=f"visual:{letter * 24}",
+            visual_verification={"decision": "DIFFERENT"},
+        )
+        for media_id, slot, letter in ((10, 0, "a"), (11, 1, "b"))
+    )
+    previous = MediaProgress(required=2, inline=inline, featured=FeaturedProgress(FeaturedStatus.MISSING))
+
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115286, "title": "Test", "original_link": "https://source.test/article"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(3), "seo": {}},
+        previous,
+    )
+
+    assert len(source_calls) == 1
+    assert source_calls[0][0] == "https://source.test/article"
+    assert len(result.inline) == 2
+    assert result.featured.status is FeaturedStatus.VALID
+    assert result.featured.media_id == 99
+    assert executed[0]["role"] == "featured"
+    assert executed[0]["is_featured"] is True
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event.get("event") == "v2_featured_source_discovery"
+        and event.get("outcome") == "accepted_from_source"
+        for event in events
+    )
 
 
 def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(monkeypatch, tmp_path):

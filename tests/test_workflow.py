@@ -1629,6 +1629,54 @@ class WorkflowTests(unittest.TestCase):
             "featured-1280x720.webp",
         )
 
+    def test_existing_irrelevant_featured_rejection_is_auditable(self):
+        from unicornio_editor.workflow import _normalize_existing_featured
+
+        class Client:
+            def __init__(self):
+                self.uploads = 0
+
+            def get_media(self, media_id):
+                return {
+                    "id": media_id,
+                    "source_url": "https://cdn.test/site-logo-banner.jpg",
+                    "title": {"rendered": "Site logo banner"},
+                    "alt_text": "Brand logo",
+                    "media_details": {"width": 1200, "height": 900},
+                }
+
+            def upload_media(self, *_args, **_kwargs):
+                self.uploads += 1
+                raise AssertionError("irrelevant featured must not be uploaded")
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = _normalize_existing_featured(
+                client,
+                self.config(False),
+                {"id": 71, "featured_media": 115287},
+                {
+                    "seo": {"title": "Hollow Knight recebe atualização importante"},
+                    "cleaned_html": "<p>Hollow Knight videogame update news.</p>",
+                    "game_name": "Hollow Knight",
+                },
+                root=root,
+            )
+            events = [
+                json.loads(line)
+                for line in (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertIsNone(result)
+        self.assertEqual(client.uploads, 0)
+        self.assertTrue(any(
+            event.get("event") == "featured_normalization"
+            and event.get("reason_code") == "existing_featured_not_relevant"
+            and event.get("media_id") == 115287
+            for event in events
+        ))
+
     def test_publish_blocks_without_publish_enabled_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

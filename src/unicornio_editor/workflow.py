@@ -2380,9 +2380,29 @@ def _normalize_existing_featured(
     featured = post.get("featured_media")
     if not isinstance(featured, int) or featured <= 0:
         return None
+
+    def report(reason_code: str, stage: str, *, outcome: str, exc: Exception | None = None) -> None:
+        if root is None:
+            return
+        fields: dict[str, Any] = {
+            "post_id": int(post.get("id") or 0) or None,
+            "media_id": featured,
+            "role": "featured",
+            "stage": stage,
+            "outcome": outcome,
+            "reason_code": reason_code,
+        }
+        if exc is not None:
+            fields["exception_type"] = type(exc).__name__
+        try:
+            append_telemetry(root, "featured_normalization", **fields)
+        except Exception:  # noqa: BLE001 - diagnostics cannot change media decisions
+            pass
+
     try:
         media = client.get_media(featured)
-    except Exception:
+    except Exception as exc:
+        report("wordpress_read_failed", "read_attachment", outcome="retryable_failure", exc=exc)
         return None
     details = media.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
@@ -2411,10 +2431,13 @@ def _normalize_existing_featured(
                 entities=entities,
                 source_only=True,
             ):
+                report("existing_featured_not_relevant", "source_relevance", outcome="rejected")
                 return None
     if width == 1280 and height == 720 and source_url.lower().endswith(".webp"):
+        report("already_normalized", "complete", outcome="reused")
         return featured
     if not source_url:
+        report("attachment_source_url_missing", "read_attachment", outcome="rejected")
         return None
     from .media.text import plain_text
 
@@ -2424,9 +2447,9 @@ def _normalize_existing_featured(
     alt = plain_text(str(media.get("alt_text") or ""))
     caption = plain_text(str((media.get("caption") or {}).get("rendered") or ""))
     filename = _featured_filename_from_source(source_url)
-    try:
-        with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
-            tmp = Path(directory)
+    with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
+        tmp = Path(directory)
+        try:
             source = download_image(
                 source_url,
                 tmp / "featured_source.jpg",
@@ -2440,7 +2463,15 @@ def _normalize_existing_featured(
                     else None
                 ),
             )
+        except Exception as exc:
+            report("source_download_failed", "download", outcome="retryable_failure", exc=exc)
+            return None
+        try:
             webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
+        except Exception as exc:
+            report("featured_conversion_failed", "convert", outcome="rejected", exc=exc)
+            return None
+        try:
             new_media = client.upload_media(
                 str(webp),
                 filename=filename,
@@ -2448,10 +2479,18 @@ def _normalize_existing_featured(
                 title=title,
                 caption=caption,
             )
-    except Exception:
+        except Exception as exc:
+            report("wordpress_upload_failed", "upload", outcome="retryable_failure", exc=exc)
+            return None
+    if not isinstance(new_media, dict):
+        report("wordpress_upload_missing_media_id", "upload", outcome="retryable_failure")
         return None
     new_id = new_media.get("id")
-    return new_id if isinstance(new_id, int) else None
+    if not isinstance(new_id, int) or new_id <= 0:
+        report("wordpress_upload_missing_media_id", "upload", outcome="retryable_failure")
+        return None
+    report("normalized", "complete", outcome="accepted")
+    return new_id
 
 
 def _featured_filename_from_source(source_url: str) -> str:

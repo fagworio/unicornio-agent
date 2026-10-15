@@ -1026,6 +1026,166 @@ class ProductionMediaResolver:
             persist_progress()
             return results
 
+        def record_non_executable_candidates(
+            candidates: list[dict[str, Any]],
+            approved: list[dict[str, Any]],
+            *,
+            role: str,
+        ) -> None:
+            """Persist a terminal decision for candidates not sent to upload gates."""
+            approved_ids = {
+                str(item.get("candidate_id") or "")
+                for item in approved
+                if str(item.get("candidate_id") or "")
+            }
+            try:
+                from ..media.registry import record_v2_candidate_decision
+
+                for candidate in candidates:
+                    candidate_id = str(candidate.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in approved_ids:
+                        continue
+                    evidence = candidate.get("evidence")
+                    evidence = evidence if isinstance(evidence, dict) else {}
+                    verdict = str(evidence.get("verdict") or "").casefold()
+                    rejected_reason = str(candidate.get("rejected_reason") or "").casefold()
+                    gate = str(evidence.get("gate") or "").casefold()
+                    signal = rejected_reason or verdict or gate
+                    definitive_signals = (
+                        "source_mismatch", "duplicate", "unrelated", "width_below_minimum",
+                        "resolution", "source_bytes_mismatch", "identity_mismatch",
+                    )
+                    definitive_verdicts = {
+                        "reject", "source_mismatch", "duplicate_existing_frame",
+                        "duplicate_frame", "unrelated",
+                    }
+                    is_definitive = verdict in definitive_verdicts or any(
+                        value in signal for value in definitive_signals
+                    )
+                    disposition = "reject_final" if is_definitive else "defer_retry"
+                    if verdict == "deterministic_match" and not rejected_reason:
+                        # The evidence matched, but the candidate was not executable;
+                        # missing contract/provenance data is not a permanent rejection.
+                        disposition = "defer_retry"
+                        signal = "incomplete_provenance"
+                    elif not signal:
+                        signal = "incomplete_provenance"
+                    record_v2_candidate_decision(
+                        self.root,
+                        post_id=int(context["post_id"]),
+                        run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                        candidate=candidate,
+                        role=role,
+                        disposition=disposition,
+                        reason_code=signal[:120],
+                    )
+            except Exception:  # noqa: BLE001 - registry audit must not change acquisition
+                pass
+
+        source_url = str(context.get("original_link") or "").strip()
+        if not source_url:
+            post = context.get("post") or {}
+            source_url = (
+                str((post.get("meta") or {}).get("original_link") or "").strip()
+                if isinstance(post, dict)
+                else ""
+            )
+        source_stats: dict[str, int] = {}
+        source_candidates_cache: list[dict[str, Any]] | None = None
+
+        def article_source_candidates() -> list[dict[str, Any]]:
+            nonlocal source_candidates_cache
+            if source_candidates_cache is not None:
+                return source_candidates_cache
+            source_candidates_cache = []
+            if not source_url:
+                return source_candidates_cache
+            try:
+                from ..media.source_verify import discover_article_source_candidates
+
+                primary_subject = (
+                    source_subjects[0]
+                    if source_subjects
+                    else (subject_queries[0][0] if subject_queries else title)
+                )
+                source_candidates_cache = discover_article_source_candidates(
+                    source_url,
+                    subject=primary_subject,
+                    subjects=source_subjects,
+                    limit=max(8, max(inline_needed, featured_needed) * 4),
+                    stats=source_stats,
+                )
+            except Exception as exc:
+                from ..observability import record_unexpected_error, append_telemetry
+
+                record_unexpected_error(
+                    self.root, exc, post_id=int(context["post_id"]),
+                    run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                    file="pipeline_v2/runtime.py", field="source_discovery",
+                )
+                append_telemetry(
+                    self.root, "media_source_discovery_failed",
+                    post_id=int(context["post_id"]),
+                    failure_kind="source_extractor_error",
+                    candidates_found=int(source_stats.get("raw_assets") or 0),
+                )
+                source_candidates_cache = []
+            return source_candidates_cache
+
+        if featured_needed:
+            featured_row = subject_rows[0] if subject_rows else {}
+            featured_subject = str(featured_row.get("subject") or title)
+            source_feature_candidates: list[dict[str, Any]] = []
+            discovered_source_candidates = article_source_candidates()
+            for raw_candidate in discovered_source_candidates:
+                candidate = dict(raw_candidate)
+                if current_featured.status is FeaturedStatus.VALID:
+                    break
+                candidate["subject"] = featured_subject
+                candidate["role"] = "featured"
+                candidate["search_query"] = "article_source featured"
+                candidate_url = _canonical_embedded_media_url(
+                    str(candidate.get("direct_image_url") or "")
+                )
+                if candidate_url and candidate_url in rejection_history["urls"]:
+                    continue
+                try:
+                    from ..media.library_index import find_by_source_url
+
+                    existing = find_by_source_url(
+                        self.root, str(candidate.get("direct_image_url") or "")
+                    )
+                    if existing and existing.get("media_id"):
+                        candidate["media_library_id"] = int(existing["media_id"])
+                        candidate["already_in_library"] = True
+                except Exception:
+                    pass
+                source_feature_candidates.append(candidate)
+            self._resolve_ambiguous_vision(
+                source_feature_candidates, post_id=int(context["post_id"])
+            )
+            approved_source_features = self._approved_unique(source_feature_candidates)
+            record_non_executable_candidates(
+                source_feature_candidates, approved_source_features, role="featured"
+            )
+            for candidate in approved_source_features:
+                if current_featured.status is FeaturedStatus.VALID:
+                    break
+                execute_plan([self._plan_item(candidate, featured_subject, 0, True)])
+            append_telemetry(
+                self.root,
+                "v2_featured_source_discovery",
+                post_id=int(context["post_id"]),
+                run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                candidates_found=len(discovered_source_candidates),
+                candidates_considered=len(source_feature_candidates),
+                candidates_executable=len(approved_source_features),
+                outcome=(
+                    "accepted_from_source" if current_featured.status is FeaturedStatus.VALID
+                    else "source_exhausted"
+                ),
+            )
+
         featured_queries: list[tuple[str, str]] = []
         if featured_needed:
             featured_row = subject_rows[0] if subject_rows else {}
@@ -1040,7 +1200,11 @@ class ProductionMediaResolver:
                     break
                 candidates = resolve_query(subject, query, 1, "featured")
                 self._resolve_ambiguous_vision(candidates, post_id=int(context["post_id"]))
-                for candidate in self._approved_unique(candidates):
+                approved_candidates = self._approved_unique(candidates)
+                record_non_executable_candidates(
+                    candidates, approved_candidates, role="featured"
+                )
+                for candidate in approved_candidates:
                     if current_featured.status is FeaturedStatus.VALID:
                         break
                     execute_plan([
@@ -1071,47 +1235,11 @@ class ProductionMediaResolver:
             # The article's own Fonte is the first acquisition strategy.  Its
             # assets already have provenance by construction; they still pass
             # through the regular executable media-plan gates below.
-            source_url = str(context.get("original_link") or "").strip()
-            if not source_url:
-                post = context.get("post") or {}
-                source_url = (
-                    str((post.get("meta") or {}).get("original_link") or "").strip()
-                    if isinstance(post, dict)
-                    else ""
-                )
             if source_url:
-                source_stats: dict[str, int] = {}
                 source_attempted = 0
                 source_accepted = 0
                 source_reused = 0
-                try:
-                    from ..media.source_verify import discover_article_source_candidates
-
-                    source_candidates = discover_article_source_candidates(
-                        source_url,
-                        subject=(source_subjects[0] if source_subjects else (subject_queries[0][0] if subject_queries else title)),
-                        subjects=source_subjects,
-                        limit=max(8, inline_remaining() * 4),
-                        stats=source_stats,
-                    )
-                except Exception as exc:
-                    from ..observability import record_unexpected_error
-
-                    record_unexpected_error(
-                        self.root, exc, post_id=int(context["post_id"]),
-                        run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
-                        file="pipeline_v2/runtime.py", field="source_discovery",
-                    )
-                    from ..observability import append_telemetry
-
-                    append_telemetry(
-                        self.root, "media_source_discovery_failed",
-                        post_id=int(context["post_id"]),
-                        source_page=source_url[:500],
-                        failure_kind="source_extractor_error",
-                        candidates_found=int(source_stats.get("raw_assets") or 0),
-                    )
-                    source_candidates = []
+                source_candidates = article_source_candidates()
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
