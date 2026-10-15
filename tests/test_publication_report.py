@@ -119,6 +119,39 @@ class PublicationReportCostTests(unittest.TestCase):
 
         self.assertIn("Custo editorial (24h): indisponível", output.getvalue())
 
+    def test_report_shows_retry_only_window_with_reason_and_checks(self):
+        data = {
+            "posts": [],
+            "blocked_posts": [],
+            "retryable_count": 1,
+            "retryable_posts": [{
+                "post_id": 115286,
+                "reason": "validação técnica da mídia inconclusiva; publicação não realizada",
+                "checks": ["featured_identity_matches_current_attachment"],
+            }],
+            "error_count": 0,
+            "error_posts": [],
+        }
+        with patch.object(report, "_load_window_json", return_value=data), patch.object(
+            report, "_post_titles", return_value={115286: "Post de teste"}
+        ), patch.object(report, "_custo_24h", return_value=(0.0, 0, "test")), patch.object(
+            report, "_published_by_editorial_last_24h", return_value=0
+        ), patch.object(report, "_queue_after_window", return_value=None), patch(
+            "sys.stdout", new_callable=StringIO
+        ) as output:
+            self.assertEqual(report.main(), 0)
+
+        text = output.getvalue()
+        self.assertIn("Publicados: 0", text)
+        self.assertIn("Retries técnicos (1)", text)
+        self.assertIn("115286 | Post de teste | retry", text)
+        self.assertIn("featured_identity_matches_current_attachment", text)
+        self.assertIn("Erros inesperados: 0", text)
+
+    def test_report_redacts_secrets_in_retry_and_error_details(self):
+        self.assertNotIn("pw123", report._safe_reason("password=pw123"))
+        self.assertNotIn("abc123", report._safe_reason("Bearer abc123"))
+
 
 if __name__ == "__main__":
     unittest.main()

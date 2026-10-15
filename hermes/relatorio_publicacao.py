@@ -135,6 +135,25 @@ def _fmt_data(iso: str) -> str:
         return iso[:16]
 
 
+def _safe_reason(value: object, limit: int = 180) -> str:
+    """Keep operational details useful while redacting likely credentials."""
+    try:
+        sys.path.insert(0, str(ROOT / "src"))
+        from unicornio_editor.observability import _redact_text
+
+        text = _redact_text(str(value))
+    except Exception:
+        text = str(value)
+    text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b(password|token|secret|authorization|cookie|api[_-]?key)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2[redacted]",
+        text,
+    )
+    text = re.sub(r"https?://[^/\s:@]+:[^/@\s]+@", "https://[redacted]@", text)
+    return " ".join(text.split())[:limit]
+
+
 def main() -> int:
     data = _load_window_json()
     if data is None:
@@ -143,14 +162,20 @@ def main() -> int:
 
     published = data.get("posts") or []
     blocked = data.get("blocked_posts") or []
+    retryable = data.get("retryable_posts") or []
+    errors = data.get("error_posts") or []
+    detail_ids = [
+        post.get("post_id")
+        for post in [*published, *blocked, *retryable, *errors]
+        if isinstance(post, dict) and isinstance(post.get("post_id"), int)
+    ]
+    titles = _post_titles(sorted(set(detail_ids)))
     cost_measurement = _custo_24h()
 
     print("📰 Relatório de publicação")
     print(f"🕐 Janela: {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y %H:%M')} (-03)")
 
     if published:
-        ids = [p.get("post_id") for p in published if isinstance(p.get("post_id"), int)]
-        titles = _post_titles(ids)
         print(f"\n✅ Publicados ({len(published)}):")
         for p in published:
             pid = p.get("post_id")
@@ -162,8 +187,6 @@ def main() -> int:
         print("\n✅ Publicados: 0")
 
     if blocked:
-        ids = [b.get("post_id") for b in blocked if isinstance(b.get("post_id"), int)]
-        titles = _post_titles(ids)
         print(f"\n⚠️ Bloqueados ({len(blocked)}):")
         for b in blocked:
             pid = b.get("post_id")
@@ -171,6 +194,31 @@ def main() -> int:
             print(f"  • {pid} | {titles.get(pid, '')[:50]} | blocked | {fails[:60]}")
     else:
         print("⚠️ Bloqueados: 0")
+
+    if retryable:
+        print(f"\n🔄 Retries técnicos ({len(retryable)}):")
+        for item in retryable:
+            pid = item.get("post_id")
+            title = titles.get(pid, "")[:50]
+            reason = _safe_reason(item.get("reason") or "falha técnica recuperável")
+            checks = item.get("checks") or []
+            check_text = ", ".join(
+                _safe_reason(check, limit=60) for check in checks if isinstance(check, str)
+            )
+            suffix = f" | checks: {check_text}" if check_text else ""
+            print(f"  • {pid} | {title} | retry | {reason}{suffix}")
+    else:
+        print("🔄 Retries técnicos: 0")
+
+    if errors:
+        print(f"\n❌ Erros inesperados ({len(errors)}):")
+        for item in errors:
+            pid = item.get("post_id")
+            title = titles.get(pid, "")[:50]
+            reason = _safe_reason(item.get("reason") or "erro sem detalhe")
+            print(f"  • {pid} | {title} | error | {reason}")
+    else:
+        print("❌ Erros inesperados: 0")
 
     queue = _queue_after_window()
     if queue is not None:
