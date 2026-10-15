@@ -5,6 +5,7 @@ from unicornio_editor.media.vision_cache import get_cached_decision, set_cached_
 from unicornio_editor.media.vision_policy import (
     featured_vision_category,
     featured_vision_subject,
+    resolve_editorial_identity,
     vision_cache_subject,
 )
 from unicornio_editor.workflow import _effective_partial_kind
@@ -50,6 +51,28 @@ def test_non_game_featured_subject_comes_from_post_subjects_not_seo_title():
         },
     }
     assert featured_vision_subject(editorial) == "metroid prime 4"
+
+
+def test_canonical_identity_prefers_focus_over_grammatical_headline_entity():
+    editorial = {
+        "title": "Procuradoria-Geral investiga Xbox Live após denúncias",
+        "editorial_type": "game",
+        "cleaned_html": "<p>Xbox Live atualiza salvaguardas depois das denúncias.</p>",
+        "seo": {"title": "Entenda as salvaguardas", "focus_keyword": "Xbox Live"},
+    }
+
+    identity = resolve_editorial_identity(editorial)
+    assert identity["primary_subject"].casefold() == "xbox live"
+    assert featured_vision_subject(editorial) == identity["primary_subject"]
+    assert identity["vision_category"] == "game"
+    assert "Procuradoria-Geral" in identity["secondary_entities"]
+
+
+def test_explicit_subject_wins_over_mismatched_focus_keyword():
+    assert featured_vision_subject({
+        "post_subjects": [{"subject": "Cyberpunk: Edgerunners"}],
+        "seo": {"focus_keyword": "Wrong keyword", "title": "Headline"},
+    }) == "Cyberpunk: Edgerunners"
 
 
 def test_legacy_media_partial_with_vision_error_is_featured_only():

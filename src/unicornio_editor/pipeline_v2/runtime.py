@@ -681,6 +681,25 @@ class ProductionMediaResolver:
             focus_keyword=focus_keyword,
             game_name=editorial.get("game_name"),
         )
+        from ..media.vision_policy import resolve_editorial_identity
+        seo_identity = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+        identity = resolve_editorial_identity({
+            **editorial,
+            "title": title,
+            "cleaned_html": html,
+            "seo": {**seo_identity, "focus_keyword": focus_keyword},
+        })
+        primary_subject = str(identity.get("primary_subject") or "").strip()
+        explicit_focus = focus_keyword.strip().casefold() not in {
+            "", "game", "games", "jogo", "jogos", "videogame", "anime", "filme", "series",
+        }
+        has_canonical_subject = bool(str(editorial.get("game_name") or "").strip() or explicit_focus)
+        if primary_subject and has_canonical_subject:
+            source_subjects = [primary_subject, *[
+                str(value).strip()
+                for value in identity.get("secondary_entities") or []
+                if str(value).strip().casefold() != primary_subject.casefold()
+            ]]
         is_listicle = detect_list_format(title, html) is not None or len(subject_rows) > 1
         if is_listicle:
             media_reconciliation = reconcile_working_visual_media(
@@ -713,7 +732,12 @@ class ProductionMediaResolver:
             # Keep listicle coverage driven by its H2 subjects.  For ordinary
             # news, use the first concrete visual entity for discovery rather
             # than a grammatical phrase such as "ex-gerentes".
-            subject_rows = [{"item": None, "heading": source_subjects[0], "subject": source_subjects[0]}]
+            chosen_subject = primary_subject if has_canonical_subject else source_subjects[0]
+            subject_rows = [{
+                "item": None,
+                "heading": chosen_subject,
+                "subject": chosen_subject,
+            }]
 
         def add_query_context(base: str) -> str:
             if is_listicle:
@@ -903,6 +927,7 @@ class ProductionMediaResolver:
                     "source_page_url": reused.get("source_page_url") or reused.get("source"),
                     "media_library_id": reused.get("media_library_id") or reused.get("media_id"),
                     "subject": subject,
+                    "news_context": str(identity.get("news_context") or ""),
                     "search_query": query,
                     "role": role,
                     "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
@@ -915,6 +940,7 @@ class ProductionMediaResolver:
                     continue
                 candidate = dict(candidate)
                 candidate["subject"] = subject
+                candidate["news_context"] = str(identity.get("news_context") or "")
                 candidate["search_query"] = query
                 candidate["role"] = role
                 metadata = subject_meta.get(subject) or {}
@@ -1185,6 +1211,7 @@ class ProductionMediaResolver:
                 if current_featured.status is FeaturedStatus.VALID:
                     break
                 candidate["subject"] = featured_subject
+                candidate["news_context"] = str(identity.get("news_context") or "")
                 candidate["role"] = "featured"
                 candidate["search_query"] = "article_source featured"
                 candidate_url = _canonical_embedded_media_url(
@@ -1534,6 +1561,7 @@ class ProductionMediaResolver:
                     "candidate_id": str(candidate.get("candidate_id") or f"v2-{index}"),
                     "source_image_url": str(url),
                     "subject": str(candidate.get("subject") or ""),
+                    "context": str(candidate.get("news_context") or ""),
                     "require_key_art": bool(candidate.get("role") == "featured"),
                 })
         if not vision_candidates or not getattr(self.config, "vision_enabled", False) or not getattr(self.config, "vision_api_key", ""):
@@ -1650,7 +1678,8 @@ class ProductionMediaResolver:
                 decision_record = {
                     key: decision[key]
                     for key in (
-                        "status", "confidence", "visual_type", "verdict", "reason",
+                        "status", "confidence", "visual_type", "relation", "editorial_fit",
+                        "role_fit", "verdict", "reason",
                         "detail_used", "low_status", "low_confidence", "low_visual_type",
                     )
                     if key in decision

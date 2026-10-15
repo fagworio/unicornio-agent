@@ -913,7 +913,10 @@ def run_pre_publish_checklist(
         )
     else:
         from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
-        from .media.vision_policy import featured_vision_category, featured_vision_subject
+        from .media.vision_policy import (
+            featured_vision_category, featured_vision_subject,
+            resolve_editorial_identity,
+        )
 
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
         vision_root = _project_root(backup_path)
@@ -979,7 +982,8 @@ def run_pre_publish_checklist(
                         cache_decision = {
                             key: decision[key]
                             for key in (
-                                "status", "confidence", "visual_type", "verdict", "reason",
+                                "status", "confidence", "visual_type", "relation", "editorial_fit",
+                                "role_fit", "verdict", "reason",
                                 "detail_used", "low_status", "low_confidence", "low_visual_type",
                             )
                             if key in decision
@@ -1015,11 +1019,17 @@ def run_pre_publish_checklist(
                 media = client.get_media(featured)
                 featured_url = str(media.get("source_url") or "").strip()
                 featured_subject = featured_vision_subject(editorial)
+                editorial_context = str(
+                    resolve_editorial_identity(editorial).get("news_context") or ""
+                )
                 if featured_url and featured_subject:
                     _verify(
                         featured_url, featured_subject,
                         is_featured=True,
-                        context="image destaque do artigo",
+                        context=(
+                            f"{editorial_context} | imagem destaque do artigo"
+                            if editorial_context else "image destaque do artigo"
+                        ),
                         category=featured_vision_category(editorial),
                     )
             except VisionGateError as exc:

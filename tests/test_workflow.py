@@ -26,6 +26,7 @@ from unicornio_editor.workflow import (
     _recover_partial_featured,
     _execute_media_plan,
     _is_final_phash_duplicate,
+    _item_entities,
     _media_item_rejection,
     _vision_evidence_matches_item,
     apply_editorial,
@@ -876,7 +877,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(stored["confidence"], 0.92)
         self.assertEqual(stored["visual_type"], "key_art")
         self.assertEqual(stored["image_role"], "featured")
-        self.assertEqual(stored["policy_version"], "featured-editorial-v2")
+        self.assertEqual(stored["policy_version"], "featured-editorial-v3-multidimensional")
         self.assertRegex(stored["image_sha256"], r"^[a-f0-9]{64}$")
 
     def test_media_validate_skips_paid_vision_for_strong_official_featured_evidence(self):
@@ -2831,7 +2832,7 @@ def test_execute_media_plan_preserves_rejected_preflight_vision_without_upload(t
     vision = {
         "status": "UNRELATED", "confidence": 0.80, "visual_type": "photograph",
         "verdict": "reject", "image_sha256": "b" * 64, "image_role": "featured",
-        "policy_version": "featured-editorial-v2", "decision_source": "vision_provider",
+            "policy_version": "featured-editorial-v3-multidimensional", "decision_source": "vision_provider",
         "model_identity": "https://vision.test/vision-model", "context_key": "game",
         "subject": "Xbox Live",
     }
@@ -2879,12 +2880,12 @@ def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path)
         "subject": "Halo", "direct_image_url": "https://cdn.test/generic-image.webp",
         "source_page_url": "https://news.test/article", "is_featured": False,
         "evidence": {
-            "vision_policy_version": "featured-editorial-v2",
+            "vision_policy_version": "featured-editorial-v3-multidimensional",
             "vision_image_sha256": image_sha,
             "vision_decision": {
                 "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
                 "verdict": "accept", "image_sha256": image_sha, "image_role": "inline",
-                "policy_version": "featured-editorial-v2",
+                "policy_version": "featured-editorial-v3-multidimensional",
                 "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
                 "context_key": "game", "subject": "Halo",
             },
@@ -2898,6 +2899,30 @@ def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path)
     assert _media_item_rejection(item, {"Halo"}, object(), {}, editorial, root=tmp_path, config=config) is None
     item["evidence"]["vision_decision"]["model_identity"] = "https://vision.test/model-b"
     assert not _vision_evidence_matches_item(item, editorial, config)
+
+
+def test_normal_article_image_gate_uses_shared_canonical_identity():
+    editorial = {
+        "title": "Procuradoria-Geral investiga Xbox Live após denúncias",
+        "cleaned_html": "<p>Xbox Live atualiza salvaguardas.</p>",
+        "seo": {"focus_keyword": "Xbox Live"},
+    }
+    assert _item_entities(
+        {"subject": "Procuradoria-Geral"}, {"procuradoria-geral"}, editorial
+    ) == {"xbox live"}
+
+
+def test_listicle_image_gate_keeps_section_subject():
+    editorial = {
+        "cleaned_html": (
+            "<h2>1. Bleach</h2><p>Bleach update.</p>"
+            "<h2>2. Naruto</h2><p>Naruto update.</p>"
+        ),
+        "seo": {"focus_keyword": "Bleach"},
+    }
+    assert _item_entities(
+        {"subject": "bleach", "paragraph_index": 0}, {"bleach", "naruto"}, editorial
+    ) == {"bleach"}
 
 
 def test_execute_media_plan_uploads_new_final_phash(tmp_path):

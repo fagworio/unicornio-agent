@@ -57,6 +57,7 @@ from .media.vision_policy import (
     VISION_POLICY_VERSION,
     featured_vision_category,
     featured_vision_subject,
+    resolve_editorial_identity,
     trusted_featured_evidence,
     vision_cache_subject,
 )
@@ -1332,17 +1333,28 @@ def _item_entities(
 ) -> set[str]:
     """Entidades que valem para ESTE item (P1 da auditoria).
 
-    ATENÇÃO — estado ATUAL: usa o `subject` DECLARADO no media_plan (dado do
-    agente) e, sem ele, as entidades do artigo. O subject derivado da SEÇÃO
-    (`_expected_subject`) ainda NÃO substitui o declarado: o mapeamento
-    H2<->paragraph_index precisa de mais cuidado (ativar antes disso rejeitou
-    itens legítimos de listicle nos testes). Ou seja, a proteção contra um plano
-    inconsistente (seção = Bleach, subject = Naruto) ainda NÃO existe.
+    Listicle items remain bound to their section-specific subject. For ordinary
+    posts, an explicit game name or concrete focus keyword supplies the shared
+    canonical identity; legacy/generic inputs retain the declared subject or
+    article entity set.
     """
     declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
-    # O subject esperado da SEÇÃO fica disponível (auditoria/futuro), mas ainda
-    # NÃO substitui o declarado: o mapeamento seção<->item precisa de mais
-    # cuidado (um H2 numerado nem sempre corresponde ao paragraph_index).
+    if not _expected_subject(item, editorial) and isinstance(editorial, dict):
+        # Ordinary posts share the same canonical subject as V2 discovery and
+        # featured vision. Listicle items keep their section-specific identity.
+        seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+        focus = str(seo.get("focus_keyword") or "").strip()
+        generic_focus = {"game", "games", "jogo", "jogos", "videogame", "anime", "filme", "series"}
+        if editorial.get("game_name") or (focus and focus.casefold() not in generic_focus):
+            from .media.vision_policy import resolve_editorial_identity
+
+            canonical = str(
+                resolve_editorial_identity(editorial).get("primary_subject") or ""
+            ).strip().casefold()
+            if canonical:
+                declarado = canonical
+    # The section mapping is used only when the numbered list structure is
+    # unambiguous; otherwise keep the normal-post identity path above.
     if declarado:
         locais = {declarado}
         locais.update(e for e in entities if e and e.lower() in declarado)
@@ -1396,7 +1408,8 @@ def _structured_vision_evidence(
     result = {
         key: decision[key]
         for key in (
-            "status", "confidence", "visual_type", "verdict", "detail_used",
+            "status", "confidence", "visual_type", "relation", "editorial_fit",
+            "role_fit", "verdict", "detail_used",
             "low_status", "low_confidence", "low_visual_type",
         )
         if key in decision
@@ -1762,6 +1775,7 @@ def _validate_featured_candidate_vision(
     if config is None:
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
     subject = featured_vision_subject(editorial)
+    editorial_context = str(resolve_editorial_identity(editorial).get("news_context") or "")
     cache_subject = subject
     media_id = item.get("media_library_id")
     attachment: dict[str, Any] | None = None
@@ -1835,7 +1849,10 @@ def _validate_featured_candidate_vision(
                 base_url=config.vision_base_url,
                 model=config.vision_model,
                 timeout=config.http_timeout,
-                context="preflight da imagem de destaque do artigo",
+                context=(
+                    f"{editorial_context} | preflight da imagem de destaque"
+                    if editorial_context else "preflight da imagem de destaque do artigo"
+                ),
                 category=featured_vision_category(editorial),
                 alt=str(item.get("alt_text") or subject),
                 detail=config.vision_detail,
@@ -1847,7 +1864,8 @@ def _validate_featured_candidate_vision(
             cache_decision = {
                 key: decision[key]
                 for key in (
-                    "status", "confidence", "visual_type", "verdict", "reason",
+                    "status", "confidence", "visual_type", "relation", "editorial_fit",
+                    "role_fit", "verdict", "reason",
                     "detail_used", "low_status", "low_confidence", "low_visual_type",
                 )
                 if key in decision
@@ -2422,7 +2440,11 @@ def _execute_media_plan(
                                     base_url=config.vision_base_url,
                                     model=config.vision_model,
                                     timeout=config.http_timeout,
-                                    context="validação final da featured antes do upload",
+                                    context=(
+                                        f"{resolve_editorial_identity(editorial).get('news_context')} | validação final da featured"
+                                        if resolve_editorial_identity(editorial).get("news_context")
+                                        else "validação final da featured antes do upload"
+                                    ),
                                     category=featured_vision_category(editorial),
                                     alt=str(item.get("alt_text") or subject),
                                     detail=config.vision_detail,
@@ -2443,7 +2465,8 @@ def _execute_media_plan(
                                 cache_decision = {
                                     key: decision[key]
                                     for key in (
-                                        "status", "confidence", "visual_type", "verdict", "reason",
+                                        "status", "confidence", "visual_type", "relation", "editorial_fit",
+                                        "role_fit", "verdict", "reason",
                                         "detail_used", "low_status", "low_confidence", "low_visual_type",
                                     )
                                     if key in decision
@@ -2462,7 +2485,8 @@ def _execute_media_plan(
                         vision_evidence_record = {
                             key: decision[key]
                             for key in (
-                                "status", "confidence", "visual_type", "verdict", "detail_used",
+                                "status", "confidence", "visual_type", "relation", "editorial_fit",
+                                "role_fit", "verdict", "detail_used",
                                 "low_status", "low_confidence", "low_visual_type",
                             )
                             if key in decision

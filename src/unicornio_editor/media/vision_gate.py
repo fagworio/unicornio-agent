@@ -11,7 +11,7 @@ Design (cost-controlled):
 - Prompt is RESTRICTED: the model judges the PIXELS, treating ALT/filename/URL
   as context only ("a real bat captioned Redfall is NOT Redfall"). It never
   tries to name the work (knowledge cutoff would fail for 2026 news).
-- Uses Structured Outputs -> {status, confidence, visual_type}.
+- Uses structured visual judgment -> relation, editorial fit and intended-role fit.
 - `detail: low` by default (~2833 tokens/image). On AMBIGUOUS and when
   `allow_high` is set, re-asks at `detail: high` (~13x cost) before deciding.
 
@@ -82,25 +82,36 @@ _VISUAL_TYPES = (
     "logo", "poster", "photograph", "illustration", "animal", "other",
     "text_banner", "infographic",
 )
+_RELATIONS = ("direct", "contextual", "unrelated", "uncertain")
+_EDITORIAL_FITS = ("suitable", "unsuitable", "uncertain")
+_ROLE_FITS = ("suitable", "unsuitable", "uncertain")
 _ACCEPT_THRESHOLD = 0.85   # MATCH and confidence >= this -> accept
 _REJECT_THRESHOLD = 0.80   # UNRELATED and confidence >= this -> reject
 
 _SYSTEM_PROMPT = (
     "You are an editorial image validator. You judge the actual VISUAL CONTENT "
     "of an image and decide whether it is consistent with a described subject. "
-    "Return ONLY a JSON object with keys status, confidence and visual_type. "
+    "Return ONLY JSON with keys status, confidence, visual_type, relation, "
+    "editorial_fit and role_fit. "
     "status must be one of: MATCH, PARTIAL_MATCH, UNRELATED, AMBIGUOUS. "
     "confidence is a float 0..1. visual_type must be one of: "
     "gameplay, key_art, movie_still, character, person, product, logo, poster, "
-    "photograph, illustration, animal, other, text_banner, infographic."
+    "photograph, illustration, animal, other, text_banner, infographic. "
+    "relation must be direct, contextual, unrelated or uncertain; editorial_fit "
+    "and role_fit must each be suitable, unsuitable or uncertain. Judge these "
+    "dimensions independently: a contextual image may suit the story but still "
+    "be insufficient as a featured image."
 )
 
 _BATCH_SYSTEM_PROMPT = (
     "You are an editorial image validator working on independent candidates. "
     "For every candidate, judge only the actual pixels against that candidate's "
     "expected subject. Return ONLY JSON with an 'items' array. Each item must "
-    "contain candidate_id, status, confidence and visual_type. Never move a "
-    "decision from one candidate to another."
+    "contain candidate_id, status, confidence, visual_type, relation, "
+    "editorial_fit and role_fit. Judge direct vs contextual relation, story "
+    "appropriateness, and suitability for the requested image role separately. Never move a "
+    "decision from one candidate to another. relation values: direct, contextual, "
+    "unrelated, uncertain. editorial_fit and role_fit values: suitable, unsuitable, uncertain."
 )
 
 
@@ -235,8 +246,14 @@ def _json_output_schema() -> dict[str, Any]:
                 "type": "string",
                 "enum": list(_VISUAL_TYPES),
             },
+            "relation": {"type": "string", "enum": list(_RELATIONS)},
+            "editorial_fit": {"type": "string", "enum": list(_EDITORIAL_FITS)},
+            "role_fit": {"type": "string", "enum": list(_ROLE_FITS)},
         },
-        "required": ["status", "confidence", "visual_type"],
+        "required": [
+            "status", "confidence", "visual_type", "relation",
+            "editorial_fit", "role_fit",
+        ],
         "additionalProperties": False,
     }
 
@@ -287,10 +304,27 @@ def _parse_response(text: str, *, allow_unknown_status: bool = False) -> dict[st
         visual_type = "other"
     if normalized_status not in _STATUS:
         normalized_status = "UNKNOWN"
+    relation = str(data.get("relation") or "").casefold()
+    if relation not in _RELATIONS:
+        relation = {
+            "MATCH": "direct", "PARTIAL_MATCH": "contextual",
+            "UNRELATED": "unrelated",
+        }.get(normalized_status, "uncertain")
+    editorial_fit = str(data.get("editorial_fit") or "").casefold()
+    if editorial_fit not in _EDITORIAL_FITS:
+        editorial_fit = {
+            "MATCH": "suitable", "UNRELATED": "unsuitable",
+        }.get(normalized_status, "uncertain")
+    role_fit = str(data.get("role_fit") or "").casefold()
+    if role_fit not in _ROLE_FITS:
+        role_fit = "uncertain"
     return {
         "status": normalized_status,
         "confidence": confidence,
         "visual_type": visual_type,
+        "relation": relation,
+        "editorial_fit": editorial_fit,
+        "role_fit": role_fit,
         "vision_status_normalized": normalized_status if normalized_status != "UNKNOWN" else "INCONCLUSIVE",
         **({"vision_status_raw": raw_status} if raw_status != normalized_status else {}),
     }
@@ -308,6 +342,7 @@ def _build_user_prompt(
         "image; the textual metadata is context only.",
         "",
         f"Expected subject: {subject.strip()}",
+        f"Intended image role: {'featured' if require_key_art else 'inline'}",
     ]
     if category.strip():
         lines.append(f"Category: {category.strip()}")
@@ -320,6 +355,11 @@ def _build_user_prompt(
         "Answer whether the image is visually consistent with the expected "
         "subject and category. Reject unrelated real-world photography, generic "
         "animals, unrelated games, unrelated brand logos, and stock photography.",
+        "Classify separately: relation is direct when the subject/work itself is "
+        "depicted, contextual when only a related platform/device/event appears, "
+        "unrelated when it does not match, otherwise uncertain. editorial_fit "
+        "judges whether pixels suit this news context; role_fit judges the "
+        "intended image role, independently of relation.",
     ]
     if require_key_art:
         lines += [
@@ -331,7 +371,7 @@ def _build_user_prompt(
             "typographic graphic that merely announces or describes the subject in "
             "text but carries NO actual artwork of it is NOT acceptable as key art "
             "— classify it as visual_type 'text_banner' (or 'infographic') and "
-            "status 'UNRELATED'.",
+            "role_fit 'unsuitable'.",
         ]
     return "\n".join(lines)
 
@@ -362,7 +402,7 @@ def _call_vision(
                 ],
             },
         ],
-        "max_tokens": 60,
+        "max_tokens": 140,
         "temperature": 0,
         "response_format": {"type": "json_object"},
     }
@@ -540,7 +580,15 @@ def _call_vision_batch(
                 "type": "text",
                 "text": (
                     f"Candidate {item['candidate_id']}. Subject: {str(item['subject']).strip()}. "
-                    "Judge this image only; do not transfer evidence from other candidates."
+                    "Judge this image only; do not transfer evidence from other candidates. "
+                    "Return status, confidence, visual_type, relation, editorial_fit and role_fit. "
+                    "Distinguish direct from contextual relation and judge the intended "
+                    + ("featured" if item.get("require_key_art") else "inline")
+                    + " role separately."
+                    + (
+                        f" Editorial context (not proof of image identity): {item['context']}"
+                        if item.get("context") else ""
+                    )
                     + (
                         " It is featured key art: reject a text-only news banner or infographic."
                         if item.get("require_key_art") else ""
@@ -563,7 +611,7 @@ def _call_vision_batch(
             {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ],
-        "max_tokens": max(60, 60 * len(items)),
+        "max_tokens": max(140, 140 * len(items)),
         "temperature": 0,
         "response_format": {
             "type": "json_schema",
@@ -872,6 +920,7 @@ def verify_image_subject_batch(
                 "candidate_id": candidate_id,
                 "image_url": image_url,
                 "subject": subject,
+                "context": str(item.get("context") or "").strip(),
                 "require_key_art": bool(item.get("require_key_art")),
             }
         )

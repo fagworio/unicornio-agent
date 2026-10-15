@@ -104,12 +104,13 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
             "source_page_url": source_url, "direct_image_url": direct_url,
             "evidence": {
                 "verdict": "deterministic_match",
-                "vision_policy_version": "featured-editorial-v2",
+                "vision_policy_version": "featured-editorial-v3-multidimensional",
                 "vision_decision": {
                     "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
+                    "relation": "direct", "editorial_fit": "suitable", "role_fit": "suitable",
                     "verdict": "accept", "detail_used": "high",
                     "image_sha256": "a" * 64, "image_role": "featured",
-                    "policy_version": "featured-editorial-v2",
+                    "policy_version": "featured-editorial-v3-multidimensional",
                     "model_identity": "https://vision.example/model-a",
                     "context_key": "game",
                     "prompt": "must not persist", "raw_payload": "must not persist",
@@ -129,6 +130,9 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
     assert reference["vision_decision"]["confidence"] == 0.91
     assert reference["vision_decision"]["image_sha256"] == "a" * 64
     assert reference["vision_decision"]["context_key"] == "game"
+    assert reference["vision_decision"]["relation"] == "direct"
+    assert reference["vision_decision"]["editorial_fit"] == "suitable"
+    assert reference["vision_decision"]["role_fit"] == "suitable"
 
 
 def test_preflight_vision_evidence_stays_correlated_to_candidate_run(tmp_path):
@@ -140,7 +144,7 @@ def test_preflight_vision_evidence_stays_correlated_to_candidate_run(tmp_path):
     vision = {
         "status": "UNRELATED", "confidence": 0.80, "visual_type": "photograph",
         "verdict": "reject", "image_sha256": "b" * 64, "image_role": "featured",
-        "policy_version": "featured-editorial-v2", "decision_source": "vision_provider",
+        "policy_version": "featured-editorial-v3-multidimensional", "decision_source": "vision_provider",
         "model_identity": "https://vision.test/model", "context_key": "game",
         "subject": "Xbox Live",
     }

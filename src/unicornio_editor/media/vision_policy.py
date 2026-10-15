@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-VISION_POLICY_VERSION = "featured-editorial-v2"
+VISION_POLICY_VERSION = "featured-editorial-v3-multidimensional"
 
 
 def trusted_featured_evidence(
@@ -50,53 +50,100 @@ _GENERIC_FOCUS = frozenset({"game", "games", "jogo", "jogos", "videogame", "anim
 def featured_vision_subject(editorial: Mapping[str, Any]) -> str:
     """Return the one stable editorial identity used by every featured gate.
 
-    Explicit ``game_name`` wins for backwards compatibility.  Structured
-    subjects/main entities are preferred over SEO copy, then the focus keyword,
-    and only finally the SEO title.  This is deliberately deterministic: cache
-    keys must not change between preflight and the final checklist.
+    The resolver is deliberately deterministic so discovery, cache keys and
+    final checklist use the same identity.
+    """
+    return str(resolve_editorial_identity(editorial)["primary_subject"])
+
+
+def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a shared primary subject and preserve secondary context.
+
+    Explicit game identity is strongest. Otherwise a concrete focus keyword is
+    preferred over grammatical entities extracted from the headline, which
+    can select a ministry or company mentioned in a story about a platform.
+    Other extracted entities remain context, never a replacement primary.
     """
     game_name = editorial.get("game_name")
-    if isinstance(game_name, str) and game_name.strip():
-        return game_name.strip()
+    seo = editorial.get("seo") if isinstance(editorial.get("seo"), Mapping) else {}
+    focus = str(seo.get("focus_keyword") or editorial.get("focus_keyword") or "").strip()
+    title = str(editorial.get("title") or seo.get("title") or "").strip()
+    content = str(editorial.get("cleaned_html") or "")
+    primary = str(game_name or "").strip() if isinstance(game_name, str) else ""
+    if not primary and focus and focus.casefold() not in _GENERIC_FOCUS:
+        from .evidence import normalize
+
+        focus_key = normalize(focus).strip()
+        article_text = normalize(f"{title} {content}")
+        has_structured_subject = any(
+            editorial.get(key)
+            for key in ("post_subjects", "subjects", "main_entity", "entity")
+        )
+        if focus_key and focus_key in article_text:
+            primary = focus.casefold() if content.strip() else focus
+        elif focus_key and not has_structured_subject:
+            primary = focus
     for key in ("post_subjects", "subjects"):
+        if primary:
+            break
         values = editorial.get(key)
         if isinstance(values, str) and values.strip():
-            return values.strip()
+            primary = values.strip()
         if isinstance(values, list):
             for value in values:
                 candidate = value.get("subject") if isinstance(value, dict) else value
                 if isinstance(candidate, str) and candidate.strip():
-                    return candidate.strip()
-    for key in ("main_entity", "entity"):
-        candidate = editorial.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+                    primary = candidate.strip()
+                    break
+    if not primary:
+        for key in ("main_entity", "entity"):
+            candidate = editorial.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                primary = candidate.strip()
+                break
     # Editorial schema deliberately keeps post subjects derived rather than
     # accepting model-supplied top-level identity fields.  Use the same
     # deterministic extractor as the media evidence gate.
     try:
         from .evidence import post_subjects
-        seo = editorial.get("seo") or {}
         derived = post_subjects(
-            title=str(seo.get("title") or ""),
-            content_html=str(editorial.get("cleaned_html") or ""),
-            focus_keyword=str(seo.get("focus_keyword") or ""),
+            title=title,
+            content_html=content,
+            focus_keyword=focus,
+            game_name=game_name if isinstance(game_name, str) else None,
         )
-        focus = str(seo.get("focus_keyword") or "").strip()
-        if focus and focus.casefold() not in _GENERIC_FOCUS:
-            if str(editorial.get("cleaned_html") or "").strip():
-                return focus.casefold()
-            return focus
-        if derived and str(derived[0].get("subject") or "").strip():
-            return str(derived[0]["subject"]).strip()
+        if not primary and derived and str(derived[0].get("subject") or "").strip():
+            primary = str(derived[0]["subject"]).strip()
     except Exception:  # noqa: BLE001 - fallback remains deterministic
         pass
-    seo = editorial.get("seo") or {}
-    for key in ("focus_keyword",):
-        candidate = editorial.get(key) or seo.get(key)
-        if isinstance(candidate, str) and candidate.strip() and candidate.strip().casefold() not in _GENERIC_FOCUS:
-            return candidate.strip()
-    return str(seo.get("title") or "").strip()
+    if not primary:
+        primary = title
+
+    secondary: list[str] = []
+    try:
+        from .evidence import editorial_subjects
+
+        for subject in editorial_subjects(
+            title=title,
+            content_html=content,
+            focus_keyword=focus,
+            game_name=game_name if isinstance(game_name, str) else None,
+        ):
+            value = str(subject or "").strip()
+            if value and value.casefold() != primary.casefold() and value.casefold() not in {
+                item.casefold() for item in secondary
+            }:
+                secondary.append(value)
+    except Exception:  # noqa: BLE001 - identity remains usable without context
+        pass
+    category = featured_vision_category(editorial)
+    return {
+        "primary_subject": primary,
+        "subject_type": category,
+        "secondary_entities": secondary,
+        "news_context": title,
+        "vision_category": category,
+    }
 
 
 def vision_cache_subject(editorial: Mapping[str, Any]) -> str:

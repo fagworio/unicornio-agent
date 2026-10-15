@@ -3342,6 +3342,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             else "UNRELATED",
                             "confidence": float(decision.get("confidence") or 0),
                             "visual_type": decision.get("visual_type") or "other",
+                            "relation": decision.get("relation") or "uncertain",
+                            "editorial_fit": decision.get("editorial_fit") or "uncertain",
+                            "role_fit": decision.get("role_fit") or "uncertain",
                         },
                     )
                     cached = True
@@ -3353,6 +3356,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "verdict": decision.get("verdict"),
                         "confidence": decision.get("confidence"),
                         "visual_type": decision.get("visual_type"),
+                        "relation": decision.get("relation"),
+                        "editorial_fit": decision.get("editorial_fit"),
+                        "role_fit": decision.get("role_fit"),
                         "reason": decision.get("reason"),
                         "cached": cached,
                     }

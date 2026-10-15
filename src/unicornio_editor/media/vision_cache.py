@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-VISION_CACHE_VERSION = "vision-v4-content-policy-model-context"
+VISION_CACHE_VERSION = "vision-v5-editorial-dimensions"
 VISUAL_COMPARISON_CACHE_VERSION = "visual-compare-v1"
 _CACHE_LOCK = threading.Lock()
 

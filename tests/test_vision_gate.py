@@ -17,11 +17,16 @@ from unicornio_editor.media.vision_gate import (
     verify_image_subject_decision,
     verify_image_subject_batch,
     vision_config_ready,
+    _build_user_prompt,
+    _decide_tri,
+    _json_output_schema,
+    _parse_response,
 )
 
 
 class VisionHandler(BaseHTTPRequestHandler):
-    # Structured Outputs: a API responde um JSON puro {status, confidence, visual_type}.
+    # Existing compatible providers may omit optional dimensions; parsing
+    # conservatively marks those dimensions uncertain.
     answer = '{"status": "MATCH", "confidence": 0.97, "visual_type": "key_art"}'
     calls = []
 
@@ -69,6 +74,40 @@ class VisionGateTests(unittest.TestCase):
         }
         kwargs.update(overrides)
         return verify_image_subject(**kwargs)
+
+    def test_multidimensional_judgment_keeps_acceptance_gate_independent(self):
+        decision = _parse_response(json.dumps({
+            "status": "MATCH", "confidence": 0.91, "visual_type": "product",
+            "relation": "contextual", "editorial_fit": "suitable",
+            "role_fit": "unsuitable",
+        }))
+        self.assertEqual(decision["relation"], "contextual")
+        self.assertEqual(decision["editorial_fit"], "suitable")
+        self.assertEqual(decision["role_fit"], "unsuitable")
+        # IMG-03 is audit data only here: the deployed acceptance thresholds
+        # are unchanged until separate calibration and approval.
+        self.assertEqual(_decide_tri(decision), ("accept", "modelo confirmou o assunto [MATCH 0.91 product]"))
+
+    def test_legacy_model_response_gets_non_committal_dimensions(self):
+        decision = _parse_response(
+            '{"status":"PARTIAL_MATCH","confidence":0.7,"visual_type":"product"}'
+        )
+        self.assertEqual(decision["relation"], "contextual")
+        self.assertEqual(decision["editorial_fit"], "uncertain")
+        self.assertEqual(decision["role_fit"], "uncertain")
+
+    def test_prompt_and_schema_request_separate_visual_dimensions(self):
+        prompt = _build_user_prompt(
+            "Xbox Live", category="game", context="platform safeguards",
+            require_key_art=True,
+        )
+        self.assertIn("direct", prompt)
+        self.assertIn("contextual", prompt)
+        self.assertIn("role_fit", prompt)
+        self.assertEqual(
+            _json_output_schema()["required"],
+            ["status", "confidence", "visual_type", "relation", "editorial_fit", "role_fit"],
+        )
 
     def test_confirms_subject(self):
         ok, reason = self._verify()
@@ -352,7 +391,10 @@ class VisionGateTests(unittest.TestCase):
             }],
         })
         result = verify_image_subject_batch(
-            items=[{"candidate_id": "A1", "image_url": data_url, "subject": "Obra A"}],
+            items=[{
+                "candidate_id": "A1", "image_url": data_url, "subject": "Obra A",
+                "context": "notícia sobre a plataforma",
+            }],
             api_key="test-key",
             base_url=self.base,
             model="vision-test",
@@ -362,6 +404,9 @@ class VisionGateTests(unittest.TestCase):
             self.server.last_payload["messages"][1]["content"][2]["image_url"]["url"],
             data_url,
         )
+        prompt = self.server.last_payload["messages"][1]["content"][1]["text"]
+        self.assertIn("not proof of image identity", prompt)
+        self.assertIn("notícia sobre a plataforma", prompt)
 
     def test_batch_exige_um_resultado_por_candidato(self):
         VisionHandler.answer = json.dumps(
