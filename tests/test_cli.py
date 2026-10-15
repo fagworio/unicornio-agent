@@ -396,6 +396,8 @@ class CompactOutputTests(unittest.TestCase):
                 "retryable_errors": [{"name": "featured_identity_matches_current_attachment"}],
             },
             {"post_id": 115287, "status": "skipped", "wordpress_changed": False},
+            {"post_id": 115288, "status": "error", "wordpress_changed": False, "reason": "unexpected"},
+            {"post_id": 115289, "status": "blocked", "wordpress_changed": False, "reason": "quality"},
         ]
         config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
         with tempfile.TemporaryDirectory() as directory:
@@ -417,7 +419,11 @@ class CompactOutputTests(unittest.TestCase):
             report["retryable_posts"][0]["checks"],
             ["featured_identity_matches_current_attachment"],
         )
-        self.assertEqual(report["quality_blocked"], 0)
+        self.assertEqual(report["quality_blocked"], 1)
+        self.assertEqual(report["not_published"], 4)
+        self.assertEqual(report["blocked_or_skipped"], 2)
+        self.assertEqual(report["skipped_count"], 1)
+        self.assertEqual(report["error_count"], 1)
 
 
 if __name__ == "__main__":

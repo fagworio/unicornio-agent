@@ -3451,6 +3451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             blocked = [o for o in outcomes if o.get("status") == "blocked"]
             errors = [o for o in outcomes if o.get("status") == "error"]
             retryable = [o for o in outcomes if o.get("status") == "retry"]
+            skipped = [o for o in outcomes if o.get("status") == "skipped"]
             if published or blocked or errors or retryable:
                 result = {
                     "published": len(published),
@@ -3462,7 +3463,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                         for o in published
                     ],
-                    "blocked_or_skipped": len(outcomes) - len(published),
+                    "not_published": len(outcomes) - len(published),
+                    "blocked_or_skipped": len(blocked) + len(skipped),
+                    "skipped_count": len(skipped),
                     "quality_blocked": len(blocked),
                     "blocked_posts": [
                         {

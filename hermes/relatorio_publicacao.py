@@ -190,8 +190,13 @@ def main() -> int:
         print(f"\n⚠️ Bloqueados ({len(blocked)}):")
         for b in blocked:
             pid = b.get("post_id")
-            fails = ", ".join(b.get("failed") or []) or b.get("reason", "")
-            print(f"  • {pid} | {titles.get(pid, '')[:50]} | blocked | {fails[:60]}")
+            checks = ", ".join(
+                _safe_reason(item, limit=60)
+                for item in (b.get("failed") or [])
+                if isinstance(item, str)
+            )
+            fails = checks or _safe_reason(b.get("reason") or "bloqueio sem detalhe", limit=60)
+            print(f"  • {pid} | {titles.get(pid, '')[:50]} | blocked | {fails}")
     else:
         print("⚠️ Bloqueados: 0")
 

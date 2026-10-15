@@ -152,6 +152,28 @@ class PublicationReportCostTests(unittest.TestCase):
         self.assertNotIn("pw123", report._safe_reason("password=pw123"))
         self.assertNotIn("abc123", report._safe_reason("Bearer abc123"))
 
+    def test_blocked_fallback_reason_is_sanitized_in_telegram_report(self):
+        data = {
+            "posts": [],
+            "blocked_posts": [{
+                "post_id": 71,
+                "reason": "authorization=private-value",
+            }],
+            "retryable_posts": [],
+            "error_posts": [],
+        }
+        with patch.object(report, "_load_window_json", return_value=data), patch.object(
+            report, "_post_titles", return_value={71: "Bloqueado"}
+        ), patch.object(report, "_custo_24h", return_value=(0.0, 0, "test")), patch.object(
+            report, "_published_by_editorial_last_24h", return_value=0
+        ), patch.object(report, "_queue_after_window", return_value=None), patch(
+            "sys.stdout", new_callable=StringIO
+        ) as output:
+            self.assertEqual(report.main(), 0)
+
+        self.assertNotIn("private-value", output.getvalue())
+        self.assertIn("[redacted", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
