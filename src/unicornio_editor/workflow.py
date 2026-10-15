@@ -2541,7 +2541,7 @@ def _execute_media_plan(
                             "decision_source": decision_source,
                             "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
                             "context_key": vision_context_key,
-                            "subject": featured_vision_subject(editorial),
+                            "subject": featured_vision_subject(vision_editorial),
                         })
                     if not decision.get("accepted"):
                         reason = str(decision.get("reason") or "featured não confirmada visualmente")

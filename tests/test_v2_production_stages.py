@@ -426,8 +426,24 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
         ),
     )
 
+    record_v2_observation(
+        tmp_path,
+        post_id=130,
+        run_id="failed-readback-130",
+        state=state,
+        phase="validate",
+        outcome="ready_candidate",
+        applied=False,
+    )
+
     with pytest.raises(RuntimeError, match="featured media read-back mismatch"):
         WordPressWriterV2(Client(), tmp_path).commit(130, {"post_id": 130}, state, Outcome.ready())
+
+    with connect_media_registry(tmp_path) as db:
+        usages = db.execute(
+            "SELECT status FROM media_usage WHERE post_id=?", (130,),
+        ).fetchall()
+    assert usages and {row[0] for row in usages} == {"accepted"}
 
 
 def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(tmp_path):
@@ -548,6 +564,212 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
     ]
     duplicate_evidence = json.loads(usages[1][3])
     assert duplicate_evidence["decision"] == "SAME_IMAGE"
+
+
+def test_v2_media_to_ready_uses_existing_inline_and_simulated_featured(tmp_path, monkeypatch):
+    """Run real V2 compose/validate/writer stages with only WP acquisition mocked."""
+    from unicornio_editor.config import Config as RuntimeConfig
+    from unicornio_editor.pipeline_v2.runner import PipelineRunner
+
+    post_id = 115286
+    inline = (
+        _verified_inline(115325, "https://cdn.test/xbox-live-console.webp", 0),
+        _verified_inline(115326, "https://cdn.test/xbox-live-interface.webp", 4),
+    )
+    new_featured = FeaturedProgress(
+        FeaturedStatus.VALID, 115288, "https://wp.test/xbox-live-featured.webp",
+        "f" * 64, "f" * 16, "visual:" + "f" * 24,
+        {"decision": "INITIAL"},
+    )
+    prior_media = MediaProgress(
+        required=2, inline=inline,
+        # WP had an attachment, but the V2 state had no accepted featured.
+        featured=FeaturedProgress(FeaturedStatus.MISSING),
+    )
+    initial = WorkState(
+        state=LifecycleState.PENDING, phase=Phase.MEDIA,
+        relevance_approved=True, media=prior_media,
+    )
+    paragraphs = [
+        "A Xbox Live anunciou mudanças importantes para jogadores e famílias. "
+        "A atualização amplia as ferramentas de segurança e mantém as opções atuais.",
+        "Segundo a empresa, as novas salvaguardas podem ser configuradas por cada conta.",
+        "As medidas chegam gradualmente e incluem avisos mais claros durante o uso.",
+        "A plataforma também publicou orientações para responsáveis e administradores.",
+        "Jogadores poderão consultar os controles diretamente nas configurações da conta.",
+        "A mudança faz parte de um conjunto de melhorias anunciado para este ano.",
+        "A empresa informou que os recursos serão distribuídos em etapas para os usuários.",
+    ]
+    editorial = {
+        "title": "Xbox Live anuncia novas salvaguardas para jogadores",
+        "site_relevance": {
+            "decision": "process", "confidence": 0.99,
+            "reason": "assunto editorial compatível", "matched_topics": ["games"],
+        },
+        "cleaned_html": (
+            f"<p>{paragraphs[0]}</p>"
+            '<figure><img src="https://cdn.test/xbox-live-console.webp" '
+            'alt="Xbox Live no console" width="1200" height="800" />'
+            "<figcaption>Crédito da imagem: Fonte. Licença CC BY 4.0 "
+            "(https://creativecommons.org/licenses/by/4.0/).</figcaption></figure>"
+            + "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs[1:4])
+            + '<figure><img src="https://cdn.test/xbox-live-interface.webp" '
+            'alt="Interface do Xbox Live" width="1200" height="800" />'
+            "<figcaption>Crédito da imagem: Fonte. Licença CC BY 4.0 "
+            "(https://creativecommons.org/licenses/by/4.0/).</figcaption></figure>"
+            + "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs[4:])
+        ),
+        "seo": {
+            "title": "Xbox Live anuncia novas salvaguardas",
+            "meta_description": (
+                "Xbox Live amplia as salvaguardas e apresenta novas opções de segurança "
+                "para jogadores, famílias e administradores de contas."
+            ),
+            "focus_keyword": "Xbox Live",
+        },
+        "media_plan": [], "needs_trailer": False, "trailer_url": None,
+        "game_name": "Xbox Live",
+    }
+    config = RuntimeConfig(
+        "wordpress", "http://wp.test", "http://wp.test/wp-json/wp/v2",
+        dry_run=False, internal_links_enabled=False, publish_enabled=False,
+        min_relevance_confidence=0.8,
+    )
+
+    class Store:
+        def __init__(self):
+            self.state = initial
+
+        def load(self, _post_id):
+            return self.state
+
+        def commit(self, _post_id, state):
+            self.state = state
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": post_id, "status": "pending",
+                "title": {"raw": editorial["title"]},
+                "content": {"raw": "conteúdo anterior"},
+                "featured_media": 115287, "meta": {},
+            }
+            self.updates = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def get_media(self, media_id):
+            urls = {
+                115325: inline[0].media_url,
+                115326: inline[1].media_url,
+                115288: new_featured.media_url,
+                115287: "https://wp.test/115287.webp",
+            }
+            return {
+                "id": media_id,
+                "source_url": urls[media_id],
+                "title": {"rendered": "Xbox Live imagem editorial"},
+                "alt_text": "Xbox Live imagem editorial",
+                "caption": {"rendered": "Crédito da imagem: Fonte"},
+                "media_details": {
+                    "width": 1280,
+                    "height": 720 if media_id == 115288 else 800,
+                },
+            }
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            self.post.update({key: value for key, value in update.items() if key != "content"})
+            if isinstance(update.get("content"), dict):
+                self.post.setdefault("content", {})["raw"] = update["content"]["raw"]
+            if isinstance(update.get("meta"), dict):
+                self.post.setdefault("meta", {}).update(update["meta"])
+            return self.post
+
+    store, client = Store(), Client()
+    draft_dir = tmp_path / "backups" / str(post_id)
+    draft_dir.mkdir(parents=True)
+    (draft_dir / "editorial.draft.json").write_text(json.dumps(editorial), encoding="utf-8")
+    media_stage = ProductionMediaStage(
+        client, config, tmp_path,
+        resolver=lambda _context, _state, _editorial, previous: MediaProgress(
+            required=2, inline=previous.inline, featured=new_featured,
+            search=previous.search, enrichment_round=previous.enrichment_round + 1,
+        ),
+    )
+    stages = {
+        "editorial": lambda _context, _state: editorial,
+        "media": media_stage,
+        "compose": ProductionComposeStage(config, tmp_path),
+        "validate": ProductionValidateStage(client, config, tmp_path),
+    }
+
+    # URLs are deliberately synthetic. The checklist still executes every
+    # gate; only its optional remote pHash fetch is replaced by deterministic,
+    # distinct test fingerprints.
+    monkeypatch.setattr(
+        "unicornio_editor.media.visual_hash.image_hashes",
+        lambda urls: {url: f"{index + 1:016x}" for index, url in enumerate(urls)},
+    )
+    outcome = PipelineRunner(store, stages, config=config).run_one(
+        post_id,
+        {
+            "post_id": post_id, "title": editorial["title"],
+            "post": client.post, "editorial": editorial, "root": tmp_path,
+        },
+    )
+
+    assert outcome.type is OutcomeType.READY, outcome
+    assert store.state.state is LifecycleState.READY
+    candidate = json.loads(
+        (tmp_path / "backups" / str(post_id) / "editorial.candidate.json").read_text()
+    )
+    content = candidate["content"]
+    for item in inline:
+        assert content.count(item.media_url) == 1
+    assert candidate["featured_media"] == 115288
+    assert content.count("xbox-live-featured.webp") == 0
+
+    write = WordPressWriterV2(client, tmp_path).commit(
+        post_id,
+        {"post_id": post_id, "post": client.post},
+        store.state,
+        Outcome.ready(),
+    )
+    assert write["media_readback"] is True
+    assert write["ready_hash"]
+    assert client.post["status"] == "pending"
+    assert client.post["featured_media"] == 115288
+    assert client.post["meta"]["_hermes_ready_hash"] == write["ready_hash"]
+    assert client.post["meta"].get("_hermes_ready_manifest")
+    readback_content = client.post["content"]["raw"]
+    assert all(readback_content.count(item.media_url) == 1 for item in inline)
+    assert not any(update.get("status") == "publish" for update in client.updates)
+
+    # Mirror the runtime's post-readback observation boundary: accepted assets
+    # become applied only after the writer confirms the WordPress readback.
+    record_v2_observation(
+        tmp_path,
+        post_id=post_id,
+        run_id="ready-readback-115286",
+        state=store.state,
+        phase="validate",
+        outcome="ready",
+        checkpoint_reference=f"work/v2-journal/{post_id}.json",
+        applied=bool(write["media_readback"]),
+    )
+    with connect_media_registry(tmp_path) as db:
+        usages = db.execute(
+            "SELECT wordpress_media_id, role, status FROM media_usage "
+            "WHERE post_id=? ORDER BY wordpress_media_id",
+            (post_id,),
+        ).fetchall()
+    assert [(row[0], row[1], row[2]) for row in usages] == [
+        (115288, "featured", "applied"),
+        (115325, "inline", "applied"),
+        (115326, "inline", "applied"),
+    ]
 
 
 def test_writer_allows_only_listicle_final_repeat_of_featured(tmp_path):

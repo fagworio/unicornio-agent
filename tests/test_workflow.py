@@ -2937,6 +2937,16 @@ def test_featured_preflight_reuse_requires_complete_context_identity():
     assert not _featured_preflight_evidence_matches(
         row, editorial, config, image_sha256="b" * 64,
     )
+    for field, value in (
+        ("policy_version", "obsolete-policy"),
+        ("model_identity", "https://vision.test/model-b"),
+        ("image_role", "inline"),
+        ("verdict", "reject"),
+    ):
+        mismatched = {"vision_evidence": {**evidence, field: value}, "status": "passed"}
+        assert not _featured_preflight_evidence_matches(
+            mismatched, editorial, config, image_sha256="a" * 64,
+        ), field
 
 
 def test_execute_media_plan_uses_wordpress_title_context_for_inline_vision(tmp_path):
@@ -3219,8 +3229,127 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
 
     vision.assert_not_called()
     upload.assert_called_once()
-    assert results[0]["status"] == "accepted"
+    assert results[0]["status"] == "accepted", results
     assert results[0]["sha256"] == final_sha256
+
+
+def test_featured_preflight_to_apply_keeps_wordpress_context_and_evidence(tmp_path):
+    import hashlib
+
+    from unicornio_editor.media.vision_policy import featured_vision_context_key, featured_vision_subject
+
+    post_title = "Procuradoria-Geral investiga salvaguardas do Xbox Live"
+    editorial = {
+        "seo": {"title": "Título SEO diferente", "focus_keyword": "Xbox Live"},
+        "cleaned_html": "<p>A notícia trata das salvaguardas da plataforma.</p>",
+        "media_plan": [{
+            "candidate_id": "115286-featured-new",
+            "paragraph_index": 0,
+            "subject": "Xbox Live",
+            "search_query": "Xbox Live key art",
+            "direct_image_url": "https://cdn.test/xbox-live-keyart.webp",
+            "source_page_url": "https://news.test/xbox-live",
+            "is_featured": True,
+            "alt_text": "Xbox Live key art",
+            "credit_text": "Crédito da imagem: publisher",
+            "author": "Publisher",
+            "license": "Uso com crédito",
+            "license_url": "https://news.test/xbox-live",
+            "captured_at": "2026-10-15T00:00:00Z",
+        }],
+    }
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False,
+        vision_enabled=True, vision_api_key="test-key",
+        vision_base_url="https://vision.test/v1", vision_model="model-a",
+    )
+    source_path = tmp_path / "source.webp"
+    final_path = tmp_path / "final.webp"
+    final_bytes = b"simulated normalized featured bytes"
+    source_path.write_bytes(final_bytes)
+    final_path.write_bytes(final_bytes)
+    image_sha256 = hashlib.sha256(final_bytes).hexdigest()
+    identity = VisualIdentity(image_sha256, "1111111111111111", "visual:" + "a" * 24)
+    accepted_decision = {**_vision_result(accepted=True), "role_fit": "unsuitable"}
+
+    evaluated_subjects = []
+
+    def approved_preflight(_item, vision_editorial, *_args, **_kwargs):
+        assert vision_editorial["title"] == post_title
+        evaluated_subjects.append(featured_vision_subject(vision_editorial))
+        return {
+            "status": "passed", "image_sha256": image_sha256,
+            "decision": accepted_decision,
+        }
+
+    preflight_upload_evidence = []
+    with mock.patch(
+        "unicornio_editor.workflow._validate_featured_candidate_vision",
+        side_effect=approved_preflight,
+    ) as vision_preflight, \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.prepare_featured_webp", return_value=final_path), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch(
+             "unicornio_editor.media.visual_identity.verify_candidate_identity",
+             return_value=(identity, VisualIdentityDecision("INITIAL", True, reason="test")),
+         ), \
+         mock.patch("unicornio_editor.workflow.verify_image_subject_decision") as vision_apply, \
+         mock.patch(
+             "unicornio_editor.workflow.upload_image",
+             return_value={"id": 115287, "source_url": "https://wp.test/115287.webp"},
+         ) as upload:
+        preflight = validate_media_plan(
+            object(), editorial, config=config, root=tmp_path,
+            post_title=post_title, post_id=115286,
+        )
+        assert preflight["valid"] == 1
+        assert preflight["rejected"] == []
+        vision_preflight.assert_called_once()
+
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight=preflight, post_title=post_title, post_id=115286,
+            on_accepted=preflight_upload_evidence.append,
+        )
+
+    assert results[0]["status"] == "accepted", results
+    assert upload.call_count == 1
+    vision_apply.assert_not_called()  # exact normalized SHA + context reused
+    assert preflight_upload_evidence[0]["vision_evidence"]["image_sha256"] == image_sha256
+    assert preflight_upload_evidence[0]["vision_evidence"]["context_key"] == featured_vision_context_key(
+        {**editorial, "title": post_title}
+    )
+    assert preflight_upload_evidence[0]["vision_evidence"]["subject"] == featured_vision_subject(
+        {**editorial, "title": post_title}
+    )
+    assert preflight_upload_evidence[0]["vision_evidence"]["subject"] == evaluated_subjects[0]
+    assert preflight_upload_evidence[0]["vision_evidence"]["role_fit"] == "unsuitable"
+
+    from unicornio_editor.media.registry import connect as connect_registry
+    from unicornio_editor.media.registry import record_v2_candidate_decision
+    from unicornio_editor.pipeline_v2.runtime import _attach_candidate_vision_evidence
+
+    candidate_record = dict(editorial["media_plan"][0])
+    _attach_candidate_vision_evidence(
+        candidate_record, preflight_upload_evidence[0]["vision_evidence"]
+    )
+    record_v2_candidate_decision(
+        tmp_path, post_id=115286, run_id="offline-featured-test",
+        candidate=candidate_record, role="featured", disposition="accepted",
+        reason_code="candidate_accepted",
+    )
+    with connect_registry(tmp_path) as db:
+        registry_evidence = json.loads(db.execute(
+            "SELECT evidence_reference FROM media_decisions WHERE post_id=?",
+            (115286,),
+        ).fetchone()[0])
+    assert registry_evidence["vision_decision"]["subject"] == evaluated_subjects[0]
+    assert registry_evidence["vision_decision"]["role_fit"] == "unsuitable"
 
 
 def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):

@@ -1204,6 +1204,126 @@ def test_featured_ambiguous_candidate_is_recorded_as_retryable_in_registry(monke
     ]
 
 
+def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.media.registry as registry
+    from unicornio_editor.media.registry import connect
+    from unicornio_editor.media.vision_policy import (
+        VISION_POLICY_VERSION,
+        featured_vision_context_key,
+    )
+
+    candidate = {
+        "candidate_id": "featured-resolver-auto",
+        "direct_image_url": "https://cdn.test/xbox-live-featured.webp",
+        "source_page_url": "https://source.test/xbox-live",
+        "author": "Fonte Xbox",
+        "license": "CC BY 4.0",
+        "license_url": "https://license.test/cc-by-4.0",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: Fonte Xbox",
+        "alt_text": "Arte de Xbox Live",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+    monkeypatch.setattr(
+        cli, "_resolve_media_batch",
+        lambda *_args, **_kwargs: {"posts": [{"reuse": [], "audit_candidates": [candidate]}]},
+    )
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Xbox Live"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [{
+        "subject": "Xbox Live", "heading": "Xbox Live", "item": None,
+    }])
+    monkeypatch.setattr(
+        runtime, "validate_media_plan",
+        lambda *_args, **_kwargs: {"valid": True, "rejected": []},
+    )
+
+    editorial = {
+        "title": "Xbox Live anuncia novas salvaguardas",
+        "game_name": "Xbox Live",
+        "cleaned_html": _article_html(3),
+        "seo": {"focus_keyword": "Xbox Live"},
+    }
+    context_key = featured_vision_context_key(editorial)
+
+    def execute(plan_editorial, *_args, **_kwargs):
+        plan = plan_editorial["media_plan"][0]
+        return ([{
+            "status": "accepted",
+            "media_id": 115288,
+            "media_url": plan["direct_image_url"],
+            "paragraph_index": 0,
+            "featured": True,
+            "sha256": "a" * 64,
+            "phash": "a" * 16,
+            "visual_group_id": "visual:" + "a" * 24,
+            "visual_verification": {"decision": "INITIAL"},
+            "vision_evidence": {
+                "status": "MATCH", "verdict": "accept", "confidence": 0.91,
+                "role_fit": "unsuitable", "image_sha256": "a" * 64,
+                "image_role": "featured", "policy_version": VISION_POLICY_VERSION,
+                "model_identity": "vision-test-v1", "context_key": context_key,
+                "subject": "Xbox Live",
+            },
+        }], 115288, "Crédito da imagem: Fonte Xbox")
+
+    monkeypatch.setattr(runtime, "_execute_media_plan", execute)
+    previous = MediaProgress(required=0, featured=FeaturedProgress(FeaturedStatus.MISSING))
+    run_id = "resolver-run-115286"
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115286, "title": editorial["title"], "v2_run_id": run_id},
+        SimpleNamespace(media=previous),
+        editorial,
+        previous,
+    )
+
+    assert result.featured.status is FeaturedStatus.VALID
+    assert result.featured.media_id == 115288
+    with connect(tmp_path) as db:
+        decision = db.execute(
+            "SELECT post_id, run_id, candidate_id, role, subject, disposition, evidence_reference "
+            "FROM media_decisions WHERE post_id=? AND candidate_id=?",
+            (115286, "featured-resolver-auto"),
+        ).fetchone()
+    assert decision is not None
+    assert tuple(decision[:6]) == (
+        115286, run_id, "featured-resolver-auto", "featured", "Xbox Live", "accepted",
+    )
+    evidence = json.loads(decision[6])
+    assert evidence["vision_decision"]["image_sha256"] == "a" * 64
+    assert evidence["vision_decision"]["context_key"] == context_key
+    assert evidence["vision_decision"]["role_fit"] == "unsuitable"
+    assert evidence["vision_decision"]["policy_version"] == VISION_POLICY_VERSION
+
+    failure_root = tmp_path / "registry-write-failure"
+    failure_root.mkdir()
+
+    def fail_registry_write(*_args, **_kwargs):
+        raise OSError("token=must-not-leak")
+
+    monkeypatch.setattr(registry, "record_v2_candidate_decision", fail_registry_write)
+    still_accepted = ProductionMediaResolver(object(), Config(), failure_root)(
+        {"post_id": 115286, "title": editorial["title"], "v2_run_id": run_id},
+        SimpleNamespace(media=previous),
+        editorial,
+        previous,
+    )
+    assert still_accepted.featured.status is FeaturedStatus.VALID
+    telemetry = [
+        json.loads(line)
+        for line in (failure_root / "work/telemetry.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    failure_event = next(
+        event for event in telemetry
+        if event.get("event") == "v2_media_registry_decision_failed"
+    )
+    assert failure_event["exception_type"] == "OSError"
+    assert "token=must-not-leak" not in json.dumps(telemetry)
+    assert candidate["direct_image_url"] not in json.dumps(telemetry)
+
+
 def test_featured_matching_candidate_with_incomplete_provenance_is_not_blacklisted(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

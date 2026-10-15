@@ -1070,8 +1070,24 @@ class ProductionMediaResolver:
                         disposition="accepted" if accepted else "defer_retry" if temporary or not definitive else "reject_final",
                         reason_code="candidate_accepted" if accepted else "transient_provider_failure" if temporary or not definitive else (detail[:120] or "candidate_rejected"),
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Registry writes are deliberately fail-soft, but a missing
+                # decision must remain visible without logging candidate URLs,
+                # payloads, or provider messages.
+                try:
+                    from ..observability import append_telemetry
+
+                    append_telemetry(
+                        self.root,
+                        "v2_media_registry_decision_failed",
+                        post_id=int(context["post_id"]),
+                        run_id=str(context.get("v2_run_id") or ""),
+                        operation="record_candidate_decision",
+                        exception_type=type(exc).__name__,
+                        candidate_count=len(results),
+                    )
+                except Exception:  # noqa: BLE001 - telemetry remains fail-soft
+                    pass
             # Persist identity materialised for legacy accepted assets too.
             by_id = {int(row.get("media_id")): row for row in baseline_inline_assets if row.get("media_id")}
             current_inline = [
