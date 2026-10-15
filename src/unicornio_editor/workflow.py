@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
 import datetime
+import hashlib
 import json
 import re
 import shutil
@@ -45,7 +46,13 @@ from .media.relevance import extract_entities, image_is_relevant, iter_content_i
 from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
 from .media.vision_cache import get_cached_decision, set_cached_decision
-from .media.vision_gate import VisionGateError, verify_image_subject, vision_config_ready
+from .media.vision_gate import (
+    VisionGateError,
+    VisionInputUnavailable,
+    prepare_vision_image_input_from_path,
+    verify_image_subject_decision,
+    vision_config_ready,
+)
 from .media.vision_policy import (
     featured_vision_category,
     featured_vision_subject,
@@ -1666,10 +1673,11 @@ def _validate_featured_candidate_vision(
     config: Config | None,
     root: Path | None,
 ) -> dict[str, Any]:
-    """Run the expensive featured pixel gate during ``media-validate``.
+    """Validate normalized featured bytes during ``media-validate``.
 
-    The decision is cached before upload, so share cards, logos and unrelated
-    banners are rejected while the media plan is still cheap to replace.
+    The exact normalized WebP is sent to the model and its content hash keys the
+    cache. The apply path compares its own normalized bytes with this hash and
+    revalidates if the source changed between validation and upload.
     """
     if config is None:
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
@@ -1710,31 +1718,74 @@ def _validate_featured_candidate_vision(
         return {"status": "skipped", "reason": message}
 
     cache_root = root or Path(".")
-    cached = get_cached_decision(cache_root, image_url, cache_subject)
-    if cached is not None:
-        ok = cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.85
-        return {
-            "status": "passed" if ok else "rejected",
-            "reason": "decisao visual reutilizada do cache",
-            "cached": True,
-        }
     try:
-        ok, reason = verify_image_subject(
-            image_url=image_url,
-            subject=subject,
-            api_key=config.vision_api_key,
-            base_url=config.vision_base_url,
-            model=config.vision_model,
-            timeout=config.http_timeout,
-            context="preflight da imagem de destaque do artigo",
-            category=featured_vision_category(editorial),
-            alt=str(item.get("alt_text") or subject),
-            detail=config.vision_detail,
-            allow_high=True,
-            require_key_art=True,
-            root=root,  # uma requisicao HTTP = um evento vision_api_request
-        )
-    except VisionGateError as exc:
+        with tempfile.TemporaryDirectory(prefix="unicornio-featured-vision-") as directory:
+            source = download_image(
+                image_url,
+                Path(directory) / "featured-source.img",
+                max_attempts=config.max_source_retries + 1,
+                url_policy=config.remote_url_policy,
+            )
+            normalized = prepare_featured_webp(source, Path(directory) / "featured-final.webp")
+            image_sha256 = hashlib.sha256(Path(normalized).read_bytes()).hexdigest()
+            cached = get_cached_decision(
+                cache_root, image_url, cache_subject,
+                image_sha256=image_sha256, policy="featured-key-art-v1",
+            )
+            if cached is not None:
+                ok = (
+                    cached.get("status") == "MATCH"
+                    and float(cached.get("confidence") or 0) >= 0.85
+                    and cached.get("visual_type") not in {"text_banner", "infographic"}
+                )
+                return {
+                    "status": "passed" if ok else "rejected",
+                    "reason": str(cached.get("reason") or "decisao visual reutilizada para os mesmos bytes"),
+                    "cached": True,
+                    "image_sha256": image_sha256,
+                    "decision": dict(cached),
+                }
+            vision_input = prepare_vision_image_input_from_path(normalized)
+            decision = verify_image_subject_decision(
+                image_url=vision_input,
+                subject=subject,
+                api_key=config.vision_api_key,
+                base_url=config.vision_base_url,
+                model=config.vision_model,
+                timeout=config.http_timeout,
+                context="preflight da imagem de destaque do artigo",
+                category=featured_vision_category(editorial),
+                alt=str(item.get("alt_text") or subject),
+                detail=config.vision_detail,
+                allow_high=True,
+                require_key_art=True,
+                root=root,
+            )
+        if decision.get("accepted"):
+            cache_decision = {
+                key: decision[key]
+                for key in (
+                    "status", "confidence", "visual_type", "verdict", "reason",
+                    "detail_used", "low_status", "low_confidence", "low_visual_type",
+                )
+                if key in decision
+            }
+            set_cached_decision(
+                cache_root,
+                image_url,
+                cache_subject,
+                cache_decision,
+                image_sha256=image_sha256,
+                policy="featured-key-art-v1",
+            )
+        return {
+            "status": "passed" if decision.get("accepted") else "rejected",
+            "reason": str(decision.get("reason") or "decisao visual sem motivo"),
+            "cached": False,
+            "image_sha256": image_sha256,
+            "decision": decision,
+        }
+    except (VisionGateError, VisionInputUnavailable) as exc:
         return {
             "status": "error",
             "technical": True,
@@ -1748,14 +1799,6 @@ def _validate_featured_candidate_vision(
             "reason": f"visao da featured falhou: {exc}",
             "cached": False,
         }
-    if ok:
-        set_cached_decision(
-            cache_root,
-            image_url,
-            cache_subject,
-            {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
-        )
-    return {"status": "passed" if ok else "rejected", "reason": reason, "cached": False}
 
 
 def _listicle_media_capacity(
@@ -2215,6 +2258,94 @@ def _execute_media_plan(
                     if visual.decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
                         _funnel("visual_identity", "rejected", item, position, visual.reason)
                         return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "duplicate_existing_frame"}
+                if is_featured and config.vision_enabled and config.vision_api_key:
+                    vision_preflight = preflight_vision.get(position) or {}
+                    expected_sha256 = str(vision_preflight.get("image_sha256") or "")
+                    decision = None
+                    if vision_preflight.get("deterministic"):
+                        decision = {
+                            "accepted": True,
+                            "reason": str(vision_preflight.get("reason") or "evidência determinística"),
+                        }
+                    elif (
+                        vision_preflight.get("status") == "passed"
+                        and expected_sha256
+                        and expected_sha256 == identity.sha256
+                    ):
+                        preflight_decision = vision_preflight.get("decision")
+                        if isinstance(preflight_decision, dict) and preflight_decision.get("accepted"):
+                            decision = preflight_decision
+                    if decision is None:
+                        subject = featured_vision_subject(editorial)
+                        cache_subject = vision_cache_subject(editorial)
+                        cached = get_cached_decision(
+                            root, str(item.get("direct_image_url") or ""),
+                            cache_subject, image_sha256=identity.sha256,
+                            policy="featured-key-art-v1",
+                        )
+                        if cached is not None and (
+                            cached.get("status") == "MATCH"
+                            and float(cached.get("confidence") or 0) >= 0.85
+                            and cached.get("visual_type") not in {"text_banner", "infographic"}
+                        ):
+                            decision = {
+                                **cached, "verdict": "accept", "accepted": True,
+                                "reason": str(cached.get("reason") or "cache de bytes idênticos"),
+                            }
+                        else:
+                            try:
+                                vision_input = prepare_vision_image_input_from_path(webp)
+                                decision = verify_image_subject_decision(
+                                    image_url=vision_input,
+                                    subject=subject,
+                                    api_key=config.vision_api_key,
+                                    base_url=config.vision_base_url,
+                                    model=config.vision_model,
+                                    timeout=config.http_timeout,
+                                    context="validação final da featured antes do upload",
+                                    category=featured_vision_category(editorial),
+                                    alt=str(item.get("alt_text") or subject),
+                                    detail=config.vision_detail,
+                                    allow_high=True,
+                                    require_key_art=True,
+                                    root=root,
+                                )
+                            except (VisionGateError, VisionInputUnavailable) as exc:
+                                decision = {
+                                    "status": "ERROR", "confidence": 0.0,
+                                    "visual_type": "other", "verdict": "error",
+                                    "accepted": False,
+                                    "reason": f"validacao dos bytes finais falhou: {type(exc).__name__}",
+                                }
+                            if decision.get("accepted"):
+                                cache_decision = {
+                                    key: decision[key]
+                                    for key in (
+                                        "status", "confidence", "visual_type", "verdict", "reason",
+                                        "detail_used", "low_status", "low_confidence", "low_visual_type",
+                                    )
+                                    if key in decision
+                                }
+                                set_cached_decision(
+                                    root,
+                                    str(item.get("direct_image_url") or ""),
+                                    cache_subject,
+                                    cache_decision,
+                                    image_sha256=identity.sha256,
+                                    policy="featured-key-art-v1",
+                                )
+                    if not decision.get("accepted"):
+                        reason = str(decision.get("reason") or "featured não confirmada visualmente")
+                        _funnel("featured_vision_final_bytes", "rejected", item, position, reason)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "rejected",
+                            "detail": reason[:200],
+                        }
+                    _funnel(
+                        "featured_vision_final_bytes", "passed", item, position,
+                        "same_sha256_as_preflight" if expected_sha256 == identity.sha256 else "validated_before_upload",
+                    )
                 media = upload_image(client, webp, evidence)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
@@ -2266,19 +2397,6 @@ def _execute_media_plan(
                                          post_id=post_id, error=str(exc)[:200])
                     except Exception:  # noqa: BLE001
                         pass
-                # A visão cara já ocorreu no media-validate. Transfere a
-                # aprovação para a URL hospedada no WordPress; o checklist
-                # final continua fail-closed, mas consome o cache em vez de
-                # criar uma segunda chamada tardia.
-                vision = preflight_vision.get(position)
-                if is_featured and vision and vision.get("status") == "passed":
-                    subject = vision_cache_subject(editorial)
-                    set_cached_decision(
-                        root,
-                        str(media_url),
-                        subject,
-                        {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
-                    )
                 _funnel("upload", "passed", item, position)
                 if identity.sha256:
                     visual_baseline.append({**identity.to_dict(), "media_id": int(media_id), "media_url": str(media_url), "local_path": str(webp)})

@@ -1582,6 +1582,7 @@ class ProductionMediaResolver:
                 root=self.root,
             ))
         from ..media.vision_cache import set_cached_decision
+        from ..media.vision_gate import image_input_sha256
         by_candidate_id = {str(item["candidate_id"]): item for item in low_items}
         for candidate in candidates:
             source_url = str(candidate.get("direct_image_url") or "")
@@ -1590,13 +1591,37 @@ class ProductionMediaResolver:
             if item and item["candidate_id"] in high_decisions:
                 decision = high_decisions[item["candidate_id"]]
             if decision and decision.get("verdict") == "accept":
-                set_cached_decision(
-                    self.root,
-                    source_url,
-                    str(candidate.get("subject") or ""),
-                    {"status": "MATCH", "confidence": float(decision.get("confidence") or 0), "visual_type": decision.get("visual_type") or "other"},
-                )
-                candidate.setdefault("evidence", {})["verdict"] = "deterministic_match"
+                image_sha256 = image_input_sha256(str(item.get("image_url") or ""))
+                decision_record = {
+                    key: decision[key]
+                    for key in (
+                        "status", "confidence", "visual_type", "verdict", "reason",
+                        "detail_used", "low_status", "low_confidence", "low_visual_type",
+                    )
+                    if key in decision
+                }
+                if image_sha256:
+                    set_cached_decision(
+                        self.root,
+                        source_url,
+                        str(candidate.get("subject") or ""),
+                        decision_record,
+                        image_sha256=image_sha256,
+                        policy=(
+                            "featured-key-art-v1"
+                            if candidate.get("role") == "featured"
+                            else "subject-match-v1"
+                        ),
+                    )
+                evidence = candidate.get("evidence")
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                    candidate["evidence"] = evidence
+                evidence.update({
+                    "verdict": "deterministic_match",
+                    "vision_decision": decision_record,
+                    "vision_image_sha256": image_sha256,
+                })
                 candidate["needs_vision"] = False
 
     @staticmethod

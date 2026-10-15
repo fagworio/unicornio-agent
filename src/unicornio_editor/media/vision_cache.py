@@ -1,11 +1,11 @@
-"""Cache de validacao visual por hash(imagem) + entidade + versao.
+"""Cache de validação visual por hash dos bytes + entidade + política + versão.
 
 A MESMA key art aparece em varios posts (GTA 6 trailer, leak, lancamento...).
-Sem cache, cada artigo pagaria uma chamada de visao para a mesma imagem. Este
-cache evita re-analise: chave = sha256(url) + entidade normalizada + versao do
-validador. Entidade importa: a mesma imagem pode ser valida para um artigo
-(GTA 6) e invalida para outro (Redfall). Fail-soft: cache ausente/corrompido
-apenas significa "nao cacheado" (nao derruba o pipeline).
+Sem cache, cada artigo pagaria uma chamada de visão para a mesma imagem. Este
+cache evita reanálise quando os bytes, assunto e política são idênticos.
+Chamadores sem hash de conteúdo mantêm uma chave legada baseada em URL, mas
+fluxos de featured usam obrigatoriamente o SHA-256 materializado. Fail-soft:
+cache ausente/corrompido apenas significa "não cacheado".
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-VISION_CACHE_VERSION = "vision-v2"
+VISION_CACHE_VERSION = "vision-v3-content-policy"
 VISUAL_COMPARISON_CACHE_VERSION = "visual-compare-v1"
 _CACHE_LOCK = threading.Lock()
 
@@ -38,10 +38,20 @@ def _normalize_entity(entity: str) -> str:
     return slug[:48] or "none"
 
 
-def cache_key(image_url: str, entity: str, version: str = VISION_CACHE_VERSION) -> str:
-    """Chave estavel: hash da imagem + entidade + versao do validador."""
-    digest = hashlib.sha256((image_url or "").encode("utf-8")).hexdigest()[:12]
-    return f"{digest}:{_normalize_entity(entity)}:{version}"
+def cache_key(
+    image_url: str,
+    entity: str,
+    version: str = VISION_CACHE_VERSION,
+    *,
+    image_sha256: str = "",
+    policy: str = "default",
+) -> str:
+    """Key by actual image bytes when known, otherwise by URL (legacy callers)."""
+    source_identity = str(image_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", source_identity):
+        source_identity = "url:" + hashlib.sha256((image_url or "").encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}:{_normalize_entity(entity)}:{_normalize_entity(policy)}:{version}"
 
 
 def read_vision_cache(root: str | Path) -> dict[str, Any]:
@@ -56,9 +66,16 @@ def read_vision_cache(root: str | Path) -> dict[str, Any]:
         return {}
 
 
-def get_cached_decision(root: str | Path, image_url: str, entity: str) -> Any | None:
-    """Resultado de visao cacheado para esta imagem+entidade, ou None."""
-    key = cache_key(image_url, entity)
+def get_cached_decision(
+    root: str | Path,
+    image_url: str,
+    entity: str,
+    *,
+    image_sha256: str = "",
+    policy: str = "default",
+) -> Any | None:
+    """Return the cached image/entity decision; byte hashes take precedence."""
+    key = cache_key(image_url, entity, image_sha256=image_sha256, policy=policy)
     cache = read_vision_cache(root)
     value = cache.get(key)
     if isinstance(value, dict) and value.get("status"):
@@ -67,14 +84,22 @@ def get_cached_decision(root: str | Path, image_url: str, entity: str) -> Any | 
 
 
 def set_cached_decision(
-    root: str | Path, image_url: str, entity: str, decision: dict[str, Any]
+    root: str | Path,
+    image_url: str,
+    entity: str,
+    decision: dict[str, Any],
+    *,
+    image_sha256: str = "",
+    policy: str = "default",
 ) -> None:
     """Persiste o resultado de visao no cache (fail-soft)."""
     try:
         path = vision_cache_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
         cache = read_vision_cache(root)
-        cache[cache_key(image_url, entity)] = decision
+        cache[cache_key(
+            image_url, entity, image_sha256=image_sha256, policy=policy
+        )] = dict(decision)
         _atomic_write(path, cache)
     except OSError:
         pass

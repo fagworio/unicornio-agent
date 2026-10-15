@@ -53,6 +53,55 @@ class VisionCacheTests(unittest.TestCase):
             )
             self.assertIsNone(get_cached_decision(root, "https://media.example/a.webp", "redfall"))
 
+    def test_content_hash_survives_url_change_but_not_byte_change(self):
+        first_hash = "a" * 64
+        changed_hash = "b" * 64
+        decision = {
+            "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
+            "verdict": "accept", "reason": "modelo confirmou",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_cached_decision(
+                root, "https://cdn.test/first.jpg", "Xbox Live", decision,
+                image_sha256=first_hash,
+            )
+            cached = get_cached_decision(
+                root, "https://cdn.test/second.webp", "Xbox Live",
+                image_sha256=first_hash,
+            )
+            self.assertEqual(cached, decision)
+            self.assertIsNone(get_cached_decision(
+                root, "https://cdn.test/second.webp", "Xbox Live",
+                image_sha256=changed_hash,
+            ))
+
+    def test_featured_policy_does_not_reuse_inline_decision(self):
+        image_hash = "d" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_cached_decision(
+                root, "https://cdn.test/keyart.webp", "Xbox Live",
+                {"status": "MATCH", "confidence": 0.95, "visual_type": "photograph"},
+                image_sha256=image_hash, policy="subject-match-v1",
+            )
+            self.assertIsNone(get_cached_decision(
+                root, "https://cdn.test/keyart.webp", "Xbox Live",
+                image_sha256=image_hash, policy="featured-key-art-v1",
+            ))
+
+    def test_byte_cache_does_not_reuse_url_only_legacy_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_cached_decision(
+                root, "https://cdn.test/image.jpg", "Xbox Live",
+                {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
+            )
+            self.assertIsNone(get_cached_decision(
+                root, "https://cdn.test/image.jpg", "Xbox Live",
+                image_sha256="c" * 64,
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,26 @@ def _verified_media_identity():
     return VisualIdentity("a" * 64, "1111111111111111", "visual:" + "a" * 24), VisualIdentityDecision(
         "INITIAL", True, reason="test"
     )
+
+
+def _write_test_vision_source(_url, destination, **_kwargs):
+    from PIL import Image
+
+    target = Path(destination)
+    Image.new("RGB", (1280, 720), "#2457a6").save(target, format="PNG")
+    return target
+
+
+def _vision_result(*, accepted, status="MATCH", confidence=0.91, visual_type="key_art"):
+    return {
+        "accepted": accepted,
+        "status": status,
+        "confidence": confidence,
+        "visual_type": visual_type,
+        "verdict": "accept" if accepted else "reject",
+        "reason": "modelo confirmou" if accepted else "imagem e share card",
+        "detail_used": "low",
+    }
 def editorial_payload(decision="process"):
     # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
     # editorial valido — 2 imagens reais com credito + keyword no corpo.
@@ -838,8 +858,10 @@ class WorkflowTests(unittest.TestCase):
             vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
         )
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "unicornio_editor.workflow.verify_image_subject",
-            return_value=(False, "imagem e share card"),
+            "unicornio_editor.workflow.download_image", side_effect=_write_test_vision_source,
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_image_subject_decision",
+            return_value=_vision_result(accepted=False, status="UNRELATED", confidence=0.92),
         ):
             result = validate_media_plan(
                 FakeClient(self.post()), payload, config=config, root=Path(directory)
@@ -862,8 +884,11 @@ class WorkflowTests(unittest.TestCase):
             vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
         )
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "unicornio_editor.workflow.verify_image_subject"
+            "unicornio_editor.workflow.download_image", side_effect=_write_test_vision_source,
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_image_subject_decision"
         ) as vision:
+            vision.return_value = _vision_result(accepted=True)
             result = validate_media_plan(
                 FakeClient(self.post()), payload, config=config, root=Path(directory)
             )
@@ -883,11 +908,31 @@ class WorkflowTests(unittest.TestCase):
             "wordpress", "http://wp.test", "/wp-json/wp/v2",
             vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
         )
-        with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "unicornio_editor.workflow.verify_image_subject", return_value=(True, "confirmada")
-        ) as vision:
-            validate_media_plan(FakeClient(self.post()), payload, config=config, root=Path(directory))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch(
+                "unicornio_editor.workflow.download_image", side_effect=_write_test_vision_source,
+            ), mock.patch(
+                "unicornio_editor.workflow.verify_image_subject_decision",
+                return_value=_vision_result(accepted=True),
+            ) as vision:
+                result = validate_media_plan(FakeClient(self.post()), payload, config=config, root=root)
+            from unicornio_editor.media.vision_cache import get_cached_decision
+            from unicornio_editor.media.vision_policy import vision_cache_subject
+
+            vision_row = result["featured_vision"][0]
+            image_sha256 = vision_row["image_sha256"]
+            cached = get_cached_decision(
+                root, payload["media_plan"][0]["direct_image_url"],
+                vision_cache_subject(payload), image_sha256=image_sha256,
+                policy="featured-key-art-v1",
+            )
+            self.assertEqual(vision_row["decision"]["confidence"], 0.91)
+            self.assertEqual(vision_row["decision"]["visual_type"], "key_art")
+            self.assertEqual(cached["confidence"], 0.91)
+            self.assertEqual(cached["visual_type"], "key_art")
         vision.assert_called_once()
+        self.assertTrue(vision.call_args.kwargs["image_url"].startswith("data:image/webp;base64,"))
 
     def test_media_validate_checks_existing_featured_when_plan_has_none(self):
         config = Config(
@@ -895,8 +940,10 @@ class WorkflowTests(unittest.TestCase):
             vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
         )
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "unicornio_editor.workflow.verify_image_subject",
-            return_value=(True, "key art confirmada"),
+            "unicornio_editor.workflow.download_image", side_effect=_write_test_vision_source,
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_image_subject_decision",
+            return_value=_vision_result(accepted=True),
         ) as vision:
             result = validate_media_plan(
                 FakeClient(self.post()),
@@ -906,6 +953,7 @@ class WorkflowTests(unittest.TestCase):
                 existing_featured_id=7,
             )
         vision.assert_called_once()
+        self.assertTrue(vision.call_args.kwargs["image_url"].startswith("data:image/webp;base64,"))
         self.assertEqual(result["featured_vision"][0]["existing_featured_id"], 7)
         self.assertEqual(result["featured_vision"][0]["status"], "passed")
 
@@ -2831,6 +2879,131 @@ def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp
     upload.assert_not_called()
     assert results[0]["status"] == "rejected"
     assert "visual_identity_unverified" in results[0]["detail"]
+
+
+def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp_path):
+    import hashlib
+
+    from unicornio_editor.media.visual_identity import VisualIdentity
+
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/xbox-live",
+        "direct_image_url": "https://cdn.example/xbox-live-keyart.webp",
+        "author": "Publisher",
+        "license": "Uso com crédito",
+        "license_url": "https://source.example/xbox-live",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: publisher",
+        "alt_text": "Xbox Live key art",
+        "subject": "Xbox Live",
+        "is_featured": True,
+    }
+    editorial = {
+        "seo": {"title": "Notícia sobre Xbox Live", "focus_keyword": "Xbox Live"},
+        "cleaned_html": "<p>Xbox Live notícias.</p>",
+        "game_name": "Xbox Live",
+        "media_plan": [item],
+    }
+    source_path = tmp_path / "source.img"
+    source_path.write_bytes(b"source bytes")
+    final_path = tmp_path / "final.webp"
+    final_bytes = b"new normalized featured bytes"
+    final_sha256 = hashlib.sha256(final_bytes).hexdigest()
+    identity = VisualIdentity(final_sha256, "1111111111111111", "visual:" + "a" * 24)
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False,
+        vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+    )
+
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
+         mock.patch("unicornio_editor.workflow.prepare_featured_webp", side_effect=lambda *_args: (final_path.write_bytes(final_bytes), final_path)[1]), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=(identity, VisualIdentityDecision("INITIAL", True, reason="test"))), \
+         mock.patch("unicornio_editor.workflow.prepare_vision_image_input_from_path", return_value="data:image/webp;base64,ZmFrZQ==") as prepare_vision, \
+         mock.patch("unicornio_editor.workflow.verify_image_subject_decision", return_value=_vision_result(accepted=False, status="UNRELATED", confidence=0.94)) as vision, \
+         mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight={"rejected": [], "featured_vision": [{
+                "index": 0,
+                "status": "passed",
+                "image_sha256": "b" * 64,
+                "decision": _vision_result(accepted=True),
+            }]},
+            post_id=115286,
+        )
+
+    prepare_vision.assert_called_once_with(final_path)
+    vision.assert_called_once()
+    upload.assert_not_called()
+    assert results[0]["status"] == "rejected"
+    assert "share card" in results[0]["detail"]
+
+
+def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_path):
+    import hashlib
+
+    from unicornio_editor.media.visual_identity import VisualIdentity
+
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/xbox-live",
+        "direct_image_url": "https://cdn.example/xbox-live-keyart.webp",
+        "author": "Publisher", "license": "Uso com crédito",
+        "license_url": "https://source.example/xbox-live",
+        "captured_at": "2026-10-07T00:00:00Z",
+        "credit_text": "Crédito da imagem: publisher",
+        "alt_text": "Xbox Live key art", "subject": "Xbox Live", "is_featured": True,
+    }
+    editorial = {
+        "seo": {"title": "Notícia sobre Xbox Live", "focus_keyword": "Xbox Live"},
+        "cleaned_html": "<p>Xbox Live notícias.</p>", "game_name": "Xbox Live",
+        "media_plan": [item],
+    }
+    source_path = tmp_path / "source.img"
+    source_path.write_bytes(b"source bytes")
+    final_path = tmp_path / "final.webp"
+    final_bytes = b"same normalized featured bytes"
+    final_path.write_bytes(final_bytes)
+    final_sha256 = hashlib.sha256(final_bytes).hexdigest()
+    identity = VisualIdentity(final_sha256, "1111111111111111", "visual:" + "a" * 24)
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False,
+        vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
+    )
+    approved = _vision_result(accepted=True)
+
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
+         mock.patch("unicornio_editor.workflow.prepare_featured_webp", return_value=final_path), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=(identity, VisualIdentityDecision("INITIAL", True, reason="test"))), \
+         mock.patch("unicornio_editor.workflow.verify_image_subject_decision") as vision, \
+         mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        upload.return_value = {"id": 115287, "source_url": "https://wp.test/115287.webp"}
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight={"rejected": [], "featured_vision": [{
+                "index": 0, "status": "passed", "image_sha256": final_sha256,
+                "decision": approved,
+            }]},
+            post_id=115286,
+        )
+
+    vision.assert_not_called()
+    upload.assert_called_once()
+    assert results[0]["status"] == "accepted"
+    assert results[0]["sha256"] == final_sha256
 
 
 def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):

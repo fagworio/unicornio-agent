@@ -645,7 +645,8 @@ class ChecklistTests(unittest.TestCase):
             '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Jogo importante" /></figure>'
         )
         with mock.patch(
-            "unicornio_editor.checklist.verify_image_subject", return_value=(True, "ok")
+            "unicornio_editor.checklist.verify_image_subject_decision",
+            return_value={"accepted": True, "reason": "ok", "status": "MATCH", "confidence": 0.91, "visual_type": "key_art"},
         ) as verify:
             result = self._run_checklist(content=content)
         item = next(i for i in result["items"] if i["name"] == "imagens_visao")
@@ -679,8 +680,8 @@ class ChecklistTests(unittest.TestCase):
             vision_model="vision-m",
         )
         with mock.patch(
-            "unicornio_editor.checklist.verify_image_subject",
-            return_value=(False, "modelo de visao NEGOU o assunto"),
+            "unicornio_editor.checklist.verify_image_subject_decision",
+            return_value={"accepted": False, "reason": "modelo de visao NEGOU o assunto", "status": "UNRELATED", "confidence": 0.91, "visual_type": "photograph"},
         ), mock.patch(
             "unicornio_editor.checklist.prepare_vision_image_input",
             return_value="data:image/png;base64,AAAA",
@@ -721,7 +722,7 @@ class ChecklistTests(unittest.TestCase):
             vision_enabled=True, vision_api_key="k", vision_base_url="http://vision.test/v1", vision_model="vision-m",
         )
         with mock.patch(
-            "unicornio_editor.checklist.verify_image_subject",
+            "unicornio_editor.checklist.verify_image_subject_decision",
             side_effect=VisionGateError("API de visao respondeu HTTP 400"),
         ), mock.patch(
             "unicornio_editor.checklist.prepare_vision_image_input",
@@ -771,7 +772,8 @@ class ChecklistTests(unittest.TestCase):
             vision_model="vision-m",
         )
         with mock.patch(
-            "unicornio_editor.checklist.verify_image_subject", return_value=(True, "ok")
+            "unicornio_editor.checklist.verify_image_subject_decision",
+            return_value={"accepted": True, "reason": "ok", "status": "MATCH", "confidence": 0.91, "visual_type": "key_art"},
         ) as verify, mock.patch(
             "unicornio_editor.checklist.prepare_vision_image_input",
             return_value="data:image/png;base64,AAAA",
@@ -803,7 +805,7 @@ class ChecklistTests(unittest.TestCase):
             vision_base_url="http://vision.test/v1",
             vision_model="vision-m",
         )
-        with mock.patch("unicornio_editor.checklist.verify_image_subject") as verify:
+        with mock.patch("unicornio_editor.checklist.verify_image_subject_decision") as verify:
             with tempfile.TemporaryDirectory() as directory:
                 backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
                 backup_path.parent.mkdir(parents=True, exist_ok=True)

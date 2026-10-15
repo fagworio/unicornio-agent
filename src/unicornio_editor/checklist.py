@@ -25,8 +25,9 @@ from .list_quality import ListContentError, validate_list_content
 from .media.vision_gate import (
     VisionGateError,
     VisionInputUnavailable,
+    image_input_sha256,
     prepare_vision_image_input,
-    verify_image_subject,
+    verify_image_subject_decision,
     vision_config_ready,
 )
 from .wordpress import WordPressClient
@@ -929,15 +930,6 @@ def run_pre_publish_checklist(
             nonlocal calls_low, calls_high, checked
             if not url or not subject.strip():
                 return
-            # Cache por imagem+entidade: evita re-analisar a mesma key art
-            # em varios posts/artigos.
-            cached = get_cached_decision(vision_root, url, subject)
-            if cached is not None:
-                checked += 1
-                if cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.85:
-                    return
-                vision_failures.append(f"{url[:60]}: cache nao-confirma ({cached.get('status')})")
-                return
             # Limites mecanicos de custo por post.
             if calls_low >= config.vision_max_low:
                 vision_failures.append(f"{url[:60]}: limite de chamadas low atingido")
@@ -949,7 +941,22 @@ def run_pre_publish_checklist(
                     timeout=config.http_timeout,
                     url_policy=config.remote_url_policy,
                 )
-                ok, reason = verify_image_subject(
+                image_sha256 = image_input_sha256(vision_input)
+                cached = get_cached_decision(
+                    vision_root, url, subject, image_sha256=image_sha256,
+                    policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                )
+                if cached is not None:
+                    checked += 1
+                    if (
+                        cached.get("status") == "MATCH"
+                        and float(cached.get("confidence") or 0) >= 0.85
+                        and (not is_featured or cached.get("visual_type") not in {"text_banner", "infographic"})
+                    ):
+                        return
+                    vision_failures.append(f"{url[:60]}: cache nao-confirma ({cached.get('status')})")
+                    return
+                decision = verify_image_subject_decision(
                     image_url=vision_input,
                     subject=subject,
                     api_key=config.vision_api_key,
@@ -965,12 +972,23 @@ def run_pre_publish_checklist(
                     root=vision_root,  # uma requisicao HTTP = um evento (com usage)
                 )
                 checked += 1
-                if ok:
-                    set_cached_decision(
-                        vision_root, url, subject,
-                        {"status": "MATCH", "confidence": 1.0, "visual_type": "other"},
-                    )
+                if decision.get("accepted"):
+                    if image_sha256 and decision.get("status") == "MATCH":
+                        cache_decision = {
+                            key: decision[key]
+                            for key in (
+                                "status", "confidence", "visual_type", "verdict", "reason",
+                                "detail_used", "low_status", "low_confidence", "low_visual_type",
+                            )
+                            if key in decision
+                        }
+                        set_cached_decision(
+                            vision_root, url, subject, cache_decision,
+                            image_sha256=image_sha256,
+                            policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                        )
                     return
+                reason = str(decision.get("reason") or "imagem não confirmada")
                 # Escalonou para high na featured? Contabiliza para o limite.
                 if is_featured and "high" in str(config.vision_detail):
                     calls_high += 1

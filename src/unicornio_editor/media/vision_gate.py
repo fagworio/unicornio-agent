@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import io
 import json
 import re
@@ -140,6 +141,12 @@ def _data_url_bytes(value: str) -> bytes | None:
         return base64.b64decode(match.group(2), validate=True)
     except (binascii.Error, ValueError):
         raise VisionInputUnavailable("invalid base64 image input")
+
+
+def image_input_sha256(value: str) -> str:
+    """Return the digest of materialized image bytes, or empty for remote URLs."""
+    data = _data_url_bytes(str(value or ""))
+    return hashlib.sha256(data).hexdigest() if data is not None else ""
 
 
 def prepare_vision_image_input(
@@ -724,7 +731,7 @@ def _decide(result: dict[str, Any], *, require_key_art: bool = False) -> tuple[b
     return veredito != "reject", razao
 
 
-def verify_image_subject(
+def verify_image_subject_decision(
     *,
     image_url: str,
     subject: str,
@@ -739,14 +746,12 @@ def verify_image_subject(
     allow_high: bool = False,
     require_key_art: bool = False,
     root: Any = None,
-) -> tuple[bool, str]:
-    """Ask the vision model whether ``image_url`` is consistent with ``subject``.
+) -> dict[str, Any]:
+    """Return the normalized provider decision for the exact supplied image input.
 
-    Returns ``(ok, reason)``. Uses ``detail`` (default `low`). A decisão é
-    TRIPLA: ACCEPT devolve na hora; INCONCLUSIVO escala para ``detail: high``
-    (uma vez) quando ``allow_high``; REJECT bloqueia. Só depois do `high` sai a
-    decisão final — antes o inconclusivo retornava como aceito e a escalada era
-    inalcançável no caso que a motivou.
+    The result preserves the final provider status/confidence/visual type and,
+    when escalated, the low-detail response too. The input may be a materialized
+    data URL so the provider cannot fetch different bytes from a mutable CDN URL.
     Raises :class:`VisionGateError` on API failures (fail-closed).
     """
     if not api_key:
@@ -767,21 +772,63 @@ def verify_image_subject(
     )
     veredito, razao = _decide_tri(result, require_key_art=require_key_art)
     if veredito == "accept":
-        return True, razao
+        return {**result, "verdict": veredito, "accepted": True, "reason": razao, "detail_used": detail}
     if veredito == "inconclusive" and allow_high:
         high_result = _call_vision(
             image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
             model=model, detail="high", timeout=timeout, root=root,
         )
         final, razao_final = _decide_tri(high_result, require_key_art=require_key_art)
-        # Só o ACCEPT passa depois do high: "inconclusivo no detalhe máximo" não
-        # é prova de que a imagem é a certa (é o gate cumprindo o que promete).
-        return final == "accept", f"{razao} | high: {razao_final}"
+        return {
+            **high_result,
+            "verdict": final,
+            "accepted": final == "accept",
+            "reason": f"{razao} | high: {razao_final}",
+            "detail_used": "high",
+            "low_status": result.get("status"),
+            "low_confidence": result.get("confidence"),
+            "low_visual_type": result.get("visual_type"),
+        }
     if veredito == "inconclusive":
         # Sem escalada permitida (inline): mantém a política histórica de não
         # prender o post em rework por falta de confiança do modelo.
-        return True, razao
-    return False, razao
+        return {**result, "verdict": veredito, "accepted": True, "reason": razao, "detail_used": detail}
+    return {**result, "verdict": veredito, "accepted": False, "reason": razao, "detail_used": detail}
+
+
+def verify_image_subject(
+    *,
+    image_url: str,
+    subject: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: float = 30.0,
+    context: str = "",
+    category: str = "",
+    alt: str = "",
+    detail: str = "low",
+    allow_high: bool = False,
+    require_key_art: bool = False,
+    root: Any = None,
+) -> tuple[bool, str]:
+    """Compatibility wrapper returning ``(accepted, reason)``."""
+    result = verify_image_subject_decision(
+        image_url=image_url,
+        subject=subject,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        context=context,
+        category=category,
+        alt=alt,
+        detail=detail,
+        allow_high=allow_high,
+        require_key_art=require_key_art,
+        root=root,
+    )
+    return bool(result["accepted"]), str(result["reason"])
 
 
 def verify_image_subject_batch(
@@ -898,9 +945,11 @@ def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
 
 __all__ = [
     "verify_image_subject",
+    "verify_image_subject_decision",
     "verify_image_subject_batch",
     "prepare_vision_image_input",
     "prepare_vision_image_input_from_path",
+    "image_input_sha256",
     "compare_visual_assets",
     "VisualComparison",
     "VISUAL_DECISIONS",

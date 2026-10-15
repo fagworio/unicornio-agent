@@ -1,3 +1,4 @@
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest import mock
@@ -1422,19 +1423,33 @@ def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(mo
     def prepare(url, **_kwargs):
         if url.endswith("missing.webp"):
             raise vision_gate.VisionInputUnavailable("HTTP 404")
-        return "data:image/png;base64,AAAA"
+        return "data:image/png;base64,aGVsbG8="
 
     monkeypatch.setattr(vision_gate, "prepare_vision_image_input", prepare)
     monkeypatch.setattr(
         vision_gate,
         "verify_image_subject_batch",
-        lambda **_kwargs: {"good": {"verdict": "accept", "confidence": 0.97, "visual_type": "key_art"}},
+        lambda **_kwargs: {"good": {
+            "status": "MATCH", "verdict": "accept", "confidence": 0.91,
+            "visual_type": "key_art", "reason": "confirmed by pixels",
+        }},
     )
     resolver._resolve_ambiguous_vision(candidates, post_id=115025)
 
     assert candidates[0]["evidence"]["verdict"] == "vision_input_unavailable"
     assert candidates[0]["rejected_reason"] == "vision_input_unavailable"
     assert candidates[1]["evidence"]["verdict"] == "deterministic_match"
+    assert candidates[1]["evidence"]["vision_decision"]["confidence"] == 0.91
+    assert candidates[1]["evidence"]["vision_decision"]["visual_type"] == "key_art"
+    assert candidates[1]["evidence"]["vision_image_sha256"] == hashlib.sha256(b"hello").hexdigest()
+    from unicornio_editor.media.vision_cache import get_cached_decision
+    cached = get_cached_decision(
+        tmp_path, candidates[1]["direct_image_url"], "Obra B",
+        image_sha256=hashlib.sha256(b"hello").hexdigest(),
+        policy="subject-match-v1",
+    )
+    assert cached["confidence"] == 0.91
+    assert cached["visual_type"] == "key_art"
     telemetry = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
     assert "vision_input_unavailable" in telemetry
-    assert "data:image/png;base64,AAAA" not in telemetry
+    assert "data:image/png;base64,aGVsbG8=" not in telemetry

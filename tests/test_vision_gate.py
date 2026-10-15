@@ -14,6 +14,7 @@ from unicornio_editor.media.vision_gate import (
     VisionInputUnavailable,
     prepare_vision_image_input,
     verify_image_subject,
+    verify_image_subject_decision,
     verify_image_subject_batch,
     vision_config_ready,
 )
@@ -143,6 +144,45 @@ class VisionGateTests(unittest.TestCase):
         VisionHandler.answer = '{"status": "MATCH", "confidence": 0.97, "visual_type": "key_art"}'
         ok, reason = self._verify(require_key_art=True)
         self.assertTrue(ok, reason)
+
+    def test_detailed_decision_preserves_provider_fields(self):
+        VisionHandler.answer = '{"status":"MATCH","confidence":0.91,"visual_type":"key_art"}'
+        decision = verify_image_subject_decision(
+            image_url="data:image/png;base64,aGVsbG8=",
+            subject="Xbox Live",
+            api_key="test-key",
+            base_url=self.base,
+            model="vision-test",
+        )
+        self.assertTrue(decision["accepted"])
+        self.assertEqual(decision["status"], "MATCH")
+        self.assertEqual(decision["confidence"], 0.91)
+        self.assertEqual(decision["visual_type"], "key_art")
+
+    def test_detailed_decision_preserves_low_and_high_answers(self):
+        answers = iter([
+            '{"status":"AMBIGUOUS","confidence":0.55,"visual_type":"other"}',
+            '{"status":"MATCH","confidence":0.93,"visual_type":"key_art"}',
+        ])
+        with mock.patch(
+            "unicornio_editor.media.vision_gate._call_vision",
+            side_effect=lambda **_kwargs: json.loads(next(answers)),
+        ):
+            decision = verify_image_subject_decision(
+                image_url="data:image/png;base64,aGVsbG8=",
+                subject="Xbox Live",
+                api_key="test-key",
+                base_url=self.base,
+                model="vision-test",
+                allow_high=True,
+                require_key_art=True,
+            )
+        self.assertTrue(decision["accepted"])
+        self.assertEqual(decision["status"], "MATCH")
+        self.assertEqual(decision["confidence"], 0.93)
+        self.assertEqual(decision["visual_type"], "key_art")
+        self.assertEqual(decision["low_status"], "AMBIGUOUS")
+        self.assertEqual(decision["low_confidence"], 0.55)
 
     def test_inline_allows_text_banner_without_key_art_requirement(self):
         # Inline nao exige key art: um MATCH de texto nao e bloqueado pela nova regra.
