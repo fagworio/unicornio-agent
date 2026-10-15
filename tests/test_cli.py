@@ -425,6 +425,53 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(report["skipped_count"], 1)
         self.assertEqual(report["error_count"], 1)
 
+    def test_vision_batch_does_not_write_url_only_legacy_cache(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        batch = {
+            "schema_version": 1,
+            "batch_id": "vision-cache-test",
+            "items": [{
+                "candidate_id": "candidate-1",
+                "image_url": "https://cdn.test/image.webp",
+                "subject": "Xbox Live",
+                "post_id": 115286,
+                "require_key_art": False,
+            }],
+        }
+        decision = {
+            "status": "MATCH", "verdict": "accept", "confidence": 0.93,
+            "visual_type": "key_art", "relation": "direct",
+            "editorial_fit": "appropriate", "role_fit": "inline",
+            "dimensions_source": "provider",
+        }
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2",
+            vision_api_key="not-a-real-key", vision_base_url="https://vision.test/v1",
+            vision_model="model-a",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "load_vision_batch", return_value=batch), \
+                    mock.patch(
+                        "unicornio_editor.media.vision_gate.verify_image_subject_batch",
+                        return_value={"candidate-1": decision},
+                    ), \
+                    redirect_stdout(output):
+                code = cli.main([
+                    "vision-batch", str(root / "input.json"), "--root", str(root), "--full",
+                ])
+
+            report = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(report["cached"], 0)
+            self.assertFalse((root / "work" / "vision_cache.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

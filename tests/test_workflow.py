@@ -2902,6 +2902,93 @@ def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path)
     assert not _vision_evidence_matches_item(item, editorial, config)
 
 
+def test_featured_preflight_reuse_requires_complete_context_identity():
+    from unicornio_editor.media.vision_cache import vision_model_identity
+    from unicornio_editor.media.vision_policy import (
+        VISION_POLICY_VERSION, featured_vision_context_key, featured_vision_subject,
+    )
+    from unicornio_editor.workflow import _featured_preflight_evidence_matches
+
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2",
+        vision_base_url="https://vision.test/v1", vision_model="model-a",
+    )
+    editorial = {
+        "title": "Xbox Live atualiza salvaguardas",
+        "editorial_type": "game",
+        "seo": {"focus_keyword": "Xbox Live"},
+    }
+    evidence = {
+        "status": "MATCH", "verdict": "accept", "image_sha256": "a" * 64,
+        "image_role": "featured", "policy_version": VISION_POLICY_VERSION,
+        "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+        "context_key": featured_vision_context_key(editorial),
+        "subject": featured_vision_subject(editorial),
+    }
+    row = {"vision_evidence": evidence}
+
+    assert _featured_preflight_evidence_matches(
+        row, editorial, config, image_sha256="a" * 64,
+    )
+    assert not _featured_preflight_evidence_matches(
+        row, {**editorial, "title": "Xbox Live launches new features"},
+        config, image_sha256="a" * 64,
+    )
+    assert not _featured_preflight_evidence_matches(
+        row, editorial, config, image_sha256="b" * 64,
+    )
+
+
+def test_execute_media_plan_uses_wordpress_title_context_for_inline_vision(tmp_path):
+    from unicornio_editor.media.vision_cache import vision_model_identity
+    from unicornio_editor.media.vision_policy import VISION_POLICY_VERSION, featured_vision_context_key
+
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True,
+        vision_enabled=True, vision_base_url="https://vision.test/v1", vision_model="model-a",
+    )
+    editorial = {
+        "seo": {"title": "Título SEO diferente", "focus_keyword": "Xbox Live"},
+        "cleaned_html": "<p>A notícia trata das salvaguardas da plataforma.</p>",
+        "media_plan": [],
+    }
+    post_title = "Procuradoria-Geral investiga salvaguardas do Xbox Live"
+    vision_editorial = {**editorial, "title": post_title}
+    image_sha = "c" * 64
+    item = {
+        "paragraph_index": 0,
+        "subject": "Xbox Live",
+        "direct_image_url": "https://cdn.test/generic-image.webp",
+        "source_page_url": "https://news.test/article",
+        "is_featured": False,
+        "evidence": {
+            "vision_policy_version": VISION_POLICY_VERSION,
+            "vision_image_sha256": image_sha,
+            "vision_decision": {
+                "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
+                "verdict": "accept", "image_sha256": image_sha, "image_role": "inline",
+                "policy_version": VISION_POLICY_VERSION,
+                "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+                "context_key": featured_vision_context_key(vision_editorial),
+                "subject": "Xbox Live",
+            },
+        },
+    }
+    editorial["media_plan"] = [item]
+
+    results, _, _ = _execute_media_plan(
+        editorial, config, object(), tmp_path, post_title=post_title,
+    )
+
+    # Dry-run reports "blocked" after passing relevance; "rejected" would
+    # mean APPLY reconstructed a different context and discarded the evidence.
+    assert results == [{
+        "paragraph_index": 0,
+        "status": "blocked",
+        "detail": "dry-run nao executa download/upload de midia",
+    }]
+
+
 def test_normal_article_image_gate_uses_shared_canonical_identity():
     editorial = {
         "title": "Procuradoria-Geral investiga Xbox Live após denúncias",
@@ -3066,6 +3153,10 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
     import hashlib
 
     from unicornio_editor.media.visual_identity import VisualIdentity
+    from unicornio_editor.media.vision_cache import vision_model_identity
+    from unicornio_editor.media.vision_policy import (
+        VISION_POLICY_VERSION, featured_vision_context_key, featured_vision_subject,
+    )
 
     item = {
         "paragraph_index": 0,
@@ -3094,6 +3185,15 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
         vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
     )
     approved = _vision_result(accepted=True)
+    preflight_evidence = {
+        **approved,
+        "image_sha256": final_sha256,
+        "image_role": "featured",
+        "policy_version": VISION_POLICY_VERSION,
+        "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+        "context_key": featured_vision_context_key(editorial),
+        "subject": featured_vision_subject(editorial),
+    }
 
     with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
@@ -3112,6 +3212,7 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
             preflight={"rejected": [], "featured_vision": [{
                 "index": 0, "status": "passed", "image_sha256": final_sha256,
                 "decision": approved,
+                "vision_evidence": preflight_evidence,
             }]},
             post_id=115286,
         )

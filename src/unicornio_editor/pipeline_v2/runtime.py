@@ -683,12 +683,13 @@ class ProductionMediaResolver:
         )
         from ..media.vision_policy import resolve_editorial_identity
         seo_identity = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
-        identity = resolve_editorial_identity({
+        vision_editorial = {
             **editorial,
             "title": title,
             "cleaned_html": html,
             "seo": {**seo_identity, "focus_keyword": focus_keyword},
-        })
+        }
+        identity = resolve_editorial_identity(vision_editorial)
         primary_subject = str(identity.get("primary_subject") or "").strip()
         explicit_focus = focus_keyword.strip().casefold() not in {
             "", "game", "games", "jogo", "jogos", "videogame", "anime", "filme", "series",
@@ -822,9 +823,7 @@ class ProductionMediaResolver:
             )
         rejection_history = _media_rejection_history(self.root, int(context["post_id"]))
         from ..media.vision_policy import featured_vision_context_key
-        vision_context_key = featured_vision_context_key(
-            editorial, news_context=str(identity.get("news_context") or title)
-        )
+        vision_context_key = featured_vision_context_key(vision_editorial)
         inline_suffix, inline_reason = _adaptive_query_suffix(rejection_history, role="inline")
         featured_suffix, featured_reason = _adaptive_query_suffix(rejection_history, role="featured")
         subject_queries: list[tuple[str, str]] = []
@@ -1034,6 +1033,7 @@ class ProductionMediaResolver:
                     self.root,
                     preflight=checked,
                     post_id=int(context["post_id"]),
+                    post_title=title,
                     previous_inline_phashes=tuple(
                         item.phash for item in current_inline if item.phash
                     ),

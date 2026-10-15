@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import unicodedata
@@ -81,8 +82,12 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
     if not primary and focus and focus.casefold() not in _GENERIC_FOCUS:
         from .evidence import normalize
 
-        focus_key = normalize(focus).strip()
-        article_text = normalize(f"{title} {re.sub(r'<[^>]*>', ' ', content)}")
+        focus_key = re.sub(r"[^a-z0-9]+", " ", normalize(focus)).strip()
+        article_text = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            normalize(f"{title} {re.sub(r'<[^>]*>', ' ', content)}"),
+        ).strip()
         if focus_key and not has_structured_subject and f" {focus_key} " in f" {article_text} ":
             primary = focus.casefold()
             verified_focus = focus
@@ -162,7 +167,7 @@ def featured_vision_context_key(
     """Stable, phase-independent cache scope for one editorial story."""
     identity = resolve_editorial_identity(editorial)
     context = str(identity.get("news_context") or "" if news_context is None else news_context)
-    context = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", context)).strip().casefold()
+    context = normalize_editorial_context(context)
     payload = [
         "featured-editorial-context-v1",
         str(identity.get("vision_category") or "general_entertainment"),
@@ -172,6 +177,13 @@ def featured_vision_context_key(
     return "editorial:" + hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def normalize_editorial_context(value: Any) -> str:
+    """Canonical text form shared by WP, editorial, and checklist contexts."""
+    without_tags = re.sub(r"<[^>]*>", " ", str(value or ""))
+    decoded = html.unescape(without_tags)
+    return re.sub(r"\s+", " ", decoded).strip().casefold()
 
 
 def vision_cache_subject(editorial: Mapping[str, Any]) -> str:

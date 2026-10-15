@@ -40,6 +40,26 @@ def test_focus_keyword_must_be_evidenced_in_article_text():
     assert resolve_editorial_identity(evidenced)["identity_source"] == "focus_keyword_evidenced"
 
 
+def test_focus_keyword_evidence_treats_punctuation_as_word_boundaries():
+    editorial = {
+        "title": "Xbox Live, segundo a Procuradoria-Geral, atualiza salvaguardas.",
+        "cleaned_html": "<p>Xbox Live: proteção para jogadores.</p>",
+        "seo": {"focus_keyword": "Xbox Live"},
+    }
+
+    identity = resolve_editorial_identity(editorial)
+
+    assert identity["primary_subject"].casefold() == "xbox live"
+    assert identity["identity_source"] == "focus_keyword_evidenced"
+
+    substring_only = {
+        "title": "Halloween ganha novo trailer",
+        "cleaned_html": "<p>A série Halloween volta em breve.</p>",
+        "seo": {"focus_keyword": "Halo"},
+    }
+    assert resolve_editorial_identity(substring_only)["identity_source"] != "focus_keyword_evidenced"
+
+
 def test_editorial_context_key_is_stable_by_phase_and_distinct_by_story():
     first = {
         "title": "Xbox Live investiga salvaguardas após denúncias",
@@ -54,6 +74,15 @@ def test_editorial_context_key_is_stable_by_phase_and_distinct_by_story():
         first, news_context=first["title"]
     )
     assert featured_vision_context_key(first) != featured_vision_context_key(second)
+
+
+def test_editorial_context_key_decodes_wp_html_entities_consistently():
+    plain = {"title": "Xbox Live & Segurança", "seo": {"focus_keyword": "Xbox Live"}}
+    encoded = {"title": "Xbox Live &amp; Segurança", "seo": {"focus_keyword": "Xbox Live"}}
+    tagged = {"title": "  <strong>Xbox   Live</strong> & Segurança  ", "seo": plain["seo"]}
+
+    assert featured_vision_context_key(plain) == featured_vision_context_key(encoded)
+    assert featured_vision_context_key(plain) == featured_vision_context_key(tagged)
 
 
 def test_featured_category_is_editorial_type_not_universal_game_artwork():

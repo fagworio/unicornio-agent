@@ -451,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     vision_batch_parser = subparsers.add_parser(
         "vision-batch",
-        help="valida thumbnails independentes em uma chamada multimodal e atualiza o cache seguro",
+        help="valida thumbnails independentes em uma chamada multimodal",
     )
     vision_batch_parser.add_argument("batch_file", type=Path)
     vision_batch_parser.add_argument("--root", type=Path, default=Path("."))
@@ -3284,7 +3284,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     payload, result, audit=audit, post_title=post_title
                 )
         elif args.command == "vision-batch":
-            from .media.vision_cache import set_cached_decision
             from .media.vision_gate import verify_image_subject_batch
 
             batch = load_vision_batch(args.batch_file)
@@ -3317,38 +3316,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_id = item["candidate_id"]
                 decision = decisions[candidate_id]
                 cached = False
-                # Only definitive final results enter the normal cache. The
-                # batch gate already escalated only the ambiguous subset to
-                # high detail; inconclusive-at-high remains uncached.
-                # Cache only definitive pixel outcomes.  In particular,
-                # inconclusive/unknown results must leave alternate candidates
-                # eligible; a UI-level ``reject`` is not enough when the model
-                # did not return a high-confidence UNRELATED verdict.
-                definitive = (
-                    decision.get("verdict") == "accept"
-                    or (
-                        decision.get("status") == "UNRELATED"
-                        and float(decision.get("confidence") or 0) >= 0.80
-                    )
-                )
-                if definitive:
-                    set_cached_decision(
-                        args.root,
-                        item["image_url"],
-                        item["subject"],
-                        {
-                            "status": "MATCH"
-                            if decision["verdict"] == "accept"
-                            else "UNRELATED",
-                            "confidence": float(decision.get("confidence") or 0),
-                            "visual_type": decision.get("visual_type") or "other",
-                            "relation": decision.get("relation") or "uncertain",
-                            "editorial_fit": decision.get("editorial_fit") or "uncertain",
-                            "role_fit": decision.get("role_fit") or "uncertain",
-                            "dimensions_source": decision.get("dimensions_source") or "legacy_fallback",
-                        },
-                    )
-                    cached = True
                 items.append(
                     {
                         "candidate_id": candidate_id,

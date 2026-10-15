@@ -532,29 +532,49 @@ def test_source_unreachable_in_rejected_reason_is_reconsidered(tmp_path):
 def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.media.vision_policy as vision_policy
 
-    seen = {"plans": []}
+    seen = {"plans": [], "post_titles": [], "vision_editorials": []}
+    original_context_key = vision_policy.featured_vision_context_key
+
+    def capture_context(editorial, **kwargs):
+        seen["vision_editorials"].append(dict(editorial))
+        return original_context_key(editorial, **kwargs)
 
     def fake_resolve(*_args, **_kwargs):
         return {"posts": [{"reuse": [{"url": "https://cdn.test/existing.webp", "source": "https://source.test/page", "media_id": 77, "author": "Test", "license": "CC BY", "license_url": "https://license.test", "captured_at": "2026-01-01T00:00:00Z", "credit_text": "Crédito", "alt_text": "Existing"}], "audit_candidates": []}]}
 
-    def fake_validate(_client, editorial, **_kwargs):
+    def fake_validate(_client, editorial, **kwargs):
         seen["plans"].append(editorial["media_plan"])
+        seen["post_titles"].append(kwargs.get("post_title"))
         return {"valid": True, "rejected": []}
 
-    def fake_execute(editorial, *_args, **_kwargs):
-        seen["featured_visual_asset"] = _kwargs.get("featured_visual_asset")
+    def fake_execute(editorial, *_args, **kwargs):
+        seen["featured_visual_asset"] = kwargs.get("featured_visual_asset")
+        seen["post_titles"].append(kwargs.get("post_title"))
         return ([{"media_id": 77, "media_url": "https://cdn.test/existing.webp", "paragraph_index": 0, "alt_text": "existing", "credit_text": "Crédito da imagem: Existing", "featured": False}], None, None)
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
     monkeypatch.setattr(runtime, "validate_media_plan", fake_validate)
     monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
+    monkeypatch.setattr(vision_policy, "featured_vision_context_key", capture_context)
     previous = MediaProgress(required=2)
     result = ProductionMediaResolver(object(), Config(), tmp_path)(
-        {"post_id": 1, "title": "Test"}, SimpleNamespace(media=previous), {"cleaned_html": _article_html(), "seo": {}}, previous
+        {"post_id": 1, "title": "Procuradoria-Geral analisa Xbox Live"},
+        SimpleNamespace(media=previous),
+        {
+            "cleaned_html": _article_html(),
+            "seo": {"title": "Entenda as medidas da plataforma", "focus_keyword": "Xbox Live"},
+        },
+        previous,
     )
     assert seen["plans"][0][0]["direct_image_url"] == "https://cdn.test/existing.webp"
     assert seen["plans"][0][0]["source_page_url"] == "https://source.test/page"
+    assert len(seen["post_titles"]) >= 2
+    assert set(seen["post_titles"]) == {"Procuradoria-Geral analisa Xbox Live"}
+    assert seen["vision_editorials"]
+    assert seen["vision_editorials"][0]["title"] == "Procuradoria-Geral analisa Xbox Live"
+    assert seen["vision_editorials"][0]["seo"]["focus_keyword"] == "Xbox Live"
     assert seen["featured_visual_asset"] is None
     assert result.accepted == 1
 

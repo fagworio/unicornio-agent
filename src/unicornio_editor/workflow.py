@@ -1471,6 +1471,32 @@ def _vision_evidence_matches_item(
     )
 
 
+def _featured_preflight_evidence_matches(
+    row: dict[str, Any],
+    editorial: dict[str, Any],
+    config: Config,
+    *,
+    image_sha256: str,
+) -> bool:
+    """Only reuse a featured preflight decision bound to this exact context."""
+    evidence = row.get("vision_evidence")
+    if not isinstance(evidence, dict):
+        return False
+    expected = {
+        "image_sha256": image_sha256,
+        "image_role": "featured",
+        "policy_version": VISION_POLICY_VERSION,
+        "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+        "context_key": featured_vision_context_key(editorial),
+        "subject": featured_vision_subject(editorial),
+    }
+    return bool(
+        evidence.get("status") == "MATCH"
+        and evidence.get("verdict") == "accept"
+        and all(evidence.get(key) == value for key, value in expected.items())
+    )
+
+
 def _media_item_rejection(
     item: dict[str, Any],
     entities: set[str],
@@ -1626,10 +1652,10 @@ def validate_media_plan(
         **({"title": post_title} if post_title else {}),
     }
     entities = extract_entities(
-        title=str((editorial.get("seo") or {}).get("title") or ""),
-        content_html=str(editorial.get("cleaned_html") or ""),
-        focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
-        game_name=editorial.get("game_name"),
+        title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
+        content_html=str(vision_editorial.get("cleaned_html") or ""),
+        focus_keyword=str((vision_editorial.get("seo") or {}).get("focus_keyword") or ""),
+        game_name=vision_editorial.get("game_name"),
     )
     cache: dict[int, dict[str, Any]] = {}
     valid = 0
@@ -2069,10 +2095,10 @@ def _execute_media_plan(
             for item in plan
         ], None, None
     entities = extract_entities(
-        title=str((editorial.get("seo") or {}).get("title") or ""),
-        content_html=str(editorial.get("cleaned_html") or ""),
-        focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
-        game_name=editorial.get("game_name"),
+        title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
+        content_html=str(vision_editorial.get("cleaned_html") or ""),
+        focus_keyword=str((vision_editorial.get("seo") or {}).get("focus_keyword") or ""),
+        game_name=vision_editorial.get("game_name"),
     )
     # P1 (auditoria de contexto): o reuso da Media Library e casado por SUBJECT.
     # Quando o media_plan nao declara `subject`, usa o MESMO subject que o
@@ -2083,10 +2109,10 @@ def _execute_media_plan(
         from .media.evidence import post_subjects
 
         _subs = post_subjects(
-            title=str((editorial.get("seo") or {}).get("title") or ""),
-            content_html=str(editorial.get("cleaned_html") or ""),
-            focus_keyword=str((editorial.get("seo") or {}).get("focus_keyword") or ""),
-            game_name=editorial.get("game_name"),
+            title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
+            content_html=str(vision_editorial.get("cleaned_html") or ""),
+            focus_keyword=str((vision_editorial.get("seo") or {}).get("focus_keyword") or ""),
+            game_name=vision_editorial.get("game_name"),
         )
         if _subs:
             subject_idx = str(_subs[0].get("subject") or "")
@@ -2159,7 +2185,7 @@ def _execute_media_plan(
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
         return _media_item_rejection(
-            item, entities, client, attachment_cache, editorial, root=root, config=config
+            item, entities, client, attachment_cache, vision_editorial, root=root, config=config
         )
 
     if config.dry_run:
@@ -2339,7 +2365,7 @@ def _execute_media_plan(
                         not _vision_evidence_matches_item(
                             item, vision_editorial, config, image_sha256=source_sha256
                         )
-                        and not _item_evidence_relevant(item, entities, editorial)
+                        and not _item_evidence_relevant(item, entities, vision_editorial)
                     ):
                         _funnel(
                             "inline_vision_evidence", "rejected", item, position,
@@ -2416,14 +2442,20 @@ def _execute_media_plan(
                         vision_preflight.get("status") == "passed"
                         and expected_sha256
                         and expected_sha256 == identity.sha256
+                        and _featured_preflight_evidence_matches(
+                            vision_preflight,
+                            vision_editorial,
+                            config,
+                            image_sha256=identity.sha256,
+                        )
                     ):
                         preflight_decision = vision_preflight.get("decision")
                         if isinstance(preflight_decision, dict) and preflight_decision.get("accepted"):
                             decision = preflight_decision
                             decision_source = "preflight_same_bytes"
                     if decision is None:
-                        subject = featured_vision_subject(editorial)
-                        cache_subject = vision_cache_subject(editorial)
+                        subject = featured_vision_subject(vision_editorial)
+                        cache_subject = vision_cache_subject(vision_editorial)
                         cached = get_cached_decision(
                             root, str(item.get("direct_image_url") or ""),
                             cache_subject, image_sha256=identity.sha256,
@@ -2452,11 +2484,11 @@ def _execute_media_plan(
                                     model=config.vision_model,
                                     timeout=config.http_timeout,
                                     context=(
-                                        f"{resolve_editorial_identity(editorial).get('news_context')} | validação final da featured"
-                                        if resolve_editorial_identity(editorial).get("news_context")
+                                        f"{resolve_editorial_identity(vision_editorial).get('news_context')} | validação final da featured"
+                                        if resolve_editorial_identity(vision_editorial).get("news_context")
                                         else "validação final da featured antes do upload"
                                     ),
-                                    category=featured_vision_category(editorial),
+                                    category=featured_vision_category(vision_editorial),
                                     alt=str(item.get("alt_text") or subject),
                                     detail=config.vision_detail,
                                     allow_high=True,
