@@ -1386,6 +1386,76 @@ def _item_evidence_relevant(
     )
 
 
+def _structured_vision_evidence(
+    row: dict[str, Any], *, image_role: str, model_identity: str = ""
+) -> dict[str, Any] | None:
+    """Create a compact decision record linked to the evaluated image bytes."""
+    decision = row.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    result = {
+        key: decision[key]
+        for key in (
+            "status", "confidence", "visual_type", "verdict", "detail_used",
+            "low_status", "low_confidence", "low_visual_type",
+        )
+        if key in decision
+    }
+    result.update({
+        "image_sha256": str(row.get("image_sha256") or ""),
+        "image_role": image_role,
+        "policy_version": VISION_POLICY_VERSION,
+        "decision_source": (
+            "deterministic_evidence" if row.get("deterministic")
+            else "cache" if row.get("cached")
+            else "vision_provider"
+        ),
+        "model_identity": model_identity,
+        "context_key": str(row.get("category") or ""),
+        "subject": str(row.get("subject") or ""),
+    })
+    return result
+
+
+def _vision_evidence_matches_item(
+    item: dict[str, Any],
+    editorial: dict[str, Any] | None,
+    config: Config | None,
+    *,
+    image_sha256: str | None = None,
+) -> bool:
+    """Validate an inline vision decision against policy/model/subject/bytes."""
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    decision = evidence.get("vision_decision") if isinstance(evidence.get("vision_decision"), dict) else {}
+    if not decision or config is None:
+        return False
+    from .media.vision_cache import vision_model_identity
+
+    expected_sha = str(evidence.get("vision_image_sha256") or decision.get("image_sha256") or "")
+    expected_model = vision_model_identity(config.vision_base_url, config.vision_model)
+    expected_subject = str(item.get("subject") or "").strip().casefold()
+    expected_context = featured_vision_category(editorial or {})
+    try:
+        confidence = float(decision.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        evidence.get("vision_policy_version") == VISION_POLICY_VERSION
+        and decision.get("policy_version") == VISION_POLICY_VERSION
+        and decision.get("image_role") == "inline"
+        and decision.get("verdict") == "accept"
+        and decision.get("status") == "MATCH"
+        and confidence >= 0.85
+        and expected_sha
+        and decision.get("image_sha256") == expected_sha
+        and (image_sha256 is None or expected_sha == image_sha256)
+        and expected_subject
+        and str(decision.get("subject") or "").strip().casefold() == expected_subject
+        and decision.get("model_identity") == expected_model
+        and decision.get("context_key") == expected_context
+    )
+
+
 def _media_item_rejection(
     item: dict[str, Any],
     entities: set[str],
@@ -1393,6 +1463,7 @@ def _media_item_rejection(
     attachment_cache: dict[int, dict[str, Any]],
     editorial: dict[str, Any] | None = None,
     root: Path | None = None,
+    config: Config | None = None,
 ) -> str | None:
     """Motivo de rejeicao de um item do media_plan, ou None se valido.
 
@@ -1476,10 +1547,10 @@ def _media_item_rejection(
                 f"sem as entidades: {listed}); escolha key art/imagem do jogo/obra"
             )
         return None
-    if root is not None and not is_featured:
-        from .media.vision_cache import get_cached_decision
-        cached = get_cached_decision(root, str(item.get("direct_image_url") or ""), str(item.get("subject") or editorial.get("game_name") if isinstance(editorial, dict) else ""))
-        if cached and cached.get("status") == "MATCH" and float(cached.get("confidence") or 0) >= 0.80:
+    if not is_featured and _vision_evidence_matches_item(item, editorial, config):
+        # This is provisional until APPLY downloads/converts the source and
+        # compares its actual SHA-256 with the recorded vision input.
+        if not _item_evidence_relevant(item, entities, editorial):
             return None
     # P1 (auditoria): alt/credit/search_query escritos pelo AGENTE não são
     # evidência — uma imagem errada com alt "Bleach anime" passava no apply
@@ -1564,20 +1635,28 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache, editorial, root=root)
+        reason = _media_item_rejection(item, entities, client, cache, editorial, root=root, config=config)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
             vision = _validate_featured_candidate_vision(
                 item, editorial, client, cache, config=config, root=root
             )
-            featured_vision.append({
+            vision_row = {
                 "index": index,
                 "subject": featured_vision_subject(editorial),
                 "category": featured_vision_category(editorial),
                 "cache_hit": bool(vision.get("cached")),
                 **vision,
-            })
+            }
+            if config is not None:
+                from .media.vision_cache import vision_model_identity
+                vision_row["vision_evidence"] = _structured_vision_evidence(
+                    vision_row,
+                    image_role="featured",
+                    model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                )
+            featured_vision.append(vision_row)
             if root is not None:
                 append_telemetry(
                     root,
@@ -2050,7 +2129,9 @@ def _execute_media_plan(
         return attachment_cache[media_id]
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
-        return _media_item_rejection(item, entities, client, attachment_cache, editorial, root=root)
+        return _media_item_rejection(
+            item, entities, client, attachment_cache, editorial, root=root, config=config
+        )
 
     if config.dry_run:
         results: list[dict[str, Any]] = []
@@ -2100,6 +2181,12 @@ def _execute_media_plan(
                 "paragraph_index": item.get("paragraph_index"),
                 "status": "rejected",
                 "detail": reason,
+                **(
+                    {"vision_evidence": preflight_vision[position]["vision_evidence"]}
+                    if position in preflight_vision
+                    and isinstance(preflight_vision[position].get("vision_evidence"), dict)
+                    else {}
+                ),
             }
             continue
         pending.append((position, item))
@@ -2213,6 +2300,27 @@ def _execute_media_plan(
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))
+                if (
+                    not is_featured
+                    and isinstance(item.get("evidence"), dict)
+                    and isinstance(item["evidence"].get("vision_decision"), dict)
+                ):
+                    source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+                    if (
+                        not _vision_evidence_matches_item(
+                            item, editorial, config, image_sha256=source_sha256
+                        )
+                        and not _item_evidence_relevant(item, entities, editorial)
+                    ):
+                        _funnel(
+                            "inline_vision_evidence", "rejected", item, position,
+                            "vision evidence does not match downloaded source bytes",
+                        )
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "rejected",
+                            "detail": "inline vision evidence does not match downloaded source bytes",
+                        }
                 transparency = "flattened" if image_has_transparency(source) else "none"
                 if is_featured:
                     webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
@@ -2366,6 +2474,7 @@ def _execute_media_plan(
                             "decision_source": decision_source,
                             "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
                             "context_key": featured_vision_category(editorial),
+                            "subject": featured_vision_subject(editorial),
                         })
                     if not decision.get("accepted"):
                         reason = str(decision.get("reason") or "featured não confirmada visualmente")

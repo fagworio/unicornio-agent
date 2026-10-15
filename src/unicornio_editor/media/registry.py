@@ -444,19 +444,30 @@ def record_v2_candidate_decision(
             for key in (
                 "status", "confidence", "visual_type", "verdict", "detail_used",
                 "low_status", "low_confidence", "low_visual_type", "image_sha256",
-                "image_role", "policy_version", "decision_source", "model_identity", "context_key",
+                "image_role", "policy_version", "decision_source", "model_identity", "context_key", "subject",
             )
             if key in vision
         },
         "vision_policy_version": str(evidence.get("vision_policy_version") or ""),
     }, sort_keys=True)
+    allowed_reason_codes = {
+        "candidate_accepted", "transient_provider_failure", "candidate_rejected",
+        "incomplete_provenance", "ambiguous", "vision_input_unavailable",
+        "source_mismatch", "source_bytes_mismatch",
+        "duplicate_existing_frame", "duplicate_frame", "unrelated",
+        "width_below_minimum", "resolution", "identity_mismatch",
+        "visual_identity_unverified", "vision_provider_error",
+    }
+    safe_reason_code = str(reason_code or "").casefold().strip()
+    if safe_reason_code not in allowed_reason_codes:
+        safe_reason_code = "candidate_rejected"
     with connect(root) as db:
         db.execute(
             """INSERT INTO media_decisions
             (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, CURRENT_TIMESTAMP)""",
             (int(post_id), run_id, candidate_id, role, str(candidate.get("subject") or ""),
-             reason_code, disposition, reference),
+             safe_reason_code, disposition, reference),
         )
         db.commit()
 

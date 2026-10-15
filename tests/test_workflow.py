@@ -26,6 +26,8 @@ from unicornio_editor.workflow import (
     _recover_partial_featured,
     _execute_media_plan,
     _is_final_phash_duplicate,
+    _media_item_rejection,
+    _vision_evidence_matches_item,
     apply_editorial,
     build_cards,
     build_queue_report,
@@ -869,6 +871,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["valid"], 0)
         self.assertEqual(result["featured_vision"][0]["status"], "rejected")
         self.assertIn("share card", result["rejected"][0]["reason"])
+        stored = result["featured_vision"][0]["vision_evidence"]
+        self.assertEqual(stored["status"], "UNRELATED")
+        self.assertEqual(stored["confidence"], 0.92)
+        self.assertEqual(stored["visual_type"], "key_art")
+        self.assertEqual(stored["image_role"], "featured")
+        self.assertEqual(stored["policy_version"], "featured-editorial-v2")
+        self.assertRegex(stored["image_sha256"], r"^[a-f0-9]{64}$")
 
     def test_media_validate_skips_paid_vision_for_strong_official_featured_evidence(self):
         payload = editorial_payload()
@@ -2812,6 +2821,83 @@ def test_execute_media_plan_rejects_final_duplicate_before_upload(tmp_path):
         )
     upload.assert_not_called()
     assert results == [{"paragraph_index": 0, "status": "rejected", "detail": "duplicate_existing_frame"}]
+
+
+def test_execute_media_plan_preserves_rejected_preflight_vision_without_upload(tmp_path):
+    editorial = {"media_plan": [
+        {"paragraph_index": 0, "is_featured": True, "candidate_id": "candidate-a"},
+        {"paragraph_index": 1, "is_featured": True, "candidate_id": "candidate-b"},
+    ]}
+    vision = {
+        "status": "UNRELATED", "confidence": 0.80, "visual_type": "photograph",
+        "verdict": "reject", "image_sha256": "b" * 64, "image_role": "featured",
+        "policy_version": "featured-editorial-v2", "decision_source": "vision_provider",
+        "model_identity": "https://vision.test/vision-model", "context_key": "game",
+        "subject": "Xbox Live",
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight={
+                "rejected": [
+                    {"index": 0, "reason": "source mismatch"},
+                    {"index": 1, "reason": "UNRELATED 0.80 photograph"},
+                ],
+                "featured_vision": [{
+                    "index": 1, "status": "rejected", "subject": "Xbox Live",
+                    "category": "game", "image_sha256": "b" * 64,
+                    "decision": {
+                        "status": "UNRELATED", "confidence": 0.80,
+                        "visual_type": "photograph", "verdict": "reject",
+                    },
+                    "vision_evidence": vision,
+                }],
+            },
+            post_id=115286,
+        )
+    upload.assert_not_called()
+    assert results[0]["status"] == "rejected"
+    assert "vision_evidence" not in results[0]
+    assert results[1]["vision_evidence"] == vision
+
+
+def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path):
+    from unicornio_editor.media.vision_cache import vision_model_identity
+
+    config = Config(
+        "wordpress", "http://wp.test", "/wp-json/wp/v2",
+        vision_enabled=True, vision_base_url="https://vision.test/v1", vision_model="model-a",
+    )
+    editorial = {
+        "editorial_type": "game",
+        "seo": {"title": "Halo", "focus_keyword": "Halo"},
+        "cleaned_html": "<p>Halo</p>",
+    }
+    image_sha = "c" * 64
+    item = {
+        "subject": "Halo", "direct_image_url": "https://cdn.test/generic-image.webp",
+        "source_page_url": "https://news.test/article", "is_featured": False,
+        "evidence": {
+            "vision_policy_version": "featured-editorial-v2",
+            "vision_image_sha256": image_sha,
+            "vision_decision": {
+                "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
+                "verdict": "accept", "image_sha256": image_sha, "image_role": "inline",
+                "policy_version": "featured-editorial-v2",
+                "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+                "context_key": "game", "subject": "Halo",
+            },
+        },
+    }
+    assert _vision_evidence_matches_item(item, editorial, config)
+    assert _vision_evidence_matches_item(item, editorial, config, image_sha256=image_sha)
+    assert not _vision_evidence_matches_item(item, editorial, config, image_sha256="d" * 64)
+    # Missing textual proof is acceptable only because the inline decision is
+    # structured; a URL-only cache result no longer satisfies this gate.
+    assert _media_item_rejection(item, {"Halo"}, object(), {}, editorial, root=tmp_path, config=config) is None
+    item["evidence"]["vision_decision"]["model_identity"] = "https://vision.test/model-b"
+    assert not _vision_evidence_matches_item(item, editorial, config)
 
 
 def test_execute_media_plan_uploads_new_final_phash(tmp_path):

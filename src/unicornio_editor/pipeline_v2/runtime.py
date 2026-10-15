@@ -47,6 +47,25 @@ def _canonical_embedded_media_url(value: str) -> str:
     ))
 
 
+def _attach_candidate_vision_evidence(
+    candidate: dict[str, Any], vision_evidence: dict[str, Any]
+) -> dict[str, Any]:
+    """Carry preflight/APPLY visual evidence into the exact registry candidate."""
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+        candidate["evidence"] = evidence
+    evidence["vision_decision"] = dict(vision_evidence)
+    evidence["vision_policy_version"] = str(vision_evidence.get("policy_version") or "")
+    evidence["vision_image_sha256"] = str(vision_evidence.get("image_sha256") or "")
+    if (
+        vision_evidence.get("status") == "UNRELATED"
+        and vision_evidence.get("verdict") == "reject"
+    ):
+        evidence["verdict"] = "unrelated"
+    return candidate
+
+
 def _embedded_media_urls(content: str) -> list[str]:
     """Return only URLs used by actual img elements, never plain text URLs."""
     return [
@@ -1008,15 +1027,7 @@ class ProductionMediaResolver:
                     item = plan[index] if index < len(plan) else plan[0]
                     vision_evidence = result.get("vision_evidence")
                     if isinstance(vision_evidence, dict):
-                        evidence = item.get("evidence")
-                        if not isinstance(evidence, dict):
-                            evidence = {}
-                            item["evidence"] = evidence
-                        evidence["vision_decision"] = vision_evidence
-                        evidence["vision_policy_version"] = vision_evidence.get("policy_version") or ""
-                        evidence["vision_image_sha256"] = vision_evidence.get("image_sha256") or ""
-                        if vision_evidence.get("status") == "UNRELATED" and vision_evidence.get("verdict") == "reject":
-                            evidence["verdict"] = "unrelated"
+                        _attach_candidate_vision_evidence(item, vision_evidence)
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
                     temporary = any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
@@ -1651,6 +1662,7 @@ class ProductionMediaResolver:
                     "decision_source": "vision_provider_batch",
                     "model_identity": vision_model_identity(self.config.vision_base_url, self.config.vision_model),
                     "context_key": context_key,
+                    "subject": str(candidate.get("subject") or ""),
                 })
                 evidence = candidate.get("evidence")
                 if not isinstance(evidence, dict):

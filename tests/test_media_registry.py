@@ -9,6 +9,7 @@ from unicornio_editor.media.registry import (
     record_v2_candidate_decision, record_v2_observation, registry_path,
 )
 from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
+from unicornio_editor.pipeline_v2.runtime import _attach_candidate_vision_evidence
 
 
 def test_registry_is_per_root_and_migrates_legacy_index_idempotently(tmp_path):
@@ -128,6 +129,40 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
     assert reference["vision_decision"]["confidence"] == 0.91
     assert reference["vision_decision"]["image_sha256"] == "a" * 64
     assert reference["vision_decision"]["context_key"] == "game"
+
+
+def test_preflight_vision_evidence_stays_correlated_to_candidate_run(tmp_path):
+    candidate = {
+        "candidate_id": "featured-candidate-b", "subject": "Xbox Live",
+        "direct_image_url": "https://cdn.test/b.webp",
+        "source_page_url": "https://source.test/article",
+    }
+    vision = {
+        "status": "UNRELATED", "confidence": 0.80, "visual_type": "photograph",
+        "verdict": "reject", "image_sha256": "b" * 64, "image_role": "featured",
+        "policy_version": "featured-editorial-v2", "decision_source": "vision_provider",
+        "model_identity": "https://vision.test/model", "context_key": "game",
+        "subject": "Xbox Live",
+    }
+    _attach_candidate_vision_evidence(candidate, vision)
+    record_v2_candidate_decision(
+        tmp_path, post_id=115286, run_id="run-115286-a",
+        candidate=candidate, role="featured", disposition="reject_final",
+        reason_code="UNRELATED 0.80 https://cdn.test/b.webp?token=private",
+    )
+    with connect(tmp_path) as db:
+        row = db.execute(
+            "SELECT post_id, run_id, candidate_id, reason_code, evidence_reference "
+            "FROM media_decisions"
+        ).fetchone()
+    reference = json.loads(row["evidence_reference"])
+    assert (row["post_id"], row["run_id"], row["candidate_id"]) == (
+        115286, "run-115286-a", "featured-candidate-b",
+    )
+    assert row["reason_code"] == "candidate_rejected"
+    assert reference["vision_decision"]["image_sha256"] == "b" * 64
+    assert reference["vision_decision"]["confidence"] == 0.80
+    assert "private" not in row["evidence_reference"]
 
 
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
