@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-VISION_POLICY_VERSION = "featured-editorial-v3-multidimensional"
+VISION_POLICY_VERSION = "featured-editorial-v4-context-scoped"
 
 
 def trusted_featured_evidence(
@@ -70,19 +72,21 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
     title = str(editorial.get("title") or seo.get("title") or "").strip()
     content = str(editorial.get("cleaned_html") or "")
     primary = str(game_name or "").strip() if isinstance(game_name, str) else ""
+    identity_source = "game_name" if primary else ""
+    verified_focus = ""
+    has_structured_subject = any(
+        editorial.get(key)
+        for key in ("post_subjects", "subjects", "main_entity", "entity")
+    )
     if not primary and focus and focus.casefold() not in _GENERIC_FOCUS:
         from .evidence import normalize
 
         focus_key = normalize(focus).strip()
-        article_text = normalize(f"{title} {content}")
-        has_structured_subject = any(
-            editorial.get(key)
-            for key in ("post_subjects", "subjects", "main_entity", "entity")
-        )
-        if focus_key and focus_key in article_text:
-            primary = focus.casefold() if content.strip() else focus
-        elif focus_key and not has_structured_subject:
-            primary = focus
+        article_text = normalize(f"{title} {re.sub(r'<[^>]*>', ' ', content)}")
+        if focus_key and not has_structured_subject and f" {focus_key} " in f" {article_text} ":
+            primary = focus.casefold()
+            verified_focus = focus
+            identity_source = "focus_keyword_evidenced"
     for key in ("post_subjects", "subjects"):
         if primary:
             break
@@ -94,12 +98,14 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
                 candidate = value.get("subject") if isinstance(value, dict) else value
                 if isinstance(candidate, str) and candidate.strip():
                     primary = candidate.strip()
+                    identity_source = "structured_subject"
                     break
     if not primary:
         for key in ("main_entity", "entity"):
             candidate = editorial.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 primary = candidate.strip()
+                identity_source = "structured_entity"
                 break
     # Editorial schema deliberately keeps post subjects derived rather than
     # accepting model-supplied top-level identity fields.  Use the same
@@ -109,15 +115,17 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
         derived = post_subjects(
             title=title,
             content_html=content,
-            focus_keyword=focus,
+            focus_keyword=verified_focus,
             game_name=game_name if isinstance(game_name, str) else None,
         )
         if not primary and derived and str(derived[0].get("subject") or "").strip():
             primary = str(derived[0]["subject"]).strip()
+            identity_source = "article_extraction"
     except Exception:  # noqa: BLE001 - fallback remains deterministic
         pass
     if not primary:
         primary = title
+        identity_source = "headline_fallback" if title else "unresolved"
 
     secondary: list[str] = []
     try:
@@ -126,7 +134,7 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
         for subject in editorial_subjects(
             title=title,
             content_html=content,
-            focus_keyword=focus,
+            focus_keyword=verified_focus,
             game_name=game_name if isinstance(game_name, str) else None,
         ):
             value = str(subject or "").strip()
@@ -143,7 +151,27 @@ def resolve_editorial_identity(editorial: Mapping[str, Any]) -> dict[str, Any]:
         "secondary_entities": secondary,
         "news_context": title,
         "vision_category": category,
+        "identity_source": identity_source,
+        "identity_status": "resolved" if primary and identity_source != "headline_fallback" else "inconclusive",
     }
+
+
+def featured_vision_context_key(
+    editorial: Mapping[str, Any], *, news_context: str | None = None
+) -> str:
+    """Stable, phase-independent cache scope for one editorial story."""
+    identity = resolve_editorial_identity(editorial)
+    context = str(identity.get("news_context") or "" if news_context is None else news_context)
+    context = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", context)).strip().casefold()
+    payload = [
+        "featured-editorial-context-v1",
+        str(identity.get("vision_category") or "general_entertainment"),
+        str(identity.get("primary_subject") or "").strip().casefold(),
+        context,
+    ]
+    return "editorial:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def vision_cache_subject(editorial: Mapping[str, Any]) -> str:

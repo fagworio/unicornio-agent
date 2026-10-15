@@ -263,7 +263,7 @@ def test_current_policy_unrelated_remains_a_bounded_rejection(tmp_path):
             "sha256": "a" * 64,
             "evidence": {
                 "verdict": "unrelated",
-                "vision_policy_version": "featured-editorial-v3-multidimensional",
+                "vision_policy_version": "featured-editorial-v4-context-scoped",
             },
         }]}]}),
         encoding="utf-8",

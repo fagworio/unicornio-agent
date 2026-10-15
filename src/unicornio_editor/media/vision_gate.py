@@ -304,20 +304,22 @@ def _parse_response(text: str, *, allow_unknown_status: bool = False) -> dict[st
         visual_type = "other"
     if normalized_status not in _STATUS:
         normalized_status = "UNKNOWN"
+    provided_dimensions = 0
     relation = str(data.get("relation") or "").casefold()
     if relation not in _RELATIONS:
-        relation = {
-            "MATCH": "direct", "PARTIAL_MATCH": "contextual",
-            "UNRELATED": "unrelated",
-        }.get(normalized_status, "uncertain")
+        relation = "uncertain"
+    else:
+        provided_dimensions += 1
     editorial_fit = str(data.get("editorial_fit") or "").casefold()
     if editorial_fit not in _EDITORIAL_FITS:
-        editorial_fit = {
-            "MATCH": "suitable", "UNRELATED": "unsuitable",
-        }.get(normalized_status, "uncertain")
+        editorial_fit = "uncertain"
+    else:
+        provided_dimensions += 1
     role_fit = str(data.get("role_fit") or "").casefold()
     if role_fit not in _ROLE_FITS:
         role_fit = "uncertain"
+    else:
+        provided_dimensions += 1
     return {
         "status": normalized_status,
         "confidence": confidence,
@@ -325,6 +327,9 @@ def _parse_response(text: str, *, allow_unknown_status: bool = False) -> dict[st
         "relation": relation,
         "editorial_fit": editorial_fit,
         "role_fit": role_fit,
+        "dimensions_source": "provider" if provided_dimensions == 3 else (
+            "provider_partial" if provided_dimensions else "legacy_fallback"
+        ),
         "vision_status_normalized": normalized_status if normalized_status != "UNKNOWN" else "INCONCLUSIVE",
         **({"vision_status_raw": raw_status} if raw_status != normalized_status else {}),
     }

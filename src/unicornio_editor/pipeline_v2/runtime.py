@@ -821,8 +821,10 @@ class ProductionMediaResolver:
                 waiver_reason=previous.waiver_reason,
             )
         rejection_history = _media_rejection_history(self.root, int(context["post_id"]))
-        from ..media.vision_policy import featured_vision_category
-        vision_context_key = featured_vision_category(editorial)
+        from ..media.vision_policy import featured_vision_context_key
+        vision_context_key = featured_vision_context_key(
+            editorial, news_context=str(identity.get("news_context") or title)
+        )
         inline_suffix, inline_reason = _adaptive_query_suffix(rejection_history, role="inline")
         featured_suffix, featured_reason = _adaptive_query_suffix(rejection_history, role="featured")
         subject_queries: list[tuple[str, str]] = []
@@ -1679,7 +1681,7 @@ class ProductionMediaResolver:
                     key: decision[key]
                     for key in (
                         "status", "confidence", "visual_type", "relation", "editorial_fit",
-                        "role_fit", "verdict", "reason",
+                        "role_fit", "dimensions_source", "verdict", "reason",
                         "detail_used", "low_status", "low_confidence", "low_visual_type",
                     )
                     if key in decision

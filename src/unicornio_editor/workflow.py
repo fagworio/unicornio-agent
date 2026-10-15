@@ -56,6 +56,7 @@ from .media.vision_gate import (
 from .media.vision_policy import (
     VISION_POLICY_VERSION,
     featured_vision_category,
+    featured_vision_context_key,
     featured_vision_subject,
     resolve_editorial_identity,
     trusted_featured_evidence,
@@ -429,7 +430,8 @@ def _apply_editorial_unlocked(
         ),
     )
     media_results, featured_id, featured_credit = _execute_media_plan(
-        editorial, config, client, root, preflight=media_preflight, post_id=post_id
+        editorial, config, client, root, preflight=media_preflight, post_id=post_id,
+        post_title=_post_title(post) or "",
     )
     combined_media_results = prior_media + [
         item for item in media_results
@@ -1409,7 +1411,7 @@ def _structured_vision_evidence(
         key: decision[key]
         for key in (
             "status", "confidence", "visual_type", "relation", "editorial_fit",
-            "role_fit", "verdict", "detail_used",
+            "role_fit", "dimensions_source", "verdict", "detail_used",
             "low_status", "low_confidence", "low_visual_type",
         )
         if key in decision
@@ -1424,7 +1426,7 @@ def _structured_vision_evidence(
             else "vision_provider"
         ),
         "model_identity": model_identity,
-        "context_key": str(row.get("category") or ""),
+        "context_key": str(row.get("context_key") or ""),
         "subject": str(row.get("subject") or ""),
     })
     return result
@@ -1447,7 +1449,7 @@ def _vision_evidence_matches_item(
     expected_sha = str(evidence.get("vision_image_sha256") or decision.get("image_sha256") or "")
     expected_model = vision_model_identity(config.vision_base_url, config.vision_model)
     expected_subject = str(item.get("subject") or "").strip().casefold()
-    expected_context = featured_vision_category(editorial or {})
+    expected_context = featured_vision_context_key(editorial or {})
     try:
         confidence = float(decision.get("confidence") or 0)
     except (TypeError, ValueError):
@@ -1619,6 +1621,10 @@ def validate_media_plan(
     rejeitados no resultado). Deterministico e somente leitura.
     """
     plan = editorial.get("media_plan") or []
+    vision_editorial = {
+        **editorial,
+        **({"title": post_title} if post_title else {}),
+    }
     entities = extract_entities(
         title=str((editorial.get("seo") or {}).get("title") or ""),
         content_html=str(editorial.get("cleaned_html") or ""),
@@ -1648,17 +1654,18 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache, editorial, root=root, config=config)
+        reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
             vision = _validate_featured_candidate_vision(
-                item, editorial, client, cache, config=config, root=root
+                item, vision_editorial, client, cache, config=config, root=root
             )
             vision_row = {
                 "index": index,
-                "subject": featured_vision_subject(editorial),
-                "category": featured_vision_category(editorial),
+                "subject": featured_vision_subject(vision_editorial),
+                "category": featured_vision_category(vision_editorial),
+                "context_key": featured_vision_context_key(vision_editorial),
                 "cache_hit": bool(vision.get("cached")),
                 **vision,
             }
@@ -1719,7 +1726,7 @@ def validate_media_plan(
             "alt_text": "",
         }
         vision = _validate_featured_candidate_vision(
-            existing_item, editorial, client, cache, config=config, root=root
+            existing_item, vision_editorial, client, cache, config=config, root=root
         )
         featured_vision.append(
             {"index": None, "existing_featured_id": existing_featured_id, **vision}
@@ -1776,6 +1783,7 @@ def _validate_featured_candidate_vision(
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
     subject = featured_vision_subject(editorial)
     editorial_context = str(resolve_editorial_identity(editorial).get("news_context") or "")
+    vision_context_key = featured_vision_context_key(editorial)
     cache_subject = subject
     media_id = item.get("media_library_id")
     attachment: dict[str, Any] | None = None
@@ -1826,7 +1834,7 @@ def _validate_featured_candidate_vision(
                 cache_root, image_url, cache_subject,
                 image_sha256=image_sha256, policy="featured-key-art-v1",
                 model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                context_key=featured_vision_category(editorial),
+                context_key=vision_context_key,
             )
             if cached is not None:
                 ok = (
@@ -1865,7 +1873,7 @@ def _validate_featured_candidate_vision(
                 key: decision[key]
                 for key in (
                     "status", "confidence", "visual_type", "relation", "editorial_fit",
-                    "role_fit", "verdict", "reason",
+                    "role_fit", "dimensions_source", "verdict", "reason",
                     "detail_used", "low_status", "low_confidence", "low_visual_type",
                 )
                 if key in decision
@@ -1878,7 +1886,7 @@ def _validate_featured_candidate_vision(
                 image_sha256=image_sha256,
                 policy="featured-key-art-v1",
                 model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                context_key=featured_vision_category(editorial),
+                context_key=vision_context_key,
             )
         return {
             "status": "passed" if decision.get("accepted") else "rejected",
@@ -2023,6 +2031,7 @@ def _execute_media_plan(
     *,
     preflight: dict[str, Any] | None = None,
     post_id: int | None = None,
+    post_title: str = "",
     previous_inline_phashes: list[str] | tuple[str, ...] = (),
     previous_inline_visual_assets: list[dict[str, Any]] | None = None,
     featured_visual_asset: dict[str, Any] | None = None,
@@ -2039,6 +2048,8 @@ def _execute_media_plan(
     for a game vampire) are rejected before any download/insert — the
     editorial rule is "no image beats a wrong image".
     """
+    vision_editorial = {**editorial, **({"title": post_title} if post_title else {})}
+    vision_context_key = featured_vision_context_key(vision_editorial)
     plan = editorial.get("media_plan") or []
     if not plan:
         return [], None, None
@@ -2326,7 +2337,7 @@ def _execute_media_plan(
                     source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
                     if (
                         not _vision_evidence_matches_item(
-                            item, editorial, config, image_sha256=source_sha256
+                            item, vision_editorial, config, image_sha256=source_sha256
                         )
                         and not _item_evidence_relevant(item, entities, editorial)
                     ):
@@ -2418,7 +2429,7 @@ def _execute_media_plan(
                             cache_subject, image_sha256=identity.sha256,
                             policy="featured-key-art-v1",
                             model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                            context_key=featured_vision_category(editorial),
+                            context_key=vision_context_key,
                         )
                         if cached is not None and (
                             cached.get("status") == "MATCH"
@@ -2466,7 +2477,7 @@ def _execute_media_plan(
                                     key: decision[key]
                                     for key in (
                                         "status", "confidence", "visual_type", "relation", "editorial_fit",
-                                        "role_fit", "verdict", "reason",
+                                        "role_fit", "dimensions_source", "verdict", "reason",
                                         "detail_used", "low_status", "low_confidence", "low_visual_type",
                                     )
                                     if key in decision
@@ -2479,14 +2490,14 @@ def _execute_media_plan(
                                     image_sha256=identity.sha256,
                                     policy="featured-key-art-v1",
                                     model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                                    context_key=featured_vision_category(editorial),
+                                    context_key=vision_context_key,
                                 )
                     if decision is not None:
                         vision_evidence_record = {
                             key: decision[key]
                             for key in (
                                 "status", "confidence", "visual_type", "relation", "editorial_fit",
-                                "role_fit", "verdict", "detail_used",
+                                "role_fit", "dimensions_source", "verdict", "detail_used",
                                 "low_status", "low_confidence", "low_visual_type",
                             )
                             if key in decision
@@ -2497,7 +2508,7 @@ def _execute_media_plan(
                             "policy_version": VISION_POLICY_VERSION,
                             "decision_source": decision_source,
                             "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
-                            "context_key": featured_vision_category(editorial),
+                            "context_key": vision_context_key,
                             "subject": featured_vision_subject(editorial),
                         })
                     if not decision.get("accepted"):

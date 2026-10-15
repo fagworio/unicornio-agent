@@ -3345,6 +3345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "relation": decision.get("relation") or "uncertain",
                             "editorial_fit": decision.get("editorial_fit") or "uncertain",
                             "role_fit": decision.get("role_fit") or "uncertain",
+                            "dimensions_source": decision.get("dimensions_source") or "legacy_fallback",
                         },
                     )
                     cached = True
@@ -3359,6 +3360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "relation": decision.get("relation"),
                         "editorial_fit": decision.get("editorial_fit"),
                         "role_fit": decision.get("role_fit"),
+                        "dimensions_source": decision.get("dimensions_source"),
                         "reason": decision.get("reason"),
                         "cached": cached,
                     }

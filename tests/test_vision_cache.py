@@ -12,7 +12,10 @@ from unicornio_editor.media.vision_cache import (
     set_cached_decision,
     vision_cache_path,
 )
-from unicornio_editor.media.vision_policy import vision_cache_subject
+from unicornio_editor.media.vision_policy import (
+    featured_vision_context_key,
+    vision_cache_subject,
+)
 
 
 def _write_cache_entry_concurrently(root, index, barrier):
@@ -138,6 +141,38 @@ class VisionCacheTests(unittest.TestCase):
                 context_key="movie",
             ) is None
 
+    def test_same_image_and_entity_do_not_share_decision_between_news_contexts(self):
+        image_hash = "f" * 64
+        first = {
+            "title": "Xbox Live investiga salvaguardas após denúncias",
+            "editorial_type": "game",
+            "seo": {"focus_keyword": "Xbox Live"},
+        }
+        second = {
+            **first,
+            "title": "Xbox Live anuncia novos recursos para assinantes",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_cached_decision(
+                root, "https://cdn.test/xbox.webp", "Xbox Live",
+                {"status": "MATCH", "confidence": 0.93},
+                image_sha256=image_hash, policy="featured-key-art-v1",
+                model_identity="provider/model",
+                context_key=featured_vision_context_key(first),
+            )
+            self.assertIsNotNone(get_cached_decision(
+                root, "https://cdn.test/xbox.webp", "Xbox Live",
+                image_sha256=image_hash, policy="featured-key-art-v1",
+                model_identity="provider/model",
+                context_key=featured_vision_context_key(first),
+            ))
+            self.assertIsNone(get_cached_decision(
+                root, "https://cdn.test/xbox.webp", "Xbox Live",
+                image_sha256=image_hash, policy="featured-key-art-v1",
+                model_identity="provider/model",
+                context_key=featured_vision_context_key(second),
+            ))
     def test_model_identity_strips_credentials_query_and_fragment(self):
         from unicornio_editor.media.vision_cache import vision_model_identity
 

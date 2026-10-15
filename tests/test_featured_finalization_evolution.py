@@ -4,6 +4,7 @@ from pathlib import Path
 from unicornio_editor.media.vision_cache import get_cached_decision, set_cached_decision
 from unicornio_editor.media.vision_policy import (
     featured_vision_category,
+    featured_vision_context_key,
     featured_vision_subject,
     resolve_editorial_identity,
     vision_cache_subject,
@@ -21,7 +22,38 @@ def test_featured_subject_uses_editorial_identity_priority():
         "post_subjects": [{"subject": "Cyberpunk: Edgerunners"}],
         "seo": {"focus_keyword": "wrong", "title": "Headline"},
     }) == "Cyberpunk: Edgerunners"
-    assert vision_cache_subject({"seo": {"focus_keyword": "Hades", "title": "Headline"}}) == "Hades"
+    assert vision_cache_subject({"seo": {"focus_keyword": "Hades", "title": "Headline"}}) != "Hades"
+
+
+def test_focus_keyword_must_be_evidenced_in_article_text():
+    mismatched = {
+        "title": "Headline sobre Xbox Live",
+        "cleaned_html": "<p>A notícia aborda a plataforma.</p>",
+        "seo": {"focus_keyword": "Hades"},
+    }
+    evidenced = {
+        **mismatched,
+        "cleaned_html": "<p>Hades recebe uma atualização.</p>",
+    }
+    assert resolve_editorial_identity(mismatched)["identity_source"] != "focus_keyword_evidenced"
+    assert resolve_editorial_identity(evidenced)["primary_subject"].casefold() == "hades"
+    assert resolve_editorial_identity(evidenced)["identity_source"] == "focus_keyword_evidenced"
+
+
+def test_editorial_context_key_is_stable_by_phase_and_distinct_by_story():
+    first = {
+        "title": "Xbox Live investiga salvaguardas após denúncias",
+        "editorial_type": "game",
+        "seo": {"focus_keyword": "Xbox Live"},
+    }
+    second = {
+        **first,
+        "title": "Xbox Live anuncia novos recursos para assinantes",
+    }
+    assert featured_vision_context_key(first) == featured_vision_context_key(
+        first, news_context=first["title"]
+    )
+    assert featured_vision_context_key(first) != featured_vision_context_key(second)
 
 
 def test_featured_category_is_editorial_type_not_universal_game_artwork():

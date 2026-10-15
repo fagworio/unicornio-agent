@@ -877,7 +877,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(stored["confidence"], 0.92)
         self.assertEqual(stored["visual_type"], "key_art")
         self.assertEqual(stored["image_role"], "featured")
-        self.assertEqual(stored["policy_version"], "featured-editorial-v3-multidimensional")
+        self.assertEqual(stored["policy_version"], "featured-editorial-v4-context-scoped")
         self.assertRegex(stored["image_sha256"], r"^[a-f0-9]{64}$")
 
     def test_media_validate_skips_paid_vision_for_strong_official_featured_evidence(self):
@@ -930,7 +930,7 @@ class WorkflowTests(unittest.TestCase):
             from unicornio_editor.media.vision_cache import get_cached_decision
             from unicornio_editor.media.vision_cache import vision_model_identity
             from unicornio_editor.media.vision_policy import vision_cache_subject
-            from unicornio_editor.media.vision_policy import featured_vision_category
+            from unicornio_editor.media.vision_policy import featured_vision_context_key
 
             vision_row = result["featured_vision"][0]
             image_sha256 = vision_row["image_sha256"]
@@ -939,7 +939,7 @@ class WorkflowTests(unittest.TestCase):
                 vision_cache_subject(payload), image_sha256=image_sha256,
                 policy="featured-key-art-v1",
                 model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                context_key=featured_vision_category(payload),
+                context_key=featured_vision_context_key(payload),
             )
             self.assertEqual(vision_row["decision"]["confidence"], 0.91)
             self.assertEqual(vision_row["decision"]["visual_type"], "key_art")
@@ -2865,6 +2865,7 @@ def test_execute_media_plan_preserves_rejected_preflight_vision_without_upload(t
 
 def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path):
     from unicornio_editor.media.vision_cache import vision_model_identity
+    from unicornio_editor.media.vision_policy import featured_vision_context_key
 
     config = Config(
         "wordpress", "http://wp.test", "/wp-json/wp/v2",
@@ -2880,14 +2881,14 @@ def test_inline_vision_evidence_is_subject_model_policy_and_byte_bound(tmp_path)
         "subject": "Halo", "direct_image_url": "https://cdn.test/generic-image.webp",
         "source_page_url": "https://news.test/article", "is_featured": False,
         "evidence": {
-            "vision_policy_version": "featured-editorial-v3-multidimensional",
+            "vision_policy_version": "featured-editorial-v4-context-scoped",
             "vision_image_sha256": image_sha,
             "vision_decision": {
                 "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
                 "verdict": "accept", "image_sha256": image_sha, "image_role": "inline",
-                "policy_version": "featured-editorial-v3-multidimensional",
+                "policy_version": "featured-editorial-v4-context-scoped",
                 "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
-                "context_key": "game", "subject": "Halo",
+                "context_key": featured_vision_context_key(editorial), "subject": "Halo",
             },
         },
     }

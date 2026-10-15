@@ -92,9 +92,21 @@ class VisionGateTests(unittest.TestCase):
         decision = _parse_response(
             '{"status":"PARTIAL_MATCH","confidence":0.7,"visual_type":"product"}'
         )
-        self.assertEqual(decision["relation"], "contextual")
+        self.assertEqual(decision["relation"], "uncertain")
         self.assertEqual(decision["editorial_fit"], "uncertain")
         self.assertEqual(decision["role_fit"], "uncertain")
+        self.assertEqual(decision["dimensions_source"], "legacy_fallback")
+        self.assertEqual(decision["status"], "PARTIAL_MATCH")
+
+    def test_partial_multidimensional_response_marks_provider_provenance(self):
+        decision = _parse_response(
+            '{"status":"MATCH","confidence":0.91,"visual_type":"product",'
+            '"relation":"direct"}'
+        )
+        self.assertEqual(decision["relation"], "direct")
+        self.assertEqual(decision["editorial_fit"], "uncertain")
+        self.assertEqual(decision["role_fit"], "uncertain")
+        self.assertEqual(decision["dimensions_source"], "provider_partial")
 
     def test_prompt_and_schema_request_separate_visual_dimensions(self):
         prompt = _build_user_prompt(

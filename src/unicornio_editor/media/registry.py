@@ -443,7 +443,7 @@ def record_v2_candidate_decision(
             key: vision[key]
             for key in (
                 "status", "confidence", "visual_type", "relation", "editorial_fit",
-                "role_fit", "verdict", "detail_used",
+                "role_fit", "dimensions_source", "verdict", "detail_used",
                 "low_status", "low_confidence", "low_visual_type", "image_sha256",
                 "image_role", "policy_version", "decision_source", "model_identity", "context_key", "subject",
             )
