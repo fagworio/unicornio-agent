@@ -95,13 +95,25 @@ def test_registry_schema_has_decisions_usage_and_runs(tmp_path):
 
 def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_path):
     direct_url = "https://cdn.test/image.webp?token=private-signature"
-    source_url = "https://source.test/article?session=private"
+    source_url = "https://private-user:private-pass@source.test/article?session=private"
     record_v2_candidate_decision(
         tmp_path, post_id=9, run_id="run-9",
         candidate={
             "candidate_id": "candidate-9", "subject": "Jogo",
             "source_page_url": source_url, "direct_image_url": direct_url,
-            "evidence": {"verdict": "deterministic_match"},
+            "evidence": {
+                "verdict": "deterministic_match",
+                "vision_policy_version": "featured-editorial-v2",
+                "vision_decision": {
+                    "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
+                    "verdict": "accept", "detail_used": "high",
+                    "image_sha256": "a" * 64, "image_role": "featured",
+                    "policy_version": "featured-editorial-v2",
+                    "model_identity": "https://vision.example/model-a",
+                    "context_key": "game",
+                    "prompt": "must not persist", "raw_payload": "must not persist",
+                },
+            },
         }, role="inline", disposition="accepted", reason_code="candidate_accepted",
     )
 
@@ -111,6 +123,11 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
     assert reference["direct_image_url_sha256"] == hashlib.sha256(direct_url.encode()).hexdigest()
     assert reference["source_page_url_sha256"] == hashlib.sha256(source_url.encode()).hexdigest()
     assert "private" not in row[0]
+    assert reference["source_domain"] == "source.test"
+    assert "must not persist" not in row[0]
+    assert reference["vision_decision"]["confidence"] == 0.91
+    assert reference["vision_decision"]["image_sha256"] == "a" * 64
+    assert reference["vision_decision"]["context_key"] == "game"
 
 
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):

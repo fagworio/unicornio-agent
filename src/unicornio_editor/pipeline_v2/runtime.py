@@ -71,6 +71,8 @@ def _required_image_count_for_editorial(content: str, *, title: str = "") -> int
 
 def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
     """Read prior media rejection evidence without changing checkpoints."""
+    from ..media.vision_policy import VISION_POLICY_VERSION
+
     reasons: set[str] = set()
     urls: set[str] = set()
     fingerprints: set[str] = set()
@@ -205,14 +207,31 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 reason = raw_reason
             if reason:
                 reasons.add(reason)
-            for key in ("url", "media_url", "direct_image_url", "source_image_url"):
-                value = str(row.get(key) or "").strip()
-                if value:
-                    urls.add(_canonical_embedded_media_url(value))
-            for key in ("sha256", "phash", "visual_group_id"):
-                value = str(row.get(key) or "").strip()
-                if value:
-                    fingerprints.add(value)
+            vision_decision = evidence.get("vision_decision") if isinstance(evidence.get("vision_decision"), dict) else {}
+            historical_policy = str(
+                row.get("vision_policy_version")
+                or evidence.get("vision_policy_version")
+                or vision_decision.get("policy_version")
+                or ""
+            )
+            # UNRELATED is a semantic/model judgment, not immutable evidence
+            # about the bytes. Legacy decisions without a compatible policy
+            # version remain auditable but cannot permanently blacklist the
+            # candidate; deterministic failures (duplicates, source mismatch,
+            # etc.) continue to be retained exactly as before.
+            stale_semantic_rejection = (
+                reason == "unrelated"
+                and historical_policy != VISION_POLICY_VERSION
+            )
+            if not stale_semantic_rejection:
+                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
+                    value = str(row.get(key) or "").strip()
+                    if value:
+                        urls.add(_canonical_embedded_media_url(value))
+                for key in ("sha256", "phash", "visual_group_id"):
+                    value = str(row.get(key) or "").strip()
+                    if value:
+                        fingerprints.add(value)
             query = str(row.get("search_query") or row.get("query") or "").strip()
             if query:
                 queries.add(query.casefold())
@@ -759,6 +778,8 @@ class ProductionMediaResolver:
                 waiver_reason=previous.waiver_reason,
             )
         rejection_history = _media_rejection_history(self.root, int(context["post_id"]))
+        from ..media.vision_policy import featured_vision_category
+        vision_context_key = featured_vision_category(editorial)
         inline_suffix, inline_reason = _adaptive_query_suffix(rejection_history, role="inline")
         featured_suffix, featured_reason = _adaptive_query_suffix(rejection_history, role="featured")
         subject_queries: list[tuple[str, str]] = []
@@ -985,6 +1006,17 @@ class ProductionMediaResolver:
                 run_id = str(context.get("v2_run_id") or "")
                 for index, result in enumerate(results):
                     item = plan[index] if index < len(plan) else plan[0]
+                    vision_evidence = result.get("vision_evidence")
+                    if isinstance(vision_evidence, dict):
+                        evidence = item.get("evidence")
+                        if not isinstance(evidence, dict):
+                            evidence = {}
+                            item["evidence"] = evidence
+                        evidence["vision_decision"] = vision_evidence
+                        evidence["vision_policy_version"] = vision_evidence.get("policy_version") or ""
+                        evidence["vision_image_sha256"] = vision_evidence.get("image_sha256") or ""
+                        if vision_evidence.get("status") == "UNRELATED" and vision_evidence.get("verdict") == "reject":
+                            evidence["verdict"] = "unrelated"
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
                     temporary = any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
@@ -1162,7 +1194,8 @@ class ProductionMediaResolver:
                     pass
                 source_feature_candidates.append(candidate)
             self._resolve_ambiguous_vision(
-                source_feature_candidates, post_id=int(context["post_id"])
+                source_feature_candidates, post_id=int(context["post_id"]),
+                context_key=vision_context_key,
             )
             approved_source_features = self._approved_unique(source_feature_candidates)
             record_non_executable_candidates(
@@ -1199,7 +1232,9 @@ class ProductionMediaResolver:
                 if current_featured.status is FeaturedStatus.VALID:
                     break
                 candidates = resolve_query(subject, query, 1, "featured")
-                self._resolve_ambiguous_vision(candidates, post_id=int(context["post_id"]))
+                self._resolve_ambiguous_vision(
+                    candidates, post_id=int(context["post_id"]), context_key=vision_context_key
+                )
                 approved_candidates = self._approved_unique(candidates)
                 record_non_executable_candidates(
                     candidates, approved_candidates, role="featured"
@@ -1315,7 +1350,9 @@ class ProductionMediaResolver:
                     1 if is_listicle else remaining,
                     "inline",
                 )
-                self._resolve_ambiguous_vision(candidates, post_id=int(context["post_id"]))
+                self._resolve_ambiguous_vision(
+                    candidates, post_id=int(context["post_id"]), context_key=vision_context_key
+                )
                 for candidate in self._approved_unique(candidates):
                     if inline_remaining() <= 0:
                         break
@@ -1470,7 +1507,13 @@ class ProductionMediaResolver:
                 result.append(candidate)
         return result
 
-    def _resolve_ambiguous_vision(self, candidates: list[dict[str, Any]], *, post_id: int | None = None) -> None:
+    def _resolve_ambiguous_vision(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        post_id: int | None = None,
+        context_key: str = "",
+    ) -> None:
         vision_candidates = []
         for index, candidate in enumerate(candidates):
             url = candidate.get("direct_image_url") or candidate.get("image_url")
@@ -1581,7 +1624,8 @@ class ProductionMediaResolver:
                 allow_high=False,
                 root=self.root,
             ))
-        from ..media.vision_cache import set_cached_decision
+        from ..media.vision_cache import set_cached_decision, vision_model_identity
+        from ..media.vision_policy import VISION_POLICY_VERSION
         from ..media.vision_gate import image_input_sha256
         by_candidate_id = {str(item["candidate_id"]): item for item in low_items}
         for candidate in candidates:
@@ -1590,7 +1634,7 @@ class ProductionMediaResolver:
             decision = low_decisions.get(item["candidate_id"]) if item else None
             if item and item["candidate_id"] in high_decisions:
                 decision = high_decisions[item["candidate_id"]]
-            if decision and decision.get("verdict") == "accept":
+            if decision:
                 image_sha256 = image_input_sha256(str(item.get("image_url") or ""))
                 decision_record = {
                     key: decision[key]
@@ -1600,7 +1644,24 @@ class ProductionMediaResolver:
                     )
                     if key in decision
                 }
-                if image_sha256:
+                decision_record.update({
+                    "image_sha256": image_sha256,
+                    "image_role": "featured" if candidate.get("role") == "featured" else "inline",
+                    "policy_version": VISION_POLICY_VERSION,
+                    "decision_source": "vision_provider_batch",
+                    "model_identity": vision_model_identity(self.config.vision_base_url, self.config.vision_model),
+                    "context_key": context_key,
+                })
+                evidence = candidate.get("evidence")
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                    candidate["evidence"] = evidence
+                evidence.update({
+                    "vision_decision": decision_record,
+                    "vision_image_sha256": image_sha256,
+                    "vision_policy_version": VISION_POLICY_VERSION,
+                })
+                if decision.get("verdict") == "accept" and image_sha256:
                     set_cached_decision(
                         self.root,
                         source_url,
@@ -1612,17 +1673,15 @@ class ProductionMediaResolver:
                             if candidate.get("role") == "featured"
                             else "subject-match-v1"
                         ),
+                        model_identity=vision_model_identity(self.config.vision_base_url, self.config.vision_model),
+                        context_key=context_key,
                     )
-                evidence = candidate.get("evidence")
-                if not isinstance(evidence, dict):
-                    evidence = {}
-                    candidate["evidence"] = evidence
-                evidence.update({
-                    "verdict": "deterministic_match",
-                    "vision_decision": decision_record,
-                    "vision_image_sha256": image_sha256,
-                })
-                candidate["needs_vision"] = False
+                if decision.get("verdict") == "accept":
+                    evidence.update({"verdict": "deterministic_match"})
+                    candidate["needs_vision"] = False
+                elif decision.get("status") == "UNRELATED" and decision.get("verdict") == "reject":
+                    evidence["verdict"] = "unrelated"
+                    candidate["rejected_reason"] = "UNRELATED visual policy decision"
 
     @staticmethod
     def _plan_item(candidate: dict[str, Any], subject: str, slot: int, featured: bool) -> dict[str, Any]:

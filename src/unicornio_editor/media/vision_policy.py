@@ -7,6 +7,8 @@ import unicodedata
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+VISION_POLICY_VERSION = "featured-editorial-v2"
+
 
 def trusted_featured_evidence(
     *, image_url: str, source_page_url: str, subject: str, search_query: str

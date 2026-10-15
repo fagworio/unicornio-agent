@@ -918,7 +918,9 @@ class WorkflowTests(unittest.TestCase):
             ) as vision:
                 result = validate_media_plan(FakeClient(self.post()), payload, config=config, root=root)
             from unicornio_editor.media.vision_cache import get_cached_decision
+            from unicornio_editor.media.vision_cache import vision_model_identity
             from unicornio_editor.media.vision_policy import vision_cache_subject
+            from unicornio_editor.media.vision_policy import featured_vision_category
 
             vision_row = result["featured_vision"][0]
             image_sha256 = vision_row["image_sha256"]
@@ -926,6 +928,8 @@ class WorkflowTests(unittest.TestCase):
                 root, payload["media_plan"][0]["direct_image_url"],
                 vision_cache_subject(payload), image_sha256=image_sha256,
                 policy="featured-key-art-v1",
+                model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                context_key=featured_vision_category(payload),
             )
             self.assertEqual(vision_row["decision"]["confidence"], 0.91)
             self.assertEqual(vision_row["decision"]["visual_type"], "key_art")

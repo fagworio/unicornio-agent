@@ -912,7 +912,7 @@ def run_pre_publish_checklist(
             skipped=True,
         )
     else:
-        from .media.vision_cache import get_cached_decision, set_cached_decision
+        from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
         from .media.vision_policy import featured_vision_category, featured_vision_subject
 
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
@@ -945,6 +945,8 @@ def run_pre_publish_checklist(
                 cached = get_cached_decision(
                     vision_root, url, subject, image_sha256=image_sha256,
                     policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                    model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                    context_key=category,
                 )
                 if cached is not None:
                     checked += 1
@@ -986,6 +988,8 @@ def run_pre_publish_checklist(
                             vision_root, url, subject, cache_decision,
                             image_sha256=image_sha256,
                             policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                            model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                            context_key=category,
                         )
                     return
                 reason = str(decision.get("reason") or "imagem não confirmada")

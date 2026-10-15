@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import multiprocessing
 from pathlib import Path
 
 from unicornio_editor.media.vision_cache import (
@@ -12,6 +13,15 @@ from unicornio_editor.media.vision_cache import (
     vision_cache_path,
 )
 from unicornio_editor.media.vision_policy import vision_cache_subject
+
+
+def _write_cache_entry_concurrently(root, index, barrier):
+    barrier.wait(timeout=10)
+    set_cached_decision(
+        root, f"https://cdn.test/{index}.webp", "Xbox Live",
+        {"status": "MATCH", "confidence": 0.9},
+        image_sha256=f"{index:064x}", model_identity="provider/model",
+    )
 
 
 class VisionCacheTests(unittest.TestCase):
@@ -101,6 +111,55 @@ class VisionCacheTests(unittest.TestCase):
                 root, "https://cdn.test/image.jpg", "Xbox Live",
                 image_sha256="c" * 64,
             ))
+
+    def test_model_and_editorial_context_are_part_of_cache_identity(self):
+        image_hash = "e" * 64
+        url = "https://cdn.test/xbox.webp"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_cached_decision(
+                root, url, "Xbox Live", {"status": "MATCH", "confidence": 0.9},
+                image_sha256=image_hash, policy="featured-key-art-v1",
+                model_identity="https://api.example/v1/model-a", context_key="game",
+            )
+            assert get_cached_decision(
+                root, url, "Xbox Live", image_sha256=image_hash,
+                policy="featured-key-art-v1", model_identity="https://api.example/v1/model-a",
+                context_key="game",
+            )
+            assert get_cached_decision(
+                root, url, "Xbox Live", image_sha256=image_hash,
+                policy="featured-key-art-v1", model_identity="https://api.example/v1/model-b",
+                context_key="game",
+            ) is None
+            assert get_cached_decision(
+                root, url, "Xbox Live", image_sha256=image_hash,
+                policy="featured-key-art-v1", model_identity="https://api.example/v1/model-a",
+                context_key="movie",
+            ) is None
+
+    def test_model_identity_strips_credentials_query_and_fragment(self):
+        from unicornio_editor.media.vision_cache import vision_model_identity
+
+        assert vision_model_identity(
+            "https://user:secret@vision.example/v1?token=private#frag", "vision-x"
+        ) == "https://vision.example/vision-x"
+
+    def test_concurrent_process_writes_merge_cache_entries(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as directory:
+            barrier = context.Barrier(6)
+            workers = [
+                context.Process(target=_write_cache_entry_concurrently, args=(directory, index, barrier))
+                for index in range(6)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=15)
+            self.assertTrue(all(worker.exitcode == 0 for worker in workers))
+            cache = read_vision_cache(directory)
+            self.assertEqual(len(cache), 6)
 
 
 if __name__ == "__main__":

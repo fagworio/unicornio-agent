@@ -247,7 +247,31 @@ def test_adaptive_history_reads_real_media_manifest(tmp_path):
     )
     history = _media_rejection_history(tmp_path, 115152)
     assert "unrelated" in history["reasons"]
-    assert "abc" in history["fingerprints"]
+    # Old semantic judgments have no policy version and must not permanently
+    # blacklist a URL/fingerprint under the current editorial policy.
+    assert "https://cdn.test/same.webp" not in history["urls"]
+    assert "abc" not in history["fingerprints"]
+
+
+def test_current_policy_unrelated_remains_a_bounded_rejection(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-current-policy"
+    batch.mkdir(parents=True)
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115152, "audit_candidates": [{
+            "direct_image_url": "https://cdn.test/current.webp",
+            "rejected_reason": "UNRELATED 0.90 other",
+            "sha256": "a" * 64,
+            "evidence": {
+                "verdict": "unrelated",
+                "vision_policy_version": "featured-editorial-v2",
+            },
+        }]}]}),
+        encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115152)
+    assert "unrelated" in history["reasons"]
+    assert "https://cdn.test/current.webp" in history["urls"]
+    assert "a" * 64 in history["fingerprints"]
 
 
 def test_deferred_invalid_media_does_not_blacklist_url(tmp_path):
@@ -1443,10 +1467,12 @@ def test_vision_input_failure_rejects_one_candidate_and_keeps_valid_candidate(mo
     assert candidates[1]["evidence"]["vision_decision"]["visual_type"] == "key_art"
     assert candidates[1]["evidence"]["vision_image_sha256"] == hashlib.sha256(b"hello").hexdigest()
     from unicornio_editor.media.vision_cache import get_cached_decision
+    from unicornio_editor.media.vision_cache import vision_model_identity
     cached = get_cached_decision(
         tmp_path, candidates[1]["direct_image_url"], "Obra B",
         image_sha256=hashlib.sha256(b"hello").hexdigest(),
         policy="subject-match-v1",
+        model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
     )
     assert cached["confidence"] == 0.91
     assert cached["visual_type"] == "key_art"

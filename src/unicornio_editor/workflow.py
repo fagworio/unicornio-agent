@@ -45,7 +45,7 @@ from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.text import sanitize_title
 from .media.source_verify import verify_downloaded_against_source
-from .media.vision_cache import get_cached_decision, set_cached_decision
+from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
 from .media.vision_gate import (
     VisionGateError,
     VisionInputUnavailable,
@@ -54,6 +54,7 @@ from .media.vision_gate import (
     vision_config_ready,
 )
 from .media.vision_policy import (
+    VISION_POLICY_VERSION,
     featured_vision_category,
     featured_vision_subject,
     trusted_featured_evidence,
@@ -1731,6 +1732,8 @@ def _validate_featured_candidate_vision(
             cached = get_cached_decision(
                 cache_root, image_url, cache_subject,
                 image_sha256=image_sha256, policy="featured-key-art-v1",
+                model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                context_key=featured_vision_category(editorial),
             )
             if cached is not None:
                 ok = (
@@ -1777,6 +1780,8 @@ def _validate_featured_candidate_vision(
                 cache_decision,
                 image_sha256=image_sha256,
                 policy="featured-key-art-v1",
+                model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                context_key=featured_vision_category(editorial),
             )
         return {
             "status": "passed" if decision.get("accepted") else "rejected",
@@ -2140,6 +2145,7 @@ def _execute_media_plan(
 
             def _process_item(pair: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
                 position, item = pair
+                vision_evidence_record: dict[str, Any] | None = None
                 evidence = {
                     name: item[name]
                     for name in (
@@ -2262,11 +2268,13 @@ def _execute_media_plan(
                     vision_preflight = preflight_vision.get(position) or {}
                     expected_sha256 = str(vision_preflight.get("image_sha256") or "")
                     decision = None
+                    decision_source = ""
                     if vision_preflight.get("deterministic"):
                         decision = {
                             "accepted": True,
                             "reason": str(vision_preflight.get("reason") or "evidência determinística"),
                         }
+                        decision_source = "deterministic_evidence"
                     elif (
                         vision_preflight.get("status") == "passed"
                         and expected_sha256
@@ -2275,6 +2283,7 @@ def _execute_media_plan(
                         preflight_decision = vision_preflight.get("decision")
                         if isinstance(preflight_decision, dict) and preflight_decision.get("accepted"):
                             decision = preflight_decision
+                            decision_source = "preflight_same_bytes"
                     if decision is None:
                         subject = featured_vision_subject(editorial)
                         cache_subject = vision_cache_subject(editorial)
@@ -2282,6 +2291,8 @@ def _execute_media_plan(
                             root, str(item.get("direct_image_url") or ""),
                             cache_subject, image_sha256=identity.sha256,
                             policy="featured-key-art-v1",
+                            model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                            context_key=featured_vision_category(editorial),
                         )
                         if cached is not None and (
                             cached.get("status") == "MATCH"
@@ -2292,6 +2303,7 @@ def _execute_media_plan(
                                 **cached, "verdict": "accept", "accepted": True,
                                 "reason": str(cached.get("reason") or "cache de bytes idênticos"),
                             }
+                            decision_source = "cache_same_model_context_bytes"
                         else:
                             try:
                                 vision_input = prepare_vision_image_input_from_path(webp)
@@ -2310,6 +2322,7 @@ def _execute_media_plan(
                                     require_key_art=True,
                                     root=root,
                                 )
+                                decision_source = "vision_provider"
                             except (VisionGateError, VisionInputUnavailable) as exc:
                                 decision = {
                                     "status": "ERROR", "confidence": 0.0,
@@ -2317,6 +2330,7 @@ def _execute_media_plan(
                                     "accepted": False,
                                     "reason": f"validacao dos bytes finais falhou: {type(exc).__name__}",
                                 }
+                                decision_source = "vision_provider_error"
                             if decision.get("accepted"):
                                 cache_decision = {
                                     key: decision[key]
@@ -2333,7 +2347,26 @@ def _execute_media_plan(
                                     cache_decision,
                                     image_sha256=identity.sha256,
                                     policy="featured-key-art-v1",
+                                    model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                                    context_key=featured_vision_category(editorial),
                                 )
+                    if decision is not None:
+                        vision_evidence_record = {
+                            key: decision[key]
+                            for key in (
+                                "status", "confidence", "visual_type", "verdict", "detail_used",
+                                "low_status", "low_confidence", "low_visual_type",
+                            )
+                            if key in decision
+                        }
+                        vision_evidence_record.update({
+                            "image_sha256": identity.sha256,
+                            "image_role": "featured",
+                            "policy_version": VISION_POLICY_VERSION,
+                            "decision_source": decision_source,
+                            "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+                            "context_key": featured_vision_category(editorial),
+                        })
                     if not decision.get("accepted"):
                         reason = str(decision.get("reason") or "featured não confirmada visualmente")
                         _funnel("featured_vision_final_bytes", "rejected", item, position, reason)
@@ -2341,6 +2374,7 @@ def _execute_media_plan(
                             "paragraph_index": item.get("paragraph_index"),
                             "status": "rejected",
                             "detail": reason[:200],
+                            **({"vision_evidence": vision_evidence_record} if vision_evidence_record else {}),
                         }
                     _funnel(
                         "featured_vision_final_bytes", "passed", item, position,
@@ -2363,6 +2397,7 @@ def _execute_media_plan(
                     "transparency": transparency, "phash": final_phash,
                     "sha256": identity.sha256, "visual_group_id": identity.visual_group_id,
                     "visual_verification": visual_record,
+                    **({"vision_evidence": vision_evidence_record} if vision_evidence_record else {}),
                 }
                 confirmed_uploads.add(position)
                 # Commit verified work before index/cache/telemetry can fail.

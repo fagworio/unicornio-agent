@@ -12,6 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 4
 
@@ -424,16 +425,30 @@ def record_v2_candidate_decision(
     if not candidate_id:
         return
     evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+    vision = evidence.get("vision_decision") if isinstance(evidence.get("vision_decision"), dict) else {}
     direct_url = str(candidate.get("direct_image_url") or "").strip()
     source_page_url = str(candidate.get("source_page_url") or "").strip()
     reference = json.dumps({
         "verdict": str(evidence.get("verdict") or ""),
-        "source_domain": str(source_page_url).split("/", 3)[2] if "://" in source_page_url else "",
+        "source_domain": (urlsplit(source_page_url).hostname or "").casefold(),
         # Hash URLs rather than storing their query strings: discovery URLs can
         # contain signed parameters, but recovery needs an exact provenance
         # binding for the candidate without retaining those secrets.
         "direct_image_url_sha256": hashlib.sha256(direct_url.encode()).hexdigest() if direct_url else "",
         "source_page_url_sha256": hashlib.sha256(source_page_url.encode()).hexdigest() if source_page_url else "",
+        # Persist a compact, non-sensitive model judgment for later audit.
+        # Never store image payloads, prompt/context text, signed URLs, or raw
+        # provider errors in the registry evidence reference.
+        "vision_decision": {
+            key: vision[key]
+            for key in (
+                "status", "confidence", "visual_type", "verdict", "detail_used",
+                "low_status", "low_confidence", "low_visual_type", "image_sha256",
+                "image_role", "policy_version", "decision_source", "model_identity", "context_key",
+            )
+            if key in vision
+        },
+        "vision_policy_version": str(evidence.get("vision_policy_version") or ""),
     }, sort_keys=True)
     with connect(root) as db:
         db.execute(
