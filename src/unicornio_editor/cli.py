@@ -3423,6 +3423,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "publish-ready":
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
+            published_reconciled = [
+                o for o in published if o.get("publication_kind") == "reconciled"
+            ]
+            published_new = [
+                o for o in published if o.get("publication_kind") != "reconciled"
+            ]
             blocked = [o for o in outcomes if o.get("status") == "blocked"]
             errors = [o for o in outcomes if o.get("status") == "error"]
             retryable = [o for o in outcomes if o.get("status") == "retry"]
@@ -3430,11 +3436,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if published or blocked or errors or retryable:
                 result = {
                     "published": len(published),
+                    "published_new": len(published_new),
+                    "published_reconciled": len(published_reconciled),
                     "posts": [
                         {
                             "post_id": o.get("post_id"),
                             "link": o.get("link"),
                             "published_at": o.get("published_at"),
+                            "publication_kind": o.get("publication_kind", "new"),
                         }
                         for o in published
                     ],

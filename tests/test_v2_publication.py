@@ -1,5 +1,6 @@
 import copy
 import json
+from unittest import mock
 
 import pytest
 
@@ -306,3 +307,61 @@ def test_publisher_reconciles_uncertain_marker_even_when_post_left_pending_queue
     assert outcomes[0]["reconciled"] is True
     assert client.publish_calls == []
     assert not marker.exists()
+
+
+def test_reconciled_publication_does_not_consume_new_publish_quota(tmp_path):
+    class QueueClient(FakePublicationClient):
+        def list_pending(self, page=1, per_page=100):
+            return [
+                {
+                    "id": 1,
+                    "status": "pending",
+                    "meta": {"_hermes_state": "ready"},
+                },
+                {
+                    "id": 2,
+                    "status": "pending",
+                    "meta": {"_hermes_state": "ready"},
+                },
+            ] if page == 1 else []
+
+    client = QueueClient(_ready_post())
+    reconciled = {
+        "post_id": 999,
+        "status": "published",
+        "wordpress_changed": True,
+        "reconciled": True,
+        "publication_kind": "reconciled",
+    }
+
+    with mock.patch(
+        "unicornio_editor.workflow._reconcile_persisted_uncertain_publications",
+        return_value=[reconciled],
+    ), mock.patch(
+        "unicornio_editor.workflow.publish_post",
+        side_effect=lambda _client, _config, _root, post_id: {
+            "post_id": post_id,
+            "status": "published",
+            "wordpress_changed": True,
+            "publication_kind": "new",
+        },
+    ) as publish:
+        outcomes = publish_ready_posts(client, _config(), tmp_path, limit=1)
+
+    assert [call.args[-1] for call in publish.call_args_list] == [1]
+    assert [outcome["publication_kind"] for outcome in outcomes] == ["reconciled", "new"]
+
+
+def test_persisted_uncertain_reconciliation_respects_dry_run(tmp_path):
+    client = FakePublicationClient(_ready_post())
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    outcomes = publish_ready_posts(client, _config(dry_run=True), tmp_path, limit=1)
+
+    assert outcomes[0]["status"] == "skipped"
+    assert outcomes[0]["dry_run"] is True
+    assert marker.exists()
+    assert client.updates == []
+    assert client.publish_calls == []

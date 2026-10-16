@@ -425,6 +425,43 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(report["skipped_count"], 1)
         self.assertEqual(report["error_count"], 1)
 
+    def test_publish_ready_report_separates_new_and_reconciled_publications(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        outcomes = [
+            {
+                "post_id": 115290,
+                "status": "published",
+                "wordpress_changed": True,
+                "reconciled": True,
+                "publication_kind": "reconciled",
+            },
+            {
+                "post_id": 115234,
+                "status": "published",
+                "wordpress_changed": True,
+                "publication_kind": "new",
+            },
+        ]
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "publish_ready_posts", return_value=outcomes), \
+                    redirect_stdout(output):
+                code = cli.main(["publish-ready", "--root", str(root)])
+
+        report = json.loads(output.getvalue())
+        assert code == 0
+        assert report["published"] == 2
+        assert report["published_new"] == 1
+        assert report["published_reconciled"] == 1
+        assert [post["publication_kind"] for post in report["posts"]] == ["reconciled", "new"]
+
     def test_vision_batch_does_not_write_url_only_legacy_cache(self):
         from unicornio_editor import cli
         from unicornio_editor.config import Config

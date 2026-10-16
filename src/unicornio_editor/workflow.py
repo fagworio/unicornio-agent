@@ -3275,6 +3275,7 @@ def _reconcile_uncertain_publication(
         }
     _clear_uncertain_publication(root, post_id)
     append_telemetry(root, "post_publication_reconciled", post_id=post_id)
+    append_telemetry(root, "post_published_reconciled", post_id=post_id)
     append_telemetry(
         root,
         "v2_funnel",
@@ -3290,6 +3291,7 @@ def _reconcile_uncertain_publication(
         "integrity": "reconciled_after_uncertain_write",
         "state": STATE_PUBLISHED,
         "reconciled": True,
+        "publication_kind": "reconciled",
     }
 
 
@@ -3678,6 +3680,7 @@ def _publish_now(
             "integrity": "reconciled_after_uncertain_write",
             "state": STATE_PUBLISHED,
             "reconciled": True,
+            "publication_kind": "reconciled",
         }
     try:
         _sync_published_readback(
@@ -3713,6 +3716,7 @@ def _publish_now(
         "published_at": published_at,
         "integrity": integrity,
         "state": STATE_PUBLISHED,
+        "publication_kind": "new",
     }
 
 
@@ -3786,8 +3790,13 @@ def publish_ready_posts(
         # não deixava motivo na resposta — o READY voltava a cada janela e era
         # bloqueado em silêncio para sempre. Agora o próprio publish_post
         # devolve status=blocked, grava o estado e registra a telemetria.
-        published = sum(1 for outcome in outcomes if outcome.get("wordpress_changed"))
-        if limit and published >= limit:
+        published_new = sum(
+            1
+            for outcome in outcomes
+            if outcome.get("wordpress_changed")
+            and outcome.get("publication_kind") != "reconciled"
+        )
+        if limit and published_new >= limit:
             break
         try:
             outcome = publish_post(client, config, root, candidate_id)
@@ -3827,7 +3836,31 @@ def _reconcile_persisted_uncertain_publications(
         except ValueError:
             continue
         try:
-            post = client.get_post(post_id)
+            with _acquire_post_lock(root, config, post_id):
+                post = client.get_post(post_id)
+                if config.dry_run:
+                    outcomes.append({
+                        "post_id": post_id,
+                        "wordpress_changed": False,
+                        "status": "skipped",
+                        "reason": "dry-run: reconciliação remota não sincronizada",
+                        "dry_run": True,
+                        "uncertain": True,
+                        "state": STATE_READY,
+                    })
+                    continue
+                meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+                outcome = _reconcile_uncertain_publication(
+                    client,
+                    config,
+                    root,
+                    post,
+                    post_id,
+                    ready_hash=str(meta.get(META_READY_HASH) or ""),
+                    ready_manifest=meta.get(META_READY_MANIFEST)
+                    if isinstance(meta.get(META_READY_MANIFEST), str)
+                    else None,
+                )
         except Exception as exc:  # noqa: BLE001 - keep fence for next window
             append_telemetry(
                 root,
@@ -3844,18 +3877,6 @@ def _reconcile_persisted_uncertain_publications(
                 "state": STATE_READY,
             })
             continue
-        meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
-        outcome = _reconcile_uncertain_publication(
-            client,
-            config,
-            root,
-            post,
-            post_id,
-            ready_hash=str(meta.get(META_READY_HASH) or ""),
-            ready_manifest=meta.get(META_READY_MANIFEST)
-            if isinstance(meta.get(META_READY_MANIFEST), str)
-            else None,
-        )
         if outcome is not None:
             outcomes.append(outcome)
         else:
