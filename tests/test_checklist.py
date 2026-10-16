@@ -913,6 +913,54 @@ class ChecklistTests(unittest.TestCase):
         assert result["media_decision"]["waiver_reason"] == "enrichment_search_exhausted"
         assert result["media_decision"]["waiver_basis"]["accepted"] == 1
 
+    def test_exhausted_search_waives_zero_inline_for_normal_article(self):
+        content = (
+            "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
+            "<p>Mais informações sobre Redfall para o leitor.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(featured_media=7),
+            editorial=editorial_payload(
+                game_name="Redfall",
+                cleaned_html=content,
+                seo={
+                    "title": "Redfall recebe novidades importantes",
+                    "meta_description": "Redfall recebe novidades importantes, com detalhes sobre a obra, contexto, lançamento e informações confirmadas para o leitor.",
+                    "focus_keyword": "Redfall",
+                },
+                trailer_unavailable=True,
+                trailer_search_evidence={
+                    "result": "official_not_found",
+                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "provider": "youtube",
+                    "query": "Redfall trailer",
+                },
+            ),
+            content=content,
+            media_context={
+                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED"},
+                "inline": {"required": 2, "accepted": []},
+                "featured": {
+                    "status": "valid",
+                    "media_id": 7,
+                    "media_url": "https://media.example/redfall-1280x720.webp",
+                    "sha256": "f" * 64,
+                    "phash": "f" * 16,
+                    "visual_group_id": "visual:featured",
+                    "visual_verification": {"decision": "INITIAL"},
+                },
+                "visual_identity_policy": 4,
+                "visual_identity_evidence_valid": True,
+            },
+        )
+
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        assert item["status"] == "pass"
+        assert result["all_passed"] is True
+        assert result["media_decision"]["waiver_applied"] is True
+        assert result["media_decision"]["waiver_basis"]["accepted"] == 0
+
     def test_second_enrichment_round_does_not_waive_normal_article_without_faking_missing(self):
         content = (
             "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"

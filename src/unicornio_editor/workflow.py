@@ -3091,10 +3091,9 @@ def _publish_v2_media_context(
     required = inline.get("required", 0)
     if not isinstance(required, int) or isinstance(required, bool) or required < 0:
         required = 0
-    accepted = inline.get("accepted")
-    accepted_is_list = isinstance(accepted, list)
-    if not accepted_is_list:
-        accepted = []
+    raw_accepted = inline.get("accepted")
+    accepted_is_list = isinstance(raw_accepted, list)
+    accepted = raw_accepted if accepted_is_list else []
     featured = media.get("featured")
     featured_is_mapping = isinstance(featured, dict)
     if not featured_is_mapping:
@@ -3125,25 +3124,24 @@ def _publish_v2_media_context(
         isinstance(raw_media, dict)
         and isinstance(raw_inline, dict)
         and accepted_is_list
-        and len(accepted) == len(raw_inline.get("accepted", []))
+        and isinstance(raw_inline.get("accepted"), list)
+        and len(accepted) == len(raw_inline["accepted"])
         and len(accepted_urls) == len(accepted)
         and featured_is_mapping
-        and bool(accepted_urls)
         and accepted_urls.issubset(current_urls)
+        and (bool(accepted_urls) or not current_urls)
         and featured_matches
     )
-    context: dict[str, Any] = {
-        "visual_identity_policy": 4,
-        "visual_identity_evidence_valid": evidence_matches_current_media,
-        "inline": {
-            "required": required,
-            "accepted": accepted,
-        },
-        "featured": featured,
-    }
-    for key in ("search", "enrichment_round"):
-        if key in media:
-            context[key] = media[key]
+    # Keep the exact persisted V2 media contract (including search and waiver
+    # evidence) and add only the read-back fact that the publisher can know.
+    # ProductionValidateStage passes this same serialized shape to the
+    # checklist before READY is written; rebuilding a reduced mapping here was
+    # a source of validation drift.
+    context: dict[str, Any] = dict(media)
+    context["visual_identity_policy"] = 4
+    context["visual_identity_evidence_valid"] = evidence_matches_current_media
+    context["inline"] = {**inline, "required": required, "accepted": accepted}
+    context["featured"] = featured
     return context
 
 

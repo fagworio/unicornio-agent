@@ -2186,6 +2186,28 @@ class WorkflowTests(unittest.TestCase):
             self.assertIsNotNone(context)
             self.assertTrue(context["visual_identity_evidence_valid"])
 
+    def test_v2_context_preserves_waiver_and_allows_empty_inline_evidence(self):
+        state = {
+            "media": {
+                "inline": {"required": 2, "accepted": [], "accepted_count": 0, "missing": 2},
+                "featured": {"status": "valid", "media_id": 7, "media_url": "https://media.example/featured.webp"},
+                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED"},
+                "enrichment_round": 1,
+                "waiver": {"applied": True, "reason": "enrichment_search_exhausted"},
+            }
+        }
+        post = {
+            "status": "pending",
+            "featured_media": 7,
+            "content": {"raw": "<p>Texto sem imagens inline.</p>"},
+        }
+
+        context = _publish_v2_media_context(state, post)
+
+        self.assertIsNotNone(context)
+        self.assertTrue(context["visual_identity_evidence_valid"])
+        self.assertEqual(context["waiver"]["reason"], "enrichment_search_exhausted")
+
     def test_publish_v2_featured_read_failure_retries_without_blocking_or_publishing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1075,11 +1075,13 @@ def run_pre_publish_checklist(
     )
     waiver_basis = None
     waiver_applied = False
-    # A normal article may publish with fewer inline frames only when the
-    # executable search really completed as EXHAUSTED, at least one distinct
-    # inline frame survived, and every other checklist gate—including the
-    # featured identity/vision gates—passed.  Editorial flags and provider
-    # errors never qualify; listicles retain their per-item coverage contract.
+    # A normal article may publish with fewer inline frames when the executable
+    # search really completed as EXHAUSTED and every other checklist gate—
+    # including the featured identity/vision gates—passed. The featured image
+    # is the minimum visual requirement in this narrow, audited case; zero
+    # inline frames is valid only after the search evidence proves exhaustion.
+    # Editorial flags and provider errors never qualify; listicles retain their
+    # per-item coverage contract.
     other_failures = [
         item for item in items
         if item.get("name") != "imagens_no_corpo"
@@ -1102,7 +1104,6 @@ def run_pre_publish_checklist(
     if (
         not is_list
         and image_count < required
-        and image_count >= 1
         and search_completed
         and search_exhausted
         and search_completion_reason == "EXHAUSTED"
