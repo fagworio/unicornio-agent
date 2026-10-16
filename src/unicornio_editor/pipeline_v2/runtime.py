@@ -75,6 +75,24 @@ def _embedded_media_urls(content: str) -> list[str]:
     ]
 
 
+def _assert_candidate_media_contract(content: str, media: MediaProgress | None) -> None:
+    """Reject inline HTML that is not present in the approved V2 media contract."""
+    allowed_urls = {
+        _canonical_embedded_media_url(str(item.media_url or ""))
+        for item in getattr(media, "inline", ())
+        if str(item.media_url or "").strip()
+    }
+    unexpected_urls = [
+        url for url in _embedded_media_urls(content)
+        if url not in allowed_urls
+    ]
+    if unexpected_urls:
+        raise RuntimeError(
+            "unexpected inline media in candidate contract: "
+            + ", ".join(unexpected_urls[:5])
+        )
+
+
 def _required_image_count_for_editorial(content: str, *, title: str = "") -> int:
     """Use the canonical helper while honoring legacy test integrations.
 
@@ -1838,6 +1856,11 @@ class WordPressWriterV2:
             else proposed_media
         )
         candidate_media_present = outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
+        if outcome.type.value == "ready" and content:
+            _assert_candidate_media_contract(
+                content,
+                candidate_media if candidate_media_present else proposed_media,
+            )
         if candidate_media_present:
             proposed_inline_by_id = {
                 int(item.media_id): item

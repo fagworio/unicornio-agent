@@ -458,11 +458,13 @@ def test_writer_rejects_unexpected_inline_media_when_v2_contract_is_empty(tmp_pa
                 "featured_media": 0,
                 "meta": {},
             }
+            self.updates = []
 
         def get_post(self, _post_id):
             return self.post
 
         def update_post(self, _post_id, update):
+            self.updates.append(update)
             self.post.update({key: value for key, value in update.items() if key != "meta"})
             if "meta" in update:
                 self.post["meta"].update(update["meta"])
@@ -501,8 +503,12 @@ def test_writer_rejects_unexpected_inline_media_when_v2_contract_is_empty(tmp_pa
         media=media,
     )
 
+    client = Client()
     with pytest.raises(RuntimeError, match="unexpected inline media"):
-        WordPressWriterV2(Client(), tmp_path).commit(131, {"post_id": 131}, state, Outcome.ready())
+        WordPressWriterV2(client, tmp_path).commit(131, {"post_id": 131}, state, Outcome.ready())
+    assert client.updates == []
+    assert client.post["content"] == {"raw": "<p>antigo</p>"}
+    assert client.post["featured_media"] == 0
 
 
 def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(tmp_path):
