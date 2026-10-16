@@ -226,3 +226,65 @@ def test_publish_failure_after_wordpress_success_is_telemetrized(tmp_path):
     assert client.publish_calls
     events = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
     assert "publish_v2_sync_failed" in events
+
+
+def _pending_ready_post():
+    post = _ready_post()
+    post["status"] = "pending"
+    state = json.loads(post["meta"]["_hermes_work_state"])
+    state["state"] = "ready"
+    state["phase"] = "validate"
+    post["meta"]["_hermes_state"] = "ready"
+    post["meta"]["_hermes_work_state"] = json.dumps(state, separators=(",", ":"))
+    return post
+
+
+def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path):
+    class TimeoutAfterCommitClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            result = super().publish(post_id, **kwargs)
+            raise TimeoutError("read operation timed out")
+
+    client = TimeoutAfterCommitClient(_pending_ready_post())
+    post = client.post
+    result = _publish_now(
+        client,
+        _config(),
+        post["id"],
+        root=tmp_path,
+        integrity="manifest_match",
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"],
+    )
+
+    assert result["status"] == "published"
+    assert result["reconciled"] is True
+    assert len(client.publish_calls) == 1
+    assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "published"
+    assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json").exists()
+    events = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+    assert "post_publication_reconciled" in events
+
+
+def test_publish_timeout_before_commit_is_retryable_and_not_marked_published(tmp_path):
+    class TimeoutBeforeCommitClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            self.publish_calls.append((post_id, kwargs))
+            raise TimeoutError("connect timed out")
+
+    client = TimeoutBeforeCommitClient(_pending_ready_post())
+    result = _publish_now(
+        client,
+        _config(),
+        client.post["id"],
+        root=tmp_path,
+        integrity="manifest_match",
+        ready_hash=client.post["meta"]["_hermes_ready_hash"],
+        ready_manifest=client.post["meta"]["_hermes_ready_manifest"],
+    )
+
+    assert result["status"] == "retry"
+    assert not result.get("uncertain", False)
+    assert client.post["status"] == "pending"
+    assert client.post["meta"]["_hermes_state"] == "ready"
+    assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json").exists()

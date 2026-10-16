@@ -1472,29 +1472,40 @@ class ProductionMediaResolver:
                 and queries_attempted >= queries_planned
                 and queries_completed == queries_planned
             )
+            previous_search = previous.search
             search_progress = MediaSearchProgress(
                 completed=search_completed,
                 # Exhaustion is finalized below, after the executable media
                 # plan has produced its final WebP pHashes.  Discovery-level
                 # candidates may collapse into duplicates during conversion.
                 exhausted=False,
-                queries_attempted=queries_attempted,
+                queries_attempted=previous_search.queries_attempted + queries_attempted,
                 engines_attempted=tuple(dict.fromkeys(
-                    str(engine)
-                    for run in search_runs
-                    for engine in (run.get("engines_attempted") or [])
+                    [*previous_search.engines_attempted,
+                     *(
+                         str(engine)
+                         for run in search_runs
+                         for engine in (run.get("engines_attempted") or [])
+                     )]
                 )),
                 engines_disabled=tuple(dict.fromkeys(
-                    str(engine)
-                    for run in search_runs
-                    for engine in (run.get("engines_disabled") or [])
+                    [*previous_search.engines_disabled,
+                     *(
+                         str(engine)
+                         for run in search_runs
+                         for engine in (run.get("engines_disabled") or [])
+                     )]
                 )),
-                candidates_seen=sum(int(run.get("candidates_seen") or 0) for run in search_runs),
-                candidates_rejected=sum(int(run.get("candidates_rejected") or 0) for run in search_runs),
+                candidates_seen=previous_search.candidates_seen + sum(
+                    int(run.get("candidates_seen") or 0) for run in search_runs
+                ),
+                candidates_rejected=previous_search.candidates_rejected + sum(
+                    int(run.get("candidates_rejected") or 0) for run in search_runs
+                ),
                 distinct_valid_frames=0,
-                queries_planned=queries_planned,
-                queries_completed=queries_completed,
-                completion_reason=completion_reason,
+                queries_planned=previous_search.queries_planned + queries_planned,
+                queries_completed=previous_search.queries_completed + queries_completed,
+                completion_reason=completion_reason or previous_search.completion_reason,
             )
             final_distinct = {
                 item_id for item_id in account_visual_media(

@@ -34,6 +34,7 @@ from .manifest import (
     serialize_manifest,
 )
 from .media.converter import (
+    MediaConversionError,
     convert_to_webp,
     image_dimensions,
     image_has_transparency,
@@ -1824,7 +1825,7 @@ def _validate_featured_candidate_vision(
     if not image_url or not subject:
         return {"status": "rejected", "reason": "featured sem URL ou assunto para validar por visao"}
 
-    if config.vision_mode == "ambiguous" and not media_id:
+    if getattr(config, "vision_mode", "ambiguous") == "ambiguous" and not media_id:
         deterministic_reason = trusted_featured_evidence(
             image_url=image_url,
             source_page_url=str(item.get("source_page_url") or ""),
@@ -1840,7 +1841,8 @@ def _validate_featured_candidate_vision(
             }
 
     ready, message = vision_config_ready(
-        enabled=config.vision_enabled, api_key=config.vision_api_key
+        enabled=bool(getattr(config, "vision_enabled", False)),
+        api_key=str(getattr(config, "vision_api_key", "")),
     )
     if not ready:
         return {"status": "skipped", "reason": message}
@@ -1859,7 +1861,10 @@ def _validate_featured_candidate_vision(
             cached = get_cached_decision(
                 cache_root, image_url, cache_subject,
                 image_sha256=image_sha256, policy="featured-key-art-v1",
-                model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                model_identity=vision_model_identity(
+                    getattr(config, "vision_base_url", ""),
+                    getattr(config, "vision_model", "gpt-4o-mini"),
+                ),
                 context_key=vision_context_key,
             )
             if cached is not None:
@@ -1879,17 +1884,17 @@ def _validate_featured_candidate_vision(
             decision = verify_image_subject_decision(
                 image_url=vision_input,
                 subject=subject,
-                api_key=config.vision_api_key,
-                base_url=config.vision_base_url,
-                model=config.vision_model,
-                timeout=config.http_timeout,
+                api_key=str(getattr(config, "vision_api_key", "")),
+                base_url=str(getattr(config, "vision_base_url", "")),
+                model=str(getattr(config, "vision_model", "gpt-4o-mini")),
+                timeout=float(getattr(config, "http_timeout", 30)),
                 context=(
                     f"{editorial_context} | preflight da imagem de destaque"
                     if editorial_context else "preflight da imagem de destaque do artigo"
                 ),
                 category=featured_vision_category(editorial),
                 alt=str(item.get("alt_text") or subject),
-                detail=config.vision_detail,
+                detail=str(getattr(config, "vision_detail", "low")),
                 allow_high=True,
                 require_key_art=True,
                 root=root,
@@ -1911,7 +1916,10 @@ def _validate_featured_candidate_vision(
                 cache_decision,
                 image_sha256=image_sha256,
                 policy="featured-key-art-v1",
-                model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
+                model_identity=vision_model_identity(
+                    getattr(config, "vision_base_url", ""),
+                    getattr(config, "vision_model", "gpt-4o-mini"),
+                ),
                 context_key=vision_context_key,
             )
         return {
@@ -1926,6 +1934,16 @@ def _validate_featured_candidate_vision(
             "status": "error",
             "technical": True,
             "reason": f"visao da featured falhou: {exc}",
+            "cached": False,
+        }
+    except MediaConversionError as exc:
+        # A portrait/invalid source is a deterministic candidate rejection,
+        # not an outage of the vision provider.  Keeping this distinction
+        # prevents an endless technical retry loop for an incompatible image.
+        return {
+            "status": "rejected",
+            "technical": False,
+            "reason": f"featured incompatível com a normalização: {exc}",
             "cached": False,
         }
     except Exception as exc:  # noqa: BLE001 - fail closed
@@ -3129,6 +3147,145 @@ def _publish_v2_media_context(
     return context
 
 
+def _uncertain_publication_path(root: Path, post_id: int) -> Path:
+    return root / "work" / "v2-publication-uncertain" / f"{int(post_id)}.json"
+
+
+def _mark_uncertain_publication(root: Path, post_id: int, error: Exception | str) -> None:
+    """Persist a local fence after a publish request with unknown outcome.
+
+    A timeout can happen after WordPress commits the post but before the client
+    receives the response.  The marker makes the next invocation reconcile the
+    remote status first instead of issuing a blind second publish request.
+    """
+    try:
+        atomic_write_text(
+            _uncertain_publication_path(root, post_id),
+            json.dumps(
+                {
+                    "post_id": int(post_id),
+                    "status": "uncertain",
+                    "error_type": type(error).__name__ if isinstance(error, Exception) else "Error",
+                    "error": str(error)[:240],
+                    "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    except OSError:
+        # The remote read-back below remains the primary safety mechanism.  A
+        # filesystem failure must not turn a known pending post into a publish.
+        pass
+
+
+def _clear_uncertain_publication(root: Path, post_id: int) -> None:
+    try:
+        _uncertain_publication_path(root, post_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _sync_published_readback(
+    client: WordPressClient,
+    config: Config,
+    post_id: int,
+    *,
+    root: Path | None,
+    ready_hash: str,
+    ready_manifest: str | None,
+) -> dict[str, Any]:
+    """Synchronize V2 state and verify an already-published WordPress post."""
+    from dataclasses import replace as _replace
+    from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase
+    from .pipeline_v2.operational import WordPressStateBackend as _V2Backend
+    from .pipeline_v2.state_store import StateStore as _V2Store
+
+    v2_post = client.get_post(post_id)
+    if v2_post.get("status") != "publish":
+        raise WorkflowError("WordPress publish read-back mismatch")
+    if read_state(v2_post).get("state") != STATE_PUBLISHED:
+        raise WorkflowError("legacy publish read-back mismatch")
+    v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
+    if "_hermes_work_state" in v2_meta:
+        v2_store = _V2Store(_V2Backend(client))
+        v2_current = v2_store.load(post_id)
+        v2_store.mark_published(
+            post_id,
+            _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None),
+        )
+        v2_verified = v2_store.load(post_id)
+        if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
+            raise WorkflowError("V2 state read-back mismatch after publish")
+    verified_post = client.get_post(post_id)
+    verified_meta = verified_post.get("meta", {}) if isinstance(verified_post, dict) else {}
+    if verified_post.get("status") != "publish" or read_state(verified_post).get("state") != STATE_PUBLISHED:
+        raise WorkflowError("publication read-back mismatch")
+    if ready_hash and verified_meta.get(META_READY_HASH) != ready_hash:
+        raise WorkflowError("ready hash read-back mismatch after publish")
+    if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
+        raise WorkflowError("ready manifest read-back mismatch after publish")
+    return verified_post
+
+
+def _reconcile_uncertain_publication(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post: dict[str, Any],
+    post_id: int,
+    *,
+    ready_hash: str,
+    ready_manifest: str | None,
+) -> dict[str, Any] | None:
+    """Resolve a previous ambiguous publish before allowing another write.
+
+    Returns an outcome when the request must stop.  ``None`` means the remote
+    post was read as pending and it is safe for the caller to try publishing.
+    """
+    marker = _uncertain_publication_path(root, post_id)
+    if not marker.is_file():
+        return None
+    if post.get("status") == "pending":
+        _clear_uncertain_publication(root, post_id)
+        return None
+    if post.get("status") != "publish" or read_state(post).get("state") != STATE_PUBLISHED:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "resultado anterior da publicação permanece incerto; status remoto não confirma publicação",
+            "state": STATE_READY,
+        }
+    try:
+        _sync_published_readback(
+            client, config, post_id, root=root,
+            ready_hash=ready_hash,
+            ready_manifest=ready_manifest,
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve the no-blind-retry fence
+        _mark_uncertain_publication(root, post_id, exc)
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": f"publicação já pode ter ocorrido, mas a reconciliação falhou: {exc}",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    _clear_uncertain_publication(root, post_id)
+    append_telemetry(root, "post_publication_reconciled", post_id=post_id)
+    return {
+        "post_id": post_id,
+        "wordpress_changed": True,
+        "status": "published",
+        "status_after": "publish",
+        "integrity": "reconciled_after_uncertain_write",
+        "state": STATE_PUBLISHED,
+        "reconciled": True,
+    }
+
+
 def _publish_post_unlocked(
     client: WordPressClient,
     config: Config,
@@ -3147,6 +3304,20 @@ def _publish_post_unlocked(
     nunca são tocados aqui — pertencem à fila de rework/do agente.
     """
     post = client.get_post(post_id)
+    post_meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    uncertain_outcome = _reconcile_uncertain_publication(
+        client,
+        config,
+        root,
+        post,
+        post_id,
+        ready_hash=str(post_meta.get(META_READY_HASH) or ""),
+        ready_manifest=post_meta.get(META_READY_MANIFEST)
+        if isinstance(post_meta.get(META_READY_MANIFEST), str)
+        else None,
+    )
+    if uncertain_outcome is not None:
+        return uncertain_outcome
     if post.get("status") != "pending":
         return {
             "post_id": post_id,
@@ -3408,42 +3579,92 @@ def _publish_now(
     }
     if ready_manifest is not None:
         publish_meta[META_READY_MANIFEST] = ready_manifest
-    result = client.publish(
-        post_id,
-        meta={"_ai_editor_published_at": published_at, **publish_meta},
-        # Política do dono: post antigo em pending publica como data corrente
-        # (não fica enterrado no passado do site).
-        date_gmt=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-    )
-    # Keep the V2 lifecycle synchronized with the existing publisher. This is
-    # a second, explicit state write; it never changes content or status.
-    from dataclasses import replace as _replace
-    from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase
-    from .pipeline_v2.operational import WordPressStateBackend as _V2Backend
-    from .pipeline_v2.state_store import StateStore as _V2Store
     try:
-        v2_post = client.get_post(post_id)
-        if v2_post.get("status") != "publish":
-            raise WorkflowError("WordPress publish read-back mismatch")
-        if read_state(v2_post).get("state") != STATE_PUBLISHED:
-            raise WorkflowError("legacy publish read-back mismatch")
-        v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
-        if "_hermes_work_state" in v2_meta:
-            v2_store = _V2Store(_V2Backend(client))
-            v2_current = v2_store.load(post_id)
-            v2_store.mark_published(post_id, _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None))
-            v2_verified = v2_store.load(post_id)
-            if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
-                raise WorkflowError("V2 state read-back mismatch after publish")
-        verified_post = client.get_post(post_id)
-        verified_meta = verified_post.get("meta", {}) if isinstance(verified_post, dict) else {}
-        if verified_post.get("status") != "publish" or read_state(verified_post).get("state") != STATE_PUBLISHED:
-            raise WorkflowError("publication read-back mismatch")
-        if ready_hash and verified_meta.get(META_READY_HASH) != ready_hash:
-            raise WorkflowError("ready hash read-back mismatch after publish")
-        if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
-            raise WorkflowError("ready manifest read-back mismatch after publish")
+        result = client.publish(
+            post_id,
+            meta={"_ai_editor_published_at": published_at, **publish_meta},
+            # Política do dono: post antigo em pending publica como data corrente
+            # (não fica enterrado no passado do site).
+            date_gmt=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+    except Exception as exc:  # noqa: BLE001 - POST outcome may be ambiguous
+        try:
+            observed = client.get_post(post_id)
+        except Exception as read_exc:  # noqa: BLE001 - preserve the fence
+            _mark_uncertain_publication(root or Path("."), post_id, exc)
+            append_telemetry(
+                root or Path("."),
+                "publish_outcome_uncertain",
+                post_id=post_id,
+                publish_error=type(exc).__name__,
+                read_error=type(read_exc).__name__,
+            )
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "resultado da publicação incerto; leitura de reconciliação também falhou",
+                "retryable": True,
+                "uncertain": True,
+                "state": STATE_READY,
+            }
+        if observed.get("status") == "pending":
+            _clear_uncertain_publication(root or Path("."), post_id)
+            append_telemetry(root or Path("."), "publish_write_not_applied", post_id=post_id)
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": f"publicação não confirmada; post continua pending ({type(exc).__name__})",
+                "retryable": True,
+                "state": STATE_READY,
+            }
+        try:
+            reconciled_post = _sync_published_readback(
+                client,
+                config,
+                post_id,
+                root=root,
+                ready_hash=ready_hash,
+                ready_manifest=ready_manifest,
+            )
+        except Exception as sync_exc:  # noqa: BLE001 - do not retry blindly
+            _mark_uncertain_publication(root or Path("."), post_id, sync_exc)
+            append_telemetry(
+                root or Path("."),
+                "publish_outcome_uncertain",
+                post_id=post_id,
+                publish_error=type(exc).__name__,
+                read_status=str(observed.get("status") or ""),
+                reconciliation_error=type(sync_exc).__name__,
+            )
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": f"post pode ter sido publicado, mas a reconciliação falhou: {sync_exc}",
+                "retryable": True,
+                "uncertain": True,
+                "state": STATE_READY,
+            }
+        _clear_uncertain_publication(root or Path("."), post_id)
+        append_telemetry(root or Path("."), "post_publication_reconciled", post_id=post_id)
+        return {
+            "post_id": post_id,
+            "wordpress_changed": True,
+            "status": "published",
+            "status_after": reconciled_post.get("status"),
+            "integrity": "reconciled_after_uncertain_write",
+            "state": STATE_PUBLISHED,
+            "reconciled": True,
+        }
+    try:
+        _sync_published_readback(
+            client, config, post_id, root=root,
+            ready_hash=ready_hash, ready_manifest=ready_manifest,
+        )
     except Exception as exc:
+        _mark_uncertain_publication(root or Path("."), post_id, exc)
         try:
             append_telemetry(
                 root or Path("."),
@@ -3454,6 +3675,7 @@ def _publish_now(
         except Exception:  # noqa: BLE001 - telemetry must not hide the root failure
             pass
         raise
+    _clear_uncertain_publication(root or Path("."), post_id)
     return {
         "post_id": post_id,
         "wordpress_changed": True,
