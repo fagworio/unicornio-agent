@@ -2395,6 +2395,19 @@ def run_v2(
             context["candidate_must_be_fresh"] = initial.phase is not Phase.VALIDATE
             buffered = BufferedStateStore(initial)
             try:
+                from ..observability import append_telemetry
+
+                append_telemetry(
+                    root,
+                    "v2_funnel",
+                    stage="selected",
+                    post_id=int(post_id),
+                    run_id=run_id,
+                    initial_state=initial.state.value,
+                )
+            except Exception:
+                pass
+            try:
                 # Mark the transaction before any provider/media work. If the
                 # process dies after an upload, recovery must not mistake the
                 # previous committed journal for a completed run.
@@ -2501,6 +2514,25 @@ def run_v2(
                     "detail": outcome.detail or context.get("provider_reason"),
                     **write,
                 })
+                try:
+                    from ..observability import append_telemetry
+
+                    funnel_fields = {
+                        "post_id": int(post_id),
+                        "run_id": run_id,
+                        "outcome": outcome.type.value,
+                        "blocker": outcome.blocker.value if outcome.blocker else None,
+                    }
+                    append_telemetry(root, "v2_funnel", stage="processed", **funnel_fields)
+                    written_state = write.get("state")
+                    if (
+                        outcome.type.value == "ready"
+                        and isinstance(written_state, dict)
+                        and written_state.get("state") == "ready"
+                    ):
+                        append_telemetry(root, "v2_funnel", stage="ready", **funnel_fields)
+                except Exception:
+                    pass
             except Exception as exc:  # noqa: BLE001 - isolate one post
                 failed += 1
                 details.append({
@@ -2510,13 +2542,33 @@ def run_v2(
                     "blocker": "internal_error",
                     "detail": str(exc)[:400],
                 })
+                try:
+                    from ..observability import append_telemetry
+
+                    append_telemetry(
+                        root,
+                        "v2_funnel",
+                        stage="failed",
+                        post_id=int(post_id),
+                        run_id=run_id,
+                        blocker="internal_error",
+                    )
+                except Exception:
+                    pass
                 continue
+        funnel = {
+            "selected": len(selected),
+            "processed": completed,
+            "ready": sum(1 for detail in details if detail.get("outcome") == "ready"),
+            "failed": failed,
+        }
         return {
             "selected": len(selected),
             "completed": completed,
             "failed": failed,
             "locked": False,
             "queue": queue,
+            "funnel": funnel,
             "details": details,
         }
     finally:

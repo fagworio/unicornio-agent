@@ -202,6 +202,11 @@ class ObservabilityTests(unittest.TestCase):
                 accepted_media=2, inline_applied=2, inline_readback=2,
                 readback=True,
             )
+            append_telemetry(root, "v2_funnel", stage="selected", post_id=1)
+            append_telemetry(root, "v2_funnel", stage="processed", post_id=1)
+            append_telemetry(root, "v2_funnel", stage="ready", post_id=1)
+            append_telemetry(root, "v2_funnel", stage="publish_attempted", post_id=1)
+            append_telemetry(root, "v2_funnel", stage="published", post_id=1)
             summary = read_telemetry_summary(root)
             self.assertEqual(summary["production"]["unique_ready_posts"], 2)
             # NOME CORRETO: dos READY, quantos foram de primeira (não é taxa de
@@ -218,6 +223,16 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(summary["media_source_summary"][0]["source_accepted"], 2)
             self.assertEqual(summary["media_source_summary"][0]["reused"], 1)
             self.assertEqual(summary["media_apply_readback"][0]["inline_readback"], 2)
+            self.assertEqual(
+                summary["funnel"],
+                {
+                    "selected": 1,
+                    "processed": 1,
+                    "ready": 1,
+                    "publish_attempted": 1,
+                    "published": 1,
+                },
+            )
 
 
 if __name__ == "__main__":

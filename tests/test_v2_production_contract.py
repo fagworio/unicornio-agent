@@ -36,7 +36,7 @@ def test_media_retry_does_not_call_editorial_stage():
     assert calls == [("media", {"decision": "process"})]
 
 
-def test_two_consecutive_media_no_progress_keeps_normal_article_pending():
+def test_two_consecutive_media_no_progress_escalates_normal_article():
     previous = WorkState(
         phase=Phase.MEDIA,
         blocker=BlockerCode.INLINE_MISSING,
@@ -51,11 +51,12 @@ def test_two_consecutive_media_no_progress_keeps_normal_article_pending():
         {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
         no_progress=2,
     )
-    assert outcome.type.value == "retry"
+    assert outcome.type.value == "human_required"
     assert outcome.blocker is BlockerCode.INLINE_MISSING
+    assert "media_no_progress_exhausted=2/2" in (outcome.detail or "")
 
 
-def test_runner_counts_two_real_media_no_progress_attempts():
+def test_runner_escalates_after_two_real_media_no_progress_attempts():
     store = Store(WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True, media=MediaProgress(2)))
     stages = {
         "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
@@ -69,7 +70,7 @@ def test_runner_counts_two_real_media_no_progress_attempts():
     assert first.type.value == "retry"
     assert store.state.retry.no_progress == 1
     second = runner.run_one(42, context)
-    assert second.type.value == "retry"
+    assert second.type.value == "human_required"
     assert store.state.retry.no_progress == 2
 
 

@@ -3275,6 +3275,13 @@ def _reconcile_uncertain_publication(
         }
     _clear_uncertain_publication(root, post_id)
     append_telemetry(root, "post_publication_reconciled", post_id=post_id)
+    append_telemetry(
+        root,
+        "v2_funnel",
+        stage="published",
+        post_id=int(post_id),
+        integrity="reconciled_after_uncertain_write",
+    )
     return {
         "post_id": post_id,
         "wordpress_changed": True,
@@ -3580,6 +3587,13 @@ def _publish_now(
     if ready_manifest is not None:
         publish_meta[META_READY_MANIFEST] = ready_manifest
     try:
+        append_telemetry(
+            root or Path("."),
+            "v2_funnel",
+            stage="publish_attempted",
+            post_id=int(post_id),
+            integrity=integrity,
+        )
         result = client.publish(
             post_id,
             meta={"_ai_editor_published_at": published_at, **publish_meta},
@@ -3649,6 +3663,13 @@ def _publish_now(
             }
         _clear_uncertain_publication(root or Path("."), post_id)
         append_telemetry(root or Path("."), "post_publication_reconciled", post_id=post_id)
+        append_telemetry(
+            root or Path("."),
+            "v2_funnel",
+            stage="published",
+            post_id=int(post_id),
+            integrity="reconciled_after_uncertain_write",
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": True,
@@ -3676,6 +3697,13 @@ def _publish_now(
             pass
         raise
     _clear_uncertain_publication(root or Path("."), post_id)
+    append_telemetry(
+        root or Path("."),
+        "v2_funnel",
+        stage="published",
+        post_id=int(post_id),
+        integrity=integrity,
+    )
     return {
         "post_id": post_id,
         "wordpress_changed": True,

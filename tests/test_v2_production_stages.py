@@ -281,6 +281,8 @@ def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tm
         )
     assert error.value.blocker is BlockerCode.STRUCTURE
     assert error.value.phase is Phase.EDITORIAL
+    assert "requested=4" in str(error.value)
+    assert "available=1" in str(error.value)
 
 
 def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_path):

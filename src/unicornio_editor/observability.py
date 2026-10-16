@@ -472,6 +472,7 @@ def read_telemetry_summary(
     ready_attempts = 0
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
+    funnel: dict[str, int] = {}
     media_by_domain: dict[str, dict[str, int]] = {}
     media_search_summaries: list[dict[str, Any]] = []
     media_post_summaries: list[dict[str, Any]] = []
@@ -810,6 +811,10 @@ def read_telemetry_summary(
                         domain_bucket = media_by_domain.setdefault(domain, {})
                         key = f"{stage}:{status}"
                         domain_bucket[key] = domain_bucket.get(key, 0) + 1
+            if event == "v2_funnel":
+                stage = record.get("stage")
+                if isinstance(stage, str) and stage:
+                    funnel[stage] = funnel.get(stage, 0) + 1
             ts = record.get("ts")
             if isinstance(ts, str):
                 last_ts = ts
@@ -864,6 +869,7 @@ def read_telemetry_summary(
             ),
         },
         "media_funnel": media_funnel,
+        "funnel": funnel,
         "media_by_domain": media_by_domain,
         "media_search_summary": media_search_summaries,
         "media_post_summary": media_post_summaries,

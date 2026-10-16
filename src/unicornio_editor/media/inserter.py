@@ -198,9 +198,10 @@ def plan_normal_media_insertions(
     capacity = 1 + ((last_slot - first_slot) // minimum_spacing) if last_slot >= first_slot else 0
     if capacity < count:
         raise MediaInsertionError(
-            f"insufficient valid paragraph slots: {count} image(s) require "
-            f"at least {minimum_spacing} paragraphs of spacing, but HTML has "
-            f"{paragraph_count} paragraph(s)",
+            f"insufficient valid paragraph slots: requested={count}, available={capacity}, "
+            f"minimum_spacing={minimum_spacing}, first_slot={first_slot}, "
+            f"last_slot={last_slot}, substantive_paragraphs={len(substantive)}, "
+            f"html_paragraphs={paragraph_count}",
             code="insufficient_paragraph_slots",
         )
     if count == 1:

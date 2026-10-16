@@ -255,6 +255,22 @@ def classify(
     first_blocker, _, _, first_detail = failures[0]
     detail: str | None = first_detail or None
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
+    if (
+        first_blocker in MEDIA_BLOCKERS
+        and effective_no_progress >= max(1, max_media_no_progress)
+    ):
+        exhausted_detail = (
+            f"{detail}; media_no_progress_exhausted="
+            f"{effective_no_progress}/{max(1, max_media_no_progress)}"
+            if detail
+            else "media_no_progress_exhausted="
+            f"{effective_no_progress}/{max(1, max_media_no_progress)}"
+        )
+        return Outcome.human_required(
+            Phase.MEDIA,
+            first_blocker,
+            detail=exhausted_detail,
+        )
     for blocker, _, phase_override, failure_detail in failures:
         if phase_override is not None:
             editorial_attempt = (
@@ -327,10 +343,10 @@ def classify(
         enrichment_round = int(getattr(media, "enrichment_round", 0) or 0)
     except (TypeError, ValueError):
         enrichment_round = 0
-    # no_progress remains telemetry/backoff only. A listicle can become
-    # HUMAN_REQUIRED after its second completed enrichment round, but an
-    # incomplete normal article must keep the V2 retry sequence even when the
-    # media round had no progress.
+    # A listicle can become HUMAN_REQUIRED after its second completed
+    # enrichment round even when the search itself made progress. For every
+    # article, the no-progress budget above prevents an unchanged media
+    # blocker from returning to the queue indefinitely.
     if (
         first_blocker in MEDIA_BLOCKERS
         and bool(media_decision.get("is_listicle"))
