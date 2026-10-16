@@ -1061,6 +1061,73 @@ def run_pre_publish_checklist(
                 f"{checked} imagem(ns) confirmadas (low={calls_low}, high={calls_high})",
             )
 
+    search_completed = bool(
+        isinstance(search_progress, Mapping)
+        and search_progress.get("completed") is True
+    )
+    search_exhausted = bool(
+        isinstance(search_progress, Mapping)
+        and search_progress.get("exhausted") is True
+    )
+    search_completion_reason = (
+        str(search_progress.get("completion_reason") or "")
+        if isinstance(search_progress, Mapping) else ""
+    )
+    waiver_basis = None
+    waiver_applied = False
+    # A normal article may publish with fewer inline frames only when the
+    # executable search really completed as EXHAUSTED, at least one distinct
+    # inline frame survived, and every other checklist gate—including the
+    # featured identity/vision gates—passed.  Editorial flags and provider
+    # errors never qualify; listicles retain their per-item coverage contract.
+    other_failures = [
+        item for item in items
+        if item.get("name") != "imagens_no_corpo"
+        and item.get("status") in {"fail", "error"}
+    ]
+    featured_gate_names = {
+        "imagem_destaque",
+        "destaque_1280x720",
+        "imagens_visao",
+        "visual_identity_verified",
+        "visual_identity_matches_current_media",
+        "featured_identity_matches_current_attachment",
+        "featured_inline_position",
+    }
+    featured_gates_ok = all(
+        item.get("status") in {"pass", "skip"}
+        for item in items
+        if item.get("name") in featured_gate_names
+    )
+    if (
+        not is_list
+        and image_count < required
+        and image_count >= 1
+        and search_completed
+        and search_exhausted
+        and search_completion_reason == "EXHAUSTED"
+        and featured_ok
+        and featured_gates_ok
+        and not other_failures
+    ):
+        waiver_applied = True
+        waiver_basis = {
+            "type": "search_exhausted",
+            "completion_reason": search_completion_reason,
+            "required": required,
+            "accepted": image_count,
+            "enrichment_round": enrichment_round,
+            "featured_media": featured,
+        }
+        for item in items:
+            if item.get("name") == "imagens_no_corpo" and item.get("status") == "fail":
+                item["status"] = "pass"
+                item["detail"] = (
+                    f"waived: busca de mídia esgotada com {image_count}/{required} "
+                    "frame(s) inline distintos e featured aprovada"
+                )
+                break
+
     passed = sum(1 for item in items if item["status"] == "pass")
     skipped = sum(1 for item in items if item["status"] == "skip")
     failed = sum(1 for item in items if item["status"] in {"fail", "error"})
@@ -1077,21 +1144,12 @@ def run_pre_publish_checklist(
             "accepted": image_count,
             "missing": max(0, required - image_count),
             "enrichment_round": enrichment_round,
-            "waiver_applied": False,
-            "waiver_reason": "",
-            "waiver_basis": None,
-            "search_completed": bool(
-                isinstance(search_progress, Mapping)
-                and search_progress.get("completed") is True
-            ),
-            "search_exhausted": bool(
-                isinstance(search_progress, Mapping)
-                and search_progress.get("exhausted") is True
-            ),
-            "search_completion_reason": (
-                str(search_progress.get("completion_reason") or "")
-                if isinstance(search_progress, Mapping) else ""
-            ),
+            "waiver_applied": waiver_applied,
+            "waiver_reason": "enrichment_search_exhausted" if waiver_applied else "",
+            "waiver_basis": waiver_basis,
+            "search_completed": search_completed,
+            "search_exhausted": search_exhausted,
+            "search_completion_reason": search_completion_reason,
             "is_listicle": is_list,
         },
     }

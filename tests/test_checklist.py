@@ -871,6 +871,48 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertFalse(result["media_decision"]["waiver_applied"])
 
+    def test_exhausted_search_waives_missing_inline_when_featured_and_other_gates_pass(self):
+        content = (
+            "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
+            "<p>Mais informações sobre Redfall para o leitor.</p>"
+            '<p><img src="https://media.example/scene.webp" alt="Redfall scene" width="800" height="600"></p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(featured_media=7),
+            editorial=editorial_payload(
+                game_name="Redfall",
+                cleaned_html=content,
+                seo={
+                    "title": "Redfall recebe novidades importantes",
+                    "meta_description": "Redfall recebe novidades importantes, com detalhes sobre a obra, contexto, lançamento e informações confirmadas para o leitor.",
+                    "focus_keyword": "Redfall",
+                },
+                trailer_unavailable=True,
+                trailer_search_evidence={
+                    "result": "official_not_found",
+                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "provider": "youtube",
+                    "query": "Redfall trailer",
+                },
+            ),
+            content=content,
+            media_context={
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "completion_reason": "EXHAUSTED",
+                }
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        assert item["status"] == "pass"
+        assert "waived" in item["detail"]
+        assert result["all_passed"] is True
+        assert result["media_decision"]["waiver_applied"] is True
+        assert result["media_decision"]["waiver_reason"] == "enrichment_search_exhausted"
+        assert result["media_decision"]["waiver_basis"]["accepted"] == 1
+
     def test_second_enrichment_round_does_not_waive_normal_article_without_faking_missing(self):
         content = (
             "<p>Texto revisado sobre o jogo videogame e seu lançamento.</p>"

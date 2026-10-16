@@ -473,6 +473,7 @@ def read_telemetry_summary(
     ready_durations: list[int] = []
     media_funnel: dict[str, dict[str, int]] = {}
     funnel: dict[str, int] = {}
+    funnel_posts: dict[str, set[int]] = {}
     media_by_domain: dict[str, dict[str, int]] = {}
     media_search_summaries: list[dict[str, Any]] = []
     media_post_summaries: list[dict[str, Any]] = []
@@ -815,6 +816,9 @@ def read_telemetry_summary(
                 stage = record.get("stage")
                 if isinstance(stage, str) and stage:
                     funnel[stage] = funnel.get(stage, 0) + 1
+                    post_id = record.get("post_id")
+                    if isinstance(post_id, int):
+                        funnel_posts.setdefault(stage, set()).add(post_id)
             ts = record.get("ts")
             if isinstance(ts, str):
                 last_ts = ts
@@ -870,6 +874,9 @@ def read_telemetry_summary(
         },
         "media_funnel": media_funnel,
         "funnel": funnel,
+        "funnel_unique_posts": {
+            stage: len(post_ids) for stage, post_ids in funnel_posts.items()
+        },
         "media_by_domain": media_by_domain,
         "media_search_summary": media_search_summaries,
         "media_post_summary": media_post_summaries,

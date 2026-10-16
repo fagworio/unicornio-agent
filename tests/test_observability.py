@@ -233,6 +233,7 @@ class ObservabilityTests(unittest.TestCase):
                     "published": 1,
                 },
             )
+            self.assertEqual(summary["funnel_unique_posts"]["selected"], 1)
 
 
 if __name__ == "__main__":

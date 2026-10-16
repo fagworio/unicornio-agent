@@ -3729,7 +3729,9 @@ def publish_ready_posts(
     awaiting_human/uncertain/skipped são ignorados sem custo (sem checklist).
     ``limit`` conta somente publicados; ``limit=0`` = sem cota.
     """
-    outcomes: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = _reconcile_persisted_uncertain_publications(
+        client, config, root,
+    )
     # Paginacao completa: a fila pode ter mais que 100 pending, e um post READY
     # alem da pagina 1 nao pode ficar invisivel na janela de publicacao.
     posts: list[dict[str, Any]] = []
@@ -3801,6 +3803,67 @@ def publish_ready_posts(
             # Base durável do relatório: custo e publicações usam a mesma
             # janela móvel de 24h, sem inferir o denominador da janela atual.
             append_telemetry(root, "post_published", post_id=candidate_id)
+    return outcomes
+
+
+def _reconcile_persisted_uncertain_publications(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+) -> list[dict[str, Any]]:
+    """Reconcile publish fences before scanning the pending queue.
+
+    A post that was committed remotely can disappear from ``list_pending``.
+    Its local fence is therefore an independent recovery queue and must be
+    read by ID before the publisher considers new pending candidates.
+    """
+    marker_dir = Path(root) / "work" / "v2-publication-uncertain"
+    if not marker_dir.is_dir():
+        return []
+    outcomes: list[dict[str, Any]] = []
+    for marker in sorted(marker_dir.glob("*.json")):
+        try:
+            post_id = int(marker.stem)
+        except ValueError:
+            continue
+        try:
+            post = client.get_post(post_id)
+        except Exception as exc:  # noqa: BLE001 - keep fence for next window
+            append_telemetry(
+                root,
+                "publish_uncertain_read_failed",
+                post_id=post_id,
+                error=type(exc).__name__,
+            )
+            outcomes.append({
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": f"leitura do marcador de publicação incerta falhou: {exc}",
+                "uncertain": True,
+                "state": STATE_READY,
+            })
+            continue
+        meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+        outcome = _reconcile_uncertain_publication(
+            client,
+            config,
+            root,
+            post,
+            post_id,
+            ready_hash=str(meta.get(META_READY_HASH) or ""),
+            ready_manifest=meta.get(META_READY_MANIFEST)
+            if isinstance(meta.get(META_READY_MANIFEST), str)
+            else None,
+        )
+        if outcome is not None:
+            outcomes.append(outcome)
+        else:
+            append_telemetry(
+                root,
+                "publish_uncertain_cleared_pending",
+                post_id=post_id,
+            )
     return outcomes
 
 

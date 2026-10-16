@@ -27,8 +27,7 @@ def test_expected_stage_error_becomes_retry_and_persists_cooldown_path():
 
 @pytest.mark.parametrize(
     "blocker",
-    [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.INTERNAL_ERROR,
-     BlockerCode.MEDIA_INVALID],
+    [BlockerCode.PROVIDER_ERROR, BlockerCode.WORDPRESS_ERROR, BlockerCode.INTERNAL_ERROR],
 )
 def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     store = Store()
@@ -51,6 +50,28 @@ def test_operational_error_with_high_global_attempts_remains_retry(blocker):
     assert store.state.state.value == "pending"
     assert store.state.retry.no_progress == 28
     assert store.state.retry.attempts == 36
+
+
+def test_deterministic_media_stage_error_consumes_no_progress_budget():
+    store = Store()
+    store.state = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.FEATURED_MISSING,
+        retry=RetryInfo(attempts=10, no_progress=1),
+        relevance_approved=True,
+    )
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: (_ for _ in ()).throw(
+            StageError(BlockerCode.FEATURED_MISSING, Phase.MEDIA, "featured ausente")
+        ),
+        "compose": lambda *args: {},
+        "validate": lambda *args: {"passed": True, "failures": []},
+    }
+    result = PipelineRunner(store, stages).run_one(1, {"editorial": {"decision": "process"}})
+    assert result.type is OutcomeType.HUMAN_REQUIRED
+    assert result.blocker is BlockerCode.FEATURED_MISSING
+    assert store.state.retry.no_progress == 2
 
 
 def test_provider_error_from_checklist_does_not_consume_media_budget():

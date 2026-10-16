@@ -24,8 +24,8 @@ class PipelineRunner:
         return {
             "max_media_no_progress": int(getattr(
                 config,
-                "max_media_search_attempts",
-                getattr(config, "max_partial_no_progress_attempts", 2),
+                "max_media_no_progress_attempts",
+                getattr(config, "max_media_search_attempts", 2),
             )),
             "max_rework_attempts": int(getattr(config, "max_rework_attempts", 3)),
             "cooldown_minutes": int(getattr(config, "rework_cooldown_minutes", 30)),
@@ -72,6 +72,7 @@ class PipelineRunner:
             if previous.phase is Phase.MEDIA
             else 0
         )
+        stage_error_no_progress = media_base_no_progress
         decision = editorial.get("decision")
         if decision in {"skip", "uncertain"}:
             outcome = classify(previous, editorial, previous.media, {"passed": False, "failures": []}, **self._policy())
@@ -127,10 +128,18 @@ class PipelineRunner:
             except StageError as exc:
                 media_stage_error = exc.phase is Phase.MEDIA
                 recovered_media = exc.media_progress
+                if media_stage_error and exc.blocker in MEDIA_BLOCKERS:
+                    recovered_progress = (
+                        isinstance(recovered_media, MediaProgress)
+                        and self._media_progressed(previous.media, recovered_media)
+                    )
+                    stage_error_no_progress = (
+                        0 if recovered_progress else media_base_no_progress + 1
+                    )
                 outcome = classify_stage_error(
                     previous,
                     exc,
-                    no_progress=media_base_no_progress if media_stage_error else None,
+                    no_progress=stage_error_no_progress if media_stage_error else None,
                     **self._policy(),
                 )
         # Reconcile first, then measure progress. A newly uploaded asset that
@@ -165,8 +174,12 @@ class PipelineRunner:
         media_attempt = media_completed and not technical_media_error
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
         current_no_progress = (
-            (0 if progress else media_base_no_progress + 1)
-            if media_attempt else media_base_no_progress
+            stage_error_no_progress
+            if media_stage_error and outcome.blocker in MEDIA_BLOCKERS
+            else (
+                (0 if progress else media_base_no_progress + 1)
+                if media_attempt else media_base_no_progress
+            )
         )
         if media_completed and validation is not None:
             corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())

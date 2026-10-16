@@ -19,7 +19,7 @@ from unicornio_editor.pipeline_v2.publication import (
     repair_lost_ready_hash,
     reconcile_published_v2,
 )
-from unicornio_editor.workflow import _publish_now
+from unicornio_editor.workflow import _publish_now, publish_ready_posts
 
 
 def _ready_post(post_id=114840):
@@ -92,6 +92,9 @@ class FakePublicationClient:
         if kwargs.get("date_gmt"):
             self.post["date_gmt"] = kwargs["date_gmt"]
         return copy.deepcopy(self.post)
+
+    def list_pending(self, page=1, per_page=100):
+        return []
 
 
 def _config(*, dry_run=False, publish_enabled=True):
@@ -288,3 +291,18 @@ def test_publish_timeout_before_commit_is_retryable_and_not_marked_published(tmp
     assert client.post["status"] == "pending"
     assert client.post["meta"]["_hermes_state"] == "ready"
     assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json").exists()
+
+
+def test_publisher_reconciles_uncertain_marker_even_when_post_left_pending_queue(tmp_path):
+    client = FakePublicationClient(_ready_post())
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    outcomes = publish_ready_posts(client, _config(), tmp_path, limit=1)
+
+    assert [outcome["post_id"] for outcome in outcomes] == [client.post["id"]]
+    assert outcomes[0]["status"] == "published"
+    assert outcomes[0]["reconciled"] is True
+    assert client.publish_calls == []
+    assert not marker.exists()

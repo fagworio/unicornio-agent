@@ -170,6 +170,16 @@ def classify_stage_error(
     if getattr(exc, "human_required", False):
         return Outcome.human_required(exc.phase, exc.blocker, detail=detail)
     if getattr(exc, "blocker", None) in MEDIA_BLOCKERS:
+        effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
+        if effective_no_progress >= max(1, max_media_no_progress):
+            return Outcome.human_required(
+                exc.phase,
+                exc.blocker,
+                detail=(
+                    f"{detail}; media_no_progress_exhausted="
+                    f"{effective_no_progress}/{max(1, max_media_no_progress)}"
+                ),
+            )
         return _retry(
             previous,
             exc.phase,
