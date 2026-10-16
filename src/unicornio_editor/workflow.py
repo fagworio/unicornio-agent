@@ -3315,38 +3315,65 @@ def _reopen_v2_ready_after_publish_block(
     if not isinstance(raw_v2, dict) or raw_v2.get("state") != "ready":
         return True
 
+    from .pipeline_v2.classifier import (
+        EDITORIAL_BLOCKERS,
+        MEDIA_BLOCKERS,
+        OPERATIONAL_BLOCKERS,
+        blocker_for_gate,
+    )
     from .pipeline_v2.model import BlockerCode, LifecycleState, Phase, WorkState
     from .pipeline_v2.operational import WordPressStateBackend
     from .pipeline_v2.state_store import StateStore
 
-    failed_names = {
-        str(item.get("name") or "")
-        for item in (checklist.get("items") or [])
+    def _failure_target(item: dict[str, Any]) -> tuple[int, Phase, BlockerCode]:
+        raw_blocker = str(item.get("blocker") or "")
+        try:
+            blocker = BlockerCode(raw_blocker) if raw_blocker else None
+        except ValueError:
+            blocker = None
+        blocker = blocker or blocker_for_gate(str(item.get("name") or ""))
+        blocker = blocker or BlockerCode.WORDPRESS_ERROR
+        raw_phase = str(item.get("phase") or "")
+        try:
+            phase = Phase(raw_phase)
+        except ValueError:
+            phase = Phase.MEDIA if raw_phase.startswith("media") else None
+        if phase is None:
+            if blocker in MEDIA_BLOCKERS:
+                phase = Phase.MEDIA
+            elif blocker in EDITORIAL_BLOCKERS:
+                phase = Phase.EDITORIAL
+            elif blocker is BlockerCode.RELEVANCE_UNCERTAIN:
+                phase = Phase.RELEVANCE
+            else:
+                phase = Phase.VALIDATE
+        # Operational failures have precedence because they should be retried
+        # before asking editorial/media rework to compensate for an unavailable
+        # provider. Within a category, checklist order is the deterministic
+        # tiebreaker; alphabetical gate names are never used.
+        priority = (
+            0 if blocker in OPERATIONAL_BLOCKERS else
+            1 if blocker in MEDIA_BLOCKERS else
+            2 if blocker in EDITORIAL_BLOCKERS else
+            3 if blocker is BlockerCode.RELEVANCE_UNCERTAIN else
+            4
+        )
+        return priority, phase, blocker
+
+    failures = [
+        item for item in (checklist.get("items") or [])
         if isinstance(item, dict) and item.get("status") in {"fail", "error"}
-    }
-    target_by_check = {
-        "imagens_no_corpo": (Phase.MEDIA, BlockerCode.INLINE_MISSING),
-        "imagens_webp": (Phase.MEDIA, BlockerCode.MEDIA_INVALID),
-        "imagens_duplicadas": (Phase.MEDIA, BlockerCode.MEDIA_DUPLICATE),
-        "relevancia_imagens": (Phase.MEDIA, BlockerCode.MEDIA_ORIGIN),
-        "imagem_destaque": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
-        "destaque_1280x720": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
-        "imagens_visao": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
-        "visual_identity_verified": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
-        "visual_identity_matches_current_media": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
-        "featured_identity_matches_current_attachment": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
-        "featured_inline_position": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
-        "qualidade_texto": (Phase.EDITORIAL, BlockerCode.TEXT_QUALITY),
-        "seo": (Phase.EDITORIAL, BlockerCode.SEO),
-        "estrutura_lista": (Phase.EDITORIAL, BlockerCode.STRUCTURE),
-        "fonte": (Phase.EDITORIAL, BlockerCode.SOURCE),
-        "trailer_youtube": (Phase.EDITORIAL, BlockerCode.TRAILER),
-        "schema": (Phase.EDITORIAL, BlockerCode.SCHEMA),
-    }
-    phase, blocker = next(
-        (target_by_check[name] for name in sorted(failed_names) if name in target_by_check),
-        (Phase.VALIDATE, BlockerCode.WORDPRESS_ERROR),
-    )
+    ]
+    if failures:
+        _priority, phase, blocker, _index = min(
+            (
+                (*_failure_target(item), index)
+                for index, item in enumerate(failures)
+            ),
+            key=lambda candidate: (candidate[0], candidate[3]),
+        )
+    else:
+        phase, blocker = Phase.VALIDATE, BlockerCode.WORDPRESS_ERROR
     try:
         current = WorkState.from_dict(raw_v2)
         if current.state is not LifecycleState.READY:
@@ -3576,6 +3603,20 @@ def _publish_post_unlocked(
             if isinstance(item, dict) and item.get("status") == "error" and item.get("retryable")
         ]
         if retryable_errors:
+            v2_reopened = _reopen_v2_ready_after_publish_block(
+                client, config, root, post_id, post, checklist
+            )
+            if not v2_reopened:
+                return {
+                    "post_id": post_id,
+                    "wordpress_changed": False,
+                    "status": "retry",
+                    "reason": "falha ao reabrir estado V2 após erro técnico do checklist",
+                    "checklist": checklist,
+                    "retryable_errors": retryable_errors,
+                    "state": state,
+                    "retryable": True,
+                }
             try:
                 from .observability import append_telemetry
 
@@ -3594,7 +3635,8 @@ def _publish_post_unlocked(
                 "reason": "validação técnica da mídia inconclusiva; publicação não realizada",
                 "checklist": checklist,
                 "retryable_errors": retryable_errors,
-                "state": state,
+                "state": "pending" if v2_state is not None else state,
+                "v2_reopened": v2_state is not None,
             }
         # V2 e a fonte de verdade da fila. Reabre-o antes do marcador legado;
         # sem isso o publisher deixa _hermes_work_state=ready e o scheduler
@@ -3618,7 +3660,7 @@ def _publish_post_unlocked(
         # tenta). O agente ve o editorial.blocked.json nos cards, corrige
         # (re-apply) e a proxima janela publica.
         _record_blocked(root, post_id, checklist)
-        _write_state_markers(
+        legacy_state_persisted = _write_state_markers(
             client,
             config,
             post_id,
@@ -3626,6 +3668,18 @@ def _publish_post_unlocked(
             root=root,
             last_error="checklist pre-publicacao com falhas",
         )
+        if not legacy_state_persisted:
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "V2 reaberto, mas o marcador legado blocked não foi confirmado",
+                "checklist": checklist,
+                "state": "pending" if v2_state is not None else STATE_BLOCKED,
+                "v2_reopened": v2_state is not None,
+                "legacy_state_persisted": False,
+                "retryable": True,
+            }
         return {
             "post_id": post_id,
             "wordpress_changed": False,
@@ -3635,6 +3689,7 @@ def _publish_post_unlocked(
             "reopened_for_rework": True,
             "state": "pending" if v2_state is not None else STATE_BLOCKED,
             "v2_reopened": v2_state is not None,
+            "legacy_state_persisted": legacy_state_persisted,
         }
     if not config.publish_enabled:
         return {

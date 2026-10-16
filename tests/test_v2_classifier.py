@@ -9,6 +9,12 @@ def test_gate_map_is_explicit_not_substring_matching():
     assert blocker_for_gate("imagens_visao") is BlockerCode.FEATURED_VISION
     assert blocker_for_gate("media_duplicate_confirmed") is BlockerCode.MEDIA_DUPLICATE
     assert blocker_for_gate("visual_identity_verified") is BlockerCode.MEDIA_INVALID
+    assert blocker_for_gate("visual_identity_matches_current_media") is BlockerCode.MEDIA_INVALID
+    assert blocker_for_gate("featured_identity_matches_current_attachment") is BlockerCode.FEATURED_INVALID
+    assert blocker_for_gate("destaque_relevancia") is BlockerCode.FEATURED_INVALID
+    assert blocker_for_gate("html_semantics") is BlockerCode.STRUCTURE
+    assert blocker_for_gate("schema_editorial") is BlockerCode.SCHEMA
+    assert blocker_for_gate("fonte_original_link") is BlockerCode.SOURCE
     assert blocker_for_gate("qualidade_texto") is BlockerCode.TEXT_QUALITY
     assert blocker_for_gate("imagem_inventada") is None
 

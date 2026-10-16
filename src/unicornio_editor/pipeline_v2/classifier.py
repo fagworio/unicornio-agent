@@ -13,6 +13,8 @@ GATE_TO_BLOCKER: dict[str, BlockerCode] = {
     "imagens_similares": BlockerCode.MEDIA_DUPLICATE,
     "media_duplicate_confirmed": BlockerCode.MEDIA_DUPLICATE,
     "visual_identity_verified": BlockerCode.MEDIA_INVALID,
+    "visual_identity_matches_current_media": BlockerCode.MEDIA_INVALID,
+    "featured_identity_matches_current_attachment": BlockerCode.FEATURED_INVALID,
     "featured_inline_position": BlockerCode.MEDIA_DUPLICATE,
     "destaque_1280x720": BlockerCode.FEATURED_INVALID,
     "destaque_relevancia": BlockerCode.FEATURED_INVALID,

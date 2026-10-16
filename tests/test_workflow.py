@@ -2162,6 +2162,77 @@ class WorkflowTests(unittest.TestCase):
             self.assertIs(reopened.state, LifecycleState.PENDING)
             self.assertIs(reopened.blocker, BlockerCode.INLINE_MISSING)
             self.assertEqual(reopened.phase, Phase.MEDIA)
+            from unicornio_editor.pipeline_v2.operational import WordPressStateBackend
+            from unicornio_editor.pipeline_v2.scheduler import select
+            from unicornio_editor.pipeline_v2.state_store import StateStore
+
+            selected = select(
+                [(42, client.post)],
+                StateStore(WordPressStateBackend(client)),
+                limit=1,
+            )
+            self.assertEqual([item[0] for item in selected], [42])
+            self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
+
+    def test_publish_retryable_check_failure_reopens_v2_without_legacy_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            checklist = {
+                "failed": 1,
+                "items": [{
+                    "name": "featured_identity_matches_current_attachment",
+                    "status": "error",
+                    "retryable": True,
+                    "blocker": "provider_error",
+                    "phase": "media_validation",
+                }],
+            }
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            with mock.patch(
+                "unicornio_editor.workflow.run_pre_publish_checklist",
+                return_value=checklist,
+            ):
+                outcome = publish_post(client, config, root, 42)
+
+            self.assertEqual(outcome["status"], "retry")
+            self.assertTrue(outcome["v2_reopened"])
+            self.assertEqual(client.post["meta"]["_hermes_state"], "ready")
+            reopened = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+            self.assertIs(reopened.state, LifecycleState.PENDING)
+            self.assertIs(reopened.blocker, BlockerCode.PROVIDER_ERROR)
+            self.assertEqual(reopened.phase, Phase.MEDIA)
+            self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
+
+    def test_publish_reports_legacy_marker_failure_after_v2_reopen(self):
+        class LegacyMarkerFailureClient(FakeClient):
+            def update_post(self, post_id, payload):
+                if (payload.get("meta") or {}).get("_hermes_state") == "blocked":
+                    raise RuntimeError("legacy marker unavailable")
+                return super().update_post(post_id, payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = LegacyMarkerFailureClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            client.post["content"]["raw"] = "<p>Conteúdo alterado sem as imagens aceitas.</p>"
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+
+            outcome = publish_post(client, config, root, 42)
+
+            self.assertEqual(outcome["status"], "retry")
+            self.assertFalse(outcome["legacy_state_persisted"])
+            reopened = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+            self.assertIs(reopened.state, LifecycleState.PENDING)
             self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
 
     def test_publish_v2_ready_with_valid_media_passes_real_checklist(self):
@@ -2249,8 +2320,11 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(outcome["status"], "retry")
             self.assertFalse(outcome["wordpress_changed"])
-            self.assertEqual(client.updated, updates_before_publish)
+            self.assertEqual(len(client.updated), len(updates_before_publish) + 1)
             self.assertNotEqual(client.post["meta"].get("_hermes_state"), "blocked")
+            reopened = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+            self.assertIs(reopened.state, LifecycleState.PENDING)
+            self.assertIs(reopened.blocker, BlockerCode.PROVIDER_ERROR)
             self.assertFalse((root / "backups/42/editorial.blocked.json").exists())
 
     def test_publish_ready_from_previous_policy_revalidates_before_publish(self):
