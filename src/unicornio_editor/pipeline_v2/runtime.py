@@ -1992,6 +1992,10 @@ class WordPressWriterV2:
                 raise RuntimeError(
                     "inline media read-back mismatch: " + ", ".join(missing_inline[:5])
                 )
+            if not expected_inline_urls and embedded_readback_urls:
+                raise RuntimeError(
+                    "unexpected inline media in read-back without accepted V2 media"
+                )
             for record in apply_media_records:
                 role = str(record.get("role") or "")
                 if role == "featured":

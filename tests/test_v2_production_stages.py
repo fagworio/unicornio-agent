@@ -448,6 +448,63 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
     assert usages and {row[0] for row in usages} == {"accepted"}
 
 
+def test_writer_rejects_unexpected_inline_media_when_v2_contract_is_empty(tmp_path):
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 131,
+                "status": "pending",
+                "content": {"raw": "<p>antigo</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.post.update({key: value for key, value in update.items() if key != "meta"})
+            if "meta" in update:
+                self.post["meta"].update(update["meta"])
+
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        99,
+        "https://example.test/featured.webp",
+        "f" * 64,
+        "f" * 16,
+        "visual:" + "f" * 24,
+        {"decision": "INITIAL"},
+    )
+    media = MediaProgress(required=2, inline=(), featured=featured)
+    backup = tmp_path / "backups" / "131"
+    backup.mkdir(parents=True)
+    (backup / "editorial.candidate.json").write_text(json.dumps({
+        "content": '<p>Texto editorial.</p><img src="https://example.test/unexpected.webp" />',
+        "editorial": {"cleaned_html": "<p>Texto editorial.</p>", "seo": {
+            "title": "Título editorial",
+            "meta_description": "Descrição editorial com contexto para validar o candidato, confirmar os dados principais e assegurar a persistência segura do estado READY durante o readback.",
+            "focus_keyword": "título",
+        }},
+        "seo": {
+            "title": "Título editorial",
+            "meta_description": "Descrição editorial com contexto para validar o candidato, confirmar os dados principais e assegurar a persistência segura do estado READY durante o readback.",
+            "focus_keyword": "título",
+        },
+        "featured_media": 99,
+        "media": media.to_dict(),
+    }), encoding="utf-8")
+    state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+        media=media,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected inline media"):
+        WordPressWriterV2(Client(), tmp_path).commit(131, {"post_id": 131}, state, Outcome.ready())
+
+
 def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(tmp_path):
     class Client:
         def __init__(self):
