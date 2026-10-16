@@ -3665,6 +3665,7 @@ def _publish_now(
             }
         _clear_uncertain_publication(root or Path("."), post_id)
         append_telemetry(root or Path("."), "post_publication_reconciled", post_id=post_id)
+        append_telemetry(root or Path("."), "post_published_reconciled", post_id=post_id)
         append_telemetry(
             root or Path("."),
             "v2_funnel",
@@ -3808,7 +3809,11 @@ def publish_ready_posts(
                 "reason": str(exc),
             }
         outcomes.append(outcome)
-        if outcome.get("status") == "published" and outcome.get("wordpress_changed"):
+        if (
+            outcome.get("status") == "published"
+            and outcome.get("wordpress_changed")
+            and outcome.get("publication_kind") != "reconciled"
+        ):
             # Base durável do relatório: custo e publicações usam a mesma
             # janela móvel de 24h, sem inferir o denominador da janela atual.
             append_telemetry(root, "post_published", post_id=candidate_id)

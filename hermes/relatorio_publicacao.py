@@ -175,16 +175,34 @@ def main() -> int:
     print("📰 Relatório de publicação")
     print(f"🕐 Janela: {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y %H:%M')} (-03)")
 
-    if published:
-        print(f"\n✅ Publicados ({len(published)}):")
-        for p in published:
+    published_reconciled = [
+        p for p in published if p.get("publication_kind") == "reconciled"
+    ]
+    published_new = [
+        p for p in published if p.get("publication_kind") != "reconciled"
+    ]
+
+    if published_new:
+        print(f"\n✅ Publicados novos ({len(published_new)}):")
+        for p in published_new:
             pid = p.get("post_id")
             link = p.get("link", "")
             slug = link.rstrip("/").split("/")[-1].replace("-", " ") if link else ""
             titulo = titles.get(pid) or slug or str(pid)
             print(f"  • {pid} | {titulo[:60]} | {_fmt_data(str(p.get('published_at','')))} | publish")
     else:
-        print("\n✅ Publicados: 0")
+        print("\n✅ Publicados novos: 0")
+
+    if published_reconciled:
+        print(f"\n♻️ Publicados reconciliados ({len(published_reconciled)}):")
+        for p in published_reconciled:
+            pid = p.get("post_id")
+            link = p.get("link", "")
+            slug = link.rstrip("/").split("/")[-1].replace("-", " ") if link else ""
+            titulo = titles.get(pid) or slug or str(pid)
+            print(f"  • {pid} | {titulo[:60]} | {_fmt_data(str(p.get('published_at','')))} | reconciled")
+    else:
+        print("♻️ Publicados reconciliados: 0")
 
     if blocked:
         print(f"\n⚠️ Bloqueados ({len(blocked)}):")

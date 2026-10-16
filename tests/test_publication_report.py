@@ -142,11 +142,37 @@ class PublicationReportCostTests(unittest.TestCase):
             self.assertEqual(report.main(), 0)
 
         text = output.getvalue()
-        self.assertIn("Publicados: 0", text)
+        self.assertIn("Publicados novos: 0", text)
+        self.assertIn("Publicados reconciliados: 0", text)
         self.assertIn("Retries técnicos (1)", text)
         self.assertIn("115286 | Post de teste | retry", text)
         self.assertIn("featured_identity_matches_current_attachment", text)
         self.assertIn("Erros inesperados: 0", text)
+
+    def test_report_separates_new_and_reconciled_publications(self):
+        data = {
+            "posts": [
+                {"post_id": 115290, "publication_kind": "reconciled", "published_at": "2026-10-16T12:00:00Z"},
+                {"post_id": 115234, "publication_kind": "new", "published_at": "2026-10-16T12:01:00Z"},
+            ],
+            "blocked_posts": [],
+            "retryable_posts": [],
+            "error_posts": [],
+        }
+        with patch.object(report, "_load_window_json", return_value=data), patch.object(
+            report, "_post_titles", return_value={115290: "Reconciliado", 115234: "Novo"}
+        ), patch.object(report, "_custo_24h", return_value=(0.0, 0, "test")), patch.object(
+            report, "_published_by_editorial_last_24h", return_value=1
+        ), patch.object(report, "_queue_after_window", return_value=None), patch(
+            "sys.stdout", new_callable=StringIO
+        ) as output:
+            self.assertEqual(report.main(), 0)
+
+        text = output.getvalue()
+        self.assertIn("Publicados novos (1)", text)
+        self.assertIn("Publicados reconciliados (1)", text)
+        self.assertIn("115234 | Novo", text)
+        self.assertIn("115290 | Reconciliado", text)
 
     def test_report_redacts_secrets_in_retry_and_error_details(self):
         self.assertNotIn("pw123", report._safe_reason("password=pw123"))

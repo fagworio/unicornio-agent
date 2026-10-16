@@ -268,6 +268,8 @@ def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path
     assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json").exists()
     events = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
     assert "post_publication_reconciled" in events
+    assert "post_published_reconciled" in events
+    assert '"event": "post_published"' not in events
 
 
 def test_publish_timeout_before_commit_is_retryable_and_not_marked_published(tmp_path):
@@ -365,3 +367,17 @@ def test_persisted_uncertain_reconciliation_respects_dry_run(tmp_path):
     assert marker.exists()
     assert client.updates == []
     assert client.publish_calls == []
+
+
+def test_persisted_reconciliation_does_not_emit_new_publication_event(tmp_path):
+    client = FakePublicationClient(_ready_post())
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    outcomes = publish_ready_posts(client, _config(), tmp_path, limit=1)
+
+    assert outcomes[0]["publication_kind"] == "reconciled"
+    events = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+    assert '"event": "post_published_reconciled"' in events
+    assert '"event": "post_published"' not in events
