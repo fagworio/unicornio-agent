@@ -10,6 +10,7 @@ from unicornio_editor.config import Config
 from unicornio_editor.manifest import manifest_matches, parse_manifest
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
 from unicornio_editor.pipeline_v2.model import (
+    BlockerCode,
     FeaturedProgress,
     FeaturedStatus,
     InlineMedia,
@@ -2138,6 +2139,29 @@ class WorkflowTests(unittest.TestCase):
                 if item["status"] in {"fail", "error"}
             }
             self.assertIn("media_duplicate_confirmed", failures)
+            self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
+
+    def test_publish_checklist_failure_reopens_v2_ready_for_scheduler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self._attach_v2_ready_media(client)
+            client.post["content"]["raw"] = "<p>Conteúdo alterado sem as imagens aceitas.</p>"
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+
+            outcome = publish_post(client, config, root, 42)
+
+            self.assertEqual(outcome["status"], "blocked")
+            self.assertTrue(outcome["v2_reopened"])
+            self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
+            reopened = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+            self.assertIs(reopened.state, LifecycleState.PENDING)
+            self.assertIs(reopened.blocker, BlockerCode.INLINE_MISSING)
+            self.assertEqual(reopened.phase, Phase.MEDIA)
             self.assertFalse(any(payload.get("status") == "publish" for _, payload in client.updated))
 
     def test_publish_v2_ready_with_valid_media_passes_real_checklist(self):

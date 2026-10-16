@@ -3293,6 +3293,96 @@ def _reconcile_uncertain_publication(
     }
 
 
+def _reopen_v2_ready_after_publish_block(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    post: dict[str, Any],
+    checklist: dict[str, Any],
+) -> bool:
+    """Move a V2 READY post back to pending after a publish-gate failure.
+
+    The publisher writes the legacy ``blocked`` marker for compatibility, but
+    V2 is the queue's source of truth.  Leaving its state as READY makes the
+    scheduler discard the post forever.  Reopen V2 first and verify the
+    round-trip before writing the legacy marker, so a failed V2 write cannot
+    create a second inconsistent terminal state.
+    """
+    if config.dry_run:
+        return True
+    raw_v2 = _read_v2_work_state(post)
+    if not isinstance(raw_v2, dict) or raw_v2.get("state") != "ready":
+        return True
+
+    from .pipeline_v2.model import BlockerCode, LifecycleState, Phase, WorkState
+    from .pipeline_v2.operational import WordPressStateBackend
+    from .pipeline_v2.state_store import StateStore
+
+    failed_names = {
+        str(item.get("name") or "")
+        for item in (checklist.get("items") or [])
+        if isinstance(item, dict) and item.get("status") in {"fail", "error"}
+    }
+    target_by_check = {
+        "imagens_no_corpo": (Phase.MEDIA, BlockerCode.INLINE_MISSING),
+        "imagens_webp": (Phase.MEDIA, BlockerCode.MEDIA_INVALID),
+        "imagens_duplicadas": (Phase.MEDIA, BlockerCode.MEDIA_DUPLICATE),
+        "relevancia_imagens": (Phase.MEDIA, BlockerCode.MEDIA_ORIGIN),
+        "imagem_destaque": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
+        "destaque_1280x720": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
+        "imagens_visao": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
+        "visual_identity_verified": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
+        "visual_identity_matches_current_media": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
+        "featured_identity_matches_current_attachment": (Phase.MEDIA, BlockerCode.FEATURED_VISION),
+        "featured_inline_position": (Phase.MEDIA, BlockerCode.FEATURED_INVALID),
+        "qualidade_texto": (Phase.EDITORIAL, BlockerCode.TEXT_QUALITY),
+        "seo": (Phase.EDITORIAL, BlockerCode.SEO),
+        "estrutura_lista": (Phase.EDITORIAL, BlockerCode.STRUCTURE),
+        "fonte": (Phase.EDITORIAL, BlockerCode.SOURCE),
+        "trailer_youtube": (Phase.EDITORIAL, BlockerCode.TRAILER),
+        "schema": (Phase.EDITORIAL, BlockerCode.SCHEMA),
+    }
+    phase, blocker = next(
+        (target_by_check[name] for name in sorted(failed_names) if name in target_by_check),
+        (Phase.VALIDATE, BlockerCode.WORDPRESS_ERROR),
+    )
+    try:
+        current = WorkState.from_dict(raw_v2)
+        if current.state is not LifecycleState.READY:
+            return True
+        reopened = WorkState(
+            state=LifecycleState.PENDING,
+            phase=phase,
+            blocker=blocker,
+            retry=current.retry,
+            relevance_approved=current.relevance_approved,
+            media=current.media,
+        )
+        store = StateStore(WordPressStateBackend(client))
+        store.commit(post_id, reopened)
+        readback = client.get_post(post_id)
+        verified = _read_v2_work_state(readback)
+        if verified != reopened.to_dict():
+            raise WorkflowError(f"V2 reabertura read-back failed for post {post_id}")
+    except Exception as exc:  # noqa: BLE001 - publish remains fail-closed
+        append_telemetry(
+            root,
+            "v2_reopen_after_publish_block_failed",
+            post_id=post_id,
+            error=str(exc)[:240],
+        )
+        return False
+    append_telemetry(
+        root,
+        "v2_reopened_after_publish_block",
+        post_id=post_id,
+        phase=phase.value,
+        blocker=blocker.value,
+    )
+    return True
+
+
 def _publish_post_unlocked(
     client: WordPressClient,
     config: Config,
@@ -3506,6 +3596,22 @@ def _publish_post_unlocked(
                 "retryable_errors": retryable_errors,
                 "state": state,
             }
+        # V2 e a fonte de verdade da fila. Reabre-o antes do marcador legado;
+        # sem isso o publisher deixa _hermes_work_state=ready e o scheduler
+        # descarta o post para sempre, mesmo com _hermes_state=blocked.
+        v2_reopened = _reopen_v2_ready_after_publish_block(
+            client, config, root, post_id, post, checklist
+        )
+        if not v2_reopened:
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "falha ao reabrir estado V2 após bloqueio do checklist",
+                "checklist": checklist,
+                "state": state,
+                "retryable": True,
+            }
         # Registra o bloqueio SEM remover editorial.latest.json: o post
         # continua candidato nas proximas janelas (o conteudo no WP pode ja
         # estar bom — remover o latest orfana o post e o publish nunca mais o
@@ -3527,7 +3633,8 @@ def _publish_post_unlocked(
             "reason": "checklist pre-publicacao com falhas (STALE/legado revalidado)",
             "checklist": checklist,
             "reopened_for_rework": True,
-            "state": STATE_BLOCKED,
+            "state": "pending" if v2_state is not None else STATE_BLOCKED,
+            "v2_reopened": v2_state is not None,
         }
     if not config.publish_enabled:
         return {
