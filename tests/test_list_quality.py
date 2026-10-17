@@ -27,19 +27,41 @@ class ListQualityTests(unittest.TestCase):
         self.assertEqual(detect_list_format("5 melhores jogos para conhecer", html), 5)
         items = extract_list_items("5 melhores jogos para conhecer", html)
         self.assertEqual(len(items), 5)
-        self.assertEqual(items[0].identity, "os-melhores-jogos-para-conhecer:metroid-prime-4")
+        self.assertEqual(items[0].identity, "filmes:dune")
         self.assertEqual(items[-1].position, 5)
         self.assertTrue(validate_list_content("5 melhores jogos para conhecer", html)["passed"])
+
+    def test_coverage_requires_the_approved_url_inside_the_matching_section(self):
+        html = self.FIXTURE_115179.read_text(encoding="utf-8")
+        items = extract_list_items("5 melhores jogos para conhecer", html)
+        assets = [
+            {
+                "media_id": index + 1,
+                "media_url": f"https://media.test/{name}.webp",
+                "item_identity": item.identity,
+                "item_title": item.heading,
+                "subject": item.heading,
+                "visual_verification": {"decision": "DIFFERENT"},
+            }
+            for index, (item, name) in enumerate(zip(items, ("dune", "alien", "oppenheimer", "fallout", "arcane")))
+        ]
+        swapped = html.replace("https://media.test/dune.webp", "https://media.test/__swap__.webp", 1)
+        swapped = swapped.replace("https://media.test/alien.webp", "https://media.test/dune.webp", 1)
+        swapped = swapped.replace("https://media.test/__swap__.webp", "https://media.test/alien.webp", 1)
+        result = list_item_media_coverage("5 melhores jogos para conhecer", swapped, {"inline": assets})
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["rendered_mismatch"])
 
     def test_115179_incremental_coverage_preserves_progress_and_rejects_wrong_or_duplicate(self):
         html = self.FIXTURE_115179.read_text(encoding="utf-8")
         items = extract_list_items("5 melhores jogos para conhecer", html)
+        media_names = ("dune", "alien", "oppenheimer", "fallout", "arcane")
 
         def assets(count):
             return [
                 {
                     "media_id": index + 1,
-                    "media_url": f"https://media.test/{index + 1}.webp",
+                    "media_url": f"https://media.test/{media_names[index]}.webp",
                     "item_identity": item.identity,
                     "item_title": item.heading,
                     "subject": item.heading,

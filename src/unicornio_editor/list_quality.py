@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
+from urllib.parse import urlsplit, urlunsplit
 
 
 class ListContentError(ValueError):
@@ -133,7 +135,7 @@ def extract_list_items(
     current_group = ""
     for match in _HEADING_RE.finditer(source):
         tag = str(match.group("tag")).lower()
-        text = " ".join(re.sub(r"<[^>]+>", " ", match.group("body")).split())
+        text = " ".join(unescape(re.sub(r"<[^>]+>", " ", match.group("body"))).split())
         if tag == "h2":
             current_group = text
         numbered = _NUMBERED_HEADING.match(text)
@@ -294,7 +296,7 @@ def _is_descriptive_item(row: dict[str, object], source: str) -> bool:
     text = str(row.get("text") or "").strip()
     if not text or _AUXILIARY_HEADING.search(text):
         return False
-    if len(re.findall(r"[\wÀ-ÿ]+", text)) < 2:
+    if len(re.findall(r"[\wÀ-ÿ]+", text)) < 1:
         return False
     match = row.get("match")
     if not isinstance(match, re.Match):
@@ -317,7 +319,7 @@ def _item_identity(group: str, heading: str, number: int | None, position: int) 
 
 
 def _heading_name(value: str, item: ListItem) -> str | None:
-    text = " ".join(str(value or "").split())
+    text = " ".join(unescape(str(value or "")).split())
     numbered = _NUMBERED_HEADING.match(text)
     name = numbered.group(2).strip() if numbered else text
     return name if name.casefold() == item.heading.casefold() else None
@@ -345,7 +347,16 @@ def list_item_media_coverage(
         rows = getattr(media_context, "inline", ())
     if isinstance(rows, dict):
         rows = rows.get("accepted") or ()
-    assets = list(rows) if isinstance(rows, (list, tuple)) else []
+    raw_assets = list(rows) if isinstance(rows, (list, tuple)) else []
+    assets: list[dict[str, object]] = []
+    for asset in raw_assets:
+        if isinstance(asset, dict):
+            assets.append(asset)
+            continue
+        to_dict = getattr(asset, "to_dict", None)
+        value = to_dict() if callable(to_dict) else {}
+        if isinstance(value, dict):
+            assets.append(value)
     canonical_asset_contract = any(
         isinstance(asset, dict) and str(asset.get("item_identity") or "").strip()
         for asset in assets
@@ -353,11 +364,6 @@ def list_item_media_coverage(
     covered: dict[str, list[object]] = {item.identity: [] for item in items}
     used: set[str] = set()
     for asset in assets:
-        if not isinstance(asset, dict):
-            to_dict = getattr(asset, "to_dict", None)
-            asset = to_dict() if callable(to_dict) else {}
-        if not isinstance(asset, dict):
-            continue
         decision = str((asset.get("visual_verification") or {}).get("decision") or "").upper()
         if decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
             continue
@@ -380,11 +386,40 @@ def list_item_media_coverage(
                 used.add(media_key)
                 break
     missing = [item.identity for item in items if not covered[item.identity]]
+    rendered_mismatch: list[str] = []
+    for position, item in enumerate(items):
+        next_start = items[position + 1].heading_start if position + 1 < len(items) else len(html)
+        section = html[item.heading_end:next_start]
+        rendered = {
+            _media_url_key(match.group(1))
+            for match in re.finditer(
+                r"<img\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]",
+                section,
+                re.IGNORECASE | re.DOTALL,
+            )
+        }
+        approved = {
+            _media_url_key(str(asset.get("media_url") or ""))
+            for asset in covered[item.identity]
+            if isinstance(asset, dict) and str(asset.get("media_url") or "").strip()
+        }
+        if not rendered.intersection(approved):
+            rendered_mismatch.append(item.identity)
+    missing = list(dict.fromkeys([*missing, *rendered_mismatch]))
     return {
         "applicable": True,
         "passed": not missing,
         "required": len(items),
         "covered": len(items) - len(missing),
         "missing": missing,
+        "rendered_mismatch": rendered_mismatch,
         "items": [item.identity for item in items],
     }
+
+
+def _media_url_key(value: str) -> str:
+    parsed = urlsplit(unescape(str(value or "").strip()))
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip().split("?", 1)[0]
+    path = re.sub(r"-\d+x\d+(?=\.[^./]+$)", "", parsed.path)
+    return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), path.rstrip("/") or "/", "", ""))

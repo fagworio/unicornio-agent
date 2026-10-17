@@ -22,12 +22,14 @@ listicles e a aquisição incremental de mídia no V2.
 ## Regressão local
 
 `tests/fixtures/post_115179_regression.html` representa o formato reportado para
-o post 115179: um H2 agrupador, cinco H3 de itens sem numeração e um CTA H3.
-Ele é uma fixture local de regressão, não uma cópia obtida do WordPress.
+o post 115179: dois H2 agrupadores, cinco H3 de itens sem numeração, títulos
+curtos/escapados e um CTA H3. Ele é uma fixture local de regressão, não uma
+cópia obtida do WordPress.
 
 Foram cobertos localmente: zero, uma, quatro e cinco imagens; obra errada;
 duplicação; featured sem quota inline; busca `EXHAUSTED` sem waiver; CTA fora
-da contagem; inserção por seção; e a contabilidade de identidade visual.
+da contagem; inserção por seção sem fallback de heading; URLs trocadas entre
+seções; e a contabilidade de identidade visual.
 
 ## Limitação operacional
 

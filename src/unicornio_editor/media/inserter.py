@@ -364,7 +364,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
     if len(plan) > 12:
         raise MediaInsertionError("at most twelve images are allowed")
     paragraph_ends = [match.end() for match in re.finditer(r"</p>\s*", html, flags=re.IGNORECASE)]
-    placements: list[tuple[int, str]] = []
+    placements: list[tuple[int, str, Mapping[str, Any]]] = []
     indexes: list[int] = []
     for item in plan:
         if not isinstance(item, Mapping):
@@ -424,10 +424,10 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             f'[caption id="" align="aligncenter" width="{width}"]'
             f"{img} {escape(credit)}[/caption]"
         )
-        placements.append((index, figure))
+        placements.append((index, figure, item))
         indexes.append(index)
     if listicle:
-        for index, figure in sorted(placements, reverse=True):
+        for index, figure, item in sorted(placements, key=lambda value: value[0], reverse=True):
             start = paragraph_ends[index - 1] if index > 0 else 0
             end = paragraph_ends[index]
             headings = list(re.finditer(
@@ -444,11 +444,18 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
                 return value.strip().casefold()
 
             target_key = re.sub(r"\s+", " ", target).casefold()
-            heading = next(
-                (candidate for candidate in reversed(headings)
-                 if not target_key or heading_text(candidate) == target_key),
-                headings[-1] if headings else None,
-            )
+            if target_key:
+                matches = [candidate for candidate in headings if heading_text(candidate) == target_key]
+            else:
+                # Legacy plans may not carry the canonical title yet. Infer
+                # only when the section contains exactly one item heading;
+                # never silently select an arbitrary last heading.
+                matches = [
+                    candidate for candidate in headings
+                    if re.match(r"<h3\b", candidate.group(0), re.IGNORECASE)
+                    or re.match(r"<h[23]\b[^>]*>\s*\d{1,3}\s*[.)-]", candidate.group(0), re.IGNORECASE)
+                ]
+            heading = matches[0] if len(matches) == 1 else None
             if not heading:
                 raise MediaInsertionError(
                     f"list item at paragraph {index} has no target H2/H3 before it"
@@ -456,7 +463,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             position = start + heading.end()
             html = html[:position] + figure + html[position:]
         return html
-    for index, figure in sorted(placements, reverse=True):
+    for index, figure, _item in sorted(placements, key=lambda value: value[0], reverse=True):
         position = paragraph_ends[index]
         html = html[:position] + figure + html[position:]
     return html
