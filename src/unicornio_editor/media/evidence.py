@@ -28,14 +28,13 @@ from __future__ import annotations
 import re
 from typing import Any
 from .page_assets import extract_page_assets
+from ..list_quality import extract_list_items
 from urllib.parse import unquote, urlparse
 
 from .relevance import CONCEPT_WORDS, STOPWORDS, extract_entities, normalize
 
-_H2_RE = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.IGNORECASE | re.DOTALL)
 _TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
-_ITEM_RE = re.compile(r"^\s*(\d{1,3})\s*[.)\u2013-]\s*")
 _FIGCAPTION_RE = re.compile(r"<figcaption\b[^>]*>(.*?)</figcaption>", re.IGNORECASE | re.DOTALL)
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'([a-zA-Z-]+)\s*=\s*["\']([^"\']*)["\']')
@@ -76,35 +75,29 @@ def post_subjects(
 ) -> list[dict[str, Any]]:
     """Subjects do post (Fases 7-8).
 
-    Listicle (H2 numerados): 1 subject por item — ``{"item", "heading",
-    "subject"}``. Artigo normal: a entidade principal do título (a frase mais
+    Listicle (H2 numerados ou H3 agrupados): 1 subject por item —
+    ``{"item", "heading", "subject"}``. Artigo normal: a entidade principal do título (a frase mais
     específica, ex. "Metroid Prime 4").
 
     Cada subject é a chave de validação da SUA imagem: a imagem do item 1 não
     pode ser aceita por evidência do item 3 (Fase 9).
     """
-    # Lista = H2 REALMENTE numerados ("1. Bleach"). Um artigo comum também tem
-    # H2 ("O que sabemos até agora") e antes cada um virava item — o subject
-    # saía do H2 em vez da entidade do título ("O que sabemos até agora" no
-    # lugar de "metroid prime 4"), destruindo o score em notícias normais.
-    numerados: list[tuple[int, str, int]] = []
+    # A estrutura é compartilhada com o checklist e o inserter. Um artigo
+    # comum que apenas menciona cinco filmes não possui headings numerados e
+    # continua usando a entidade principal do título.
     html = content_html or ""
-    for match in _H2_RE.finditer(html):
-        h2 = match.group(1)
-        limpo = re.sub(r"\s+", " ", _TAG_RE.sub(" ", h2)).strip()
-        achado = _ITEM_RE.match(limpo)
-        if not achado:
-            continue
-        # O H2 inteiro (menos o numero) e o subject: "Cyberpunk: Edgerunners"
-        # nomeia a obra em si — cortar no ":" perderia metade do nome.
-        texto_item = _ITEM_RE.sub("", limpo).strip()
-        if texto_item:
-            section_slot = len(re.findall(r"</p\s*>", html[:match.start()], flags=re.IGNORECASE))
-            numerados.append((int(achado.group(1)), texto_item, section_slot))
-    if len(numerados) >= 2:
+    items = extract_list_items(title, html)
+    if len(items) >= 2:
         return [
-            {"item": numero, "heading": texto, "subject": texto, "section_slot": section_slot}
-            for numero, texto, section_slot in numerados
+            {
+                "item": item.number,
+                "heading": item.heading,
+                "subject": item.heading,
+                "section_slot": item.paragraph_index,
+                "heading_tag": item.tag,
+                "group_heading": item.group_heading,
+            }
+            for item in items
         ]
 
     principal = _entidade_principal(title)

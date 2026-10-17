@@ -853,6 +853,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(result["listicle"]["feasible"])
         self.assertEqual(result["listicle"]["verified_inline_capacity"], 3)
         self.assertEqual(result["listicle"]["missing"], 1)
+        self.assertEqual(result["listicle"]["missing_items"], [4])
 
     def test_media_validate_rejects_featured_denied_by_vision(self):
         payload = editorial_payload()

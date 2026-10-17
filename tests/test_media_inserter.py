@@ -171,6 +171,20 @@ class MediaInserterTests(unittest.TestCase):
         with self.assertRaises(MediaInsertionError):
             insert_media(html, [_item(index=0)], listicle=True)
 
+    def test_grouped_h3_listicle_inserts_after_each_item_heading(self):
+        html = (
+            "<p>Introdução suficiente para contextualizar a lista.</p>"
+            "<h2>Recomendações</h2>"
+            "<h3>3. Primeiro jogo: descrição</h3><p>Descrição do primeiro.</p>"
+            "<h3>2. Segundo jogo: descrição</h3><p>Descrição do segundo.</p>"
+            "<h3>1. Terceiro jogo: descrição</h3><p>Descrição do terceiro.</p>"
+        )
+        plan = [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(1, 4)]
+        result = insert_media(html, plan, listicle=True)
+        self.assertIn("<h2>Recomendações</h2><h3>3. Primeiro jogo: descrição</h3>[caption", result)
+        self.assertIn("<h3>2. Segundo jogo: descrição</h3>[caption", result)
+        self.assertIn("<h3>1. Terceiro jogo: descrição</h3>[caption", result)
+
     def test_enforces_distance_between_images(self):
         plan = [
             _item(index=1, url="https://media.example/1.webp", alt="Um"),

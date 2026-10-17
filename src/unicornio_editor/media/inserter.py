@@ -354,8 +354,9 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
     """Insert uploaded figures at safe block boundaries.
 
     Normal articles: figures go after the paragraph at ``paragraph_index``,
-    kept at least three paragraphs apart. Listicles (numbered H2 items):
-    each figure goes immediately after the numbered H2 preceding the
+    kept at least three paragraphs apart. Listicles (numbered H2 items or
+    numbered H3 items under a grouping H2): each figure goes immediately
+    after the numbered heading preceding the
     targeted paragraph, as required by ``validate_list_content``.
     """
     if not isinstance(html, str) or not isinstance(plan, list):
@@ -425,10 +426,15 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         for index, figure in sorted(placements, reverse=True):
             start = paragraph_ends[index - 1] if index > 0 else 0
             end = paragraph_ends[index]
-            heading = re.search(r"<h2[^>]*>.*?</h2>", html[start:end], re.IGNORECASE | re.DOTALL)
+            headings = list(re.finditer(
+                r"<h[23]\b[^>]*>\s*\d{1,3}\s*[.)-]\s*.*?</h[23]>",
+                html[start:end],
+                re.IGNORECASE | re.DOTALL,
+            ))
+            heading = headings[-1] if headings else None
             if not heading:
                 raise MediaInsertionError(
-                    f"list item at paragraph {index} has no numbered H2 before it"
+                    f"list item at paragraph {index} has no numbered H2/H3 before it"
                 )
             position = start + heading.end()
             html = html[:position] + figure + html[position:]

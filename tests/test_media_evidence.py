@@ -72,6 +72,22 @@ class SubjectTests(unittest.TestCase):
         # imagem sem evidencia de nenhum item -> sem subject (nao herda o global)
         self.assertEqual(subject_for_image("https://x/random.jpg", subs), "")
 
+    def test_listicle_grouped_h3_tem_um_subject_por_item(self):
+        subs = post_subjects(
+            title="5 recomendações de filmes",
+            content_html=(
+                "<p>Introdução.</p><h2>Recomendações</h2>"
+                "<h3>5. Obra A: descrição</h3><p>a</p>"
+                "<h3>4. Obra B: descrição</h3><p>b</p>"
+                "<h3>3. Obra C: descrição</h3><p>c</p>"
+                "<h3>2. Obra D: descrição</h3><p>d</p>"
+                "<h3>1. Obra E: descrição</h3><p>e</p>"
+            ),
+        )
+        self.assertEqual([row["item"] for row in subs], [5, 4, 3, 2, 1])
+        self.assertEqual([row["section_slot"] for row in subs], [1, 2, 3, 4, 5])
+        self.assertEqual(subs[0]["heading_tag"], "h3")
+
 
 class ScoreTests(unittest.TestCase):
     def test_key_art_com_evidencia_de_origem_e_match(self):

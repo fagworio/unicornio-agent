@@ -23,7 +23,7 @@ from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import _repair_orphan_media, clean_html
 from .language import editorial_language_report
-from .list_quality import detect_list_format
+from .list_quality import detect_list_format, extract_list_items
 from .locking import LockError, LockManager
 from .manifest import (
     META_READY_MANIFEST,
@@ -1302,17 +1302,9 @@ def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) ->
     html = str(editorial.get("cleaned_html") or "")
     if not html:
         return ""
-    h2s = list(
-        re.finditer(r"<h2\b[^>]*>(.*?)</h2>", html, re.IGNORECASE | re.DOTALL)
+    numerados = extract_list_items(
+        str((editorial.get("seo") or {}).get("title") or ""), html
     )
-    if not h2s:
-        return ""
-    numerados: list[tuple[int, str, int]] = []
-    for achado in h2s:
-        limpo = " ".join(re.sub(r"<[^>]+>", " ", achado.group(1)).split())
-        numero = re.match(r"^\s*(\d+)\s*[.)]\s*(.+)$", limpo)
-        if numero:
-            numerados.append((int(numero.group(1)), numero.group(2).strip(), achado.start()))
     if len(numerados) < 2:
         return ""
     # Qual item da seção? O paragraph_index aponta para o parágrafo; o item é o
@@ -1324,9 +1316,9 @@ def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) ->
         if indice_paragrafo < len(paragrafos):
             limite = paragrafos[indice_paragrafo].start()
     if limite < 0:
-        return numerados[0][1] if numerados else ""
-    candidatos = [texto for _n, texto, pos in numerados if pos <= limite]
-    return candidatos[-1] if candidatos else numerados[0][1]
+        return numerados[0].heading
+    candidatos = [item.heading for item in numerados if item.heading_start <= limite]
+    return candidatos[-1] if candidatos else numerados[0].heading
 
 
 def _item_entities(
@@ -1973,16 +1965,23 @@ def _listicle_media_capacity(
     if promised is None:
         return {"applicable": False}
 
+    list_items = extract_list_items(title, html)
+    covered_slots: set[int] = set()
+
     sources: set[str] = set()
-    for image in iter_content_images(html):
-        source = str(image.get("src") or "").strip()
-        if source and image_is_relevant(
-            alt_text=str(image.get("alt") or ""),
-            credit_text=str(image.get("caption") or ""),
-            source_url=source,
-            entities=entities,
-        ):
-            sources.add(f"content:{source}")
+    for position, list_item in enumerate(list_items):
+        next_start = list_items[position + 1].heading_start if position + 1 < len(list_items) else len(html)
+        section_html = html[list_item.heading_end:next_start]
+        for image in iter_content_images(section_html):
+            source = str(image.get("src") or "").strip()
+            if source and image_is_relevant(
+                alt_text=str(image.get("alt") or ""),
+                credit_text=str(image.get("caption") or ""),
+                source_url=source,
+                entities=entities,
+            ):
+                sources.add(f"content:{source}")
+                covered_slots.add(list_item.paragraph_index)
 
     plan = editorial.get("media_plan") or []
     for index, item in enumerate(plan):
@@ -1993,6 +1992,16 @@ def _listicle_media_capacity(
         key = _plan_source_key(item)
         if key and not key.endswith(":"):
             sources.add(f"plan:{key}")
+        paragraph_index = item.get("paragraph_index")
+        if isinstance(paragraph_index, int) and any(
+            paragraph_index == list_item.paragraph_index for list_item in list_items
+        ):
+            covered_slots.add(paragraph_index)
+
+    missing_items = [
+        item.number for item in list_items
+        if item.paragraph_index not in covered_slots
+    ]
 
     available = len(sources)
     return {
@@ -2000,7 +2009,8 @@ def _listicle_media_capacity(
         "promised_items": promised,
         "verified_inline_capacity": available,
         "missing": max(0, promised - available),
-        "feasible": available >= promised,
+        "missing_items": missing_items,
+        "feasible": available >= promised and not missing_items,
         "featured_counted": False,
     }
 
@@ -2099,10 +2109,16 @@ def _execute_media_plan(
         return [], None, None
     planning = (preflight or {}).get("listicle") or {}
     if planning.get("applicable") and not planning.get("feasible"):
+        missing_items = planning.get("missing_items") or []
+        coverage_detail = (
+            f"; item(ns) sem posição de mídia válida: {', '.join(map(str, missing_items))}"
+            if missing_items else ""
+        )
         detail = (
             f"planejamento media-first: listicle promete {planning.get('promised_items')} itens, "
             f"mas possui capacidade validada para {planning.get('verified_inline_capacity')} "
             "imagem(ns) inline distinta(s); reduza itens ou encontre uma imagem por item"
+            f"{coverage_detail}"
         )
         return [
             {

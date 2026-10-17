@@ -53,7 +53,7 @@ class ListQualityTests(unittest.TestCase):
         bad = GOOD.replace("<h2>1. Scrapped Princess: a ciência por trás da magia</h2>", "<h2>1. A ciência por trás da magia</h2>")
         with self.assertRaises(ListContentError):
             validate_list_content("2 animes para assistir se você ama Frieren", bad)
-    def test_accepts_zero_image_listicle(self):
+    def test_rejects_zero_image_listicle(self):
         html = (
             "<p>Intro.</p>"
             "<h2>1. Tokyo Ghoul: um horror que precisa respirar</h2>"
@@ -61,8 +61,28 @@ class ListQualityTests(unittest.TestCase):
             "<h2>2. Berserk: uma adaptação corajosa</h2>"
             "<p>Descrição do item 2.</p>"
         )
-        report = validate_list_content("2 animes para assistir se você ama Frieren", html)
+        with self.assertRaises(ListContentError):
+            validate_list_content("2 animes para assistir se você ama Frieren", html)
+
+    def test_recognizes_grouped_h3_items_and_requires_each_image(self):
+        html = (
+            "<p>Introdução.</p><h2>Recomendações</h2>"
+            "<h3>5. Obra A: descrição</h3><figure><img src=\"a.webp\"></figure><p>Item A.</p>"
+            "<h3>4. Obra B: descrição</h3><figure><img src=\"b.webp\"></figure><p>Item B.</p>"
+            "<h3>3. Obra C: descrição</h3><figure><img src=\"c.webp\"></figure><p>Item C.</p>"
+            "<h3>2. Obra D: descrição</h3><figure><img src=\"d.webp\"></figure><p>Item D.</p>"
+            "<h3>1. Obra E: descrição</h3><figure><img src=\"e.webp\"></figure><p>Item E.</p>"
+        )
+        report = validate_list_content("5 recomendações de filmes", html)
         self.assertTrue(report["passed"])
+        self.assertEqual(report["items"], 5)
+
+    def test_mentions_five_films_without_list_structure_is_normal_article(self):
+        html = (
+            "<p>O festival reúne cinco filmes e discute suas influências.</p>"
+            "<h2>Contexto</h2><p>O texto contextualiza as obras.</p>"
+        )
+        self.assertIsNone(detect_list_format("Festival anuncia cinco filmes", html))
 
     def test_h2_sem_numeracao_nao_e_listicle(self):
         """H2 sem numeração = artigo normal: não há contrato de lista a violar.

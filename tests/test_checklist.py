@@ -1069,6 +1069,34 @@ class ChecklistTests(unittest.TestCase):
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         self.assertEqual(item["status"], "fail")
 
+    def test_grouped_h3_listicle_never_receives_search_waiver(self):
+        content = (
+            "<h2>Recomendações</h2>"
+            "<h3>5. Obra A: descrição</h3><p>Item A.</p>"
+            "<h3>4. Obra B: descrição</h3><p>Item B.</p>"
+            "<h3>3. Obra C: descrição</h3><p>Item C.</p>"
+            "<h3>2. Obra D: descrição</h3><p>Item D.</p>"
+            "<h3>1. Obra E: descrição</h3><p>Item E.</p>"
+            '<p>Fonte: <a href="https://source.example/news" rel="nofollow noopener">Source</a>.</p>'
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        result = self._run_checklist(
+            post=make_post(
+                title={"raw": "5 recomendações de filmes"},
+                featured_media=7,
+                meta={"original_link": "https://source.example/news"},
+            ),
+            editorial=editorial_payload(media_exhausted=True),
+            content=content,
+            media_context={
+                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED"}
+            },
+        )
+        item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
+        self.assertEqual(item["status"], "fail")
+        self.assertTrue(result["media_decision"]["is_listicle"])
+        self.assertFalse(result["media_decision"]["waiver_applied"])
+
 
     # ---- Fase 1: o pHash NUNCA reduz o minimo 2/4/6 ----
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from html.parser import HTMLParser
 
 
@@ -20,7 +21,30 @@ _COUNT_WITH_TERM = re.compile(
     re.IGNORECASE,
 )
 
-_NUMBERED_H2 = re.compile(r"^\s*(\d{1,3})\s*[.)-]\s+(.+?)\s*$")
+_NUMBERED_HEADING = re.compile(r"^\s*(\d{1,3})\s*[.)-]\s+(.+?)\s*$")
+_HEADING_RE = re.compile(
+    r"<(?P<tag>h[23])\b[^>]*>(?P<body>.*?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class ListItem:
+    """One item in the canonical listicle structure.
+
+    ``paragraph_index`` is the zero-based paragraph immediately following the
+    item heading.  It is shared by media evidence, insertion and the checklist
+    so an H3 item nested below a grouping H2 cannot silently fall back to the
+    article-wide subject.
+    """
+
+    number: int
+    heading: str
+    tag: str
+    heading_start: int
+    heading_end: int
+    paragraph_index: int
+    group_heading: str = ""
 
 
 class _BlockParser(HTMLParser):
@@ -34,7 +58,7 @@ class _BlockParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
-        if tag in {"h2", "p", "figure", "img", "article"} and self._depth == 0:
+        if tag in {"h2", "h3", "p", "figure", "img", "article"} and self._depth == 0:
             self._tag = tag
             self._attrs = attrs
             self._text = []
@@ -42,7 +66,7 @@ class _BlockParser(HTMLParser):
                 self.blocks.append((tag, "", True))
             else:
                 self._depth = 1
-        elif self._tag is not None:
+        elif self._tag is not None and tag not in {"img", "br", "hr", "input", "source", "wbr"}:
             self._depth += 1
 
     def handle_endtag(self, tag: str) -> None:
@@ -58,9 +82,79 @@ class _BlockParser(HTMLParser):
         elif self._depth:
             self._depth -= 1
 
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Handle HTML void elements without closing their parent block."""
+        if tag.lower() == "img":
+            if self._tag is None:
+                self.blocks.append(("img", "", True))
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
     def handle_data(self, data: str) -> None:
         if self._tag is not None:
             self._text.append(data)
+
+
+def extract_list_items(title: str = "", html: str = "") -> list[ListItem]:
+    """Extract the structural list items used by every downstream gate.
+
+    Older content used numbered H2s.  Newer/editorial content commonly uses a
+    single grouping H2 followed by numbered H3s (for example, five
+    recommendations under ``Recomendações``).  Only numbered H2s, or numbered
+    H3s that actually belong to an H2 group, are list items.  Thus a normal
+    article merely mentioning five films remains a normal article.
+    """
+    source = str(html or "")
+    headings: list[dict[str, object]] = []
+    current_group = ""
+    for match in _HEADING_RE.finditer(source):
+        tag = str(match.group("tag")).lower()
+        text = " ".join(re.sub(r"<[^>]+>", " ", match.group("body")).split())
+        if tag == "h2":
+            current_group = text
+        numbered = _NUMBERED_HEADING.match(text)
+        headings.append(
+            {
+                "tag": tag,
+                "text": text,
+                "match": match,
+                "numbered": numbered,
+                "group": current_group if tag == "h3" else "",
+            }
+        )
+
+    numbered_h2 = [row for row in headings if row["tag"] == "h2" and row["numbered"]]
+    if len(numbered_h2) >= 2:
+        selected = numbered_h2
+    else:
+        grouped_h3 = [
+            row for row in headings
+            if row["tag"] == "h3" and row["numbered"] and row["group"]
+        ]
+        # A numbered H3 without a containing H2 is an ordinary subheading,
+        # not proof that the article is a listicle.
+        selected = grouped_h3 if len(grouped_h3) >= 2 else []
+
+    items: list[ListItem] = []
+    for row in selected:
+        numbered = row["numbered"]
+        match = row["match"]
+        if not isinstance(numbered, re.Match) or not isinstance(match, re.Match):
+            continue
+        paragraph_index = len(re.findall(r"<p\b", source[: match.start()], flags=re.IGNORECASE))
+        items.append(
+            ListItem(
+                number=int(numbered.group(1)),
+                heading=numbered.group(2).strip(),
+                tag=str(row["tag"]),
+                heading_start=match.start(),
+                heading_end=match.end(),
+                paragraph_index=paragraph_index,
+                group_heading=str(row["group"] or ""),
+            )
+        )
+    return items
 
 
 def detect_list_format(title: str, html: str = "") -> int | None:
@@ -72,11 +166,12 @@ def detect_list_format(title: str, html: str = "") -> int | None:
     decide sozinho) exigia 40 IMAGENS para um artigo normal, travando o post
     para sempre. "10 animes para ficar de olho" tinha o mesmo destino.
 
-    A prova estrutural e a mesma adotada no post_subjects(): H2 REALMENTE
-    numerados (2+). Sem essa estrutura o post segue a politica 2/4/6.
+    A prova estrutural e a mesma adotada no post_subjects(): H2 numerados ou
+    H3 numerados dentro de um H2 agrupador. Sem essa estrutura o post segue a
+    politica 2/4/6.
     """
-    numerados = re.findall(r"<h2[^>]*>\s*(\d{1,3})\s*[.)-]", html or "", re.IGNORECASE)
-    if len(numerados) < 2:
+    items = extract_list_items(title, html)
+    if len(items) < 2:
         return None  # sem estrutura de lista: o titulo nao decide
     # Com a estrutura presente, a contagem vem do TITULO quando ele promete —
     # a conferencia prometido x realizado continua no validate_list_content.
@@ -86,11 +181,11 @@ def detect_list_format(title: str, html: str = "") -> int | None:
     top_match = re.search(r"\btop\s+(\d{1,3})\b", title or "", re.IGNORECASE)
     if top_match:
         return int(top_match.group(1))
-    return max(int(n) for n in numerados)
+    return max(item.number for item in items)
 
 
 def validate_list_content(title: str, html: str) -> dict[str, int | bool]:
-    """Validate exact count and H2 -> image -> description order."""
+    """Validate exact count and item-heading -> image -> description order."""
     promised = detect_list_format(title, html)
     if promised is None:
         return {"is_list": False, "items": 0, "passed": True}
@@ -99,35 +194,37 @@ def validate_list_content(title: str, html: str) -> dict[str, int | bool]:
     parser = _BlockParser()
     parser.feed(html)
     blocks = parser.blocks
-    # Relevance-first policy: a listicle may legitimately have zero images
-    # (absence beats a wrong image), so the image-order contract is waived
-    # when the content carries no image at all; numbering and count still
-    # hold. The structural contract only applies to posts that HAVE images.
-    has_any_image = any(tag in {"figure", "img"} for tag, _, _ in blocks)
-    headings = [(i, value) for i, (tag, value, _) in enumerate(blocks) if tag == "h2"]
-    if len(headings) != promised:
-        raise ListContentError(f"title promises {promised} items but content has {len(headings)} H2 items")
-    expected = list(range(promised, 0, -1)) if headings and _number(headings[0][1]) == promised else list(range(1, promised + 1))
+    items = extract_list_items(title, html)
+    if len(items) != promised:
+        raise ListContentError(
+            f"title promises {promised} items but content has {len(items)} numbered list items"
+        )
+    heading_indexes = []
+    for item in items:
+        match = next(
+            (index for index, (tag, value, _is_void) in enumerate(blocks)
+             if tag == item.tag and _number(value) == item.number),
+            None,
+        )
+        if match is None:
+            raise ListContentError(f"item {item.number} heading is missing from the content blocks")
+        heading_indexes.append((match, item))
+    expected = list(range(promised, 0, -1)) if heading_indexes and heading_indexes[0][1].number == promised else list(range(1, promised + 1))
     seen: list[int] = []
-    for position, (index, heading) in enumerate(headings):
-        match = _NUMBERED_H2.match(heading)
-        if not match:
-            raise ListContentError(f"item {position + 1} must have a numbered H2")
-        number, name = int(match.group(1)), match.group(2).strip()
+    for position, (index, item) in enumerate(heading_indexes):
+        number, name = item.number, item.heading
         if not name or len(name) < 3 or ":" not in name:
-            raise ListContentError(f"item {number} H2 must identify the item and its description")
+            raise ListContentError(f"item {number} {item.tag.upper()} must identify the item and its description")
         seen.append(number)
-        if not has_any_image:
-            continue
         if index + 1 >= len(blocks) or blocks[index + 1][0] not in {"figure", "img"}:
-            raise ListContentError(f"item {number} must have its image immediately after H2")
+            raise ListContentError(f"item {number} must have its image immediately after {item.tag.upper()}")
         if index + 2 >= len(blocks) or blocks[index + 2][0] != "p":
             raise ListContentError(f"item {number} description must follow the image")
     if seen != expected:
         raise ListContentError(f"invalid item numbering: expected {expected}, got {seen}")
-    return {"is_list": True, "items": len(headings), "promised": promised, "passed": True}
+    return {"is_list": True, "items": len(items), "promised": promised, "passed": True}
 
 
 def _number(heading: str) -> int | None:
-    match = _NUMBERED_H2.match(heading)
+    match = _NUMBERED_HEADING.match(heading)
     return int(match.group(1)) if match else None
