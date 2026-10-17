@@ -370,7 +370,11 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         if not isinstance(item, Mapping):
             raise MediaInsertionError("each media placement must be an object")
         required = {"paragraph_index", "media_url", "alt_text", "credit_text", "width", "height"}
-        if set(item) != required:
+        allowed = required | {
+            "item_identity", "item_title", "item_group", "html_position",
+            "item_number", "section_heading", "section_slot", "subject",
+        }
+        if not required.issubset(item) or set(item) - allowed:
             raise MediaInsertionError("media placement has missing or unknown fields")
         index = item["paragraph_index"]
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
@@ -427,14 +431,27 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             start = paragraph_ends[index - 1] if index > 0 else 0
             end = paragraph_ends[index]
             headings = list(re.finditer(
-                r"<h[23]\b[^>]*>\s*\d{1,3}\s*[.)-]\s*.*?</h[23]>",
+                r"<h[23]\b[^>]*>.*?</h[23]>",
                 html[start:end],
                 re.IGNORECASE | re.DOTALL,
             ))
-            heading = headings[-1] if headings else None
+            target = str(item.get("item_title") or item.get("section_heading") or item.get("subject") or "").strip()
+
+            def heading_text(match: re.Match[str]) -> str:
+                value = re.sub(r"<[^>]+>", " ", match.group(0))
+                value = " ".join(unescape(value).split())
+                value = re.sub(r"^\d{1,3}\s*[.)-]\s*", "", value)
+                return value.strip().casefold()
+
+            target_key = re.sub(r"\s+", " ", target).casefold()
+            heading = next(
+                (candidate for candidate in reversed(headings)
+                 if not target_key or heading_text(candidate) == target_key),
+                headings[-1] if headings else None,
+            )
             if not heading:
                 raise MediaInsertionError(
-                    f"list item at paragraph {index} has no numbered H2/H3 before it"
+                    f"list item at paragraph {index} has no target H2/H3 before it"
                 )
             position = start + heading.end()
             html = html[:position] + figure + html[position:]

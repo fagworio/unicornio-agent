@@ -223,6 +223,12 @@ class InlineMedia:
     sha256: str = ""
     visual_group_id: str = ""
     visual_verification: dict[str, Any] = field(default_factory=dict)
+    # Canonical list-item contract. Kept at the end for positional backwards
+    # compatibility with checkpoints and legacy tests.
+    item_identity: str = ""
+    item_title: str = ""
+    item_group: str = ""
+    html_position: int | None = None
 
     def __post_init__(self) -> None:
         if self.media_id < 1 or self.slot < 0:
@@ -249,6 +255,10 @@ class InlineMedia:
             "sha256": self.sha256,
             "visual_group_id": self.visual_group_id,
             "visual_verification": self.visual_verification,
+            "item_identity": self.item_identity,
+            "item_title": self.item_title,
+            "item_group": self.item_group,
+            "html_position": self.html_position,
         }
 
     @classmethod
@@ -271,6 +281,10 @@ class InlineMedia:
             str(value.get("sha256") or ""),
             str(value.get("visual_group_id") or ""),
             dict(value.get("visual_verification") or {}),
+            str(value.get("item_identity") or ""),
+            str(value.get("item_title") or ""),
+            str(value.get("item_group") or ""),
+            int(value["html_position"]) if value.get("html_position") is not None else None,
         )
 
 

@@ -75,7 +75,12 @@ def _embedded_media_urls(content: str) -> list[str]:
     ]
 
 
-def _assert_candidate_media_contract(content: str, media: MediaProgress | None) -> None:
+def _assert_candidate_media_contract(
+    content: str,
+    media: MediaProgress | None,
+    *,
+    title: str = "",
+) -> None:
     """Reject inline HTML that is not present in the approved V2 media contract."""
     allowed_urls = {
         _canonical_embedded_media_url(str(item.media_url or ""))
@@ -91,6 +96,26 @@ def _assert_candidate_media_contract(content: str, media: MediaProgress | None) 
             "unexpected inline media in candidate contract: "
             + ", ".join(unexpected_urls[:5])
         )
+    if title and media is not None:
+        from .media_accounting import account_visual_media
+        from ..media.evidence import post_subjects
+
+        rows = post_subjects(title=title, content_html=content)
+        canonical_items = any(
+            str(getattr(item, "item_identity", "") or "").strip()
+            for item in getattr(media, "inline", ())
+        )
+        if len(rows) > 1 and canonical_items:
+            accounting = account_visual_media(
+                media,
+                required_inline=max(len(rows), int(getattr(media, "required", 0) or 0)),
+                listicle_items=rows,
+            )
+            if accounting.uncovered_listicle_items:
+                raise RuntimeError(
+                    "approved candidate does not cover list items: "
+                    + ", ".join(accounting.uncovered_listicle_items)
+                )
 
 
 def _required_image_count_for_editorial(content: str, *, title: str = "") -> int:
@@ -692,12 +717,14 @@ class ProductionMediaResolver:
             content_html=html,
             focus_keyword=focus_keyword,
             game_name=editorial.get("game_name"),
+            categories=editorial.get("categories") or context.get("categories") or (),
         )
         source_subjects = editorial_subjects(
             title=title,
             content_html=html,
             focus_keyword=focus_keyword,
             game_name=editorial.get("game_name"),
+            categories=editorial.get("categories") or context.get("categories") or (),
         )
         from ..media.vision_policy import resolve_editorial_identity
         seo_identity = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
@@ -719,7 +746,11 @@ class ProductionMediaResolver:
                 for value in identity.get("secondary_entities") or []
                 if str(value).strip().casefold() != primary_subject.casefold()
             ]]
-        is_listicle = detect_list_format(title, html) is not None or len(subject_rows) > 1
+        is_listicle = detect_list_format(
+            title,
+            html,
+            editorial.get("categories") or context.get("categories") or (),
+        ) is not None or len(subject_rows) > 1
         if is_listicle:
             media_reconciliation = reconcile_working_visual_media(
                 recovered_media,
@@ -779,9 +810,9 @@ class ProductionMediaResolver:
         def contextual_query(subject: str, *, extra: str = "") -> str:
             return add_query_context(item_query(subject, title, extra=extra))
         covered_items = {
-            str(item.item_number)
+            str(item.item_identity or item.item_number)
             for item in current_inline
-            if item.media_id in valid_inline_ids and item.item_number is not None
+            if item.media_id in valid_inline_ids and (item.item_identity or item.item_number is not None)
         }
         covered_subjects = {
             item.subject.casefold().strip()
@@ -792,7 +823,7 @@ class ProductionMediaResolver:
             (index, row) for index, row in enumerate(subject_rows)
             if not is_listicle
             or (
-                str(row.get("item")) not in covered_items
+                str(row.get("item_identity") or row.get("item")) not in covered_items
                 and str(row.get("subject") or "").casefold().strip() not in covered_subjects
             )
         ]
@@ -951,6 +982,10 @@ class ProductionMediaResolver:
                     "role": role,
                     "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
                     "item_number": (subject_meta.get(subject) or {}).get("item"),
+                    "item_identity": (subject_meta.get(subject) or {}).get("item_identity"),
+                    "item_title": (subject_meta.get(subject) or {}).get("item_title") or subject,
+                    "item_group": (subject_meta.get(subject) or {}).get("item_group") or "",
+                    "html_position": (subject_meta.get(subject) or {}).get("html_position"),
                     "section_heading": (subject_meta.get(subject) or {}).get("heading") or subject,
                     "section_slot": (subject_meta.get(subject) or {}).get("section_slot"),
                 })
@@ -964,6 +999,10 @@ class ProductionMediaResolver:
                 candidate["role"] = role
                 metadata = subject_meta.get(subject) or {}
                 candidate["item_number"] = metadata.get("item")
+                candidate["item_identity"] = metadata.get("item_identity")
+                candidate["item_title"] = metadata.get("item_title") or subject
+                candidate["item_group"] = metadata.get("item_group") or ""
+                candidate["html_position"] = metadata.get("html_position")
                 candidate["section_heading"] = metadata.get("heading") or subject
                 candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
@@ -1116,6 +1155,10 @@ class ProductionMediaResolver:
                     str(by_id[item.media_id].get("sha256") or item.sha256),
                     str(by_id[item.media_id].get("visual_group_id") or item.visual_group_id),
                     dict(by_id[item.media_id].get("visual_verification") or item.visual_verification),
+                    item.item_identity,
+                    item.item_title,
+                    item.item_group,
+                    item.html_position,
                 ) for item in current_inline
             ]
             if current_featured.status is FeaturedStatus.VALID and baseline_featured_asset is not None:
@@ -1321,7 +1364,7 @@ class ProductionMediaResolver:
                     ])
 
         covered_item_keys = {
-            str(item.item_number or item.subject).casefold()
+            str(item.item_identity or item.item_number or item.subject).casefold()
             for item in current_inline
             if item.media_id in valid_inline_ids and (item.item_number is not None or item.subject)
         }
@@ -1361,6 +1404,10 @@ class ProductionMediaResolver:
                     candidate["subject"] = subject
                     metadata = subject_meta.get(subject) or {}
                     candidate["item_number"] = metadata.get("item")
+                    candidate["item_identity"] = metadata.get("item_identity")
+                    candidate["item_title"] = metadata.get("item_title") or subject
+                    candidate["item_group"] = metadata.get("item_group") or ""
+                    candidate["html_position"] = metadata.get("html_position")
                     candidate["section_heading"] = metadata.get("heading") or subject
                     candidate["section_slot"] = metadata.get("section_slot")
                     try:
@@ -1431,7 +1478,10 @@ class ProductionMediaResolver:
                     if inline_remaining() <= 0:
                         break
                     candidate_key = str(
-                        candidate.get("item_number") or candidate.get("subject") or ""
+                        candidate.get("item_identity")
+                        or candidate.get("item_number")
+                        or candidate.get("subject")
+                        or ""
                     ).casefold()
                     if is_listicle and candidate_key in covered_item_keys:
                         continue
@@ -1781,6 +1831,10 @@ class ProductionMediaResolver:
             "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}",
             "width": 1200,
             "height": 800,
+            "item_identity": candidate.get("item_identity") or "",
+            "item_title": candidate.get("item_title") or subject,
+            "item_group": candidate.get("item_group") or candidate.get("group_heading") or "",
+            "html_position": candidate.get("html_position"),
         }
 
 
@@ -1860,6 +1914,7 @@ class WordPressWriterV2:
             _assert_candidate_media_contract(
                 content,
                 candidate_media if candidate_media_present else proposed_media,
+                title=str(candidate.get("title") or context.get("title") or ""),
             )
         if candidate_media_present:
             proposed_inline_by_id = {

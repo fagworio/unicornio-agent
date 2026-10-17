@@ -1967,6 +1967,7 @@ def _listicle_media_capacity(
 
     list_items = extract_list_items(title, html)
     covered_slots: set[int] = set()
+    covered_items: set[str] = set()
 
     sources: set[str] = set()
     for position, list_item in enumerate(list_items):
@@ -1978,10 +1979,11 @@ def _listicle_media_capacity(
                 alt_text=str(image.get("alt") or ""),
                 credit_text=str(image.get("caption") or ""),
                 source_url=source,
-                entities=entities,
+                entities=_item_entities({"subject": list_item.heading}, entities, editorial),
             ):
                 sources.add(f"content:{source}")
                 covered_slots.add(list_item.paragraph_index)
+                covered_items.add(list_item.identity.casefold())
 
     plan = editorial.get("media_plan") or []
     for index, item in enumerate(plan):
@@ -1993,14 +1995,27 @@ def _listicle_media_capacity(
         if key and not key.endswith(":"):
             sources.add(f"plan:{key}")
         paragraph_index = item.get("paragraph_index")
-        if isinstance(paragraph_index, int) and any(
-            paragraph_index == list_item.paragraph_index for list_item in list_items
-        ):
-            covered_slots.add(paragraph_index)
+        item_identity = str(item.get("item_identity") or "").casefold()
+        matched = next(
+            (
+                list_item for list_item in list_items
+                if (
+                    item_identity and item_identity == list_item.identity.casefold()
+                ) or (
+                    not item_identity
+                    and isinstance(paragraph_index, int)
+                    and paragraph_index == list_item.paragraph_index
+                )
+            ),
+            None,
+        )
+        if matched is not None:
+            covered_slots.add(matched.paragraph_index)
+            covered_items.add(matched.identity.casefold())
 
     missing_items = [
-        item.number for item in list_items
-        if item.paragraph_index not in covered_slots
+        item.number if item.number is not None else item.position for item in list_items
+        if item.paragraph_index not in covered_slots or item.identity.casefold() not in covered_items
     ]
 
     available = len(sources)
@@ -2108,26 +2123,18 @@ def _execute_media_plan(
     if not plan:
         return [], None, None
     planning = (preflight or {}).get("listicle") or {}
+    # Capacity is a final eligibility gate, not a per-candidate acquisition
+    # gate. A listicle may already have four valid items and acquire the fifth
+    # independently; READY/publisher still reject incomplete coverage.
     if planning.get("applicable") and not planning.get("feasible"):
-        missing_items = planning.get("missing_items") or []
-        coverage_detail = (
-            f"; item(ns) sem posição de mídia válida: {', '.join(map(str, missing_items))}"
-            if missing_items else ""
+        append_telemetry(
+            root,
+            "media_incremental_capacity_deferred",
+            post_id=post_id,
+            promised_items=planning.get("promised_items"),
+            verified_inline_capacity=planning.get("verified_inline_capacity"),
+            missing_items=planning.get("missing_items") or [],
         )
-        detail = (
-            f"planejamento media-first: listicle promete {planning.get('promised_items')} itens, "
-            f"mas possui capacidade validada para {planning.get('verified_inline_capacity')} "
-            "imagem(ns) inline distinta(s); reduza itens ou encontre uma imagem por item"
-            f"{coverage_detail}"
-        )
-        return [
-            {
-                "paragraph_index": item.get("paragraph_index"),
-                "status": "rejected",
-                "detail": detail,
-            }
-            for item in plan
-        ], None, None
     entities = extract_entities(
         title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
         content_html=str(vision_editorial.get("cleaned_html") or ""),

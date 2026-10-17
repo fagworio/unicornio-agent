@@ -21,7 +21,7 @@ from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
 from .editorial_schema import EditorialValidationError, validate_editorial
 from .language import editorial_language_report
-from .list_quality import ListContentError, validate_list_content
+from .list_quality import ListContentError, list_item_media_coverage, validate_list_content
 from .media.vision_gate import (
     VisionGateError,
     VisionInputUnavailable,
@@ -350,7 +350,8 @@ def run_pre_publish_checklist(
 
     from .list_quality import detect_list_format
     search_progress = media_context.get("search") if isinstance(media_context, Mapping) else None
-    is_list = detect_list_format(title_str, content) is not None
+    categories = editorial.get("categories") or post.get("categories") or ()
+    is_list = detect_list_format(title_str, content, categories) is not None
     enrichment_round = 0
     if isinstance(media_context, Mapping):
         try:
@@ -365,6 +366,23 @@ def run_pre_publish_checklist(
         image_count >= required_effective,
         f"{_motivo}; conteudo tem {image_count}",
     )
+
+    if is_list:
+        coverage = list_item_media_coverage(
+            title_str,
+            content,
+            media_context or {},
+            categories,
+        )
+        check(
+            "list_item_media_coverage",
+            bool(coverage.get("passed")),
+            "cada item possui imagem inline distinta e correspondente"
+            if coverage.get("passed")
+            else "itens sem imagem correspondente: " + ", ".join(map(str, coverage.get("missing") or [])),
+            blocker="inline_missing" if not coverage.get("passed") else None,
+            phase="media" if not coverage.get("passed") else None,
+        )
 
     # 6b. Every inline image must be semantically related to the cited subject
     #     (deterministic entity-overlap gate; generic concept matches fail).
@@ -882,6 +900,7 @@ def run_pre_publish_checklist(
         validate_list_content(
             str((post.get("title") or {}).get("raw") or editorial.get("seo", {}).get("title") or ""),
             content,
+            categories,
         )
         check("estrutura_lista", True, "estrutura de lista validada (ou nao aplicavel)")
     except ListContentError as exc:

@@ -185,6 +185,26 @@ class MediaInserterTests(unittest.TestCase):
         self.assertIn("<h3>2. Segundo jogo: descrição</h3>[caption", result)
         self.assertIn("<h3>1. Terceiro jogo: descrição</h3>[caption", result)
 
+    def test_grouped_non_numbered_h3_uses_target_heading_not_cta(self):
+        html = (
+            "<p>Introdução.</p><h2>Os melhores jogos</h2>"
+            "<h3>Metroid Prime 4</h3><p>Descrição A.</p>"
+            "<h3>Hades II</h3><p>Descrição B.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        plan = [
+            _item(index=1, url="https://media.example/metroid.webp"),
+            {
+                **_item(index=2, url="https://media.example/hades.webp"),
+                "item_title": "Hades II",
+                "section_heading": "Hades II",
+            },
+        ]
+        result = insert_media(html, plan, listicle=True)
+        self.assertIn("<h3>Metroid Prime 4</h3>[caption", result)
+        self.assertIn("<h3>Hades II</h3>[caption", result)
+        self.assertNotIn("<h3>Confira mais novidades em nosso Portal de Notícias!</h3>[caption", result)
+
     def test_enforces_distance_between_images(self):
         plan = [
             _item(index=1, url="https://media.example/1.webp", alt="Um"),

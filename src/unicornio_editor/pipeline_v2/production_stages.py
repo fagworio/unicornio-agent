@@ -384,6 +384,10 @@ class ProductionMediaStage:
                         str(row.get("sha256") or ""),
                         str(row.get("visual_group_id") or ""),
                         dict(row.get("visual_verification") or {}),
+                        str(row.get("item_identity") or ""),
+                        str(row.get("item_title") or ""),
+                        str(row.get("item_group") or ""),
+                        int(row["html_position"]) if row.get("html_position") is not None else None,
                     )
                     for row in results
                     if row.get("status") in {"accepted", "ok"}
@@ -463,12 +467,21 @@ class ProductionComposeStage:
             is_listicle = detect_list_format(
                 str(context.get("title") or ""),
                 str(editorial.get("cleaned_html") or ""),
+                editorial.get("categories") or context.get("categories") or (),
             ) is not None
             existing_html = normalize_h1_headings(
                 str(editorial.get("cleaned_html") or ""),
                 post_title=str(context.get("title") or ""),
             )
-            reconciliation = reconcile_working_visual_media(media)
+            subject_rows = post_subjects(
+                title=str(context.get("title") or ""),
+                content_html=str(editorial.get("cleaned_html") or ""),
+                categories=editorial.get("categories") or context.get("categories") or (),
+            )
+            reconciliation = reconcile_working_visual_media(
+                media,
+                listicle_items=subject_rows if is_listicle else (),
+            )
             accounting = reconciliation.accounting
             valid_ids = set(accounting.valid_inline_ids)
             duplicate_ids = set(accounting.duplicate_inline_ids)
@@ -528,6 +541,13 @@ class ProductionComposeStage:
                     "credit_text": item.credit_text,
                     "width": item.width,
                     "height": item.height,
+                    "item_identity": item.item_identity,
+                    "item_title": item.item_title or item.subject,
+                    "item_group": item.item_group or item.section_heading,
+                    "html_position": item.html_position,
+                    "section_heading": item.section_heading,
+                    "section_slot": item.section_slot,
+                    "subject": item.subject,
                 })
             if placements and not is_listicle:
                 placements = plan_normal_media_insertions(existing_html, placements)

@@ -72,6 +72,7 @@ def post_subjects(
     *,
     focus_keyword: str = "",
     game_name: str | None = None,
+    categories: object = (),
 ) -> list[dict[str, Any]]:
     """Subjects do post (Fases 7-8).
 
@@ -86,16 +87,21 @@ def post_subjects(
     # comum que apenas menciona cinco filmes não possui headings numerados e
     # continua usando a entidade principal do título.
     html = content_html or ""
-    items = extract_list_items(title, html)
+    items = extract_list_items(title, html, categories)
     if len(items) >= 2:
         return [
             {
-                "item": item.number,
+                "item": item.number if item.number is not None else item.position,
+                "item_number": item.number,
+                "item_identity": item.identity,
+                "item_title": item.item_title,
                 "heading": item.heading,
                 "subject": item.heading,
                 "section_slot": item.paragraph_index,
+                "html_position": item.html_position,
                 "heading_tag": item.tag,
                 "group_heading": item.group_heading,
+                "item_group": item.group_heading,
             }
             for item in items
         ]
@@ -120,6 +126,7 @@ def editorial_subjects(
     *,
     focus_keyword: str = "",
     game_name: str | None = None,
+    categories: object = (),
     limit: int = 8,
 ) -> list[str]:
     """Return a small ordered set of concrete subjects for acquisition.
@@ -165,6 +172,7 @@ def editorial_subjects(
         content_html=content_html,
         focus_keyword=focus_keyword,
         game_name=game_name,
+        categories=categories,
     )
     is_listicle = len(post_rows) > 1
     if is_listicle:

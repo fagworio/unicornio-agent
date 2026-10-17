@@ -1,6 +1,13 @@
 import unittest
+from pathlib import Path
 
-from unicornio_editor.list_quality import ListContentError, detect_list_format, validate_list_content
+from unicornio_editor.list_quality import (
+    ListContentError,
+    detect_list_format,
+    extract_list_items,
+    list_item_media_coverage,
+    validate_list_content,
+)
 
 
 GOOD = """
@@ -13,6 +20,47 @@ GOOD = """
 
 
 class ListQualityTests(unittest.TestCase):
+    FIXTURE_115179 = Path(__file__).parent / "fixtures" / "post_115179_regression.html"
+
+    def test_115179_grouped_non_numbered_h3_is_canonical_listicle_and_cta_is_excluded(self):
+        html = self.FIXTURE_115179.read_text(encoding="utf-8")
+        self.assertEqual(detect_list_format("5 melhores jogos para conhecer", html), 5)
+        items = extract_list_items("5 melhores jogos para conhecer", html)
+        self.assertEqual(len(items), 5)
+        self.assertEqual(items[0].identity, "os-melhores-jogos-para-conhecer:metroid-prime-4")
+        self.assertEqual(items[-1].position, 5)
+        self.assertTrue(validate_list_content("5 melhores jogos para conhecer", html)["passed"])
+
+    def test_115179_incremental_coverage_preserves_progress_and_rejects_wrong_or_duplicate(self):
+        html = self.FIXTURE_115179.read_text(encoding="utf-8")
+        items = extract_list_items("5 melhores jogos para conhecer", html)
+
+        def assets(count):
+            return [
+                {
+                    "media_id": index + 1,
+                    "media_url": f"https://media.test/{index + 1}.webp",
+                    "item_identity": item.identity,
+                    "item_title": item.heading,
+                    "subject": item.heading,
+                    "item_number": item.position,
+                    "visual_verification": {"decision": "DIFFERENT"},
+                }
+                for index, item in enumerate(items[:count])
+            ]
+
+        self.assertEqual(len(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": []})["missing"]), 5)
+        self.assertEqual(len(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": assets(1)})["missing"]), 4)
+        self.assertEqual(len(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": assets(4)})["missing"]), 1)
+        self.assertTrue(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": assets(5)})["passed"])
+        wrong = assets(1)
+        wrong[0]["item_identity"] = items[1].identity
+        wrong[0]["item_title"] = items[1].heading
+        wrong[0]["subject"] = items[1].heading
+        self.assertFalse(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": wrong})["passed"])
+        duplicate = assets(1) * 2
+        duplicate[1] = dict(duplicate[0])
+        self.assertFalse(list_item_media_coverage("5 melhores jogos para conhecer", html, {"inline": duplicate})["passed"])
     def test_numero_no_titulo_e_promessa_e_nao_prova(self):
         """Bug do "N itens": o numero no titulo, sozinho, NAO faz listicle.
 

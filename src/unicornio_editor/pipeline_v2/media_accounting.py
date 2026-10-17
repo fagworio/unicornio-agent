@@ -152,15 +152,29 @@ def account_visual_media(
 
     covered_items: set[str] = set()
     for asset in valid_records:
-        for key in ("item_number", "subject"):
+        for key in ("item_identity", "item_number", "item_title", "subject"):
             value = str(asset.get(key) or "").strip().casefold()
             if value:
                 covered_items.add(value)
     requested_items: list[tuple[str, tuple[str, ...]]] = []
+    canonical_asset_contract = any(
+        str(asset.get("item_identity") or "").strip() for asset in valid_records
+    )
     for item in listicle_items:
         if isinstance(item, Mapping):
-            primary = str(item.get("item") or item.get("item_number") or item.get("subject") or "")
-            aliases = (primary, str(item.get("subject") or ""))
+            primary = str(
+                item.get("item_identity")
+                or item.get("item")
+                or item.get("item_number")
+                or item.get("subject")
+                or ""
+            )
+            aliases = (primary,) if canonical_asset_contract else (
+                primary,
+                str(item.get("item_number") or ""),
+                str(item.get("item_title") or ""),
+                str(item.get("subject") or ""),
+            )
         else:
             primary = str(item or "")
             aliases = (primary,)
