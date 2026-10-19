@@ -13,6 +13,33 @@ class MemoryStore:
         self.commits.append((post_id, state))
 
 
+def test_runner_rejects_invalid_keyword_before_media():
+    store = MemoryStore()
+    calls = []
+    previous = WorkState(
+        phase=Phase.EDITORIAL,
+        media=MediaProgress(required=2, inline=(InlineMedia(10, "https://example.test/a.webp", 0),)),
+    )
+    store.state = previous
+    stages = {
+        "editorial": lambda context, state: {
+            "decision": "process",
+            "seo": {"title": "Título sobre Android", "focus_keyword": "termo ausente"},
+            "cleaned_html": "<p>Texto sobre Android.</p>",
+        },
+        "media": lambda *args: calls.append("media"),
+        "compose": lambda *args: calls.append("compose"),
+        "validate": lambda *args: calls.append("validate"),
+    }
+    result = PipelineRunner(store, stages).run_one(115524, {})
+    assert result.type is OutcomeType.RETRY
+    assert result.phase is Phase.EDITORIAL
+    assert result.blocker is BlockerCode.TEXT_QUALITY
+    assert "focus keyword" in (result.detail or "")
+    assert calls == []
+    assert store.state.media == previous.media
+
+
 def test_runner_processes_one_post_and_persists_ready():
     store = MemoryStore()
     calls = []

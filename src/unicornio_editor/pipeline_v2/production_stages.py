@@ -284,6 +284,9 @@ class ProductionEditorialStage:
                 editorial = resolve_editorial_defaults(merged, _post(context))
             else:
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
+            repaired = _repair_focus_keyword_draft(editorial, _post(context))
+            if repaired is not None:
+                editorial = repaired
             editorial["cleaned_html"] = normalize_h1_headings(
                 normalize_editorial_dashes(editorial.get("cleaned_html", "")),
                 post_title=wordpress_text(input_post.get("title"), field="title"),

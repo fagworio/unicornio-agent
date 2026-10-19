@@ -142,6 +142,42 @@ def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch)
     assert persisted["seo"]["focus_keyword"] == "vazamentos de GTA 6"
 
 
+def test_editorial_repairs_keyword_in_fresh_provider_output_before_media(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.json"
+    input_path.write_text('{"posts":[{"post_id":115003}]}', encoding="utf-8")
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.prepare_batch",
+        lambda *_args: {"prepared": 1, "editorial_input": str(input_path)},
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "vazamentos de GTA 6"}],
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.generate_editorial_batch",
+        lambda *_args, **_kwargs: {"output": "generated.json"},
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.load_editorial_batch",
+        lambda *_args: {"items": [{"post_id": 115003, "editorial": {
+            "title": "Vazamentos: GTA 6 ganham força",
+            "cleaned_html": "<p>Vazamentos sobre GTA 6 revelam novidades.</p>",
+            "seo": {"title": "Vazamentos: GTA 6 ganham força", "focus_keyword": "termo ausente"},
+            "site_relevance": {"decision": "process"},
+        }}]},
+    )
+    monkeypatch.setattr("unicornio_editor.pipeline_v2.production_stages.resolve_editorial_defaults", lambda value, _post: value)
+    monkeypatch.setattr("unicornio_editor.pipeline_v2.production_stages.validate_editorial", lambda value, **_kwargs: value)
+    editorial = ProductionEditorialStage(object(), SimpleNamespace(
+        editorial_api_key="x", editorial_base_url="x", editorial_model="x",
+        http_timeout=1, min_relevance_confidence=0.8,
+    ), tmp_path)(
+        {"post_id": 115003, "post": {"id": 115003, "title": {"raw": "Vazamentos GTA 6"}}},
+        WorkState(phase=Phase.RELEVANCE),
+    )
+    assert editorial["seo"]["focus_keyword"] == "vazamentos de GTA 6"
+
+
 def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
     editorial = {
         "cleaned_html": "<p>one</p><p>two</p><p>three</p><p>four</p>",

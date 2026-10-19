@@ -4,6 +4,7 @@ from dataclasses import replace
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
+from ..content_quality import keyword_occurs_naturally
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
@@ -30,6 +31,23 @@ class PipelineRunner:
             "max_rework_attempts": int(getattr(config, "max_rework_attempts", 3)),
             "cooldown_minutes": int(getattr(config, "rework_cooldown_minutes", 30)),
         }
+
+    @staticmethod
+    def _editorial_preflight(editorial: dict[str, Any], context: dict[str, Any]) -> None:
+        """Reject an invalid focus keyword before any media side effect."""
+        raw_seo = editorial.get("seo")
+        seo = raw_seo if isinstance(raw_seo, dict) else {}
+        keyword = str(seo.get("focus_keyword") or "").strip()
+        if not keyword:
+            return
+        title = str(seo.get("title") or editorial.get("title") or context.get("title") or "")
+        html = str(editorial.get("cleaned_html") or editorial.get("content") or "")
+        if title and html and not keyword_occurs_naturally(keyword, title, html):
+            raise StageError(
+                BlockerCode.TEXT_QUALITY,
+                Phase.EDITORIAL,
+                "focus keyword must occur naturally in title and content",
+            )
 
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
         previous = self.state_store.load(post_id)
@@ -62,6 +80,13 @@ class PipelineRunner:
             )
             self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
             return outcome
+        if editorial_decision(editorial) not in {"skip", "uncertain"}:
+            try:
+                self._editorial_preflight(editorial, context)
+            except StageError as exc:
+                outcome = classify_stage_error(previous, exc, **self._policy())
+                self.state_store.commit(post_id, self._next_state(previous, editorial, previous.media, outcome))
+                return outcome
         media: MediaProgress = previous.media
         media_completed = False
         media_stage_error = False
