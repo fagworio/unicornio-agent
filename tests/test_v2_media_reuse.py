@@ -886,6 +886,40 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     assert result["posts"][0]["search"]["completed"] is False
 
 
+def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
+
+    def fake_search(*_args, **_kwargs):
+        return [{
+            "query": "technical failure",
+            "candidates": [],
+            "engine_reports": {
+                "google_browser": {"failure_kind": "js_required"},
+                "bing": {"failure_kind": "no_results_legitimate"},
+                "yandex": {"failure_kind": "no_results_legitimate"},
+                "google": {"failure_kind": "no_results_legitimate"},
+            },
+        }]
+
+    monkeypatch.setattr(search, "search_web_images_batch", fake_search)
+    result = cli._resolve_media_batch(
+        object(), Config(), tmp_path,
+        {"schema_version": 1, "batch_id": "technical-search", "posts": [{
+            "post_id": 115090, "subject": "Test", "query": "technical failure",
+            "needed": 1, "limit": 3, "engine": "auto",
+        }]},
+        full=True, allow_reuse=False,
+    )
+    progress = result["posts"][0]["search"]
+    assert progress["completed"] is False
+    assert progress["completion_reason"] == "SEARCH_INCOMPLETE"
+
+
 def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
@@ -930,7 +964,7 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     # The batch resolver records discovery completion; the production resolver
     # adds final WebP/pHash exhaustion after executing the media plan.
     assert progress["exhausted"] is False
-    assert progress["completion_reason"] == "EXHAUSTED"
+    assert progress["completion_reason"] == "EXHAUSTED_VERIFIED"
 
 
 def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_path):

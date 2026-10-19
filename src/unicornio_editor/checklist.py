@@ -1125,7 +1125,9 @@ def run_pre_publish_checklist(
         and image_count < required
         and search_completed
         and search_exhausted
-        and search_completion_reason == "EXHAUSTED"
+        and search_completion_reason == "EXHAUSTED_VERIFIED"
+        and isinstance(search_progress, Mapping)
+        and search_progress.get("completion_reason") == "EXHAUSTED_VERIFIED"
         and featured_ok
         and featured_gates_ok
         and not other_failures

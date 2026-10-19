@@ -864,6 +864,7 @@ class ChecklistTests(unittest.TestCase):
                     "candidates_seen": 8,
                     "candidates_rejected": 7,
                     "distinct_valid_frames": 1,
+                    "completion_reason": "EXHAUSTED",
                 }
             },
         )
@@ -901,7 +902,7 @@ class ChecklistTests(unittest.TestCase):
                 "search": {
                     "completed": True,
                     "exhausted": True,
-                    "completion_reason": "EXHAUSTED",
+                    "completion_reason": "EXHAUSTED_VERIFIED",
                 }
             },
         )
@@ -939,7 +940,7 @@ class ChecklistTests(unittest.TestCase):
             ),
             content=content,
             media_context={
-                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED"},
+                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"},
                 "inline": {"required": 2, "accepted": []},
                 "featured": {
                     "status": "valid",
@@ -1089,7 +1090,7 @@ class ChecklistTests(unittest.TestCase):
             editorial=editorial_payload(media_exhausted=True),
             content=content,
             media_context={
-                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED"}
+                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"}
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")

@@ -1469,9 +1469,29 @@ def _resolve_media_batch(
             expected_engines
             and all(name in engine_reports for name in expected_engines)
         )
+        # Only a clean provider result proves exhaustion. A reported engine
+        # with CAPTCHA/JS/parser drift is not a completed search strategy.
+        verified_result_kinds = {"ok", "no_results_legitimate"}
+        technical_failure_kinds = {
+            "captcha", "js_required", "parser_schema_drift", "cooldown_skip",
+        }
+        non_verified_engine_failures = {
+            str((engine_reports.get(name) or {}).get("failure_kind") or "")
+            for name in expected_engines
+            if str((engine_reports.get(name) or {}).get("failure_kind") or "")
+            not in verified_result_kinds
+        }
+        all_engines_verified = bool(
+            all_engines_reported and not non_verified_engine_failures
+        )
+        technical_engine_failure = bool(
+            non_verified_engine_failures.intersection(technical_failure_kinds)
+        ) or bool(
+            non_verified_engine_failures - technical_failure_kinds - FAILURE_KINDS_TRANSITORIOS
+        )
         transient_engine_failure = any(
             str((engine_reports.get(name) or {}).get("failure_kind") or "")
-            in FAILURE_KINDS_TRANSITORIOS | {"cooldown_skip"}
+            in FAILURE_KINDS_TRANSITORIOS
             for name in expected_engines
         )
         if needed_web > 0 and accepted_count >= needed_web:
@@ -1480,11 +1500,12 @@ def _resolve_media_batch(
         elif transient_engine_failure:
             completion_reason = "PROVIDER_ERROR"
             search_completed = False
-        elif all_engines_reported:
-            # All planned engines returned, including the case where every
-            # candidate was rejected by provenance/relevance/diversity.
-            completion_reason = "EXHAUSTED"
+        elif all_engines_verified:
+            completion_reason = "EXHAUSTED_VERIFIED"
             search_completed = True
+        elif technical_engine_failure or all_engines_reported:
+            completion_reason = "SEARCH_INCOMPLETE"
+            search_completed = False
         elif expected_engines:
             completion_reason = "INTERRUPTED"
             search_completed = False
@@ -1891,14 +1912,39 @@ def _enriquecer_candidatos(
         return hashes_locais.get(chave)
 
     def _fortes_distintos() -> int:
-        vistos: set[str] = set()
-        for forte in aprovados:
-            if (forte.get("evidence") or {}).get("verdict") != "deterministic_match":
+        fortes = [
+            dict(forte)
+            for forte in aprovados
+            if (forte.get("evidence") or {}).get("verdict") == "deterministic_match"
+        ]
+        if not fortes:
+            return 0
+        # Use the same pHash similarity threshold as the final diversity gate,
+        # but keep this early count independent from the later list mutation.
+        from .media.visual_hash import similar_image_pairs
+        rows = [
+            (str(forte.get("direct_image_url") or ""), str(forte.get("phash") or ""))
+            for forte in fortes
+            if str(forte.get("direct_image_url") or "")
+        ]
+        exact_unique: list[tuple[str, str]] = []
+        seen_keys: set[str] = set()
+        for url, phash in rows:
+            key = phash or url
+            if key in seen_keys:
                 continue
-            chave = str(forte.get("phash") or "") or str(forte.get("direct_image_url") or "")
-            if chave:
-                vistos.add(chave)
-        return len(vistos)
+            seen_keys.add(key)
+            exact_unique.append((url, phash))
+        try:
+            hashes = {url: phash for url, phash in rows if phash}
+            duplicate_urls = {
+                url_b for _url_a, url_b, _distance in similar_image_pairs(
+                    [url for url, _phash in rows], hashes=hashes
+                )
+            }
+            return len(rows) - len(duplicate_urls)
+        except Exception:
+            return len(exact_unique)
 
     def _duplicates_existing(url: str, phash: Any) -> bool:
         if not url or phash is None or not existing_hashes:

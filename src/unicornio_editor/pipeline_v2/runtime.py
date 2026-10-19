@@ -1531,8 +1531,19 @@ class ProductionMediaResolver:
                 completion_reason = "TARGET_REACHED"
             elif any(reason == "PROVIDER_ERROR" for reason in completion_reasons):
                 completion_reason = "PROVIDER_ERROR"
-            elif completion_reasons and all(reason == "EXHAUSTED" for reason in completion_reasons):
-                completion_reason = "EXHAUSTED"
+            elif completion_reasons and all(
+                reason in {"EXHAUSTED_VERIFIED", "EXHAUSTED"}
+                for reason in completion_reasons
+            ):
+                # Preserve legacy EXHAUSTED in persisted history, but only the
+                # new verified value can authorize a waiver downstream.
+                completion_reason = (
+                    "EXHAUSTED_VERIFIED"
+                    if all(reason == "EXHAUSTED_VERIFIED" for reason in completion_reasons)
+                    else "EXHAUSTED"
+                )
+            elif any(reason == "SEARCH_INCOMPLETE" for reason in completion_reasons):
+                completion_reason = "SEARCH_INCOMPLETE"
             else:
                 completion_reason = "INTERRUPTED" if completion_reasons else ""
             search_completed = bool(
