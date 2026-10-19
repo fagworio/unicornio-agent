@@ -898,6 +898,67 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     assert result["posts"][0]["search"]["completed"] is False
 
 
+def test_media_search_reaching_visual_target_is_completed_without_exhaustion(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    candidate = {
+        "direct_image_url": "https://cdn.test/accepted.webp",
+        "source_page_url": "https://source.test/article",
+        "phash": "a" * 16,
+        "evidence": {"verdict": "deterministic_match"},
+    }
+    monkeypatch.setattr(
+        cli,
+        "_enriquecer_candidatos",
+        lambda candidates, **_kwargs: (list(candidates), [], []),
+    )
+
+    def fake_search(_queries, *, accept, **_kwargs):
+        # The search layer stops once it has a deterministic candidate meeting
+        # the requested visual capacity; another provider may remain transient.
+        assert accept([candidate], "target reached query") == 1
+        return [{
+            "query": "target reached query",
+            "candidates": [candidate],
+            "engine_reports": {
+                "google_browser": {"failure_kind": "ok"},
+                "bing": {"failure_kind": "rate_limited"},
+                "yandex": {"failure_kind": "ok"},
+                "google": {"failure_kind": "ok"},
+            },
+        }]
+
+    monkeypatch.setattr(search, "search_web_images_batch", fake_search)
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "target-reached-search",
+            "posts": [{
+                "post_id": 115516,
+                "subject": "Test",
+                "query": "target reached query",
+                "needed": 1,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=False,
+    )
+
+    progress = result["posts"][0]["search"]
+    assert progress["completed"] is True
+    assert progress["completion_reason"] == "TARGET_REACHED"
+    assert progress["coverage"]["verified"] is False
+    assert progress["coverage"]["strategy_complete"] is False
+
+
 def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
