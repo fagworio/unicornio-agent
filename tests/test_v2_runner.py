@@ -40,6 +40,27 @@ def test_runner_rejects_invalid_keyword_before_media():
     assert store.state.media == previous.media
 
 
+def test_runner_rejects_missing_keyword_before_media():
+    store = MemoryStore()
+    calls = []
+    stages = {
+        "editorial": lambda context, state: {
+            "decision": "process",
+            "seo": {"title": "Título incompleto", "meta_description": "Descrição"},
+            "cleaned_html": "<p>Texto editorial.</p>",
+        },
+        "media": lambda *args: calls.append("media"),
+        "compose": lambda *args: calls.append("compose"),
+        "validate": lambda *args: calls.append("validate"),
+    }
+    result = PipelineRunner(store, stages).run_one(115525, {})
+    assert result.type is OutcomeType.RETRY
+    assert result.phase is Phase.EDITORIAL
+    assert result.blocker is BlockerCode.TEXT_QUALITY
+    assert result.detail == "focus keyword is required"
+    assert calls == []
+
+
 def test_runner_processes_one_post_and_persists_ready():
     store = MemoryStore()
     calls = []

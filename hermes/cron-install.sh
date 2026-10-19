@@ -30,11 +30,10 @@ fi
 sed "s|@PROJECT_ROOT@|$ROOT|g" "$ROOT/hermes/monitor.sh" > "$MONITOR_SCRIPT"
 chmod +x "$MONITOR_SCRIPT"
 
-# O prompt diz DUAS coisas diferentes de proposito: a META de producao (posts
-# que chegam a READY) e o TETO de posts TOCADOS por sessao (hard cap). Sem o
-# teto, a meta virava desculpa para uma sessao gigante: skipped/uncertain/blocked
-# nao consumiam a cota de READY e o agente tocava 8-15 posts acumulando contexto.
-PROMPT='Process WordPress pending posts until 5 reach READY, or until the touched-posts cap / cards reports no more eligible pending posts. Follow the unicorniohater-editor skill. Prefer one prepare-batch plus editorial-generate-batch for up to 2 new eligible posts, then use media-resolve-batch for both posts and at most one vision-batch before apply-batch; keep rework items isolated and use draft --for-fix when appropriate. A skipped, uncertain, blocked, or awaiting_human post does not consume the quota (fetch another card and continue), but it DOES count as a touched post: the hard cap of posts touched per session is EDITOR_MAX_POSTS_TOUCHED_PER_RUN. When cards returns session.remaining_posts 0 or a "stop" field, or when apply/apply-batch answers session_budget_exhausted, END the session immediately (the next post belongs to the next window) - never simplify the checklist to fit the budget. Operate in write mode: apply the editorial JSON (content + SEO meta), always keeping status pending. Create snapshots, skip irrelevant or uncertain content, validate every editorial JSON result, and report JSON outcomes. Never change a post status and never expose credentials.'
+# O job editorial usa exclusivamente o lifecycle V2. O instalador deve ser a
+# fonte persistente dessa decisão: uma reinstalação nunca pode reintroduzir os
+# comandos legados prepare-batch/editorial-generate-batch/media-resolve-batch/apply-batch.
+PROMPT='Execute exclusivamente o lifecycle editorial V2 do Unicornio-Agent neste workdir. Primeiro rode `set -a; . ./.env; set +a; PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --preview` e leia a selecao. Se houver posts elegiveis, rode exatamente uma sessao `v2-run --root . --limit 5` sem `--post-id`. Nao use prepare-batch, editorial-generate-batch, media-resolve-batch, apply-batch ou qualquer fluxo legado; nao publique, nao altere status WordPress e nao processe posts fora da selecao. Preserve checkpoints, manifests, MediaRegistry, cooldowns, tentativas e gates. Um resultado completed nao significa READY: audite cada outcome, blocker, media progress, journal, WordPress readback e Registry. Pare diante de qualquer divergencia de estado, media_readback, Registry ou lock e reporte o post afetado.'
 
 # O Hermes exige monitor_script como NOME relativo a $HERMES_HOME/scripts/
 # (caminho absoluto e rejeitado no create). O script ja foi copiado para la.

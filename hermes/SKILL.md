@@ -26,6 +26,41 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 - Nunca logue credenciais, tokens, cookies ou headers completos.
 - Nunca use posts de produção para validação local.
 
+## Executor oficial V2 — regra de precedência
+
+O único executor editorial operacional é:
+
+```bash
+set -a; . ./.env; set +a
+PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --preview
+PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5
+```
+
+O preview é obrigatório antes de uma sessão write-mode. A seleção do preview é a
+única autorização de escopo: não adicionar `--post-id`, não ampliar allowlists,
+não alterar cooldowns e não processar IDs fora de `selected_ids`. O `v2-run` é o
+único lifecycle que pode coordenar EDITORIAL → MEDIA → COMPOSE → VALIDATE →
+READY/RETRY/HUMAN_REQUIRED.
+
+Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
+`media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser
+executados pelo cron, pelo operador ou por uma reinstalação. Qualquer referência
+legada mantida abaixo é somente documentação histórica e não autoriza execução.
+Uma divergência entre o prompt instalado, este skill e o `v2-run` é bloqueio
+operacional; pause os dois crons e corrija o template antes de continuar.
+
+## Orquestração e auditoria V2
+
+- Preserve `_hermes_work_state`, checkpoints, journals, manifests, tentativas,
+  cooldowns e MediaRegistry. Não reconstrua registros sem evidência canônica.
+- `completed=1` é apenas conclusão de uma passagem; audite sempre `outcome`,
+  `phase`, `blocker`, estado WordPress, journal, Registry e readback.
+- `accepted`/`accepted_working` é aquisição intermediária, não aplicação. Só
+  `applied` com HTML/featured readback pode contar como mídia aplicada.
+- Pare na primeira divergência entre V2, checkpoint, WordPress, Registry ou lock.
+- Publisher e editorial são contratos separados. O publisher permanece pausado
+  até existir ao menos um READY novo com manifesto, hash e mídia confirmados.
+
 ## Orçamento da sessão (parar TAMBÉM é o trabalho)
 
 - Meta de produção = `EDITOR_TARGET_READY_PER_RUN` (5 posts READY, distribuída
@@ -39,11 +74,12 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
   (nada foi escrito, nenhuma tentativa gasta): encerre a sessão.
 - NUNCA simplifique o checklist para caber no orçamento — encerre a sessão.
 
-## Microbatches stateless
+## Procedimentos legados — somente referência histórica (NÃO EXECUTAR)
 
-Quando houver dois posts novos elegíveis, prefira um microbatch editorial de
-dois itens. O batch reduz turnos do modelo, mas NÃO cria uma transação
-multi-post no WordPress.
+> Esta seção não pertence ao lifecycle operacional. Para produção, use somente
+> `v2-run` conforme a seção **Executor oficial V2** acima.
+
+Quando houver dois posts novos elegíveis, a antiga estratégia de microbatch era
 
 1. Antes de qualquer escrita, rode o preflight read-only com os dois IDs:
 
@@ -135,9 +171,12 @@ Não envie para o modelo uma resposta combinada com conteúdo de posts sem
 correlação e a telemetria carrega `batch_id`/`batch_stage` quando a execução é
 batch.
 
-## Fluxo editorial (sucesso = mínimo, falha = só o que corrigir)
+## Fluxo V2 oficial — referência operacional
 
-1. `cards --compact` — UMA chamada com o DELTA por post (rework primeiro):
+A execução real é feita pelo `v2-run` e não pelos procedimentos históricos
+abaixo. Estes invariantes devem ser verificados no resultado do runner:
+
+1. `v2-run --preview` antes de qualquer write-mode;
    `images{required,valid,missing,irrelevant,non_webp}`, `featured` (ação),
    `fix`, `requires_content`, `session`. Escreva os editoriais direto dos cards;
    NÃO abra blocked.json/logs/source. Fila geral: `queue --compact`.

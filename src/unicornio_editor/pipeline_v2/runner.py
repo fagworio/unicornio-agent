@@ -39,6 +39,14 @@ class PipelineRunner:
         seo = raw_seo if isinstance(raw_seo, dict) else {}
         keyword = str(seo.get("focus_keyword") or "").strip()
         if not keyword:
+            if isinstance(raw_seo, dict) and any(
+                key in raw_seo for key in ("title", "meta_description", "focus_keyword")
+            ):
+                raise StageError(
+                    BlockerCode.TEXT_QUALITY,
+                    Phase.EDITORIAL,
+                    "focus keyword is required",
+                )
             return
         title = str(seo.get("title") or editorial.get("title") or context.get("title") or "")
         html = str(editorial.get("cleaned_html") or editorial.get("content") or "")

@@ -26,9 +26,11 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("--workdir", content)
         self.assertIn("--skill", content)
         self.assertIn("unicorniohater-editor", content)
-        self.assertIn("until 5 reach READY", content)
-        self.assertIn("does not consume the quota", content)
-        self.assertNotIn("EDITOR_DRY_RUN=false", content)
+        self.assertIn("PROMPT='Execute exclusivamente o lifecycle editorial V2", content)
+        self.assertIn("v2-run --root . --limit 5 --preview", content)
+        self.assertIn("v2-run --root . --limit 5", content)
+        self.assertNotIn("Prefer one prepare-batch plus editorial-generate-batch", content)
+        self.assertNotIn("then use media-resolve-batch for both posts", content)
 
     def test_publish_cron_is_fail_closed_when_publication_is_disabled(self):
         script = ROOT / "hermes" / "publish-cron.sh"
