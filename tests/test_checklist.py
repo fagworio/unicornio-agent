@@ -906,12 +906,16 @@ class ChecklistTests(unittest.TestCase):
                     "coverage": {
                         "version": 1,
                         "verified": True,
-                        "runs": [{
+                        "active_coverage": {
                             "verified": True,
+                            "strategy_complete": True,
                             "expected_engines": ["bing"],
                             "reported_engines": ["bing"],
                             "technical_failures": [],
-                        }],
+                            "planned_queries": 1,
+                            "completed_queries": 1,
+                        },
+                        "attempt_history": [],
                     },
                 }
             },
@@ -954,12 +958,26 @@ class ChecklistTests(unittest.TestCase):
                     "completed": True,
                     "exhausted": True,
                     "completion_reason": "EXHAUSTED_VERIFIED",
-                    "coverage": {"version": 1, "verified": True, "runs": [{
+                    "coverage": {
+                        "version": 1,
                         "verified": True,
-                        "expected_engines": ["bing"],
-                        "reported_engines": ["bing"],
-                        "technical_failures": [],
-                    }]},
+                        "active_coverage": {
+                            "verified": True,
+                            "strategy_complete": True,
+                            "expected_engines": ["bing"],
+                            "reported_engines": ["bing"],
+                            "technical_failures": [],
+                            "planned_queries": 1,
+                            "completed_queries": 1,
+                        },
+                        "attempt_history": [{
+                            "verified": False,
+                            "strategy_complete": False,
+                            "expected_engines": ["google"],
+                            "reported_engines": ["google"],
+                            "technical_failures": ["js_required"],
+                        }],
+                    },
                 },
                 "inline": {"required": 2, "accepted": []},
                 "featured": {

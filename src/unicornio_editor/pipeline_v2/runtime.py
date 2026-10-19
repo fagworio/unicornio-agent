@@ -1553,21 +1553,40 @@ class ProductionMediaResolver:
             )
             previous_search = previous.search
             coverage_runs = [
-                run.get("coverage") for run in search_runs if isinstance(run.get("coverage"), dict)
+                run["coverage"]
+                for run in search_runs
+                if isinstance(run.get("coverage"), dict)
             ]
             previous_coverage = previous_search.coverage if isinstance(previous_search.coverage, dict) else {}
+            previous_history = list(previous_coverage.get("attempt_history") or [])
+            if not previous_history:
+                previous_history = list(previous_coverage.get("runs") or [])
+            attempt_history = [*previous_history, *coverage_runs][-20:]
+            active_coverage: dict[str, Any] = {}
+            if coverage_runs:
+                latest_coverage = coverage_runs[-1]
+                if (
+                    latest_coverage.get("verified") is True
+                    and latest_coverage.get("strategy_complete") is True
+                    and latest_coverage.get("expected_engines")
+                    and set(latest_coverage.get("expected_engines") or ()) <= set(latest_coverage.get("reported_engines") or ())
+                    and not (latest_coverage.get("technical_failures") or ())
+                ):
+                    active_coverage = dict(latest_coverage)
+                else:
+                    active_coverage = {
+                        "version": 1,
+                        "verified": False,
+                        "strategy_complete": False,
+                        "reason": "latest_attempt_incomplete",
+                    }
+            else:
+                active_coverage = dict(previous_coverage.get("active_coverage") or {})
             coverage = {
                 "version": 1,
-                "runs": [*(previous_coverage.get("runs") or []), *coverage_runs],
-                "verified": bool(
-                    completion_reason == "EXHAUSTED_VERIFIED"
-                    and coverage_runs
-                    and all(
-                        item.get("verified") is True
-                        for item in coverage_runs
-                        if isinstance(item, dict)
-                    )
-                ),
+                "attempt_history": attempt_history,
+                "active_coverage": active_coverage,
+                "verified": active_coverage.get("verified") is True,
             }
             search_progress = MediaSearchProgress(
                 completed=search_completed,

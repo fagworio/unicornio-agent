@@ -1095,19 +1095,18 @@ def run_pre_publish_checklist(
     waiver_basis = None
     waiver_applied = False
     coverage = search_progress.get("coverage") if isinstance(search_progress, Mapping) else None
+    active_coverage = coverage.get("active_coverage") if isinstance(coverage, Mapping) else None
     coverage_valid = bool(
         isinstance(coverage, Mapping)
         and coverage.get("version") == 1
-        and coverage.get("verified") is True
-        and isinstance(coverage.get("runs"), list)
-        and coverage.get("runs")
-        and all(
-            isinstance(run, Mapping)
-            and run.get("verified") is True
-            and set(run.get("expected_engines") or ()) <= set(run.get("reported_engines") or ())
-            and not (run.get("technical_failures") or ())
-            for run in (coverage.get("runs") or [])
-        )
+        and isinstance(active_coverage, Mapping)
+        and active_coverage.get("verified") is True
+        and active_coverage.get("strategy_complete") is True
+        and bool(active_coverage.get("expected_engines"))
+        and set(active_coverage.get("expected_engines") or ()) <= set(active_coverage.get("reported_engines") or ())
+        and not (active_coverage.get("technical_failures") or ())
+        and int(active_coverage.get("planned_queries") or 0) > 0
+        and int(active_coverage.get("completed_queries") or 0) >= int(active_coverage.get("planned_queries") or 0)
     )
     # A normal article may publish with fewer inline frames when the executable
     # search really completed as EXHAUSTED and every other checklist gate—

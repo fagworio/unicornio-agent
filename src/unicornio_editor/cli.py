@@ -1542,6 +1542,13 @@ def _resolve_media_batch(
                     for name in expected_engines
                 },
                 "technical_failures": sorted(non_verified_engine_failures),
+                "planned_queries": 1 if needed_web > 0 else 0,
+                "completed_queries": 1 if search_completed else 0,
+                "strategy_complete": bool(
+                    expected_engines
+                    and all_engines_verified
+                    and search_completed
+                ),
                 "verified": completion_reason == "EXHAUSTED_VERIFIED",
                 "accepted_visual_representatives": accepted_count,
             },
