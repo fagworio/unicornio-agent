@@ -97,7 +97,23 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
   fi
 fi
 
-out="$("$ROOT/.venv/bin/unicornio-editor" queue --monitor --root "$ROOT" 2>/dev/null)" || out="ERROR"
+monitor_log_error() {
+  local status="$1"
+  local detail="$2"
+  mkdir -p "$ROOT/work" 2>/dev/null || true
+  printf '%s status=%s detail=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" "$detail" \
+    >> "$ROOT/work/monitor-errors.log" 2>/dev/null || true
+}
+
+out=""
+monitor_status=0
+if out="$("$ROOT/.venv/bin/unicornio-editor" queue --monitor --root "$ROOT" 2>&1)"; then
+  :
+else
+  monitor_status=$?
+  monitor_log_error "$monitor_status" "$out"
+  out="ERROR"
+fi
 out="${out:-0}"
 if [ "$budget_blocked" = "1" ]; then
   budget_blocked=0

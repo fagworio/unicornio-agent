@@ -221,6 +221,52 @@ class CompactOutputTests(unittest.TestCase):
         }
         self.assertEqual(_monitor_line(report), "101416")
 
+    def test_monitor_line_v2_cooldown_uses_report_eligible_set(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [{
+                "id": 42,
+                "v2": True,
+                "state": "pending",
+                "next_retry_at": "2026-08-25T14:30:00+00:00",
+            }],
+        }
+        self.assertEqual(_monitor_line(report), "42@2026-08-25T14:30")
+
+    def test_monitor_line_v2_cooldown_expires_into_eligible_signature(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [42],
+            "unprocessed_ids": [],
+            "posts": [{
+                "id": 42,
+                "v2": True,
+                "state": "pending",
+                "next_retry_at": "2026-08-25T14:30:00+00:00",
+            }],
+        }
+        self.assertEqual(_monitor_line(report), "42")
+
+    def test_monitor_line_mixes_legacy_and_v2_without_duplicate_ids(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [10],
+            "unprocessed_ids": [9, 10],
+            "posts": [{"id": 10, "v2": True, "state": "pending"}],
+        }
+        self.assertEqual(_monitor_line(report), "10 9")
+
+    def test_monitor_line_is_deterministic_for_unchanged_empty_queue(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        self.assertEqual(_monitor_line(report), _monitor_line(report))
+
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})
         self.assertEqual(ok, {"status": "pass", "failed": []})

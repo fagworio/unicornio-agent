@@ -1701,6 +1701,9 @@ def _monitor_line(report: dict) -> str:
         str(pid) for pid in report.get("unprocessed_ids", [])
         if pid not in v2_ids
     ]
+    v2_eligible = {
+        int(pid) for pid in report.get("v2_eligible_ids", [])
+    }
     in_cooldown = sorted(
         f"{row['id']}@{str(row.get('next_retry_at') or '')[:16]}"
         for row in (report.get("posts") or [])
