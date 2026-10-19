@@ -965,6 +965,11 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     # adds final WebP/pHash exhaustion after executing the media plan.
     assert progress["exhausted"] is False
     assert progress["completion_reason"] == "EXHAUSTED_VERIFIED"
+    assert progress["coverage"]["version"] == 1
+    assert progress["coverage"]["verified"] is True
+    assert progress["coverage"]["expected_engines"] == [
+        "google_browser", "bing", "yandex", "google"
+    ]
 
 
 def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_path):

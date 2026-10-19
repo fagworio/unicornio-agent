@@ -1552,6 +1552,23 @@ class ProductionMediaResolver:
                 and queries_completed == queries_planned
             )
             previous_search = previous.search
+            coverage_runs = [
+                run.get("coverage") for run in search_runs if isinstance(run.get("coverage"), dict)
+            ]
+            previous_coverage = previous_search.coverage if isinstance(previous_search.coverage, dict) else {}
+            coverage = {
+                "version": 1,
+                "runs": [*(previous_coverage.get("runs") or []), *coverage_runs],
+                "verified": bool(
+                    completion_reason == "EXHAUSTED_VERIFIED"
+                    and coverage_runs
+                    and all(
+                        item.get("verified") is True
+                        for item in coverage_runs
+                        if isinstance(item, dict)
+                    )
+                ),
+            }
             search_progress = MediaSearchProgress(
                 completed=search_completed,
                 # Exhaustion is finalized below, after the executable media
@@ -1585,6 +1602,7 @@ class ProductionMediaResolver:
                 queries_planned=previous_search.queries_planned + queries_planned,
                 queries_completed=previous_search.queries_completed + queries_completed,
                 completion_reason=completion_reason or previous_search.completion_reason,
+                coverage=coverage,
             )
             final_distinct = {
                 item_id for item_id in account_visual_media(

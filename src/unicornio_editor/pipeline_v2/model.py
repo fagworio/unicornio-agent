@@ -155,6 +155,7 @@ class MediaSearchProgress:
     queries_planned: int = 0
     queries_completed: int = 0
     completion_reason: str = ""
+    coverage: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if min(

@@ -61,6 +61,45 @@ def phash_from_path(path: str, *, timeout: float = 20.0) -> str:
         return ""
 
 
+def canonical_visual_representatives(
+    candidates: list[dict[str, Any]],
+    *,
+    hashes: dict[str, Any] | None = None,
+    threshold: int = DEFAULT_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Return representatives whose visual identity is actually proven.
+
+    URL equality is only used to collapse the same candidate. Distinct URLs
+    without a valid pHash are deliberately not counted as capacity: accepting
+    them as distinct would let the resolver stop before visual identity was
+    established. The same Hamming-distance rule is used by final deduplication.
+    """
+    import imagehash
+
+    hashes = hashes or {}
+    representatives: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    representative_hashes: list[Any] = []
+    for candidate in candidates:
+        url = str(candidate.get("direct_image_url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        raw = candidate.get("phash") or hashes.get(url)
+        try:
+            current = raw if hasattr(raw, "__sub__") else imagehash.hex_to_hash(str(raw))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if current is None:
+            continue
+        if any(int(current - previous) <= threshold for previous in representative_hashes):
+            seen_urls.add(url)
+            continue
+        seen_urls.add(url)
+        representative_hashes.append(current)
+        representatives.append(candidate)
+    return representatives
+
+
 def similar_image_pairs(
     urls: list[str],
     *,

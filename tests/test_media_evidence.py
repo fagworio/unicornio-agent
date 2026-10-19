@@ -387,5 +387,27 @@ class ContextoImageLocalTests(unittest.TestCase):
         self.assertEqual(out["verdict"], "ambiguous")
 
 
+class CanonicalVisualCapacityTests(unittest.TestCase):
+    def test_counts_proven_representatives_not_urls_or_invalid_hashes(self):
+        candidates = [
+            {"direct_image_url": "https://a/one.jpg", "phash": "0" * 16},
+            {"direct_image_url": "https://b/same-frame.jpg", "phash": "0" * 15 + "1"},
+            {"direct_image_url": "https://c/distinct.jpg", "phash": "f" * 16},
+            {"direct_image_url": "https://d/unproven.jpg", "phash": "not-a-phash"},
+            {"direct_image_url": "https://a/one.jpg", "phash": "0" * 16},
+        ]
+        reps = visual_hash.canonical_visual_representatives(candidates)
+        self.assertEqual([row["direct_image_url"] for row in reps], [
+            "https://a/one.jpg", "https://c/distinct.jpg"
+        ])
+
+    def test_hashless_candidate_does_not_satisfy_capacity(self):
+        reps = visual_hash.canonical_visual_representatives([
+            {"direct_image_url": "https://a/no-proof.jpg"},
+            {"direct_image_url": "https://b/no-proof.jpg", "phash": ""},
+        ])
+        self.assertEqual(reps, [])
+
+
 if __name__ == "__main__":
     unittest.main()

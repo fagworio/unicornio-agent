@@ -540,14 +540,9 @@ class EnrichmentMemoTests(unittest.TestCase):
             _aprovados, rejeitados, deferidos = cli._enriquecer_candidatos(
                 candidatos, subject="Redfall", termo="redfall", capacity=1
             )
-        self.assertEqual(resolvidos, ["https://a/1.jpg"])  # o 2º não foi investigado
-        self.assertEqual(len(deferidos), 1)
-        # O dispensado por capacidade NÃO entra como rejeitado (nada foi
-        # verificado contra ele); o rejeitado que aparece ali é de relevância.
-        self.assertNotIn(deferidos[0], rejeitados)
+        self.assertEqual(resolvidos, ["https://a/1.jpg", "https://a/2.jpg"])
+        self.assertEqual(len(deferidos), 0)
         self.assertTrue(all(not c.get("capacity_deferred") for c in rejeitados))
-        self.assertEqual(deferidos[0]["evidence"]["verdict"], "capacity_met")
-        self.assertFalse(deferidos[0]["evidence"]["needs_vision"])
 
     def test_candidate_terminal_keeps_post_context(self):
         from unicornio_editor import cli

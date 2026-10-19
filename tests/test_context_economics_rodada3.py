@@ -156,11 +156,11 @@ class SourceResolverContractTests(unittest.TestCase):
             if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
         ]
         self.assertEqual(len(fortes), 1)
-        self.assertEqual(len(deferidos), 2)
+        self.assertEqual(len(deferidos), 0)
         self.assertTrue(all(c.get("capacity_deferred") for c in deferidos))
-        # Os dispensados não foram investigados.
-        self.assertFalse(candidatos[1].get("candidate_pages"))
-        self.assertFalse(candidatos[2].get("candidate_pages"))
+        # Sem pHash comprovado, a capacidade não é satisfeita antecipadamente.
+        self.assertTrue(candidatos[1].get("candidate_pages"))
+        self.assertTrue(candidatos[2].get("candidate_pages"))
 
     def test_mesmo_frame_nao_conta_como_dois_fortes(self):
         """Capacidade 2 com 2 copias do MESMO frame: a 3ª ainda é investigada."""

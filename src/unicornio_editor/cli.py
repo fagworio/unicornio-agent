@@ -1336,7 +1336,7 @@ def _resolve_media_batch(
     first = searchable[0] if searchable else posts[0]
     spec_by_query = {str(item["query"] or item["subject"]): item for item in searchable}
     memo_by_query = {query: {} for query in queries}
-    accepted_urls_by_query: dict[str, set[str]] = {query: set() for query in queries}
+    accepted_candidates_by_query: dict[str, list[dict[str, Any]]] = {query: [] for query in queries}
 
     def accept(novos: list[dict], query: str) -> int:
         spec = spec_by_query.get(str(query))
@@ -1369,12 +1369,13 @@ def _resolve_media_batch(
             excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
         )
-        accepted_urls_by_query[str(query)].update(
-            str(candidate.get("direct_image_url") or "")
-            for candidate in aprovados
+        accepted = [
+            candidate for candidate in aprovados
             if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
-        )
-        return len(accepted_urls_by_query[str(query)])
+        ]
+        accepted_candidates_by_query[str(query)].extend(dict(candidate) for candidate in accepted)
+        from .media.visual_hash import canonical_visual_representatives
+        return len(canonical_visual_representatives(accepted_candidates_by_query[str(query)]))
 
     reset_http_request_count()
     found = search_web_images_batch(
@@ -1464,7 +1465,10 @@ def _resolve_media_batch(
         engines_attempted = tuple(
             name for name in expected_engines if name in engine_reports
         )
-        accepted_count = len(accepted_urls_by_query.get(str(item["query"]), set()))
+        from .media.visual_hash import canonical_visual_representatives
+        accepted_count = len(canonical_visual_representatives(
+            accepted_candidates_by_query.get(str(item["query"]), [])
+        ))
         all_engines_reported = bool(
             expected_engines
             and all(name in engine_reports for name in expected_engines)
@@ -1527,6 +1531,20 @@ def _resolve_media_batch(
             "candidates_rejected": len(rejeitados),
             "distinct_valid_frames": len(distinct),
             "completion_reason": completion_reason,
+            "coverage": {
+                "version": 1,
+                "query": str(item["query"]),
+                "expected_engines": list(expected_engines),
+                "attempted_engines": list(engines_attempted),
+                "reported_engines": sorted(engine_reports),
+                "engine_results": {
+                    name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
+                    for name in expected_engines
+                },
+                "technical_failures": sorted(non_verified_engine_failures),
+                "verified": completion_reason == "EXHAUSTED_VERIFIED",
+                "accepted_visual_representatives": accepted_count,
+            },
         }
         append_telemetry(
             root,
@@ -1919,32 +1937,8 @@ def _enriquecer_candidatos(
         ]
         if not fortes:
             return 0
-        # Use the same pHash similarity threshold as the final diversity gate,
-        # but keep this early count independent from the later list mutation.
-        from .media.visual_hash import similar_image_pairs
-        rows = [
-            (str(forte.get("direct_image_url") or ""), str(forte.get("phash") or ""))
-            for forte in fortes
-            if str(forte.get("direct_image_url") or "")
-        ]
-        exact_unique: list[tuple[str, str]] = []
-        seen_keys: set[str] = set()
-        for url, phash in rows:
-            key = phash or url
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            exact_unique.append((url, phash))
-        try:
-            hashes = {url: phash for url, phash in rows if phash}
-            duplicate_urls = {
-                url_b for _url_a, url_b, _distance in similar_image_pairs(
-                    [url for url, _phash in rows], hashes=hashes
-                )
-            }
-            return len(rows) - len(duplicate_urls)
-        except Exception:
-            return len(exact_unique)
+        from .media.visual_hash import canonical_visual_representatives
+        return len(canonical_visual_representatives(fortes, hashes=hashes_locais))
 
     def _duplicates_existing(url: str, phash: Any) -> bool:
         if not url or phash is None or not existing_hashes:
