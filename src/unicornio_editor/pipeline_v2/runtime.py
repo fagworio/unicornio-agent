@@ -1564,21 +1564,67 @@ class ProductionMediaResolver:
             attempt_history = [*previous_history, *coverage_runs][-20:]
             active_coverage: dict[str, Any] = {}
             if coverage_runs:
-                latest_coverage = coverage_runs[-1]
-                if (
-                    latest_coverage.get("verified") is True
-                    and latest_coverage.get("strategy_complete") is True
-                    and latest_coverage.get("expected_engines")
-                    and set(latest_coverage.get("expected_engines") or ()) <= set(latest_coverage.get("reported_engines") or ())
-                    and not (latest_coverage.get("technical_failures") or ())
-                ):
-                    active_coverage = dict(latest_coverage)
+                valid_runs = [
+                    run for run in coverage_runs
+                    if (
+                        run.get("verified") is True
+                        and run.get("strategy_complete") is True
+                        and bool(run.get("expected_engines"))
+                        and set(run.get("expected_engines") or ()) <= set(run.get("reported_engines") or ())
+                        and not (run.get("technical_failures") or ())
+                        and int(run.get("planned_queries") or 0) > 0
+                        and int(run.get("completed_queries") or 0) >= int(run.get("planned_queries") or 0)
+                        and isinstance(run.get("engine_results"), dict)
+                        and all(
+                            run["engine_results"].get(engine) in {"ok", "no_results_legitimate"}
+                            for engine in (run.get("expected_engines") or ())
+                        )
+                    )
+                ]
+                complete = (
+                    len(valid_runs) == len(coverage_runs)
+                    and bool(coverage_runs)
+                    and len({str(run.get("query") or "") for run in coverage_runs}) == len(coverage_runs)
+                )
+                if complete:
+                    active_coverage = {
+                        "version": 1,
+                        "verified": True,
+                        "strategy_complete": True,
+                        "queries": [str(run.get("query") or "") for run in coverage_runs],
+                        "expected_engines": sorted({
+                            engine
+                            for run in coverage_runs
+                            for engine in (run.get("expected_engines") or ())
+                        }),
+                        "reported_engines": sorted({
+                            engine
+                            for run in coverage_runs
+                            for engine in (run.get("reported_engines") or ())
+                        }),
+                        "engine_results": {
+                            str(run.get("query") or ""): dict(run.get("engine_results") or {})
+                            for run in coverage_runs
+                        },
+                        "technical_failures": [],
+                        "planned_queries": sum(int(run.get("planned_queries") or 0) for run in coverage_runs),
+                        "completed_queries": sum(int(run.get("completed_queries") or 0) for run in coverage_runs),
+                        "accepted_visual_representatives": sum(
+                            int(run.get("accepted_visual_representatives") or 0)
+                            for run in coverage_runs
+                        ),
+                    }
                 else:
                     active_coverage = {
                         "version": 1,
                         "verified": False,
                         "strategy_complete": False,
-                        "reason": "latest_attempt_incomplete",
+                        "reason": "active_strategy_incomplete",
+                        "queries": [str(run.get("query") or "") for run in coverage_runs],
+                        "engine_results": {
+                            str(run.get("query") or ""): dict(run.get("engine_results") or {})
+                            for run in coverage_runs
+                        },
                     }
             else:
                 active_coverage = dict(previous_coverage.get("active_coverage") or {})

@@ -1096,6 +1096,8 @@ def run_pre_publish_checklist(
     waiver_applied = False
     coverage = search_progress.get("coverage") if isinstance(search_progress, Mapping) else None
     active_coverage = coverage.get("active_coverage") if isinstance(coverage, Mapping) else None
+    active_queries = active_coverage.get("queries") if isinstance(active_coverage, Mapping) else None
+    active_results = active_coverage.get("engine_results") if isinstance(active_coverage, Mapping) else None
     coverage_valid = bool(
         isinstance(coverage, Mapping)
         and coverage.get("version") == 1
@@ -1103,6 +1105,20 @@ def run_pre_publish_checklist(
         and active_coverage.get("verified") is True
         and active_coverage.get("strategy_complete") is True
         and bool(active_coverage.get("expected_engines"))
+        and isinstance(active_queries, list)
+        and bool(active_queries)
+        and len(set(active_queries)) == len(active_queries)
+        and isinstance(active_results, Mapping)
+        and set(active_results) == set(active_queries)
+        and all(
+            isinstance(active_results.get(query), Mapping)
+            and set(active_coverage.get("expected_engines") or ()) <= set(active_results.get(query) or ())
+            and all(
+                active_results[query].get(engine) in {"ok", "no_results_legitimate"}
+                for engine in (active_coverage.get("expected_engines") or ())
+            )
+            for query in active_queries
+        )
         and set(active_coverage.get("expected_engines") or ()) <= set(active_coverage.get("reported_engines") or ())
         and not (active_coverage.get("technical_failures") or ())
         and int(active_coverage.get("planned_queries") or 0) > 0
