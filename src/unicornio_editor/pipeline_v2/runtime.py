@@ -47,6 +47,138 @@ def _canonical_embedded_media_url(value: str) -> str:
     ))
 
 
+def _coverage_query_key(value: Any) -> str:
+    """Normalize query identity only for harmless whitespace/case differences."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _coverage_run_is_valid(run: dict[str, Any], planned_query: str) -> bool:
+    """Validate one provider-coverage proof against the query actually planned."""
+    query = run.get("query")
+    expected = run.get("expected_engines")
+    reported = run.get("reported_engines")
+    results = run.get("engine_results")
+    planned = run.get("planned_queries")
+    completed = run.get("completed_queries")
+    failures = run.get("technical_failures")
+    return bool(
+        type(run.get("version")) is int
+        and run.get("version") == 1
+        and isinstance(query, str)
+        and _coverage_query_key(query) == _coverage_query_key(planned_query)
+        and run.get("verified") is True
+        and run.get("strategy_complete") is True
+        and isinstance(expected, list)
+        and expected
+        and all(isinstance(engine, str) and engine for engine in expected)
+        and isinstance(reported, list)
+        and all(isinstance(engine, str) and engine for engine in reported)
+        and set(expected) <= set(reported)
+        and isinstance(failures, list)
+        and not failures
+        and isinstance(planned, int)
+        and not isinstance(planned, bool)
+        and planned == 1
+        and isinstance(completed, int)
+        and not isinstance(completed, bool)
+        and completed == planned
+        and isinstance(results, dict)
+        and all(results.get(engine) in {"ok", "no_results_legitimate"} for engine in expected)
+    )
+
+
+def _aggregate_active_coverage(
+    search_runs: list[dict[str, Any]], planned_queries: list[str]
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    """Aggregate only a one-to-one set of valid proofs for this search pass."""
+    proofs: list[dict[str, Any]] = []
+    valid = bool(planned_queries) and len(search_runs) == len(planned_queries)
+    for index, planned_query in enumerate(planned_queries):
+        run = search_runs[index] if index < len(search_runs) else {}
+        valid = valid and isinstance(run, dict) and (
+            _coverage_query_key(run.get("_planned_query"))
+            == _coverage_query_key(planned_query)
+        )
+        coverage = run.get("coverage") if isinstance(run, dict) else None
+        if isinstance(coverage, dict):
+            proof = dict(coverage)
+        else:
+            proof = {
+                "query": planned_query,
+                "verified": False,
+                "strategy_complete": False,
+                "technical_failures": ["coverage_missing"],
+            }
+        proofs.append(proof)
+        valid = valid and _coverage_run_is_valid(proof, planned_query)
+
+    for run in search_runs[len(planned_queries):]:
+        coverage = run.get("coverage") if isinstance(run, dict) else None
+        proofs.append(
+            dict(coverage)
+            if isinstance(coverage, dict)
+            else {
+                "query": str(run.get("_planned_query") or "") if isinstance(run, dict) else "",
+                "verified": False,
+                "strategy_complete": False,
+                "technical_failures": ["unplanned_search_run"],
+            }
+        )
+
+    queries = [str(proof.get("query") or "") for proof in proofs]
+    unique_queries = len({_coverage_query_key(query) for query in queries}) == len(queries)
+    valid = valid and unique_queries
+    engine_names = sorted({
+        engine
+        for proof in proofs
+        for engine in (proof.get("expected_engines") or [])
+        if isinstance(engine, str) and engine
+    })
+    if valid:
+        active = {
+            "version": 1,
+            "verified": True,
+            "strategy_complete": True,
+            "queries": queries,
+            "expected_engines": engine_names,
+            "reported_engines": sorted({
+                engine
+                for proof in proofs
+                for engine in (proof.get("reported_engines") or [])
+                if isinstance(engine, str) and engine
+            }),
+            "engine_results": {
+                str(proof["query"]): dict(proof["engine_results"])
+                for proof in proofs
+            },
+            "technical_failures": [],
+            "planned_queries": len(planned_queries),
+            "completed_queries": len(planned_queries),
+            "accepted_visual_representatives": sum(
+                proof.get("accepted_visual_representatives")
+                for proof in proofs
+                if type(proof.get("accepted_visual_representatives")) is int
+                and proof["accepted_visual_representatives"] >= 0
+            ),
+        }
+    else:
+        active = {
+            "version": 1,
+            "verified": False,
+            "strategy_complete": False,
+            "reason": "active_strategy_incomplete",
+            "queries": queries,
+            "engine_results": {
+                str(proof.get("query") or (
+                    planned_queries[index] if index < len(planned_queries) else ""
+                )): dict(proof.get("engine_results") or {})
+                for index, proof in enumerate(proofs)
+                if isinstance(proof.get("engine_results"), dict)
+            },
+        }
+    return active, proofs, valid
+
+
 def _attach_candidate_vision_evidence(
     candidate: dict[str, Any], vision_evidence: dict[str, Any]
 ) -> dict[str, Any]:
@@ -965,8 +1097,14 @@ class ProductionMediaResolver:
                 cleanup_browser_artifacts()
                 raise
             row = (resolved.get("posts") or [{}])[0]
-            if role == "inline" and isinstance(row.get("search"), dict):
-                search_runs.append(dict(row["search"]))
+            if role == "inline":
+                search_run = row.get("search")
+                search_run = dict(search_run) if isinstance(search_run, dict) else {
+                    "completed": False,
+                    "completion_reason": "SEARCH_INCOMPLETE",
+                }
+                search_run["_planned_query"] = query
+                search_runs.append(search_run)
             candidates: list[dict[str, Any]] = []
             for reused in row.get("reuse") or []:
                 if not isinstance(reused, dict):
@@ -1383,6 +1521,7 @@ class ProductionMediaResolver:
                 return current_accounting.effective_missing
             return current_accounting.effective_missing
 
+        inline_queries_attempted: list[str] = []
         if inline_needed:
             # The article's own Fonte is the first acquisition strategy.  Its
             # assets already have provenance by construction; they still pass
@@ -1465,6 +1604,7 @@ class ProductionMediaResolver:
                 remaining = inline_remaining()
                 if remaining <= 0:
                     break
+                inline_queries_attempted.append(query)
                 candidates = resolve_query(
                     subject,
                     query,
@@ -1552,82 +1692,20 @@ class ProductionMediaResolver:
                 and queries_completed == queries_planned
             )
             previous_search = previous.search
-            coverage_runs = [
-                run["coverage"]
-                for run in search_runs
-                if isinstance(run.get("coverage"), dict)
-            ]
+            active_coverage, coverage_runs, coverage_complete = _aggregate_active_coverage(
+                search_runs,
+                inline_queries_attempted,
+            )
             previous_coverage = previous_search.coverage if isinstance(previous_search.coverage, dict) else {}
             previous_history = list(previous_coverage.get("attempt_history") or [])
             if not previous_history:
                 previous_history = list(previous_coverage.get("runs") or [])
             attempt_history = [*previous_history, *coverage_runs][-20:]
-            active_coverage: dict[str, Any] = {}
-            if coverage_runs:
-                valid_runs = [
-                    run for run in coverage_runs
-                    if (
-                        run.get("verified") is True
-                        and run.get("strategy_complete") is True
-                        and bool(run.get("expected_engines"))
-                        and set(run.get("expected_engines") or ()) <= set(run.get("reported_engines") or ())
-                        and not (run.get("technical_failures") or ())
-                        and int(run.get("planned_queries") or 0) > 0
-                        and int(run.get("completed_queries") or 0) >= int(run.get("planned_queries") or 0)
-                        and isinstance(run.get("engine_results"), dict)
-                        and all(
-                            run["engine_results"].get(engine) in {"ok", "no_results_legitimate"}
-                            for engine in (run.get("expected_engines") or ())
-                        )
-                    )
-                ]
-                complete = (
-                    len(valid_runs) == len(coverage_runs)
-                    and bool(coverage_runs)
-                    and len({str(run.get("query") or "") for run in coverage_runs}) == len(coverage_runs)
-                )
-                if complete:
-                    active_coverage = {
-                        "version": 1,
-                        "verified": True,
-                        "strategy_complete": True,
-                        "queries": [str(run.get("query") or "") for run in coverage_runs],
-                        "expected_engines": sorted({
-                            engine
-                            for run in coverage_runs
-                            for engine in (run.get("expected_engines") or ())
-                        }),
-                        "reported_engines": sorted({
-                            engine
-                            for run in coverage_runs
-                            for engine in (run.get("reported_engines") or ())
-                        }),
-                        "engine_results": {
-                            str(run.get("query") or ""): dict(run.get("engine_results") or {})
-                            for run in coverage_runs
-                        },
-                        "technical_failures": [],
-                        "planned_queries": sum(int(run.get("planned_queries") or 0) for run in coverage_runs),
-                        "completed_queries": sum(int(run.get("completed_queries") or 0) for run in coverage_runs),
-                        "accepted_visual_representatives": sum(
-                            int(run.get("accepted_visual_representatives") or 0)
-                            for run in coverage_runs
-                        ),
-                    }
-                else:
-                    active_coverage = {
-                        "version": 1,
-                        "verified": False,
-                        "strategy_complete": False,
-                        "reason": "active_strategy_incomplete",
-                        "queries": [str(run.get("query") or "") for run in coverage_runs],
-                        "engine_results": {
-                            str(run.get("query") or ""): dict(run.get("engine_results") or {})
-                            for run in coverage_runs
-                        },
-                    }
-            else:
+            if not search_runs:
                 active_coverage = dict(previous_coverage.get("active_coverage") or {})
+            if not coverage_complete and search_runs:
+                search_completed = False
+                completion_reason = "SEARCH_INCOMPLETE"
             coverage = {
                 "version": 1,
                 "attempt_history": attempt_history,

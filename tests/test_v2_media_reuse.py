@@ -5,9 +5,14 @@ from unittest import mock
 
 import pytest
 
-from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress
+from unicornio_editor.pipeline_v2.model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress
 from unicornio_editor.pipeline_v2.errors import StageError
-from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver, _adaptive_query_suffix, _media_rejection_history
+from unicornio_editor.pipeline_v2.runtime import (
+    ProductionMediaResolver,
+    _adaptive_query_suffix,
+    _aggregate_active_coverage,
+    _media_rejection_history,
+)
 
 
 class Config:
@@ -196,10 +201,17 @@ def test_resolver_plans_reference_case_using_visual_deficit(monkeypatch, tmp_pat
 
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         planned.append(batch["posts"][0]["needed"])
+        query = batch["posts"][0]["query"]
         return {"posts": [{
             "reuse": [],
             "audit_candidates": [],
-            "search": {"completed": True, "queries_attempted": 1, "engines_attempted": ["bing"]},
+            "search": {
+                "completed": True,
+                "completion_reason": "EXHAUSTED_VERIFIED",
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "coverage": _verified_search_coverage(query),
+            },
         }]}
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
@@ -972,6 +984,225 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     ]
 
 
+def _verified_search_coverage(query):
+    return {
+        "version": 1,
+        "query": query,
+        "expected_engines": ["bing"],
+        "reported_engines": ["bing"],
+        "engine_results": {"bing": "no_results_legitimate"},
+        "technical_failures": [],
+        "planned_queries": 1,
+        "completed_queries": 1,
+        "strategy_complete": True,
+        "verified": True,
+        "accepted_visual_representatives": 0,
+    }
+
+
+def _search_run(query, coverage=None):
+    row = {"_planned_query": query}
+    if coverage is not None:
+        row["coverage"] = coverage
+    return row
+
+
+def test_active_coverage_requires_one_matching_proof_per_executed_query():
+    queries = ["redfall gameplay screenshots", "redfall key art"]
+    runs = [_search_run(query, _verified_search_coverage(query)) for query in queries]
+
+    active, proofs, complete = _aggregate_active_coverage(runs, queries)
+
+    assert complete is True
+    assert len(proofs) == len(queries)
+    assert active["verified"] is True
+    assert active["planned_queries"] == active["completed_queries"] == 2
+    assert active["queries"] == queries
+
+
+@pytest.mark.parametrize(
+    ("runs", "queries"),
+    [
+        (
+            [
+                _search_run("redfall gameplay screenshots", _verified_search_coverage("redfall gameplay screenshots")),
+                _search_run("redfall key art"),
+            ],
+            ["redfall gameplay screenshots", "redfall key art"],
+        ),
+        (
+            [_search_run("redfall gameplay screenshots", _verified_search_coverage("unexpected query"))],
+            ["redfall gameplay screenshots"],
+        ),
+        (
+            [_search_run("redfall gameplay screenshots", {
+                **_verified_search_coverage("redfall gameplay screenshots"),
+                "verified": False,
+                "strategy_complete": False,
+                "technical_failures": ["js_required"],
+                "completed_queries": 0,
+            })],
+            ["redfall gameplay screenshots"],
+        ),
+    ],
+)
+def test_active_coverage_fails_closed_for_missing_mismatched_or_technical_proof(runs, queries):
+    active, _proofs, complete = _aggregate_active_coverage(runs, queries)
+
+    assert complete is False
+    assert active["verified"] is False
+    assert active["strategy_complete"] is False
+
+
+def test_failed_historical_attempt_does_not_block_new_complete_strategy_roundtrip():
+    from unicornio_editor.checklist import run_pre_publish_checklist
+    from test_checklist import ChecklistTests, FakeClient, editorial_payload, make_post
+
+    queries = ["redfall gameplay screenshots", "redfall key art"]
+    active, proofs, complete = _aggregate_active_coverage(
+        [_search_run(query, _verified_search_coverage(query)) for query in queries],
+        queries,
+    )
+    progress = MediaSearchProgress(
+        completed=True,
+        exhausted=True,
+        completion_reason="EXHAUSTED_VERIFIED",
+        coverage={
+            "version": 1,
+            "attempt_history": [{
+                "query": "old query",
+                "verified": False,
+                "strategy_complete": False,
+                "technical_failures": ["js_required"],
+            }, *proofs],
+            "active_coverage": active,
+            "verified": complete,
+        },
+    ).to_dict()
+
+    content = (
+        "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
+        "<p>Mais informações sobre Redfall para o leitor.</p>"
+        "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+    )
+    with __import__("tempfile").TemporaryDirectory() as directory:
+        from pathlib import Path
+
+        backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+        backup_path.parent.mkdir(parents=True)
+        backup_path.write_text("{}")
+        result = run_pre_publish_checklist(
+            post=make_post(featured_media=7),
+            editorial=editorial_payload(
+                game_name="Redfall",
+                cleaned_html=content,
+                seo={
+                    "title": "Redfall recebe novidades importantes",
+                    "meta_description": "Redfall recebe novidades importantes, com detalhes sobre a obra, contexto, lançamento e informações confirmadas para o leitor.",
+                    "focus_keyword": "Redfall",
+                },
+                trailer_unavailable=True,
+                trailer_search_evidence={
+                    "result": "official_not_found",
+                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "provider": "youtube",
+                    "query": "Redfall trailer",
+                },
+            ),
+            content=content,
+            backup_path=backup_path,
+            config=ChecklistTests().config(),
+            client=FakeClient(),
+            media_context={
+                "enrichment_round": 1,
+                "search": progress,
+                "inline": {"required": 2, "accepted": []},
+                "featured": {
+                    "status": "valid",
+                    "media_id": 7,
+                    "media_url": "https://media.example/redfall-1280x720.webp",
+                    "sha256": "f" * 64,
+                    "phash": "f" * 16,
+                    "visual_group_id": "visual:featured",
+                    "visual_verification": {"decision": "INITIAL"},
+                },
+                "visual_identity_policy": 4,
+                "visual_identity_evidence_valid": True,
+            },
+        )
+
+    assert result["media_decision"]["waiver_applied"] is True
+
+
+def test_serialized_incomplete_coverage_remains_blocked_by_checklist():
+    from unicornio_editor.checklist import run_pre_publish_checklist
+    from test_checklist import ChecklistTests, FakeClient, editorial_payload, make_post
+
+    queries = ["redfall gameplay screenshots", "redfall key art"]
+    active, _proofs, complete = _aggregate_active_coverage(
+        [_search_run(queries[0], _verified_search_coverage(queries[0])), _search_run(queries[1])],
+        queries,
+    )
+    progress = MediaSearchProgress(
+        completed=False,
+        exhausted=False,
+        completion_reason="SEARCH_INCOMPLETE",
+        coverage={"version": 1, "active_coverage": active, "verified": complete},
+    ).to_dict()
+    content = (
+        "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
+        "<p>Mais informações sobre Redfall para o leitor.</p>"
+        "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+    )
+    with __import__("tempfile").TemporaryDirectory() as directory:
+        from pathlib import Path
+
+        backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+        backup_path.parent.mkdir(parents=True)
+        backup_path.write_text("{}")
+        result = run_pre_publish_checklist(
+            post=make_post(featured_media=7),
+            editorial=editorial_payload(
+                game_name="Redfall",
+                cleaned_html=content,
+                seo={
+                    "title": "Redfall recebe novidades importantes",
+                    "meta_description": "Redfall recebe novidades importantes, com detalhes sobre a obra, contexto, lançamento e informações confirmadas para o leitor.",
+                    "focus_keyword": "Redfall",
+                },
+                trailer_unavailable=True,
+                trailer_search_evidence={
+                    "result": "official_not_found",
+                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "provider": "youtube",
+                    "query": "Redfall trailer",
+                },
+            ),
+            content=content,
+            backup_path=backup_path,
+            config=ChecklistTests().config(),
+            client=FakeClient(),
+            media_context={
+                "enrichment_round": 1,
+                "search": progress,
+                "inline": {"required": 2, "accepted": []},
+                "featured": {
+                    "status": "valid",
+                    "media_id": 7,
+                    "media_url": "https://media.example/redfall-1280x720.webp",
+                    "sha256": "f" * 64,
+                    "phash": "f" * 16,
+                    "visual_group_id": "visual:featured",
+                    "visual_verification": {"decision": "INITIAL"},
+                },
+                "visual_identity_policy": 4,
+                "visual_identity_evidence_valid": True,
+            },
+        )
+
+    assert result["media_decision"]["waiver_applied"] is False
+
+
 def test_media_resolver_promotes_normalized_existing_featured(monkeypatch, tmp_path):
     import unicornio_editor.pipeline_v2.runtime as runtime
     import unicornio_editor.pipeline_v2.visual_media as visual_media
@@ -1047,9 +1278,14 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
             "audit_candidates": candidates,
             "search": {
                 "completed": True,
+                "completion_reason": "EXHAUSTED_VERIFIED",
                 "queries_attempted": 1,
                 "engines_attempted": ["bing"],
                 "candidates_seen": len(candidates),
+                **(
+                    {"coverage": _verified_search_coverage(query)}
+                    if "Alpha" in query else {}
+                ),
             },
         }]}
 
@@ -1095,8 +1331,10 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.queries_planned == 2
     assert result.search.queries_attempted == 2
     assert result.search.queries_completed == 2
-    assert result.search.completed is True
-    assert result.search.exhausted is True
+    assert result.search.completed is False
+    assert result.search.completion_reason == "SEARCH_INCOMPLETE"
+    assert result.search.coverage["active_coverage"]["verified"] is False
+    assert result.search.exhausted is False
 
 
 def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, tmp_path):
