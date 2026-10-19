@@ -2980,7 +2980,7 @@ def _resolve_seo_from_post(
     derived_title = post_title.strip()[:65] or "Notícia"
     derived_description = _seo_description(body_text)
     for candidate in _seo_keyword_candidates(post_title, game_name):
-        if _keyword_in_text(candidate, post_title) and _keyword_in_text(candidate, body_text):
+        if _keyword_in_text(candidate, derived_title) and _keyword_in_text(candidate, body_text):
             return {
                 "title": derived_title,
                 "meta_description": derived_description,

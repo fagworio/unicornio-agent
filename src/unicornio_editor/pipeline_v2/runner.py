@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-from ..content_quality import _keyword_in_text
+from ..content_quality import _keyword_in_text, rendered_text
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
@@ -51,7 +51,8 @@ class PipelineRunner:
         title = str(seo.get("title") or editorial.get("title") or context.get("title") or "")
         html = str(editorial.get("cleaned_html") or editorial.get("content") or "")
         title_match = bool(title and _keyword_in_text(keyword, title))
-        content_match = bool(html and _keyword_in_text(keyword, html))
+        content_text = rendered_text(html)
+        content_match = bool(content_text and _keyword_in_text(keyword, content_text))
         if not (title_match and content_match):
             raise StageError(
                 BlockerCode.TEXT_QUALITY,

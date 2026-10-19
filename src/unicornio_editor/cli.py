@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     v2_run_parser.add_argument(
         "--preview", action="store_true", help="mostra a seleção sem executar stages ou escrever"
     )
+    v2_run_parser.add_argument(
+        "--expected-selected-ids",
+        default=None,
+        help="canário supervisionado: IDs esperados pelo preview, separados por vírgula; rejeita divergência sem executar",
+    )
 
     v2_recover_media_parser = subparsers.add_parser(
         "v2-recover-media",
@@ -2335,6 +2340,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=int(args.limit),
                 post_id=getattr(args, "post_id", None),
                 preview=bool(getattr(args, "preview", False)),
+                expected_selected_ids=(
+                    [int(item.strip()) for item in args.expected_selected_ids.split(",") if item.strip()]
+                    if getattr(args, "expected_selected_ids", None) is not None
+                    else None
+                ),
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment

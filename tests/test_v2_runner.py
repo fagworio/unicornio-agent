@@ -63,6 +63,28 @@ def test_runner_rejects_missing_keyword_before_media():
     assert calls == []
 
 
+
+
+def test_runner_ignores_keyword_found_only_in_html_attributes():
+    store = MemoryStore()
+    calls = []
+    stages = {
+        "editorial": lambda context, state: {
+            "decision": "process",
+            "seo": {"title": "Guia Android", "focus_keyword": "Android"},
+            "cleaned_html": '<p>Texto editorial.</p><img alt="Android">',
+        },
+        "media": lambda *args: calls.append("media"),
+        "compose": lambda *args: calls.append("compose"),
+        "validate": lambda *args: calls.append("validate"),
+    }
+    result = PipelineRunner(store, stages).run_one(115526, {})
+    assert result.type is OutcomeType.RETRY
+    assert result.blocker is BlockerCode.TEXT_QUALITY
+    assert "content_match=false" in (result.detail or "")
+    assert calls == []
+
+
 def test_runner_processes_one_post_and_persists_ready():
     store = MemoryStore()
     calls = []

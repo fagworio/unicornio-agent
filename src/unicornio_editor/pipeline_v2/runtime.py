@@ -2257,6 +2257,7 @@ def run_v2(
     limit: int = 1,
     post_id: int | None = None,
     preview: bool = False,
+    expected_selected_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -2437,6 +2438,19 @@ def run_v2(
                 if not requested_pending
                 else "cooldown_active"
             )
+        if expected_selected_ids is not None and [int(item[0]) for item in selected] != [int(item) for item in expected_selected_ids]:
+            return {
+                "selected": len(selected),
+                "completed": 0,
+                "failed": 0,
+                "locked": False,
+                "preview": False,
+                "selection_mismatch": True,
+                "expected_selected_ids": [int(item) for item in expected_selected_ids],
+                "actual_selected_ids": [int(item[0]) for item in selected],
+                "queue": queue,
+                "details": [],
+            }
         if preview:
             return {
                 "selected": len(selected),

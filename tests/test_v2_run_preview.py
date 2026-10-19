@@ -121,6 +121,24 @@ def test_preview_post_id_uses_admission_and_never_falls_back(tmp_path):
     assert client.updates == []
 
 
+
+def test_write_rejects_selection_drift_before_stages(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
+    client = Client([post(2, "2026-10-09T01:00:00Z", WorkState(state=LifecycleState.PENDING))])
+    result = run_v2(
+        client,
+        config(cohort, tmp_path),
+        tmp_path,
+        post_id=2,
+        expected_selected_ids=[999],
+    )
+    assert result["selection_mismatch"] is True
+    assert result["expected_selected_ids"] == [999]
+    assert result["actual_selected_ids"] == [2]
+    assert client.updates == []
+
+
 def test_quarantine_blocks_reentry_and_manual_post_id_but_not_other_eligible_posts(tmp_path):
     cohort = tmp_path / "cohort.json"
     cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")

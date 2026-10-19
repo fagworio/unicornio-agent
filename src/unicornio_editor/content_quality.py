@@ -37,9 +37,14 @@ def _keyword_in_text(keyword: str, text: str) -> bool:
     return all(any(token == candidate for candidate in haystack) for token in significant)
 
 
+def rendered_text(html: str) -> str:
+    """Return visible HTML text, excluding tags and attribute values."""
+    return unescape(re.sub(r"<[^>]+>", " ", str(html or "")))
+
+
 def keyword_occurs_naturally(keyword: str, title: str, html: str) -> bool:
     """Apply the publication keyword rule to title and rendered body text."""
-    body = unescape(re.sub(r"<[^>]+>", " ", str(html or "")))
+    body = rendered_text(html)
     return _keyword_in_text(str(keyword or ""), str(title or "")) and _keyword_in_text(
         str(keyword or ""), body
     )
