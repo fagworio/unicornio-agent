@@ -1041,6 +1041,7 @@ class ChecklistTests(unittest.TestCase):
             ("PROVIDER_ERROR", 2, False, False),
             ("EXHAUSTED", 1, True, True),
             ("TARGET_REACHED", 1, True, False),
+            ("TARGET_REACHED", 1, True, True),
         ]
         for reason, enrichment_round, completed, exhausted in cases:
             result = self._run_checklist(

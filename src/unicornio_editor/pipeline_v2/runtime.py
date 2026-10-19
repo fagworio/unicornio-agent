@@ -128,12 +128,17 @@ def _aggregate_active_coverage(
     queries = [str(proof.get("query") or "") for proof in proofs]
     unique_queries = len({_coverage_query_key(query) for query in queries}) == len(queries)
     valid = valid and unique_queries
-    engine_names = sorted({
-        engine
-        for proof in proofs
-        for engine in (proof.get("expected_engines") or [])
-        if isinstance(engine, str) and engine
-    })
+    def engine_names_for(field: str) -> list[str]:
+        return sorted({
+            engine
+            for proof in proofs
+            for values in [proof.get(field)]
+            if isinstance(values, list)
+            for engine in values
+            if isinstance(engine, str) and engine
+        })
+
+    engine_names = engine_names_for("expected_engines")
     if valid:
         active = {
             "version": 1,
@@ -141,12 +146,7 @@ def _aggregate_active_coverage(
             "strategy_complete": True,
             "queries": queries,
             "expected_engines": engine_names,
-            "reported_engines": sorted({
-                engine
-                for proof in proofs
-                for engine in (proof.get("reported_engines") or [])
-                if isinstance(engine, str) and engine
-            }),
+            "reported_engines": engine_names_for("reported_engines"),
             "engine_results": {
                 str(proof["query"]): dict(proof["engine_results"])
                 for proof in proofs
@@ -1703,6 +1703,28 @@ class ProductionMediaResolver:
             attempt_history = [*previous_history, *coverage_runs][-20:]
             if not search_runs:
                 active_coverage = dict(previous_coverage.get("active_coverage") or {})
+            final_distinct = {
+                item_id for item_id in account_visual_media(
+                    current_inline,
+                    required_inline=total_required,
+                    featured=current_featured,
+                    listicle_items=subject_rows if is_listicle else (),
+                ).valid_inline_ids
+            }
+            completed_reason_set = {"EXHAUSTED_VERIFIED", "EXHAUSTED", "TARGET_REACHED"}
+            target_reached_with_complete_execution = bool(
+                search_completed
+                and any(run.get("completion_reason") == "TARGET_REACHED" for run in search_runs)
+                and all(run.get("completion_reason") in completed_reason_set for run in search_runs)
+                and all(run.get("completed") is True for run in search_runs)
+                and len(final_distinct) >= total_required
+            )
+            if target_reached_with_complete_execution:
+                # Keep target attainment distinct from exhaustion proof. All
+                # queries completed and the final visual quota is satisfied,
+                # but incomplete coverage still cannot authorize a waiver.
+                search_completed = True
+                completion_reason = "TARGET_REACHED"
             if not coverage_complete and search_runs and completion_reason != "TARGET_REACHED":
                 search_completed = False
                 completion_reason = "SEARCH_INCOMPLETE"
@@ -1747,17 +1769,13 @@ class ProductionMediaResolver:
                 completion_reason=completion_reason or previous_search.completion_reason,
                 coverage=coverage,
             )
-            final_distinct = {
-                item_id for item_id in account_visual_media(
-                    current_inline,
-                    required_inline=total_required,
-                    featured=current_featured,
-                    listicle_items=subject_rows if is_listicle else (),
-                ).valid_inline_ids
-            }
             search_progress = replace(
                 search_progress,
-                exhausted=bool(search_completed and len(final_distinct) < total_required),
+                exhausted=bool(
+                    search_completed
+                    and completion_reason != "TARGET_REACHED"
+                    and len(final_distinct) < total_required
+                ),
                 distinct_valid_frames=len(final_distinct),
             )
         else:

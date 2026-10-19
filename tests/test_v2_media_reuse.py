@@ -1105,6 +1105,20 @@ def test_active_coverage_requires_one_matching_proof_per_executed_query():
             })],
             ["redfall gameplay screenshots"],
         ),
+        (
+            [_search_run("redfall gameplay screenshots", {
+                **_verified_search_coverage("redfall gameplay screenshots"),
+                "expected_engines": 4,
+            })],
+            ["redfall gameplay screenshots"],
+        ),
+        (
+            [_search_run("redfall gameplay screenshots", {
+                **_verified_search_coverage("redfall gameplay screenshots"),
+                "reported_engines": 4,
+            })],
+            ["redfall gameplay screenshots"],
+        ),
     ],
 )
 def test_active_coverage_fails_closed_for_missing_mismatched_or_technical_proof(runs, queries):
@@ -1460,6 +1474,152 @@ def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeyp
     assert result.search.completed is True
     assert result.search.completion_reason == "TARGET_REACHED"
     assert result.search.coverage["active_coverage"]["verified"] is False
+
+
+def test_media_resolver_preserves_target_reached_after_mixed_completed_queries(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    calls = []
+    candidate = {
+        "candidate_id": "target-after-exhaustion",
+        "direct_image_url": "https://cdn.test/target-after-exhaustion.webp",
+        "source_page_url": "https://source.test/article",
+        "subject": "Beta",
+        "author": "Test",
+        "license": "CC BY",
+        "license_url": "https://license.test",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Credit",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        query = batch["posts"][0]["query"]
+        calls.append(query)
+        if "Alpha" in query:
+            search_result = {
+                "completed": True,
+                "completion_reason": "EXHAUSTED_VERIFIED",
+                "coverage": _verified_search_coverage(query),
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": 0,
+            }
+            candidates = []
+        else:
+            search_result = {
+                "completed": True,
+                "completion_reason": "TARGET_REACHED",
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": 1,
+            }
+            candidates = [candidate]
+        return {"posts": [{"reuse": [], "audit_candidates": candidates, "search": search_result}]}
+
+    def fake_execute(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        return ([{
+            "media_id": 115568,
+            "media_url": item["direct_image_url"],
+            "paragraph_index": item["paragraph_index"],
+            "alt_text": "Test",
+            "credit_text": "Credit",
+            "featured": False,
+            "phash": "a" * 16,
+            "sha256": "b" * 64,
+            "visual_group_id": "visual:target-after-exhaustion",
+            "visual_verification": {"decision": "INITIAL"},
+            "status": "accepted",
+        }], None, None)
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [
+        {"subject": "Alpha"}, {"subject": "Beta"}
+    ])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", fake_execute)
+
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 115567, "https://wp.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115516, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    assert len(calls) == 2
+    assert result.accepted == 1
+    assert result.search.completed is True
+    assert result.search.completion_reason == "TARGET_REACHED"
+    assert result.search.coverage["active_coverage"]["verified"] is False
+    assert result.search.exhausted is False
+
+
+def test_media_resolver_does_not_call_rejected_target_exhaustion(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    candidate = {
+        "candidate_id": "rejected-target",
+        "direct_image_url": "https://cdn.test/rejected-target.webp",
+        "source_page_url": "https://source.test/article",
+        "subject": "Test",
+        "author": "Test",
+        "license": "CC BY",
+        "license_url": "https://license.test",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Credit",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
+        "posts": [{
+            "reuse": [],
+            "audit_candidates": [candidate],
+            "search": {
+                "completed": True,
+                "completion_reason": "TARGET_REACHED",
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": 1,
+            },
+        }],
+    })
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", lambda *_args, **_kwargs: ([{
+        "paragraph_index": 0,
+        "status": "rejected",
+        "detail": "source_mismatch",
+    }], None, None))
+
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 115567, "https://wp.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115516, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    assert result.accepted == 0
+    assert result.search.completed is True
+    assert result.search.completion_reason == "TARGET_REACHED"
+    assert result.search.coverage["active_coverage"]["verified"] is False
+    assert result.search.exhausted is False
 
 
 def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, tmp_path):
