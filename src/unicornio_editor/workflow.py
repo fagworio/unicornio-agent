@@ -2919,30 +2919,40 @@ def _seo_description(text: str, limit: int = 155) -> str:
 
 def _seo_keyword_candidates(title: str, game_name: str | None) -> list[str]:
     """Deterministic focus-keyword candidates, most specific first."""
-    from .content_quality import _keyword_in_text
+    from .content_quality import _PT_STOPWORDS
 
     candidates: list[str] = []
     if game_name and game_name.strip():
         candidates.append(game_name.strip())
     title = (title or "").strip()
+    tokens = re.findall(r"[\wÀ-ÿ]+", title)
+    for size in range(min(5, len(tokens)), 1, -1):
+        for start in range(0, len(tokens) - size + 1):
+            phrase_tokens = tokens[start:start + size]
+            while phrase_tokens and phrase_tokens[0].casefold() in _PT_STOPWORDS:
+                phrase_tokens = phrase_tokens[1:]
+            while phrase_tokens and phrase_tokens[-1].casefold() in _PT_STOPWORDS:
+                phrase_tokens = phrase_tokens[:-1]
+            if len([token for token in phrase_tokens if token.casefold() not in _PT_STOPWORDS]) >= 2:
+                candidates.append(" ".join(phrase_tokens))
     if title:
         candidates.append(title)
-        words = re.findall(r"[\wÀ-ÿ]+", title)
-        if len(words) >= 3:
-            candidates.append(" ".join(words[:3]))
-            candidates.append(" ".join(words[-3:]))
-    return candidates
+    # Preserve order while avoiding duplicate candidates from overlapping ngrams.
+    return list(dict.fromkeys(candidate.strip() for candidate in candidates if candidate.strip()))
 
 
 def _resolve_seo_from_post(
     post: dict[str, Any], *, game_name: str | None = None
 ) -> dict[str, Any]:
-    from .content_quality import _keyword_in_text
+    from .content_quality import _keyword_in_text, keyword_occurs_naturally
     from .editorial_schema import EditorialValidationError
 
     meta = post.get("meta") or {}
     if not isinstance(meta, dict):
         meta = {}
+    post_title = _post_title(post) or ""
+    body = clean_html(_raw_content(post), post_title=post_title)
+    body_text = re.sub(r"<[^>]+>", " ", body)
     title = meta.get("rank_math_title")
     description = meta.get("rank_math_description")
     keyword = meta.get("rank_math_focus_keyword")
@@ -2954,6 +2964,7 @@ def _resolve_seo_from_post(
         and 120 <= len(description.strip()) <= 160
         and isinstance(keyword, str)
         and keyword.strip()
+        and keyword_occurs_naturally(keyword.strip(), title.strip(), body_text)
     ):
         return {
             "title": title.strip(),

@@ -18,7 +18,7 @@ from ..checklist import run_pre_publish_checklist
 # Preserve the module-level seam used by older integrations while all stage
 # calculations use the canonical HTML-aware helper.
 from ..checklist import required_image_count, required_image_count_for_content
-from ..content_quality import _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes
+from ..content_quality import _PT_STOPWORDS, _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes
 from ..editorial_provider import EditorialProviderError, generate_editorial_batch
 from ..editorial_schema import validate_editorial
 from ..language import editorial_language_report
@@ -30,6 +30,7 @@ from ..media.vision_gate import VisionGateError
 from ..wordpress import WordPressError
 from ..workflow import (
     _execute_media_plan,
+    _seo_keyword_candidates,
     compose_final_content,
     attach_trailer_audit,
     resolve_editorial_defaults,
@@ -141,32 +142,40 @@ def _repair_focus_keyword_draft(
     editorial: dict[str, Any],
     post: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Repair only a deterministic keyword mismatch before provider rework."""
+    """Repair a keyword mismatch using only phrases already in the article."""
     seo = dict(editorial.get("seo") or {})
-    title = str(seo.get("title") or "")
+    title = str(seo.get("title") or editorial.get("title") or wordpress_text(post.get("title"), field="title"))
     content = str(editorial.get("cleaned_html") or "")
     current = str(seo.get("focus_keyword") or "").strip()
     if current and keyword_occurs_naturally(current, title, content):
         return None
     subjects = post_subjects(
-        title=title or wordpress_text(post.get("title"), field="title"),
+        title=title,
         content_html=content,
         focus_keyword=current,
         game_name=editorial.get("game_name"),
     )
+    candidates = [
+        str(row.get("subject") or "").strip()
+        for row in subjects
+        if isinstance(row, dict)
+    ]
+    candidates.extend(
+        _seo_keyword_candidates(title, game_name=editorial.get("game_name"))
+    )
     replacement = next(
         (
-            subject
-            for row in subjects
-            if (subject := str(row.get("subject") or "").strip())
-            and keyword_occurs_naturally(subject, title, content)
+            candidate
+            for candidate in candidates
+            if candidate and candidate.casefold() != current.casefold()
+            and keyword_occurs_naturally(candidate, title, content)
         ),
         "",
     )
     if not replacement:
         return None
     repaired = dict(editorial)
-    repaired["seo"] = {**seo, "focus_keyword": replacement}
+    repaired["seo"] = {**seo, "title": title, "focus_keyword": replacement}
     repaired.pop("decision", None)
     return repaired
 

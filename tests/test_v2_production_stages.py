@@ -6,7 +6,13 @@ import pytest
 
 from unicornio_editor.pipeline_v2.errors import StageError
 from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
-from unicornio_editor.pipeline_v2.production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
+from unicornio_editor.pipeline_v2.production_stages import (
+    ProductionComposeStage,
+    ProductionEditorialStage,
+    ProductionMediaStage,
+    ProductionValidateStage,
+    _repair_focus_keyword_draft,
+)
 from unicornio_editor.pipeline_v2.production import ProductionContextLoader
 from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, _embedded_media_urls
 from unicornio_editor.media.registry import (
@@ -14,7 +20,7 @@ from unicornio_editor.media.registry import (
     invalidate_v2_media,
     record_v2_observation,
 )
-from unicornio_editor.workflow import MediaFunnelInvariantError
+from unicornio_editor.workflow import MediaFunnelInvariantError, _resolve_seo_from_post
 
 
 class Config:
@@ -140,6 +146,34 @@ def test_editorial_repairs_keyword_before_provider_rework(tmp_path, monkeypatch)
     assert repaired["seo"]["focus_keyword"] == "vazamentos de GTA 6"
     persisted = json.loads((draft_dir / "editorial.draft.json").read_text(encoding="utf-8"))
     assert persisted["seo"]["focus_keyword"] == "vazamentos de GTA 6"
+
+
+def test_repair_keyword_uses_title_ngrams_when_subjects_are_too_narrow():
+    editorial = {
+        "title": "Emular jogos de PC no Android: desempenho e armazenamento",
+        "cleaned_html": "<p>Testar jogos de PC no celular é uma surpresa.</p>",
+        "seo": {
+            "title": "Emular jogos de PC no Android: desempenho e armazenamento",
+            "focus_keyword": "emular jogos de PC no Android",
+        },
+    }
+    repaired = _repair_focus_keyword_draft(editorial, {"title": editorial["title"]})
+    assert repaired is not None
+    assert repaired["seo"]["focus_keyword"] == "jogos de PC"
+
+
+def test_rank_math_keyword_is_not_inherited_when_absent_from_body():
+    post = {
+        "title": {"raw": "Emular jogos de PC no Android: desempenho e armazenamento"},
+        "content": {"raw": "<p>Testar jogos de PC no celular é uma surpresa.</p>"},
+        "meta": {
+            "rank_math_title": "Emular jogos de PC no Android: desempenho e armazenamento",
+            "rank_math_description": "Uma descrição suficientemente longa e detalhada sobre o desempenho e o armazenamento em celulares Android para o artigo editorial.",
+            "rank_math_focus_keyword": "emular jogos de PC no Android",
+        },
+    }
+    resolved = _resolve_seo_from_post(post)
+    assert resolved["focus_keyword"] == "jogos de PC"
 
 
 def test_editorial_repairs_keyword_in_fresh_provider_output_before_media(tmp_path, monkeypatch):

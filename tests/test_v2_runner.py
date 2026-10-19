@@ -36,6 +36,8 @@ def test_runner_rejects_invalid_keyword_before_media():
     assert result.phase is Phase.EDITORIAL
     assert result.blocker is BlockerCode.TEXT_QUALITY
     assert "focus keyword" in (result.detail or "")
+    assert "title_match=false" in (result.detail or "")
+    assert "content_match=false" in (result.detail or "")
     assert calls == []
     assert store.state.media == previous.media
 
@@ -57,7 +59,7 @@ def test_runner_rejects_missing_keyword_before_media():
     assert result.type is OutcomeType.RETRY
     assert result.phase is Phase.EDITORIAL
     assert result.blocker is BlockerCode.TEXT_QUALITY
-    assert result.detail == "focus keyword is required"
+    assert result.detail == "focus keyword is required (title_match=false, content_match=false)"
     assert calls == []
 
 

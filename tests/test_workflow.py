@@ -452,7 +452,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["uncertain"], 1)
             self.assertEqual(report["eligible_rework_ids"], [])
 
-    def test_apply_inherits_valid_seo_from_post_meta(self):
+    def test_apply_does_not_inherit_rank_math_keyword_absent_from_body(self):
+        from unicornio_editor.editorial_schema import EditorialValidationError
+
         with tempfile.TemporaryDirectory() as directory:
             payload = editorial_payload()
             del payload["seo"]
@@ -463,13 +465,9 @@ class WorkflowTests(unittest.TestCase):
                 "rank_math_description": "Uma descricao suficientemente longa e detalhada para o SEO herdado do post de videogame, valida dentro dos limites exigidos pelo portal editorial.",
                 "rank_math_focus_keyword": "videogame",
             }
-            client = FakeClient(post)
-            report = apply_editorial(client, self.config(True), Path(directory), 42, payload)
-            saved = json.loads(
-                Path(directory, "backups/42/editorial.latest.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(saved["seo"]["title"], "Titulo herdado do post")
-            self.assertIn("<p>Texto revisado sobre videogame e lançamento.</p>", report["content_preview"])
+            with self.assertRaises(EditorialValidationError):
+                apply_editorial(FakeClient(post), self.config(True), Path(directory), 42, payload)
+            self.assertFalse(Path(directory, "backups/42/editorial.latest.json").exists())
 
     def test_apply_requires_seo_when_post_meta_invalid(self):
         from unicornio_editor.editorial_schema import EditorialValidationError

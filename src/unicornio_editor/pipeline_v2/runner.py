@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-from ..content_quality import keyword_occurs_naturally
+from ..content_quality import _keyword_in_text
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
@@ -45,16 +45,19 @@ class PipelineRunner:
                 raise StageError(
                     BlockerCode.TEXT_QUALITY,
                     Phase.EDITORIAL,
-                    "focus keyword is required",
+                    "focus keyword is required (title_match=false, content_match=false)",
                 )
             return
         title = str(seo.get("title") or editorial.get("title") or context.get("title") or "")
         html = str(editorial.get("cleaned_html") or editorial.get("content") or "")
-        if title and html and not keyword_occurs_naturally(keyword, title, html):
+        title_match = bool(title and _keyword_in_text(keyword, title))
+        content_match = bool(html and _keyword_in_text(keyword, html))
+        if not (title_match and content_match):
             raise StageError(
                 BlockerCode.TEXT_QUALITY,
                 Phase.EDITORIAL,
-                "focus keyword must occur naturally in title and content",
+                "focus keyword must occur naturally in title and content "
+                f"(title_match={str(title_match).lower()}, content_match={str(content_match).lower()})",
             )
 
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
