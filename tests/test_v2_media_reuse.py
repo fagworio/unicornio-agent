@@ -1398,6 +1398,70 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.exhausted is False
 
 
+def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    candidate = {
+        "candidate_id": "target-1",
+        "direct_image_url": "https://cdn.test/target.webp",
+        "source_page_url": "https://source.test/article",
+        "subject": "Test",
+        "author": "Test",
+        "license": "CC BY",
+        "license_url": "https://license.test",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Credit",
+        "alt_text": "Test",
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
+        "posts": [{
+            "reuse": [],
+            "audit_candidates": [candidate],
+            "search": {
+                "completed": True,
+                "completion_reason": "TARGET_REACHED",
+                "queries_attempted": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": 1,
+            },
+        }],
+    })
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", lambda editorial, *_args, **_kwargs: ([{
+        "media_id": 115568,
+        "media_url": editorial["media_plan"][0]["direct_image_url"],
+        "paragraph_index": editorial["media_plan"][0]["paragraph_index"],
+        "alt_text": "Test",
+        "credit_text": "Credit",
+        "featured": False,
+        "phash": "a" * 16,
+        "status": "accepted",
+    }], None, None))
+
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID, 115567, "https://wp.test/featured.webp"
+        ),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115516, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    assert result.search.completed is True
+    assert result.search.completion_reason == "TARGET_REACHED"
+    assert result.search.coverage["active_coverage"]["verified"] is False
+
+
 def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

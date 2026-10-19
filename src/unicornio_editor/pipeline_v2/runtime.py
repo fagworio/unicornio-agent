@@ -1703,7 +1703,7 @@ class ProductionMediaResolver:
             attempt_history = [*previous_history, *coverage_runs][-20:]
             if not search_runs:
                 active_coverage = dict(previous_coverage.get("active_coverage") or {})
-            if not coverage_complete and search_runs:
+            if not coverage_complete and search_runs and completion_reason != "TARGET_REACHED":
                 search_completed = False
                 completion_reason = "SEARCH_INCOMPLETE"
             coverage = {
