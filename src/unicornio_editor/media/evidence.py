@@ -569,7 +569,7 @@ def dedupe_by_phash(
     """
     if not aprovados:
         return aprovados, rejeitados
-    from .visual_hash import image_hashes, similar_image_pairs
+    from .visual_hash import canonical_visual_representatives, image_hashes
 
     urls = [str(c.get("direct_image_url") or "") for c in aprovados]
     conhecidos = dict(hashes or {})
@@ -592,7 +592,18 @@ def dedupe_by_phash(
     if len(hashes) < 2:
         return aprovados, rejeitados
     kwargs = {} if threshold is None else {"threshold": threshold}
-    duplicados = {u2 for _u1, u2, _d in similar_image_pairs(urls, hashes=hashes, **kwargs)}
+    representatives = canonical_visual_representatives(
+        aprovados,
+        hashes=hashes,
+        **kwargs,
+    )
+    representative_urls = {
+        str(candidate.get("direct_image_url") or "") for candidate in representatives
+    }
+    duplicados = {
+        url for url in urls
+        if url in hashes and url not in representative_urls
+    }
     if not duplicados:
         return aprovados, rejeitados
     mantidos: list[dict[str, Any]] = []

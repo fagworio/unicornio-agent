@@ -1373,7 +1373,7 @@ def _resolve_media_batch(
             candidate for candidate in aprovados
             if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
         ]
-        accepted_candidates_by_query[str(query)].extend(dict(candidate) for candidate in accepted)
+        accepted_candidates_by_query[str(query)] = [dict(candidate) for candidate in accepted]
         from .media.visual_hash import canonical_visual_representatives
         return len(canonical_visual_representatives(accepted_candidates_by_query[str(query)]))
 

@@ -401,6 +401,28 @@ class CanonicalVisualCapacityTests(unittest.TestCase):
             "https://a/one.jpg", "https://c/distinct.jpg"
         ])
 
+    def test_transitive_similarity_uses_connected_components(self):
+        reps = visual_hash.canonical_visual_representatives([
+            {"direct_image_url": "https://a/a.jpg", "phash": "0000000000000000"},
+            {"direct_image_url": "https://b/b.jpg", "phash": "000000000000003f"},
+            {"direct_image_url": "https://c/c.jpg", "phash": "0000000000000fff"},
+        ])
+        assert [row["direct_image_url"] for row in reps] == ["https://a/a.jpg"]
+
+    def test_dedupe_uses_same_transitive_grouping(self):
+        approved = [
+            {"direct_image_url": "https://a/a.jpg", "phash": "0000000000000000"},
+            {"direct_image_url": "https://b/b.jpg", "phash": "000000000000003f"},
+            {"direct_image_url": "https://c/c.jpg", "phash": "0000000000000fff"},
+        ]
+        kept, rejected = dedupe_by_phash(approved, [], hashes={
+            row["direct_image_url"]: row["phash"] for row in approved
+        })
+        assert [row["direct_image_url"] for row in kept] == ["https://a/a.jpg"]
+        assert {row["direct_image_url"] for row in rejected} == {
+            "https://b/b.jpg", "https://c/c.jpg"
+        }
+
     def test_hashless_candidate_does_not_satisfy_capacity(self):
         reps = visual_hash.canonical_visual_representatives([
             {"direct_image_url": "https://a/no-proof.jpg"},

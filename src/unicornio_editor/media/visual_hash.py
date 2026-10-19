@@ -75,28 +75,51 @@ def canonical_visual_representatives(
     established. The same Hamming-distance rule is used by final deduplication.
     """
     import imagehash
+    import re
 
     hashes = hashes or {}
-    representatives: list[dict[str, Any]] = []
+    items: list[tuple[dict[str, Any], str, Any]] = []
     seen_urls: set[str] = set()
-    representative_hashes: list[Any] = []
     for candidate in candidates:
         url = str(candidate.get("direct_image_url") or "").strip()
         if not url or url in seen_urls:
             continue
-        raw = candidate.get("phash") or hashes.get(url)
+        seen_urls.add(url)
+        raw = candidate.get("phash")
+        if isinstance(raw, str) and not re.fullmatch(r"[0-9a-fA-F]{16}", raw):
+            raw = hashes.get(url)
+        elif not raw:
+            raw = hashes.get(url)
         try:
             current = raw if hasattr(raw, "__sub__") else imagehash.hex_to_hash(str(raw))
         except (TypeError, ValueError, AttributeError):
             continue
-        if current is None:
-            continue
-        if any(int(current - previous) <= threshold for previous in representative_hashes):
-            seen_urls.add(url)
-            continue
-        seen_urls.add(url)
-        representative_hashes.append(current)
-        representatives.append(candidate)
+        if current is not None:
+            items.append((candidate, url, current))
+    parent = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for left in range(len(items)):
+        for right in range(left + 1, len(items)):
+            if int(items[left][2] - items[right][2]) <= threshold:
+                union(left, right)
+    representatives: list[dict[str, Any]] = []
+    selected_roots: set[int] = set()
+    for index, (candidate, _url, _hash) in enumerate(items):
+        root = find(index)
+        if root not in selected_roots:
+            selected_roots.add(root)
+            representatives.append(candidate)
     return representatives
 
 

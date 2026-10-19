@@ -41,7 +41,14 @@ def test_media_search_progress_round_trips_auditable_exhaustion():
             distinct_valid_frames=1,
             queries_planned=3,
             queries_completed=3,
-            completion_reason="EXHAUSTED",
+            completion_reason="EXHAUSTED_VERIFIED",
+            coverage={
+                "version": 1,
+                "expected_engines": ["bing", "yandex"],
+                "reported_engines": ["bing", "yandex"],
+                "technical_failures": [],
+                "verified": True,
+            },
         ),
     )
 

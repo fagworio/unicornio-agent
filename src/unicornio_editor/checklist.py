@@ -1094,6 +1094,21 @@ def run_pre_publish_checklist(
     )
     waiver_basis = None
     waiver_applied = False
+    coverage = search_progress.get("coverage") if isinstance(search_progress, Mapping) else None
+    coverage_valid = bool(
+        isinstance(coverage, Mapping)
+        and coverage.get("version") == 1
+        and coverage.get("verified") is True
+        and isinstance(coverage.get("runs"), list)
+        and coverage.get("runs")
+        and all(
+            isinstance(run, Mapping)
+            and run.get("verified") is True
+            and set(run.get("expected_engines") or ()) <= set(run.get("reported_engines") or ())
+            and not (run.get("technical_failures") or ())
+            for run in (coverage.get("runs") or [])
+        )
+    )
     # A normal article may publish with fewer inline frames when the executable
     # search really completed as EXHAUSTED and every other checklist gate—
     # including the featured identity/vision gates—passed. The featured image
@@ -1128,6 +1143,7 @@ def run_pre_publish_checklist(
         and search_completion_reason == "EXHAUSTED_VERIFIED"
         and isinstance(search_progress, Mapping)
         and search_progress.get("completion_reason") == "EXHAUSTED_VERIFIED"
+        and coverage_valid
         and featured_ok
         and featured_gates_ok
         and not other_failures

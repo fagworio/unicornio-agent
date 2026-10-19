@@ -181,6 +181,7 @@ class MediaSearchProgress:
             "queries_planned": self.queries_planned,
             "queries_completed": self.queries_completed,
             "completion_reason": self.completion_reason,
+            "coverage": self.coverage,
         }
 
     @classmethod
@@ -204,6 +205,7 @@ class MediaSearchProgress:
             queries_planned=int(value.get("queries_planned", 0)),
             queries_completed=int(value.get("queries_completed", 0)),
             completion_reason=str(value.get("completion_reason") or ""),
+            coverage=dict(value.get("coverage") or {}) if isinstance(value.get("coverage"), dict) else {},
         )
 
 

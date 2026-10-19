@@ -903,6 +903,16 @@ class ChecklistTests(unittest.TestCase):
                     "completed": True,
                     "exhausted": True,
                     "completion_reason": "EXHAUSTED_VERIFIED",
+                    "coverage": {
+                        "version": 1,
+                        "verified": True,
+                        "runs": [{
+                            "verified": True,
+                            "expected_engines": ["bing"],
+                            "reported_engines": ["bing"],
+                            "technical_failures": [],
+                        }],
+                    },
                 }
             },
         )
@@ -940,7 +950,17 @@ class ChecklistTests(unittest.TestCase):
             ),
             content=content,
             media_context={
-                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"},
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "completion_reason": "EXHAUSTED_VERIFIED",
+                    "coverage": {"version": 1, "verified": True, "runs": [{
+                        "verified": True,
+                        "expected_engines": ["bing"],
+                        "reported_engines": ["bing"],
+                        "technical_failures": [],
+                    }]},
+                },
                 "inline": {"required": 2, "accepted": []},
                 "featured": {
                     "status": "valid",

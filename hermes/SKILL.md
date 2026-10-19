@@ -33,7 +33,8 @@ O único executor editorial operacional é:
 ```bash
 set -a; . ./.env; set +a
 PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --preview
-PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5
+# Preserve the preview's selected_ids exactly; abort if they cannot be extracted.
+PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --expected-selected-ids <ids-do-preview>
 ```
 
 O preview é obrigatório antes de uma sessão write-mode. A seleção do preview é a
