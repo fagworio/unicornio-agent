@@ -33,7 +33,7 @@ O único executor editorial operacional é:
 ```bash
 set -a; . ./.env; set +a
 PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --preview
-# Preserve the preview's selected_ids exactly; abort if they cannot be extracted.
+# Preserve the preview's selected_ids and order exactly; abort if an ID is no longer eligible.
 PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --expected-selected-ids <ids-do-preview>
 ```
 
@@ -47,8 +47,10 @@ Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
 `media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser
 executados pelo cron, pelo operador ou por uma reinstalação. Qualquer referência
 legada mantida abaixo é somente documentação histórica e não autoriza execução.
-Uma divergência entre o prompt instalado, este skill e o `v2-run` é bloqueio
-operacional; pause os dois crons e corrija o template antes de continuar.
+O write-mode revalida cada ID esperado contra admissão, quarentena, cooldown e
+estado atual. A entrada de novos posts pode mudar a ordenação da fila, mas não
+substitui os IDs autorizados pelo preview; se algum ID esperado deixar de ser
+elegível, o write-mode bloqueia sem executar stages.
 
 ## Orquestração e auditoria V2
 

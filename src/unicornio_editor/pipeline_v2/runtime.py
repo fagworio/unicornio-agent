@@ -2540,6 +2540,30 @@ def run_v2(
             selected = [item for item in candidates if item[0] == post_id] if requested_eligible else []
         else:
             selected = select(candidates, _SnapshotStore(candidates), limit=limit)
+        scheduled_selected = selected
+        expected_ids = None
+        selection_drift = False
+        selection_mismatch = False
+        if expected_selected_ids is not None:
+            expected_ids = [int(item) for item in expected_selected_ids]
+            candidates_by_id = {
+                int(candidate_id): (candidate_id, context)
+                for candidate_id, context in candidates
+            }
+            expected_ids_are_valid = (
+                len(expected_ids) <= limit
+                and len(expected_ids) == len(set(expected_ids))
+                and all(item in candidates_by_id for item in expected_ids)
+            )
+            if expected_ids_are_valid:
+                # The preview authorizes these exact candidates and their order.
+                # A new queue item may legitimately change scheduler ordering
+                # between the read-only preview and write-mode; it must not
+                # silently replace an already authorized post.
+                selected = [candidates_by_id[item] for item in expected_ids]
+                selection_drift = [int(item[0]) for item in scheduled_selected] != expected_ids
+            else:
+                selection_mismatch = True
         pending = [context for _post_id, context in admitted_pending]
         eligible_ids = {post_id for post_id, _context in candidates}
         cooldown = [
@@ -2582,6 +2606,8 @@ def run_v2(
             "eligible_ids": sorted(eligible_ids),
             "cooldown_ids": [post_id for post_id, _context in cooldown],
             "selected_ids": [post_id for post_id, _context in selected],
+            "selection_revalidated": expected_ids is not None and not selection_mismatch,
+            "selection_drift": selection_drift,
             "by_blocker": blockers,
             "next_eligible_at": min(
                 (
@@ -2628,7 +2654,7 @@ def run_v2(
                 if not requested_pending
                 else "cooldown_active"
             )
-        if expected_selected_ids is not None and [int(item[0]) for item in selected] != [int(item) for item in expected_selected_ids]:
+        if selection_mismatch:
             return {
                 "selected": len(selected),
                 "completed": 0,
@@ -2636,8 +2662,8 @@ def run_v2(
                 "locked": False,
                 "preview": False,
                 "selection_mismatch": True,
-                "expected_selected_ids": [int(item) for item in expected_selected_ids],
-                "actual_selected_ids": [int(item[0]) for item in selected],
+                "expected_selected_ids": expected_ids,
+                "actual_selected_ids": [int(item[0]) for item in scheduled_selected],
                 "queue": queue,
                 "details": [],
             }
