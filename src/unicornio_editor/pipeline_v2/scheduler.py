@@ -65,12 +65,15 @@ def cooldown_status(value: str | None, *, now: datetime | None = None) -> dict[s
     }
 
 
-def select(candidates, state_store, *, limit: int = 5, now: datetime | None = None):
-    """Filter eligible pending work, rank it, and reserve one NEW slot when possible."""
-    if limit < 1:
-        raise ValueError("limit must be positive")
-    now = now or datetime.now(timezone.utc)
-    eligible = []
+def _eligible_queues(candidates, state_store, now: datetime):
+    """Return eligible work split into retry and new queues.
+
+    Keeping the queues separate makes the fairness contract explicit: retries
+    retain priority by distance to READY, while NEW work can fill capacity that
+    retries do not use. The returned entries keep the original item shape so
+    callers can preserve the preview authorization contract.
+    """
+    queues = {"retry": [], "new": []}
     for item in candidates:
         state = state_store.load(item[0])
         reopened = _manual_reopen_confirmed(item, state)
@@ -79,21 +82,45 @@ def select(candidates, state_store, *, limit: int = 5, now: datetime | None = No
             or not _cooldown_expired(state.retry.next_at, now)
         ):
             continue
-        eligible.append((item, state, reopened))
-    eligible.sort(key=lambda pair: rank(pair[1], manually_reopened=pair[2]), reverse=True)
-    new_states = [(item, state) for item, state, _reopened in eligible if state.phase is Phase.RELEVANCE and state.blocker is None]
-    if limit == 1 and new_states:
+        queue = (
+            "new"
+            if (
+                not reopened
+                and state.state is LifecycleState.PENDING
+                and state.phase is Phase.RELEVANCE
+                and state.blocker is None
+            )
+            else "retry"
+        )
+        queues[queue].append((item, state, reopened))
+    for queue in queues.values():
+        queue.sort(key=lambda pair: rank(pair[1], manually_reopened=pair[2]), reverse=True)
+    return queues
+
+
+def select(candidates, state_store, *, limit: int = 5, now: datetime | None = None):
+    """Select retry work first while reserving capacity for NEW work."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    now = now or datetime.now(timezone.utc)
+    queues = _eligible_queues(candidates, state_store, now)
+    retry_items = [item for item, _state, _reopened in queues["retry"]]
+    new_items = [item for item, _state, _reopened in queues["new"]]
+    if limit == 1 and new_items:
         # Reserve one deterministic two-hour slot out of every three for an
         # aged NEW post. The other two slots remain retry-first, bounding
         # starvation in both directions.
-        aged_new = [item for item, _ in new_states if _candidate_age(item, now) >= 1]
+        aged_new = [item for item in new_items if _candidate_age(item, now) >= 1]
         if aged_new and (now.hour // 2) % 3 == 0:
             return [min(aged_new, key=lambda item: _candidate_date(item))]
-    if limit == 1 or not new_states:
-        return [item for item, _state, _reopened in eligible[:limit]]
-    new_item = new_states[0][0]
-    selected = [item for item, _state, _reopened in eligible if item != new_item][: max(0, limit - 1)]
-    return selected + [new_item]
+    if not retry_items:
+        return new_items[:limit]
+    if not new_items:
+        return retry_items[:limit]
+
+    retry_slots = min(len(retry_items), max(0, limit - 1))
+    new_slots = limit - retry_slots
+    return retry_items[:retry_slots] + new_items[:new_slots]
 
 
 def _candidate_date(item) -> datetime:

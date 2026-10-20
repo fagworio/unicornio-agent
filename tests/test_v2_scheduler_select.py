@@ -35,6 +35,21 @@ def test_select_requires_reopen_source_marker():
     assert result == []
 
 
+def test_select_keeps_reopened_relevance_work_in_retry_queue():
+    state = WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=Phase.RELEVANCE)
+    item = (7, {"post": {"status": "pending", "meta": {
+        "_hermes_human_reopened_at": "2030-01-01T00:00:00+00:00",
+        "_hermes_human_reopened_from": "awaiting_human",
+    }}})
+    result = select(
+        [item],
+        Store({7: state}),
+        limit=1,
+        now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+    assert [entry[0] for entry in result] == [7]
+
+
 def test_select_excludes_terminal_and_future_cooldown():
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     states = {
@@ -51,6 +66,54 @@ def test_select_reserves_one_slot_for_new_pending_when_near_ready_floods_queue()
     states[9] = WorkState()
     result = select([(i, {}) for i in states], Store(states), limit=3, now=datetime.now(timezone.utc))
     assert 9 in [item[0] for item in result]
+
+
+def test_select_fills_unused_retry_capacity_with_new_posts():
+    states = {
+        1: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True),
+        2: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.FEATURED_VISION, relevance_approved=True),
+        3: WorkState(),
+        4: WorkState(),
+        5: WorkState(),
+        6: WorkState(),
+    }
+    result = select([(post_id, {}) for post_id in states], Store(states), limit=5)
+    assert [item[0] for item in result] == [2, 1, 3, 4, 5]
+
+
+def test_select_caps_retry_queue_and_keeps_one_new_slot():
+    states = {
+        **{
+            post_id: WorkState(
+                phase=Phase.MEDIA,
+                blocker=BlockerCode.FEATURED_VISION,
+                relevance_approved=True,
+            )
+            for post_id in range(1, 11)
+        },
+        11: WorkState(),
+    }
+    result = select([(post_id, {}) for post_id in states], Store(states), limit=5)
+    assert [item[0] for item in result] == [1, 2, 3, 4, 11]
+
+
+def test_select_excludes_retry_cooldown_before_composing_queues():
+    states = {
+        1: WorkState(
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.FEATURED_VISION,
+            relevance_approved=True,
+            retry=RetryInfo(next_at="2030-01-02T00:00:00+00:00"),
+        ),
+        2: WorkState(),
+    }
+    result = select(
+        [(1, {}), (2, {})],
+        Store(states),
+        limit=2,
+        now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+    assert [item[0] for item in result] == [2]
 
 
 def test_cooldown_status_normalizes_utc_and_sao_paulo_offsets():
