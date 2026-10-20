@@ -847,6 +847,13 @@ def test_v2_media_to_ready_uses_existing_inline_and_simulated_featured(tmp_path,
         "unicornio_editor.media.visual_hash.image_hashes",
         lambda urls: {url: f"{index + 1:016x}" for index, url in enumerate(urls)},
     )
+    # Trailer discovery is an external YouTube lookup unrelated to this
+    # media-to-READY contract. Keep the integration test deterministic and
+    # avoid waiting on a real socket when the network is unavailable.
+    monkeypatch.setattr(
+        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        lambda *args, **kwargs: (None, "official_not_found"),
+    )
     outcome = PipelineRunner(store, stages, config=config).run_one(
         post_id,
         {

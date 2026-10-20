@@ -105,6 +105,7 @@ class Config:
     v2_cycle_max_total_attempts: int = 50
     v2_cycle_max_attempts_per_post: int = 2
     v2_cycle_max_stagnant_rounds: int = 3
+    v2_cycle_max_drain_rounds: int = 3
     v2_cycle_max_duration_seconds: float = 3600.0
 
     def __repr__(self) -> str:
@@ -345,6 +346,7 @@ def load_config() -> Config:
         v2_cycle_max_total_attempts=_int("EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS", 50, 1, 100000),
         v2_cycle_max_attempts_per_post=_int("EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST", 2, 1, 100),
         v2_cycle_max_stagnant_rounds=_int("EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS", 3, 1, 100),
+        v2_cycle_max_drain_rounds=_int("EDITOR_V2_CYCLE_MAX_DRAIN_ROUNDS", 3, 1, 100),
         v2_cycle_max_duration_seconds=_float("EDITOR_V2_CYCLE_MAX_DURATION_SECONDS", 3600.0, 1.0, 86400.0),
     )
 

@@ -117,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     v2_cycle_parser.add_argument("--max-total-attempts", type=int, default=None)
     v2_cycle_parser.add_argument("--max-attempts-per-post", type=int, default=None)
     v2_cycle_parser.add_argument("--max-stagnant-rounds", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-drain-rounds", type=int, default=None)
     v2_cycle_parser.add_argument("--max-duration-seconds", type=float, default=None)
 
     v2_recover_media_parser = subparsers.add_parser(
@@ -2424,6 +2425,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     getattr(config, "v2_cycle_max_attempts_per_post", 2)
                 ),
                 max_stagnant_rounds=int(getattr(config, "v2_cycle_max_stagnant_rounds", 3)),
+                max_drain_rounds=int(getattr(config, "v2_cycle_max_drain_rounds", 3)),
                 max_duration_seconds=float(
                     getattr(config, "v2_cycle_max_duration_seconds", 3600.0)
                 ),
@@ -2435,6 +2437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "max_total_attempts": args.max_total_attempts,
                 "max_attempts_per_post_per_cycle": args.max_attempts_per_post,
                 "max_stagnant_rounds": args.max_stagnant_rounds,
+                "max_drain_rounds": args.max_drain_rounds,
                 "max_duration_seconds": args.max_duration_seconds,
             }
             cycle_config = replace(

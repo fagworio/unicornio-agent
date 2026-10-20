@@ -97,6 +97,7 @@ Hermes cron
        -> pipeline EDITORIAL -> MEDIA -> COMPOSE -> VALIDATE
        -> readback/checkpoint/telemetria
   -> retoma rodada interrompida ou encerra por READY/orçamento/estagnação
+  -> após estagnação, DRAINING fecha NEW e processa somente retries
   -> publisher separado: somente posts READY
 ```
 

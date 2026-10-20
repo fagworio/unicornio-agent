@@ -47,6 +47,7 @@ class ConfigTests(unittest.TestCase):
                 "EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS": "24",
                 "EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST": "3",
                 "EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS": "4",
+                "EDITOR_V2_CYCLE_MAX_DRAIN_ROUNDS": "5",
                 "EDITOR_V2_CYCLE_MAX_DURATION_SECONDS": "90.5",
             },
             clear=True,
@@ -58,6 +59,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.v2_cycle_max_total_attempts, 24)
         self.assertEqual(config.v2_cycle_max_attempts_per_post, 3)
         self.assertEqual(config.v2_cycle_max_stagnant_rounds, 4)
+        self.assertEqual(config.v2_cycle_max_drain_rounds, 5)
         self.assertEqual(config.v2_cycle_max_duration_seconds, 90.5)
 
     def test_invalid_v2_admission_cutoff_fails_closed(self):

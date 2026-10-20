@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -30,29 +31,74 @@ def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
 def _reconcile_completed_round(client, root: Path, selected_ids: list[int]) -> CycleRoundResult | None:
     """Reconcile a round whose write completed before its cycle checkpoint.
 
-    A post-level V2 journal/readback is the authority. If every authorized
-    post is already READY, the cycle can account for the round without issuing
-    another WordPress write. Mixed state is deliberately rejected so a new
-    preview cannot silently replace the original authorization.
+    A post-level V2 journal/readback is the authority. Each authorized post
+    is reconstructed independently, so a mixed READY/PENDING round is counted
+    without issuing another WordPress write. Missing or non-committed evidence
+    fails closed rather than repeating an unsafe write.
     """
     reader = ProductionCandidateReader(client, root)
     contexts = dict(reader.snapshot(page_size=max(10, len(selected_ids))))
     details: list[dict[str, Any]] = []
     for post_id in selected_ids:
         context = contexts.get(int(post_id))
+        if context is None:
+            # HUMAN_REQUIRED posts are intentionally outside the pending
+            # listing. Reconstruct their read-only state directly, but never
+            # infer a result when WordPress cannot be read back.
+            try:
+                post = client.get_post(int(post_id))
+                if not isinstance(post, dict):
+                    return None
+                context = reader.context_loader.load(post)
+                context["v2_state"] = reader._recovered_state(
+                    int(post_id), reader.state_store.load(int(post_id)), context
+                )
+            except Exception:
+                return None
         state = context.get("v2_state") if context else None
-        if state is None or state.state is not LifecycleState.READY:
+        journal_path = root / "work" / "v2-journal" / f"{int(post_id)}.json"
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
             return None
-        details.append({
+        if (
+            state is None
+            or journal.get("status") != "committed"
+            or journal.get("readback") is not True
+        ):
+            return None
+        if state.state not in {
+            LifecycleState.READY,
+            LifecycleState.PENDING,
+            LifecycleState.HUMAN_REQUIRED,
+            LifecycleState.SKIPPED,
+        }:
+            return None
+        outcome = {
+            LifecycleState.READY: "ready",
+            LifecycleState.HUMAN_REQUIRED: "human_required",
+            LifecycleState.SKIPPED: "skipped",
+        }.get(state.state, "retry")
+        media_readback = journal.get("media_readback_status") == "confirmed"
+        progressed = bool(
+            media_readback
+            or state.state is not LifecycleState.PENDING
+            or state.phase.value != "relevance"
+        )
+        detail = {
             "post_id": int(post_id),
             "initial_state": "pending",
-            "outcome": "ready",
-            "ready_verified": True,
+            "outcome": outcome,
+            "ready_verified": state.state is LifecycleState.READY,
             "readback": True,
             "state": state.to_dict(),
-            "progress": True,
+            "media_readback": media_readback,
+            "media_readback_status": journal.get("media_readback_status"),
+            "progress": progressed,
+            "detail": journal.get("detail"),
             "reconciled": True,
-        })
+        }
+        details.append(detail)
     return CycleRoundResult(
         preview_selected_ids=tuple(selected_ids),
         executed_ids=tuple(selected_ids),
@@ -70,6 +116,7 @@ def _cycle_config_from_config(config) -> CycleConfig:
             getattr(config, "v2_cycle_max_attempts_per_post", 2)
         ),
         max_stagnant_rounds=int(getattr(config, "v2_cycle_max_stagnant_rounds", 3)),
+        max_drain_rounds=int(getattr(config, "v2_cycle_max_drain_rounds", 3)),
         max_duration_seconds=float(
             getattr(config, "v2_cycle_max_duration_seconds", 3600.0)
         ),
@@ -86,20 +133,11 @@ def run_v2_cycle(
 ) -> CycleReport | dict[str, Any]:
     """Run or resume one production V2 cycle under the global V2 lock."""
     root = Path(root)
-    store = CycleStateStore(root)
-    existing = store.load()
-    if existing and existing.status == "running":
-        if fresh:
-            raise ValueError("an interrupted V2 cycle exists; resume it or remove it explicitly")
-        state = existing
-        cycle_config = CycleConfig(**state.config) if state.config else (cycle_config or _cycle_config_from_config(config))
-    else:
-        cycle_config = cycle_config or _cycle_config_from_config(config)
-        state = store.create(cycle_config.__dict__)
-
     lock = RunSessionLock(root / "work" / "v2-run.lock")
     if not lock.acquire():
         return {"selected": 0, "locked": True, "stop_reason": "locked"}
+
+    store = CycleStateStore(root)
 
     def checkpoint(current: CycleState, event: str, fields: dict[str, Any]) -> None:
         if event == "round_completed":
@@ -211,6 +249,22 @@ def run_v2_cycle(
         )
 
     try:
+        # No checkpoint read/create is allowed before the global lock. This
+        # prevents two Hermes invocations from racing on state.json.
+        existing = store.load()
+        if existing and existing.status == "running":
+            if fresh:
+                raise ValueError("an interrupted V2 cycle exists; resume it or remove it explicitly")
+            state = existing
+            cycle_config = (
+                CycleConfig(**{**CycleConfig().__dict__, **state.config})
+                if state.config
+                else (cycle_config or _cycle_config_from_config(config))
+            )
+        else:
+            cycle_config = cycle_config or _cycle_config_from_config(config)
+            state = store.create(cycle_config.__dict__)
+        store.begin_run(state)
         report = run_cycle(
             execute_round,
             config=cycle_config,
@@ -229,6 +283,9 @@ def run_v2_cycle(
                 unique_posts=report.unique_posts,
                 attempts=report.attempts_total,
                 rounds=report.rounds,
+                phase=report.phase,
+                drain_rounds=report.drain_rounds,
+                elapsed_seconds=report.elapsed_seconds,
             )
         except Exception:
             pass

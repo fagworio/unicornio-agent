@@ -39,6 +39,10 @@ class CycleState:
     rounds: int = 0
     progress_rounds: int = 0
     stagnant_rounds: int = 0
+    drain_rounds: int = 0
+    phase: str = "ADMISSION"
+    elapsed_seconds: float = 0.0
+    active_started_at: str | None = None
     stop_reason: str = ""
     round_reports: list[dict[str, Any]] = field(default_factory=list)
     pending_round: dict[str, Any] | None = None
@@ -49,6 +53,10 @@ class CycleState:
             raise ValueError("cycle_id must not be empty")
         if self.status not in {"running", "completed", "failed"}:
             raise ValueError("invalid cycle status")
+        if self.phase not in {"ADMISSION", "DRAINING", "COMPLETED"}:
+            raise ValueError("invalid cycle phase")
+        if self.elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must not be negative")
         self.ready_post_ids = _ids(self.ready_post_ids)
         self.seen_post_ids = _ids(self.seen_post_ids)
         self.attempts_by_post = {
@@ -90,6 +98,12 @@ class CycleState:
             rounds=int(value.get("rounds") or 0),
             progress_rounds=int(value.get("progress_rounds") or 0),
             stagnant_rounds=int(value.get("stagnant_rounds") or 0),
+            drain_rounds=int(value.get("drain_rounds") or 0),
+            phase=str(value.get("phase") or "ADMISSION"),
+            elapsed_seconds=float(value.get("elapsed_seconds") or 0.0),
+            active_started_at=str(value["active_started_at"])
+            if value.get("active_started_at")
+            else None,
             stop_reason=str(value.get("stop_reason") or ""),
             round_reports=[
                 dict(item) for item in (value.get("round_reports") or [])
@@ -156,6 +170,24 @@ class CycleStateStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def begin_run(self, state: CycleState) -> None:
+        """Start a process invocation and carry forward uncheckpointed time."""
+        now = datetime.now(timezone.utc)
+        if state.active_started_at:
+            try:
+                previous = datetime.fromisoformat(state.active_started_at.replace("Z", "+00:00"))
+                if previous.tzinfo is None:
+                    previous = previous.replace(tzinfo=timezone.utc)
+                state.elapsed_seconds += max(0.0, (now - previous).total_seconds())
+            except ValueError:
+                # A malformed diagnostic timestamp must not reset the budget.
+                state.elapsed_seconds = max(state.elapsed_seconds, 0.0)
+        state.active_started_at = now.isoformat()
+        self.save(
+            state,
+            event="cycle_resumed" if state.rounds or state.pending_round else "cycle_run_started",
+        )
+
     def start_round(self, state: CycleState, *, round_number: int, request: Mapping[str, Any]) -> None:
         state.pending_round = {
             "round_number": int(round_number),
@@ -183,7 +215,9 @@ class CycleStateStore:
     def finish(self, state: CycleState, *, status: str, stop_reason: str) -> None:
         state.status = status
         state.stop_reason = stop_reason
+        state.phase = "COMPLETED"
         state.pending_round = None
+        state.active_started_at = None
         self.save(state, event="cycle_finished", stop_reason=stop_reason)
 
 

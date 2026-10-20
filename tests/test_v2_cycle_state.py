@@ -82,3 +82,32 @@ def test_cycle_state_rejects_duplicate_ids_and_unknown_schema(tmp_path):
     store.state_path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
     with pytest.raises(RuntimeError):
         store.load()
+
+
+def test_cycle_accumulates_persisted_duration_on_resume():
+    state = CycleState(
+        cycle_id="timed",
+        elapsed_seconds=9.0,
+        rounds=0,
+    )
+    now = [0.0]
+
+    def clock():
+        return now[0]
+
+    def execute(_request):
+        now[0] = 2.0
+        return CycleRoundResult(
+            preview_selected_ids=(1,),
+            executed_ids=(1,),
+            details=(retry_detail(1),),
+        )
+
+    report = run_cycle(
+        execute,
+        state=state,
+        clock=clock,
+        config=CycleConfig(ready_target=2, max_duration_seconds=10.0),
+    )
+    assert report.stop_reason == "duration_limit"
+    assert report.elapsed_seconds == 11.0

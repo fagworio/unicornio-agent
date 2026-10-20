@@ -122,6 +122,7 @@ def test_cycle_fails_closed_when_preview_and_write_ids_diverge():
     report = run_cycle(execute)
 
     assert report.stop_reason == "selection_mismatch"
+    assert report.phase == "ADMISSION"
     assert report.rounds == 0
     assert report.attempts_total == 0
 
@@ -141,8 +142,11 @@ def test_cycle_requires_a_readback_detail_for_each_executed_post():
 
 
 def test_cycle_stops_after_stagnant_rounds_without_ready():
+    requests = []
+
     def execute(request):
-        post_id = request.round_number
+        requests.append(request)
+        post_id = 1
         return CycleRoundResult(
             preview_selected_ids=(post_id,),
             executed_ids=(post_id,),
@@ -154,13 +158,22 @@ def test_cycle_stops_after_stagnant_rounds_without_ready():
         config=CycleConfig(
             ready_target=5,
             max_stagnant_rounds=2,
+            max_drain_rounds=2,
+            max_attempts_per_post_per_cycle=10,
+            max_unique_posts=2,
             max_total_attempts=10,
         ),
     )
 
-    assert report.stop_reason == "stagnation_limit"
-    assert report.rounds == 2
-    assert report.stagnant_rounds == 2
+    assert report.stop_reason == "drain_limit"
+    assert report.rounds == 4
+    assert report.stagnant_rounds == 4
+    assert report.drain_rounds == 2
+    assert [request.max_new_posts for request in requests] == [2, 1, 0, 0]
+    assert all(
+        entry["phase"] == ("ADMISSION" if entry["round"] <= 2 else "DRAINING")
+        for entry in report.round_reports
+    )
 
 
 def test_cycle_respects_total_attempt_budget():

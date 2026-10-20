@@ -44,7 +44,9 @@ executor de uma única rodada e coordena EDITORIAL → MEDIA → COMPOSE → VAL
 → READY/RETRY/HUMAN_REQUIRED.
 
 O ciclo encerra quando alcança `EDITOR_V2_CYCLE_READY_TARGET`, esgota orçamento,
-fica sem trabalho elegível, atinge estagnação ou encontra divergência crítica.
+fica sem trabalho elegível, conclui a fase `DRAINING` de retries após
+estagnação ou encontra divergência crítica. Em `DRAINING`, novas admissões são
+fechadas e somente retries elegíveis podem entrar.
 Falhas de autorização ou executor deixam o checkpoint em estado retomável; não
 use `--fresh` para descartar uma execução interrompida.
 

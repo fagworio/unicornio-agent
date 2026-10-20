@@ -19,6 +19,7 @@ class CycleConfig:
     max_total_attempts: int = 50
     max_attempts_per_post_per_cycle: int = 2
     max_stagnant_rounds: int = 3
+    max_drain_rounds: int = 3
     max_duration_seconds: float = 3600.0
 
     def __post_init__(self) -> None:
@@ -34,6 +35,8 @@ class CycleConfig:
             raise ValueError("max_attempts_per_post_per_cycle must be positive")
         if self.max_stagnant_rounds < 1:
             raise ValueError("max_stagnant_rounds must be positive")
+        if self.max_drain_rounds < 1:
+            raise ValueError("max_drain_rounds must be positive")
         if self.max_duration_seconds <= 0:
             raise ValueError("max_duration_seconds must be positive")
 
@@ -72,6 +75,9 @@ class CycleReport:
     rounds: int = 0
     progress_rounds: int = 0
     stagnant_rounds: int = 0
+    drain_rounds: int = 0
+    phase: str = "ADMISSION"
+    elapsed_seconds: float = 0.0
     stop_reason: str = ""
     attempted_post_ids: list[int] = field(default_factory=list)
     attempts_by_post: dict[int, int] = field(default_factory=dict)
@@ -146,7 +152,6 @@ def run_cycle(
     write-mode, and return the executed IDs plus readback-backed details.
     """
     config = config or CycleConfig()
-    started_at = clock()
     report = CycleReport(
         cycle_id=state.cycle_id if state else None,
         resumed=bool(state and (state.rounds or state.attempts_by_post or state.pending_round)),
@@ -155,10 +160,17 @@ def run_cycle(
     ready: set[int] = set(state.ready_post_ids if state else ())
     attempts: dict[int, int] = dict(state.attempts_by_post if state else {})
     stagnant = state.stagnant_rounds if state else 0
+    drain_rounds = state.drain_rounds if state else 0
+    phase = state.phase if state else "ADMISSION"
+    elapsed_before = float(state.elapsed_seconds if state else 0.0)
+    session_started_at = clock()
     if state:
         report.rounds = state.rounds
         report.progress_rounds = state.progress_rounds
         report.stagnant_rounds = state.stagnant_rounds
+        report.drain_rounds = state.drain_rounds
+        report.phase = state.phase
+        report.elapsed_seconds = state.elapsed_seconds
         report.round_reports = list(state.round_reports)
 
     def save(event: str, **fields: Any) -> None:
@@ -170,11 +182,17 @@ def run_cycle(
         state.rounds = report.rounds
         state.progress_rounds = report.progress_rounds
         state.stagnant_rounds = stagnant
+        state.drain_rounds = drain_rounds
+        state.phase = phase
+        report.elapsed_seconds = elapsed_before + max(0.0, clock() - session_started_at)
+        state.elapsed_seconds = report.elapsed_seconds
         state.round_reports = list(report.round_reports)
         checkpoint(state, event, fields)
 
     while True:
-        if clock() - started_at >= config.max_duration_seconds:
+        elapsed = elapsed_before + max(0.0, clock() - session_started_at)
+        report.elapsed_seconds = elapsed
+        if elapsed >= config.max_duration_seconds:
             report.stop_reason = "duration_limit"
             break
         if len(ready) >= config.ready_target:
@@ -183,8 +201,11 @@ def run_cycle(
         if sum(attempts.values()) >= config.max_total_attempts:
             report.stop_reason = "attempt_budget"
             break
-        if stagnant >= config.max_stagnant_rounds:
-            report.stop_reason = "stagnation_limit"
+        if phase == "ADMISSION" and stagnant >= config.max_stagnant_rounds:
+            phase = "DRAINING"
+            drain_rounds = 0
+        if phase == "DRAINING" and drain_rounds >= config.max_drain_rounds:
+            report.stop_reason = "drain_limit"
             break
 
         excluded = frozenset(
@@ -198,7 +219,11 @@ def run_cycle(
                 config.new_batch_size,
                 config.max_total_attempts - sum(attempts.values()),
             ),
-            max_new_posts=max(0, config.max_unique_posts - len(seen)),
+            max_new_posts=(
+                0
+                if phase == "DRAINING"
+                else max(0, config.max_unique_posts - len(seen))
+            ),
             seen_post_ids=tuple(sorted(seen)),
             excluded_post_ids=excluded,
             attempts_by_post=dict(attempts),
@@ -279,9 +304,15 @@ def run_cycle(
             report.progress_rounds += 1
         else:
             stagnant += 1
+        if phase == "DRAINING":
+            drain_rounds += 1
         report.stagnant_rounds = stagnant
+        report.drain_rounds = drain_rounds
+        report.phase = phase
         report.round_reports.append({
             "round": report.rounds,
+            "phase": phase,
+            "drain_rounds": drain_rounds,
             "preview_selected_ids": list(result.preview_selected_ids),
             "executed_ids": list(result.executed_ids),
             "ready_post_ids": round_ready,
@@ -299,6 +330,19 @@ def run_cycle(
     report.attempts_total = sum(attempts.values())
     report.attempts_by_post = dict(sorted(attempts.items()))
     report.attempted_post_ids = sorted(seen)
+    report.drain_rounds = drain_rounds
+    report.phase = (
+        "COMPLETED"
+        if report.stop_reason in {
+            "ready_target",
+            "duration_limit",
+            "attempt_budget",
+            "no_eligible_work",
+            "drain_limit",
+            "locked",
+        }
+        else phase
+    )
     save("cycle_finished", stop_reason=report.stop_reason)
     return report
 
