@@ -3686,6 +3686,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result = _compact_apply(result)
                 result.setdefault("session", session_budget.status(args.root, config))
         _record_cmd_output(args, result)
+        if hasattr(result, "to_dict") and callable(result.to_dict):
+            result = result.to_dict()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (ConfigError, EditorialProviderError, WordPressError, WorkflowError, OSError, ValueError) as exc:
