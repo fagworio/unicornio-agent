@@ -317,6 +317,23 @@ def run_cycle(
             "executed_ids": list(result.executed_ids),
             "ready_post_ids": round_ready,
             "progress": round_progress,
+            "post_results": [
+                {
+                    "post_id": int(detail["post_id"]),
+                    "run_id": detail.get("run_id"),
+                    "cycle_id": detail.get("cycle_id"),
+                    "cycle_round": detail.get("cycle_round"),
+                    "outcome": detail.get("outcome"),
+                    "blocker": detail.get("blocker"),
+                    "progress": bool(detail.get("progress")),
+                    "ready_verified": bool(detail.get("ready_verified")),
+                    "duration_ms": detail.get("duration_ms"),
+                    "stage_durations_ms": detail.get("stage_durations_ms") or {},
+                    "media": detail.get("media") or {},
+                }
+                for detail in result.details
+                if detail.get("post_id") is not None
+            ],
         })
         save(
             "round_completed",

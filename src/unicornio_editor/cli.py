@@ -51,6 +51,14 @@ from .media.text import sanitize_title
 from .wordpress import WordPressClient, WordPressError
 
 
+def _json_default(value: Any) -> Any:
+    """Serialize domain reports without weakening normal JSON validation."""
+    serializer = getattr(value, "to_dict", None)
+    if callable(serializer):
+        return serializer()
+    raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="unicornio-editor",
@@ -3686,9 +3694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result = _compact_apply(result)
                 result.setdefault("session", session_budget.status(args.root, config))
         _record_cmd_output(args, result)
-        if hasattr(result, "to_dict") and callable(result.to_dict):
-            result = result.to_dict()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
         return 0
     except (ConfigError, EditorialProviderError, WordPressError, WorkflowError, OSError, ValueError) as exc:
         # WorkflowError incluido de proposito: um traceback Python no contexto do

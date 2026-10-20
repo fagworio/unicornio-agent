@@ -143,8 +143,10 @@ def test_write_pins_preview_ids_when_queue_order_changes(tmp_path):
     cohort = tmp_path / "cohort.json"
     cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
     client = Client([
-        post(1, "2026-10-09T03:00:00Z", WorkState(state=LifecycleState.PENDING)),
-        post(2, "2026-10-09T01:00:00Z", WorkState(state=LifecycleState.PENDING)),
+        # Keep post 1 older so the scheduler's time-based aged-NEW slot cannot
+        # accidentally select the authorized post 2 during this test.
+        post(1, "2026-10-09T01:00:00Z", WorkState(state=LifecycleState.PENDING)),
+        post(2, "2026-10-09T03:00:00Z", WorkState(state=LifecycleState.PENDING)),
     ])
     result = run_v2(
         client,

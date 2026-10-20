@@ -56,6 +56,8 @@ def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path
     assert len(calls) == 4
     assert all(call["lock_held"] is True for call in calls)
     assert [call["preview"] for call in calls] == [True, False, True, False]
+    assert all(call["cycle_id"] == report.cycle_id for call in calls)
+    assert [call["cycle_round"] for call in calls] == [1, 1, 2, 2]
     state = json.loads((tmp_path / "work" / "v2-cycle" / "state.json").read_text())
     assert state["status"] == "completed"
     assert state["stop_reason"] == "ready_target"

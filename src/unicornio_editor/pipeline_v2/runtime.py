@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from collections.abc import Collection
+from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -51,6 +52,37 @@ def _canonical_embedded_media_url(value: str) -> str:
 def _coverage_query_key(value: Any) -> str:
     """Normalize query identity only for harmless whitespace/case differences."""
     return " ".join(str(value or "").split()).casefold()
+
+
+def _media_audit_summary(media: MediaProgress, write: dict[str, Any]) -> dict[str, Any]:
+    """Expose accepted-versus-applied media facts in one bounded post result."""
+    accounting = account_visual_media(
+        media,
+        required_inline=media.required,
+        featured=media.featured,
+    )
+    search = media.search
+    return {
+        "required_inline": accounting.required_inline,
+        "accepted_working": accounting.accepted_working_count,
+        "valid_distinct": accounting.valid_distinct_inline_count,
+        "effective_missing": accounting.effective_missing,
+        "featured_status": media.featured.status.value,
+        "search": {
+            "completed": search.completed,
+            "completion_reason": search.completion_reason,
+            "queries_attempted": search.queries_attempted,
+            "queries_completed": search.queries_completed,
+            "candidates_seen": search.candidates_seen,
+            "candidates_rejected": search.candidates_rejected,
+            "engines_attempted": list(search.engines_attempted),
+            "engines_disabled": list(search.engines_disabled),
+            "coverage": search.coverage,
+        },
+        "applied_media_ids": list(write.get("applied_media_ids") or []),
+        "applied_inline_ids": list(write.get("applied_inline_ids") or []),
+        "media_readback_status": str(write.get("media_readback_status") or "not_attempted"),
+    }
 
 
 def _coverage_run_is_valid(run: dict[str, Any], planned_query: str) -> bool:
@@ -2223,6 +2255,8 @@ class WordPressWriterV2:
         intent = {
             "status": "prepared", "post_id": post_id,
             "run_id": expected_run_id,
+            "cycle_id": str(context.get("v2_cycle_id") or ""),
+            "cycle_round": context.get("v2_cycle_round"),
             "validation_fresh": validation_fresh,
             "state": proposed_state.to_dict(), "ready_hash": ready_hash,
             "candidate_hash": hashlib.sha256(content.encode()).hexdigest(),
@@ -2453,6 +2487,8 @@ def run_v2(
     excluded_post_ids: Collection[int] = (),
     max_new_posts: int | None = None,
     lock_held: bool = False,
+    cycle_id: str | None = None,
+    cycle_round: int | None = None,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -2727,7 +2763,10 @@ def run_v2(
             initial = context["v2_state"]
             run_id = uuid.uuid4().hex
             context["v2_run_id"] = run_id
+            context["v2_cycle_id"] = str(cycle_id or "")
+            context["v2_cycle_round"] = int(cycle_round) if cycle_round is not None else None
             context["candidate_must_be_fresh"] = initial.phase is not Phase.VALIDATE
+            post_started_at = monotonic()
             buffered = BufferedStateStore(initial)
             try:
                 from ..observability import append_telemetry
@@ -2738,6 +2777,8 @@ def run_v2(
                     stage="selected",
                     post_id=int(post_id),
                     run_id=run_id,
+                    cycle_id=str(cycle_id or ""),
+                    cycle_round=cycle_round,
                     initial_state=initial.state.value,
                 )
             except Exception:
@@ -2847,6 +2888,12 @@ def run_v2(
                     "outcome": outcome.type.value,
                     "blocker": outcome.blocker.value if outcome.blocker else None,
                     "detail": outcome.detail or context.get("provider_reason"),
+                    "run_id": run_id,
+                    "cycle_id": str(cycle_id or ""),
+                    "cycle_round": cycle_round,
+                    "duration_ms": round((monotonic() - post_started_at) * 1000, 1),
+                    "stage_durations_ms": dict(context.get("_v2_stage_durations_ms") or {}),
+                    "media": _media_audit_summary(buffered.state.media, write),
                     **write,
                 })
                 try:
@@ -2857,6 +2904,8 @@ def run_v2(
                         "run_id": run_id,
                         "outcome": outcome.type.value,
                         "blocker": outcome.blocker.value if outcome.blocker else None,
+                        "cycle_id": str(cycle_id or ""),
+                        "cycle_round": cycle_round,
                     }
                     append_telemetry(root, "v2_funnel", stage="processed", **funnel_fields)
                     written_state = write.get("state")
@@ -2876,6 +2925,11 @@ def run_v2(
                     "outcome": "error",
                     "blocker": "internal_error",
                     "detail": str(exc)[:400],
+                    "run_id": run_id,
+                    "cycle_id": str(cycle_id or ""),
+                    "cycle_round": cycle_round,
+                    "duration_ms": round((monotonic() - post_started_at) * 1000, 1),
+                    "stage_durations_ms": dict(context.get("_v2_stage_durations_ms") or {}),
                 })
                 try:
                     from ..observability import append_telemetry
@@ -2886,6 +2940,8 @@ def run_v2(
                         stage="failed",
                         post_id=int(post_id),
                         run_id=run_id,
+                        cycle_id=str(cycle_id or ""),
+                        cycle_round=cycle_round,
                         blocker="internal_error",
                     )
                 except Exception:

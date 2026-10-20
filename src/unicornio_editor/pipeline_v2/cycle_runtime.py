@@ -185,6 +185,8 @@ def run_v2_cycle(
                 excluded_post_ids=request.excluded_post_ids,
                 max_new_posts=request.max_new_posts,
                 lock_held=True,
+                cycle_id=state.cycle_id,
+                cycle_round=request.round_number,
             )
             if preview.get("selection_mismatch"):
                 reconciled = _reconcile_completed_round(client, root, pending_ids)
@@ -211,6 +213,8 @@ def run_v2_cycle(
                 excluded_post_ids=request.excluded_post_ids,
                 max_new_posts=request.max_new_posts,
                 lock_held=True,
+                cycle_id=state.cycle_id,
+                cycle_round=request.round_number,
             )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
             if preview.get("selection_mismatch"):
@@ -231,6 +235,8 @@ def run_v2_cycle(
             excluded_post_ids=request.excluded_post_ids,
             max_new_posts=request.max_new_posts,
             lock_held=True,
+            cycle_id=state.cycle_id,
+            cycle_round=request.round_number,
         )
         executed_ids = tuple(
             int(detail["post_id"])

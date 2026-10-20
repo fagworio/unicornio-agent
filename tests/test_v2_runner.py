@@ -88,17 +88,19 @@ def test_runner_ignores_keyword_found_only_in_html_attributes():
 def test_runner_processes_one_post_and_persists_ready():
     store = MemoryStore()
     calls = []
+    context = {"title": "test"}
     stages = {
         "editorial": lambda context, state: {"decision": "process"},
         "media": lambda context, state, editorial: (calls.append("media") or MediaProgress()),
         "compose": lambda context, editorial, media: (calls.append("compose") or {}),
         "validate": lambda context, candidate: {"passed": True, "failures": []},
     }
-    result = PipelineRunner(store, stages).run_one(114859, {"title": "test"})
+    result = PipelineRunner(store, stages).run_one(114859, context)
     assert result.type.value == "ready"
     assert calls == ["media", "compose"]
     assert store.state.state.value == "ready"
     assert store.commits[-1][0] == 114859
+    assert set(context["_v2_stage_durations_ms"]) == {"editorial", "media", "compose", "validate"}
 
 
 def test_runner_persists_retry_without_running_later_stages_for_skip():

@@ -18,12 +18,22 @@ from unicornio_editor.cli import (
     _compact_cards,
     _compact_checklist,
     _compact_queue,
+    _json_default,
     _monitor_line,
     _record_cmd_output,
 )
+from unicornio_editor.pipeline_v2.cycle import CycleReport
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_json_default_serializes_cycle_report(self):
+        payload = json.dumps(
+            CycleReport(ready_count=1, phase="COMPLETED"),
+            default=_json_default,
+        )
+        self.assertIn('"ready_count": 1', payload)
+        self.assertIn('"phase": "COMPLETED"', payload)
+
     def test_compact_cards_keeps_only_the_next_action(self):
         result = _compact_cards({"cards": [{
             "id": 9, "title": "Post", "state": "BLOCKED", "attempts": 2,

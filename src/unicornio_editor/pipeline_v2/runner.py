@@ -1,6 +1,7 @@
 """V2 orchestration over injected stages; no provider or WP imports."""
 
 from dataclasses import replace
+from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -64,11 +65,20 @@ class PipelineRunner:
     def run_one(self, post_id: int, context: dict[str, Any]) -> Outcome:
         previous = self.state_store.load(post_id)
         context = context if isinstance(context, dict) else {}
+
+        def call_stage(name: str, stage: Callable[..., Any], *args: Any) -> Any:
+            started_at = monotonic()
+            try:
+                return stage(*args)
+            finally:
+                durations = context.setdefault("_v2_stage_durations_ms", {})
+                durations[name] = round((monotonic() - started_at) * 1000, 1)
+
         editorial = context.get("editorial") or context.get("draft")
         run_editorial = previous.phase in {Phase.RELEVANCE, Phase.EDITORIAL}
         if run_editorial:
             try:
-                editorial = self.stages["editorial"](context, previous)
+                editorial = call_stage("editorial", self.stages["editorial"], context, previous)
             except StageError as exc:
                 editorial = {}
                 outcome = classify_stage_error(previous, exc, **self._policy())
@@ -116,7 +126,7 @@ class PipelineRunner:
         else:
             try:
                 if previous.phase in {Phase.RELEVANCE, Phase.EDITORIAL, Phase.MEDIA}:
-                    media = self.stages["media"](context, previous, editorial)
+                    media = call_stage("media", self.stages["media"], context, previous, editorial)
                     if not isinstance(media, MediaProgress):
                         raise TypeError("MediaStage must return MediaProgress")
                     media_completed = True
@@ -126,10 +136,10 @@ class PipelineRunner:
                     raise StageError(BlockerCode.MANIFEST_INVALID, Phase.VALIDATE, "validate requires persisted candidate")
                 candidate = context.get("candidate") if previous.phase is Phase.VALIDATE else None
                 if candidate is None and previous.phase is not Phase.VALIDATE:
-                    candidate = self.stages["compose"](context, editorial, media)
+                    candidate = call_stage("compose", self.stages["compose"], context, editorial, media)
                 elif candidate is None:
                     candidate = context.get("draft") or {}
-                validation = self.stages["validate"](context, candidate)
+                validation = call_stage("validate", self.stages["validate"], context, candidate)
                 media_decision = ((validation.get("checklist") or {}).get("media_decision")
                                   if isinstance(validation, dict) else None)
                 if isinstance(media_decision, dict) and media_decision.get("waiver_applied"):
