@@ -1,5 +1,24 @@
 # Arquitetura
 
+## Orquestração V2 atual
+
+```text
+Hermes cron
+  -> v2-cycle (lock global)
+  -> CycleState + journal append-only
+  -> preview pinado por rodada
+  -> v2-run write com retry/new, cooldown e orçamento
+  -> EDITORIAL -> MEDIA -> COMPOSE -> VALIDATE
+  -> readback e checkpoint atômico
+  -> repõe vagas até READY, limite ou ausência de trabalho
+  -> retoma checkpoint interrompido sem duplicar efeitos confirmados
+  -> publisher separado (somente READY)
+```
+
+O `v2-run` continua sendo o executor de uma única rodada; `v2-cycle` é a
+interface operacional do cron. O diagrama histórico abaixo permanece como
+referência de etapas internas e não autoriza os comandos legados.
+
 ```text
 Hermes cron (fresh session)
   -> SKILL.md

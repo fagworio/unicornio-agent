@@ -1,16 +1,12 @@
-"""Bounded V2 cycle orchestration.
-
-This module coordinates multiple preview-authorized rounds without changing
-the existing ``v2-run`` executor. The round executor is injected deliberately:
-production wiring must add an atomic cycle checkpoint and recovery contract
-before this loop is enabled by Hermes.
-"""
+"""Bounded V2 cycle orchestration and resumable accounting."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from time import monotonic
 from typing import Any, Callable, Mapping
+
+from .cycle_state import CycleState
 
 
 @dataclass(frozen=True)
@@ -80,6 +76,8 @@ class CycleReport:
     attempted_post_ids: list[int] = field(default_factory=list)
     attempts_by_post: dict[int, int] = field(default_factory=dict)
     round_reports: list[dict[str, Any]] = field(default_factory=list)
+    cycle_id: str | None = None
+    resumed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,6 +136,8 @@ def run_cycle(
     *,
     config: CycleConfig | None = None,
     clock: Callable[[], float] = monotonic,
+    state: CycleState | None = None,
+    checkpoint: Callable[[CycleState, str, Mapping[str, Any]], None] | None = None,
 ) -> CycleReport:
     """Run bounded preview-authorized rounds until a stop condition.
 
@@ -147,11 +147,31 @@ def run_cycle(
     """
     config = config or CycleConfig()
     started_at = clock()
-    report = CycleReport()
-    seen: set[int] = set()
-    ready: set[int] = set()
-    attempts: dict[int, int] = {}
-    stagnant = 0
+    report = CycleReport(
+        cycle_id=state.cycle_id if state else None,
+        resumed=bool(state and (state.rounds or state.attempts_by_post or state.pending_round)),
+    )
+    seen: set[int] = set(state.seen_post_ids if state else ())
+    ready: set[int] = set(state.ready_post_ids if state else ())
+    attempts: dict[int, int] = dict(state.attempts_by_post if state else {})
+    stagnant = state.stagnant_rounds if state else 0
+    if state:
+        report.rounds = state.rounds
+        report.progress_rounds = state.progress_rounds
+        report.stagnant_rounds = state.stagnant_rounds
+        report.round_reports = list(state.round_reports)
+
+    def save(event: str, **fields: Any) -> None:
+        if state is None or checkpoint is None:
+            return
+        state.ready_post_ids = sorted(ready)
+        state.seen_post_ids = sorted(seen)
+        state.attempts_by_post = dict(sorted(attempts.items()))
+        state.rounds = report.rounds
+        state.progress_rounds = report.progress_rounds
+        state.stagnant_rounds = stagnant
+        state.round_reports = list(report.round_reports)
+        checkpoint(state, event, fields)
 
     while True:
         if clock() - started_at >= config.max_duration_seconds:
@@ -267,6 +287,11 @@ def run_cycle(
             "ready_post_ids": round_ready,
             "progress": round_progress,
         })
+        save(
+            "round_completed",
+            round_number=report.rounds,
+            report=report.round_reports[-1],
+        )
 
     report.ready_post_ids = sorted(ready)
     report.ready_count = len(ready)
@@ -274,6 +299,7 @@ def run_cycle(
     report.attempts_total = sum(attempts.values())
     report.attempts_by_post = dict(sorted(attempts.items()))
     report.attempted_post_ids = sorted(seen)
+    save("cycle_finished", stop_reason=report.stop_reason)
     return report
 
 
@@ -282,5 +308,6 @@ __all__ = [
     "CycleReport",
     "CycleRoundRequest",
     "CycleRoundResult",
+    "CycleState",
     "run_cycle",
 ]

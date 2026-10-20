@@ -97,6 +97,15 @@ class Config:
     # lifecycle, cooldown, and scheduler gates still apply.
     v2_admission_allowlist: tuple[int, ...] = ()  # EDITOR_V2_ADMISSION_ALLOWLIST
     v2_historical_cohort_file: Path | None = None  # EDITOR_V2_HISTORICAL_COHORT_FILE
+    # Bounded V2 cycle limits. The cycle is opt-in through ``v2-cycle`` and
+    # persists its own checkpoint under ``work/v2-cycle``.
+    v2_cycle_ready_target: int = 5
+    v2_cycle_new_batch_size: int = 5
+    v2_cycle_max_unique_posts: int = 25
+    v2_cycle_max_total_attempts: int = 50
+    v2_cycle_max_attempts_per_post: int = 2
+    v2_cycle_max_stagnant_rounds: int = 3
+    v2_cycle_max_duration_seconds: float = 3600.0
 
     def __repr__(self) -> str:
         return (
@@ -330,6 +339,13 @@ def load_config() -> Config:
         v2_admission_after=_datetime_or_none("EDITOR_V2_ADMISSION_AFTER"),
         v2_admission_allowlist=_post_id_allowlist("EDITOR_V2_ADMISSION_ALLOWLIST"),
         v2_historical_cohort_file=Path(historical_cohort_file) if historical_cohort_file else None,
+        v2_cycle_ready_target=_int("EDITOR_V2_CYCLE_READY_TARGET", 5, 1, 1000),
+        v2_cycle_new_batch_size=_int("EDITOR_V2_CYCLE_NEW_BATCH_SIZE", 5, 1, 100),
+        v2_cycle_max_unique_posts=_int("EDITOR_V2_CYCLE_MAX_UNIQUE_POSTS", 25, 1, 10000),
+        v2_cycle_max_total_attempts=_int("EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS", 50, 1, 100000),
+        v2_cycle_max_attempts_per_post=_int("EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST", 2, 1, 100),
+        v2_cycle_max_stagnant_rounds=_int("EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS", 3, 1, 100),
+        v2_cycle_max_duration_seconds=_float("EDITOR_V2_CYCLE_MAX_DURATION_SECONDS", 3600.0, 1.0, 86400.0),
     )
 
 

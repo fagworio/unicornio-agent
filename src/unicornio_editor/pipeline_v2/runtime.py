@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -2448,11 +2449,17 @@ def run_v2(
     post_id: int | None = None,
     preview: bool = False,
     expected_selected_ids: list[int] | None = None,
+    retry_post_ids: Collection[int] = (),
+    excluded_post_ids: Collection[int] = (),
+    max_new_posts: int | None = None,
+    lock_held: bool = False,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
-    lock = RunSessionLock(Path(root) / "work" / "v2-run.lock")
-    if not lock.acquire():
+    if max_new_posts is not None and max_new_posts < 0:
+        raise ValueError("max_new_posts must not be negative")
+    lock = None if lock_held else RunSessionLock(Path(root) / "work" / "v2-run.lock")
+    if lock is not None and not lock.acquire():
         return {"selected": 0, "locked": True, "details": []}
     try:
         reader = ProductionCandidateReader(client, root)
@@ -2518,6 +2525,12 @@ def run_v2(
                 (candidate_id, context) for candidate_id, context in candidates
                 if candidate_id not in quarantines
             ]
+        excluded_ids = {int(post_id) for post_id in excluded_post_ids}
+        candidates = [
+            (candidate_id, context)
+            for candidate_id, context in candidates
+            if int(candidate_id) not in excluded_ids
+        ]
 
         class _SnapshotStore:
             def __init__(self, items):
@@ -2539,7 +2552,14 @@ def run_v2(
             # queue item.  The same admission/cooldown filters still apply.
             selected = [item for item in candidates if item[0] == post_id] if requested_eligible else []
         else:
-            selected = select(candidates, _SnapshotStore(candidates), limit=limit)
+            selected = select(
+                candidates,
+                _SnapshotStore(candidates),
+                limit=limit,
+                retry_post_ids=retry_post_ids,
+                excluded_post_ids=excluded_ids,
+                max_new_posts=max_new_posts,
+            )
         scheduled_selected = selected
         expected_ids = None
         selection_drift = False
@@ -2594,6 +2614,9 @@ def run_v2(
             ],
             "quarantine_policy_error": quarantine_error,
             "quarantine_fail_closed": bool(quarantine_error),
+            "cycle_excluded_ids": sorted(excluded_ids),
+            "cycle_retry_ids": sorted(int(post_id) for post_id in retry_post_ids),
+            "cycle_max_new_posts": max_new_posts,
             "cooldown": len(cooldown),
             "ready": sum(
                 1 for _post_id, context in admitted
@@ -2884,4 +2907,5 @@ def run_v2(
             "details": details,
         }
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()

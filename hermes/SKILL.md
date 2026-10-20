@@ -28,20 +28,25 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 
 ## Executor oficial V2 — regra de precedência
 
-O único executor editorial operacional é:
+O executor editorial operacional é:
 
 ```bash
 set -a; . ./.env; set +a
-PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --preview
-# Preserve the preview's selected_ids and order exactly; abort if an ID is no longer eligible.
-PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-run --root . --limit 5 --expected-selected-ids <ids-do-preview>
+PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-cycle --root .
 ```
 
-O preview é obrigatório antes de uma sessão write-mode. A seleção do preview é a
-única autorização de escopo: não adicionar `--post-id`, não ampliar allowlists,
-não alterar cooldowns e não processar IDs fora de `selected_ids`. O `v2-run` é o
-único lifecycle que pode coordenar EDITORIAL → MEDIA → COMPOSE → VALIDATE →
-READY/RETRY/HUMAN_REQUIRED.
+O `v2-cycle` executa um preview e um write-mode pinado por rodada, persiste o
+checkpoint em `work/v2-cycle/state.json` e retoma automaticamente uma rodada
+interrompida. A seleção de cada preview é a única autorização de escopo: não
+adicionar `--post-id`, não ampliar allowlists, não alterar cooldowns e não
+processar IDs fora de `selected_ids`. O `v2-run` continua disponível como
+executor de uma única rodada e coordena EDITORIAL → MEDIA → COMPOSE → VALIDATE
+→ READY/RETRY/HUMAN_REQUIRED.
+
+O ciclo encerra quando alcança `EDITOR_V2_CYCLE_READY_TARGET`, esgota orçamento,
+fica sem trabalho elegível, atinge estagnação ou encontra divergência crítica.
+Falhas de autorização ou executor deixam o checkpoint em estado retomável; não
+use `--fresh` para descartar uma execução interrompida.
 
 Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
 `media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser

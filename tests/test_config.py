@@ -36,6 +36,30 @@ class ConfigTests(unittest.TestCase):
             datetime(2026, 10, 7, 1, 30, tzinfo=timezone.utc),
         )
 
+    def test_v2_cycle_limits_parse_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_V2_CYCLE_READY_TARGET": "3",
+                "EDITOR_V2_CYCLE_NEW_BATCH_SIZE": "4",
+                "EDITOR_V2_CYCLE_MAX_UNIQUE_POSTS": "12",
+                "EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS": "24",
+                "EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST": "3",
+                "EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS": "4",
+                "EDITOR_V2_CYCLE_MAX_DURATION_SECONDS": "90.5",
+            },
+            clear=True,
+        ):
+            config = load_config()
+        self.assertEqual(config.v2_cycle_ready_target, 3)
+        self.assertEqual(config.v2_cycle_new_batch_size, 4)
+        self.assertEqual(config.v2_cycle_max_unique_posts, 12)
+        self.assertEqual(config.v2_cycle_max_total_attempts, 24)
+        self.assertEqual(config.v2_cycle_max_attempts_per_post, 3)
+        self.assertEqual(config.v2_cycle_max_stagnant_rounds, 4)
+        self.assertEqual(config.v2_cycle_max_duration_seconds, 90.5)
+
     def test_invalid_v2_admission_cutoff_fails_closed(self):
         with patch.dict(
             os.environ,

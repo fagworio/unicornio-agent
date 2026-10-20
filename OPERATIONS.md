@@ -82,6 +82,12 @@ alterados. O relatório do `v2-run` também expõe `pending_total`,
 `admitted_pending`, `eligible_ids`, `cooldown_ids` e
 `historical_excluded_ids` para auditoria.
 
+Para a execução contínua, use `v2-cycle`. Ele faz preview e write-mode pinados
+por rodada, mantém o lock durante o ciclo e grava `work/v2-cycle/state.json` e
+`journal.jsonl`. Uma execução interrompida é retomada automaticamente; não use
+`--fresh` para descartar um checkpoint `running`. O relatório final inclui
+`ready_count`, `unique_posts`, `attempts_total`, `rounds` e `stop_reason`.
+
 ### Quarentena operacional por post
 
 `config/v2-quarantine.json` é uma política obrigatória para o scheduler. Um

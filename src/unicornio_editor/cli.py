@@ -101,6 +101,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="canário supervisionado: IDs esperados pelo preview, separados por vírgula; rejeita divergência sem executar",
     )
 
+    v2_cycle_parser = subparsers.add_parser(
+        "v2-cycle",
+        help="executa ou retoma um ciclo V2 limitado por READY, tentativas e duração",
+    )
+    v2_cycle_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_cycle_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="inicia um ciclo novo; não permite descartar um ciclo interrompido",
+    )
+    v2_cycle_parser.add_argument("--ready-target", type=int, default=None)
+    v2_cycle_parser.add_argument("--new-batch-size", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-unique-posts", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-total-attempts", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-attempts-per-post", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-stagnant-rounds", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-duration-seconds", type=float, default=None)
+
     v2_recover_media_parser = subparsers.add_parser(
         "v2-recover-media",
         help="revalida e reconcilia um attachment V2 já existente; somente leitura por padrão",
@@ -2392,6 +2410,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if getattr(args, "expected_selected_ids", None) is not None
                     else None
                 ),
+            )
+        elif args.command == "v2-cycle":
+            from .pipeline_v2.cycle import CycleConfig
+            from .pipeline_v2.cycle_runtime import run_v2_cycle
+
+            cycle_config = CycleConfig(
+                ready_target=int(getattr(config, "v2_cycle_ready_target", 5)),
+                new_batch_size=int(getattr(config, "v2_cycle_new_batch_size", 5)),
+                max_unique_posts=int(getattr(config, "v2_cycle_max_unique_posts", 25)),
+                max_total_attempts=int(getattr(config, "v2_cycle_max_total_attempts", 50)),
+                max_attempts_per_post_per_cycle=int(
+                    getattr(config, "v2_cycle_max_attempts_per_post", 2)
+                ),
+                max_stagnant_rounds=int(getattr(config, "v2_cycle_max_stagnant_rounds", 3)),
+                max_duration_seconds=float(
+                    getattr(config, "v2_cycle_max_duration_seconds", 3600.0)
+                ),
+            )
+            overrides = {
+                "ready_target": args.ready_target,
+                "new_batch_size": args.new_batch_size,
+                "max_unique_posts": args.max_unique_posts,
+                "max_total_attempts": args.max_total_attempts,
+                "max_attempts_per_post_per_cycle": args.max_attempts_per_post,
+                "max_stagnant_rounds": args.max_stagnant_rounds,
+                "max_duration_seconds": args.max_duration_seconds,
+            }
+            cycle_config = replace(
+                cycle_config,
+                **{name: value for name, value in overrides.items() if value is not None},
+            )
+            result = run_v2_cycle(
+                client,
+                config,
+                args.root,
+                cycle_config=cycle_config,
+                fresh=bool(args.fresh),
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment

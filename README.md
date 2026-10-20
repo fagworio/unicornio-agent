@@ -84,6 +84,25 @@ Se `decision=skip` ou a confianca ficar abaixo do limite configurado, o comando 
 
 ## Pipeline
 
+O fluxo operacional atual é o `v2-cycle`, que mantém um lock durante a sessão
+e repete rodadas preview→write até READY ou um limite seguro:
+
+```text
+Hermes cron
+  -> unicornio_editor.cli v2-cycle
+  -> checkpoint/journal do ciclo
+  -> a cada rodada: scheduler NEW+RETRY
+       -> preview autorizado
+       -> v2-run write com os mesmos IDs e ordem
+       -> pipeline EDITORIAL -> MEDIA -> COMPOSE -> VALIDATE
+       -> readback/checkpoint/telemetria
+  -> retoma rodada interrompida ou encerra por READY/orçamento/estagnação
+  -> publisher separado: somente posts READY
+```
+
+O diagrama abaixo descreve o pipeline histórico de etapas internas; os
+comandos legados não devem ser usados pelo cron.
+
 ```text
 Hermes cron (monitor: so acorda quando a assinatura da fila muda)
   -> cards (UMA chamada, max 2 posts): delta exato de imagens

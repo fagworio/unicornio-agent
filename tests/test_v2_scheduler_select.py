@@ -97,6 +97,22 @@ def test_select_caps_retry_queue_and_keeps_one_new_slot():
     assert [item[0] for item in result] == [1, 2, 3, 4, 11]
 
 
+def test_select_treats_seen_relevance_posts_as_retry_and_can_close_new_admissions():
+    states = {
+        1: WorkState(),
+        2: WorkState(),
+        3: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True),
+    }
+    result = select(
+        [(post_id, {}) for post_id in states],
+        Store(states),
+        limit=2,
+        retry_post_ids=(1,),
+        max_new_posts=0,
+    )
+    assert [item[0] for item in result] == [3, 1]
+
+
 def test_select_excludes_retry_cooldown_before_composing_queues():
     states = {
         1: WorkState(
