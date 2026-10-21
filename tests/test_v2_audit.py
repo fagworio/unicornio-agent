@@ -50,6 +50,9 @@ def test_audit_uses_existing_allowlisted_repair_signature_without_writing(tmp_pa
     post = report["posts"][0]
     assert post["repair"] == "v2-repair-historical-media"
     assert post["eligible"] is True
+    assert post["reentry_policy"] == "allowlisted_automatic_repair"
+    assert post["automatic_repair_allowed"] is True
+    assert post["human_reentry_required"] is False
     assert post["media"]["inline_media_ids"] == [17]
 
 
@@ -73,6 +76,11 @@ def test_audit_refuses_legitimate_terminal_state_and_unknown_state(tmp_path):
     }
     assert report["posts"][0]["eligible"] is False
     assert report["posts"][1]["next_action"] == "capture_complete_v2_state"
+    assert report["reentry_policy_counts"] == {"human_required": 2}
+    assert all(
+        post["human_reentry_required"] is True
+        for post in report["posts"]
+    )
 
 
 def test_audit_does_not_treat_non_terminal_state_as_repairable(tmp_path):

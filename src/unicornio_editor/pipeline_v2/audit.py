@@ -160,6 +160,9 @@ def classify_human_required_row(
             "signature": "invalid_post_id",
             "repair": None,
             "eligible": False,
+            "reentry_policy": "human_required",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": True,
             "next_action": "provide_valid_post_id_and_state",
         }
 
@@ -172,6 +175,9 @@ def classify_human_required_row(
             "signature": "missing_or_invalid_work_state",
             "repair": None,
             "eligible": False,
+            "reentry_policy": "human_required",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": True,
             "next_action": "capture_complete_v2_state",
             "state_source": resolution["source"],
             "state_conflicts": resolution["conflicts"],
@@ -187,6 +193,9 @@ def classify_human_required_row(
         "media": _media_diagnostics(state),
         "repair": None,
         "eligible": False,
+        "reentry_policy": "human_required",
+        "automatic_repair_allowed": False,
+        "human_reentry_required": True,
         "state_source": resolution["source"],
         "state_conflicts": resolution["conflicts"],
     }
@@ -194,6 +203,9 @@ def classify_human_required_row(
         result.update({
             "category": "not_human_required",
             "signature": "state_not_terminal",
+            "reentry_policy": "not_applicable",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": False,
             "next_action": "leave_unchanged",
         })
         return result
@@ -202,6 +214,9 @@ def classify_human_required_row(
         result.update({
             "category": "evidence_insufficient",
             "signature": "human_required_without_blocker",
+            "reentry_policy": "human_required",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": True,
             "next_action": "capture_complete_v2_state",
         })
         return result
@@ -218,6 +233,9 @@ def classify_human_required_row(
             "signature": "audited_historical_media_terminal",
             "repair": "v2-repair-historical-media",
             "eligible": True,
+            "reentry_policy": "allowlisted_automatic_repair",
+            "automatic_repair_allowed": True,
+            "human_reentry_required": False,
             "next_action": "run_existing_allowlisted_repair_in_dry_run",
         })
     elif known_terminal:
@@ -233,6 +251,9 @@ def classify_human_required_row(
             "signature": signature,
             "repair": "v2-repair-known-terminal-states",
             "eligible": True,
+            "reentry_policy": "allowlisted_automatic_repair",
+            "automatic_repair_allowed": True,
+            "human_reentry_required": False,
             "next_action": "run_existing_allowlisted_repair_in_dry_run",
         })
     elif state.blocker.value in {
@@ -243,12 +264,18 @@ def classify_human_required_row(
         result.update({
             "category": "legitimate_block",
             "signature": "no_known_repair_signature",
+            "reentry_policy": "human_required",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": True,
             "next_action": "human_review_or_new_evidence",
         })
     else:
         result.update({
             "category": "evidence_insufficient",
             "signature": "unsupported_terminal_blocker",
+            "reentry_policy": "human_required",
+            "automatic_repair_allowed": False,
+            "human_reentry_required": True,
             "next_action": "capture_diagnostic_artifacts_before_repair",
         })
     return result
@@ -272,14 +299,18 @@ def audit_human_required_inventory(
         }
     posts = [classify_human_required_row(row, now=now) for row in rows]
     counts: dict[str, int] = {}
+    policy_counts: dict[str, int] = {}
     for post in posts:
         category = str(post.get("category") or "evidence_insufficient")
         counts[category] = counts.get(category, 0) + 1
+        policy = str(post.get("reentry_policy") or "human_required")
+        policy_counts[policy] = policy_counts.get(policy, 0) + 1
     return {
         "command": "v2-audit-human-required",
         "inventory": str(path),
         "read_only": True,
         "counts": counts,
+        "reentry_policy_counts": policy_counts,
         "posts": posts,
     }
 
