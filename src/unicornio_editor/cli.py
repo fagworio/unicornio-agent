@@ -1789,7 +1789,6 @@ def _compact_checklist(checklist: dict) -> dict:
 
 
 _V2_RECOVERY_MONITOR_PROTOCOL = "v2"
-_V2_RECOVERY_MONITOR_LEGACY_PROTOCOL = "v1"
 _V2_CYCLE_PHASES = frozenset({"ADMISSION", "DRAINING", "COMPLETED"})
 
 
@@ -1865,14 +1864,9 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
     authorized_digest = hashlib.sha256(
         json.dumps(authorized_ids, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
-    protocol = (
-        _V2_RECOVERY_MONITOR_PROTOCOL
-        if authorization_id
-        else _V2_RECOVERY_MONITOR_LEGACY_PROTOCOL
-    )
-    authorization_segment = f":{authorization_id}" if authorization_id else ""
+    authorization_segment = f":{authorization_id or 'legacy'}"
     return (
-        f"recovery={protocol}:{cycle_id}:{phase}:{round_number}"
+        f"recovery={_V2_RECOVERY_MONITOR_PROTOCOL}:{cycle_id}:{phase}:{round_number}"
         f"{authorization_segment}:{authorized_digest}"
     )
 

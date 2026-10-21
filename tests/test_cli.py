@@ -307,7 +307,7 @@ class CompactOutputTests(unittest.TestCase):
             )
             self.assertEqual(first, _monitor_line(report, root))
 
-    def test_monitor_line_keeps_legacy_v1_marker_without_authorization_id(self):
+    def test_monitor_line_versioned_legacy_marker_changes_when_authorized(self):
         report = {
             "eligible_rework_ids": [],
             "v2_eligible_ids": [],
@@ -329,9 +329,16 @@ class CompactOutputTests(unittest.TestCase):
             state_path = root / "work" / "v2-cycle" / "state.json"
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps(state), encoding="utf-8")
+            legacy = _monitor_line(report, root)
+            self.assertTrue(legacy.startswith("recovery=v2:legacy-cycle:DRAINING:4:legacy:"))
+
+            state["pending_round"]["authorization_id"] = "authorization-4"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            identified = _monitor_line(report, root)
             self.assertTrue(
-                _monitor_line(report, root).startswith("recovery=v1:legacy-cycle:")
+                identified.startswith("recovery=v2:legacy-cycle:DRAINING:4:authorization-4:")
             )
+            self.assertNotEqual(legacy, identified)
 
     def test_monitor_line_changes_when_v2_authorized_round_changes(self):
         report = {
@@ -383,7 +390,7 @@ class CompactOutputTests(unittest.TestCase):
             state_path = root / "work" / "v2-cycle" / "state.json"
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps(state), encoding="utf-8")
-            self.assertIn("recovery=v1:", _monitor_line(report, root))
+            self.assertIn("recovery=v2:", _monitor_line(report, root))
 
             state["status"] = "completed"
             state_path.write_text(json.dumps(state), encoding="utf-8")
