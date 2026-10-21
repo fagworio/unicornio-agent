@@ -226,6 +226,45 @@ def test_cycle_does_not_touch_checkpoint_when_lock_is_busy(tmp_path):
     assert not (tmp_path / "work" / "v2-cycle" / "state.json").exists()
 
 
+def test_cycle_blocks_write_when_incomplete_journal_is_detected(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="journal-guard")
+    state.phase = "DRAINING"
+    state.seen_post_ids = [7]
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("preview"):
+            return {"preview": True, "queue": {"selected_ids": [7]}}
+        return {
+            "preview": False,
+            "journal_conflict": True,
+            "journal_conflicts": [{
+                "post_id": 7,
+                "reason": "incomplete_journal",
+                "status": "running",
+            }],
+            "details": [],
+        }
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+
+    assert report.stop_reason == "recovery_uncertain"
+    assert [call["preview"] for call in calls] == [True, False]
+    assert report.round_reports[0]["event"] == "round_reconciliation_blocked"
+    assert report.round_reports[0]["journal_conflicts"] == [{
+        "post_id": 7,
+        "reason": "incomplete_journal",
+        "status": "running",
+    }]
+    persisted = cycle_runtime.CycleStateStore(tmp_path).load()
+    assert persisted.pending_round["preview_selected_ids"] == [7]
+
+
 def test_draining_budget_is_checked_before_v2_write(tmp_path, monkeypatch):
     store = cycle_runtime.CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="draining-budget")

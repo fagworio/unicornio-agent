@@ -793,6 +793,16 @@ def run_v2_cycle(
             cycle_round=request.round_number,
             authorization_id=authorization_id,
         )
+        if result.get("journal_conflict"):
+            return CycleRoundResult(
+                preview_selected_ids=tuple(selected_ids),
+                reconciliation_blocked=True,
+                reconciliation_blocking_info={
+                    "authorization_status": "incomplete_journal",
+                    "write_replayed": False,
+                    "journal_conflicts": list(result.get("journal_conflicts") or []),
+                },
+            )
         executed_ids = tuple(
             int(detail["post_id"])
             for detail in result.get("details", ())

@@ -710,22 +710,70 @@ def _write_v2_journal_checkpoint(
 ) -> None:
     target = Path(root) / "work" / "v2-journal" / f"{post_id}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(
-            {
-                "status": status,
-                "post_id": post_id,
-                "state": state.to_dict(),
-                **({"run_id": run_id} if run_id else {}),
-                **({"cycle_id": cycle_id} if cycle_id else {}),
-                **({"cycle_round": cycle_round} if cycle_round is not None else {}),
-                **({"authorization_id": authorization_id} if authorization_id else {}),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot overwrite unreadable V2 journal for post {post_id}"
+            ) from exc
+        existing_complete = (
+            existing.get("status") == "committed"
+            and existing.get("readback") is True
+        )
+        same_run = bool(run_id) and str(existing.get("run_id") or "") == str(run_id)
+        if not existing_complete and not same_run:
+            raise RuntimeError(
+                f"cannot overwrite incomplete V2 journal for post {post_id}"
+            )
+    payload = {
+        "status": status,
+        "post_id": post_id,
+        "state": state.to_dict(),
+        **({"run_id": run_id} if run_id else {}),
+        **({"cycle_id": cycle_id} if cycle_id else {}),
+        **({"cycle_round": cycle_round} if cycle_round is not None else {}),
+        **({"authorization_id": authorization_id} if authorization_id else {}),
+    }
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary.replace(target)
+
+
+def _incomplete_v2_journal_conflicts(
+    root: Path,
+    selected_ids: Collection[int],
+) -> list[dict[str, Any]]:
+    """Report journals that cannot safely be replaced by a new run."""
+    journal_dir = Path(root) / "work" / "v2-journal"
+    conflicts: list[dict[str, Any]] = []
+    for post_id in selected_ids:
+        path = journal_dir / f"{int(post_id)}.json"
+        if not path.is_file():
+            continue
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            conflicts.append({
+                "post_id": int(post_id),
+                "reason": "journal_unreadable",
+            })
+            continue
+        if journal.get("status") == "committed" and journal.get("readback") is True:
+            continue
+        conflicts.append({
+            "post_id": int(post_id),
+            "reason": "incomplete_journal",
+            "status": str(journal.get("status") or "unknown"),
+            "run_id": str(journal.get("run_id") or "") or None,
+            "cycle_id": str(journal.get("cycle_id") or "") or None,
+            "cycle_round": journal.get("cycle_round"),
+            "authorization_id": str(journal.get("authorization_id") or "") or None,
+        })
+    return conflicts
 
 
 def _normalize_executable_candidate(candidate: dict[str, Any], subject: str) -> dict[str, Any]:
@@ -2881,6 +2929,22 @@ def run_v2(
                     }
                     for selected_id, context in selected
                 ],
+            }
+        journal_conflicts = _incomplete_v2_journal_conflicts(
+            root,
+            [int(item[0]) for item in selected],
+        )
+        if journal_conflicts:
+            return {
+                "selected": len(selected),
+                "completed": 0,
+                "failed": 0,
+                "locked": False,
+                "preview": False,
+                "journal_conflict": True,
+                "journal_conflicts": journal_conflicts,
+                "queue": queue,
+                "details": [],
             }
         details = []
         completed = 0

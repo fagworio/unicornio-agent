@@ -1,8 +1,10 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
-from unicornio_editor.pipeline_v2.runtime import run_v2
+from unicornio_editor.pipeline_v2.runtime import _write_v2_journal_checkpoint, run_v2
 
 
 class Client:
@@ -159,6 +161,73 @@ def test_write_pins_preview_ids_when_queue_order_changes(tmp_path):
     assert result["queue"]["selection_revalidated"] is True
     assert result["queue"]["selection_drift"] is True
     assert result["queue"]["selected_ids"] == [2]
+
+
+def test_write_preflight_preserves_incomplete_journal_when_selection_is_valid(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
+    client = Client([
+        post(2, "2026-10-09T03:00:00Z", WorkState(state=LifecycleState.PENDING))
+    ])
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    journal_path = journal_dir / "2.json"
+    journal = {
+        "status": "running",
+        "post_id": 2,
+        "run_id": "previous-run",
+        "cycle_id": "previous-cycle",
+        "cycle_round": 4,
+    }
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = journal_path.read_text(encoding="utf-8")
+
+    result = run_v2(
+        client,
+        config(cohort, tmp_path),
+        tmp_path,
+        limit=1,
+        expected_selected_ids=[2],
+        cycle_id="current-cycle",
+        cycle_round=4,
+        authorization_id="current-authorization",
+    )
+
+    assert result["journal_conflict"] is True
+    assert result["journal_conflicts"] == [{
+        "post_id": 2,
+        "reason": "incomplete_journal",
+        "status": "running",
+        "run_id": "previous-run",
+        "cycle_id": "previous-cycle",
+        "cycle_round": 4,
+        "authorization_id": None,
+    }]
+    assert client.updates == []
+    assert journal_path.read_text(encoding="utf-8") == before
+
+
+def test_journal_checkpoint_guard_preserves_running_journal(tmp_path):
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    journal_path = journal_dir / "2.json"
+    journal_path.write_text(json.dumps({
+        "status": "running",
+        "post_id": 2,
+        "run_id": "previous-run",
+    }), encoding="utf-8")
+    before = journal_path.read_text(encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot overwrite incomplete"):
+        _write_v2_journal_checkpoint(
+            tmp_path,
+            2,
+            "running",
+            WorkState(state=LifecycleState.PENDING),
+            run_id="new-run",
+        )
+
+    assert journal_path.read_text(encoding="utf-8") == before
 
 
 def test_quarantine_blocks_reentry_and_manual_post_id_but_not_other_eligible_posts(tmp_path):

@@ -216,8 +216,8 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     assert 115305 in {item.media_id for item in recovered.media.inline}
     assert client.uploads == 1
 
-    # Advance only the test clock to the next permitted attempt.
-    second_run = True
+    # A new write cannot replace an unresolved transaction. The original
+    # journal and recovered media remain available for an explicit audit.
     eligible_at = datetime.fromisoformat(persisted.retry.next_at) + timedelta(seconds=1)
     class Clock(datetime):
         @classmethod
@@ -225,8 +225,9 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
             return eligible_at.astimezone(tz)
     monkeypatch.setattr(runtime, "datetime", Clock)
     second = run_v2(client, config, tmp_path, post_id=115152)
-    assert second["completed"] == 1 and second["failed"] == 0, second
-    assert second["details"][0]["blocker"] == "inline_missing"
+    assert second["completed"] == 0 and second["failed"] == 0, second
+    assert second["journal_conflict"] is True
+    assert second["journal_conflicts"][0]["reason"] == "incomplete_journal"
     assert client.uploads == 1
     assert client.post["content"]["raw"] == "<p>Original</p>"
     assert client.post["featured_media"] == 115170
