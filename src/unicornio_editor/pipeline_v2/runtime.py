@@ -1286,17 +1286,23 @@ class ProductionMediaResolver:
                         _attach_candidate_vision_evidence(item, vision_evidence)
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
-                    temporary = any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
+                    explicit_reason = str(result.get("reason_code") or "").casefold().strip()
+                    temporary = bool(result.get("recoverable")) or any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
                     definitive = any(token in detail.casefold() for token in (
                         "duplicate", "duplicat", "unrelated", "sem relação", "width_below_minimum",
                         "resolution", "resolu", "source_bytes_mismatch", "mismatch",
                     ))
                     accepted = status in {"accepted", "ok"}
+                    reason_code = explicit_reason or (
+                        "candidate_accepted" if accepted else
+                        "transient_provider_failure" if temporary or not definitive else
+                        "candidate_rejected"
+                    )
                     record_v2_candidate_decision(
                         self.root, post_id=int(context["post_id"]), run_id=run_id,
                         candidate=item, role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
                         disposition="accepted" if accepted else "defer_retry" if temporary or not definitive else "reject_final",
-                        reason_code="candidate_accepted" if accepted else "transient_provider_failure" if temporary or not definitive else (detail[:120] or "candidate_rejected"),
+                        reason_code=reason_code,
                     )
             except Exception as exc:
                 # Registry writes are deliberately fail-soft, but a missing

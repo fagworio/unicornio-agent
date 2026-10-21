@@ -40,6 +40,35 @@ _OG_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+SOURCE_VERIFICATION_RETRYABLE_CODES = frozenset({
+    "source_page_unavailable",
+    "source_asset_unavailable",
+    "source_scan_incomplete",
+    "source_decode_failed",
+    "candidate_asset_unavailable",
+})
+
+
+def _coded_reason(code: str, detail: str) -> str:
+    """Keep a stable machine reason while retaining a useful audit detail."""
+    return f"{code}: {detail}"
+
+
+def verification_result(ok: bool, reason: str) -> dict[str, Any]:
+    """Normalize the legacy ``(ok, reason)`` result for structured callers."""
+    raw = str(reason or "")
+    code, separator, detail = raw.partition(":")
+    reason_code = code.strip() if separator and code.strip() else (
+        "source_verified" if ok else "source_mismatch"
+    )
+    return {
+        "ok": bool(ok),
+        "reason_code": reason_code,
+        "reason": raw,
+        "detail": detail.strip() if separator else raw,
+        "recoverable": reason_code in SOURCE_VERIFICATION_RETRYABLE_CODES,
+    }
+
 
 def discover_article_source_candidates(
     page_url: str,
@@ -286,13 +315,23 @@ def validate_discovered_candidate(
         "image_url": image_url,
         "source_page_url": page_url,
         "reason": "",
+        "reason_code": "",
+        "recoverable": False,
         "images_in_page": 0,
     }
     if not _valid_http(page_url):
-        resultado["reason"] = "source_page_url ausente ou invalida"
+        resultado["reason_code"] = "source_page_unavailable"
+        resultado["recoverable"] = True
+        resultado["reason"] = _coded_reason(
+            "source_page_unavailable", "source_page_url ausente ou invalida"
+        )
         return resultado
     if not _valid_http(image_url):
-        resultado["reason"] = "direct_image_url ausente ou invalida"
+        resultado["reason_code"] = "source_asset_unavailable"
+        resultado["recoverable"] = True
+        resultado["reason"] = _coded_reason(
+            "source_asset_unavailable", "direct_image_url ausente ou invalida"
+        )
         return resultado
 
     cache = cache if cache is not None else {}
@@ -307,8 +346,21 @@ def validate_discovered_candidate(
         if cache_html is not None and texto:
             cache_html[page_url] = texto
     listadas = cache[page_url]
+    if listadas is None:
+        resultado["reason_code"] = "source_page_unavailable"
+        resultado["recoverable"] = True
+        resultado["reason"] = _coded_reason(
+            "source_page_unavailable",
+            "pagina de origem inacessivel; nao e possivel confirmar a imagem",
+        )
+        return resultado
     if not listadas:
-        resultado["reason"] = "pagina de origem inacessivel ou sem imagens listadas"
+        resultado["reason_code"] = "source_scan_incomplete"
+        resultado["recoverable"] = True
+        resultado["reason"] = _coded_reason(
+            "source_scan_incomplete",
+            "pagina acessivel, mas o parser nao encontrou referencias de imagem",
+        )
         return resultado
     resultado["images_in_page"] = len(listadas)
 
@@ -319,7 +371,10 @@ def validate_discovered_candidate(
         resultado["source_verified"] = True
         resultado["matched_image_url"] = exact_match
         resultado["verification_level"] = "EXACT_URL"
-        resultado["reason"] = "URL exata encontrada no HTML da pagina de origem"
+        resultado["reason_code"] = "source_reference_found"
+        resultado["reason"] = _coded_reason(
+            "source_reference_found", "URL exata encontrada no HTML da pagina de origem"
+        )
         return resultado
     slug = _slug(image_url)
     if slug:
@@ -331,7 +386,10 @@ def validate_discovered_candidate(
         resultado["source_verified"] = True
         resultado["matched_image_url"] = slug_match
         resultado["verification_level"] = "SLUG_MATCH"
-        resultado["reason"] = "mesma imagem (slug) listada na pagina de origem"
+        resultado["reason_code"] = "source_reference_found"
+        resultado["reason"] = _coded_reason(
+            "source_reference_found", "mesma imagem (slug) listada na pagina de origem"
+        )
         return resultado
 
     rendition_key = _asset_rendition_key(image_url)
@@ -401,7 +459,10 @@ def verify_downloaded_against_source(
     listada, ou bytes divergentes -> ``(False, motivo)``.
     """
     if not isinstance(source_page_url, str) or not source_page_url.strip():
-        return False, "source_page_url ausente; impossivel verificar a imagem contra a origem"
+        return False, _coded_reason(
+            "source_page_unavailable",
+            "source_page_url ausente; impossivel verificar a imagem contra a origem",
+        )
     cache = cache if cache is not None else {}
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     def populate_page_cache() -> None:
@@ -423,32 +484,61 @@ def verify_downloaded_against_source(
         with cache_lock:
             populate_page_cache()
     listed = cache[source_page_url]
+    if listed is None:
+        return False, _coded_reason(
+            "source_page_unavailable",
+            "pagina de origem inacessivel; nao e possivel confirmar a origem da imagem",
+        )
     if not listed:
-        return False, (
-            "pagina de origem inacessivel ou sem imagens listadas; "
-            "nao e possivel confirmar a origem da imagem (fonte instavel)"
+        return False, _coded_reason(
+            "source_scan_incomplete",
+            "pagina acessivel, mas nao foram encontradas referencias de imagem",
         )
     try:
         downloaded_bytes = downloaded.read_bytes()
         downloaded_hash = _md5(downloaded_bytes)
     except OSError as exc:
-        return False, f"falha ao ler o arquivo baixado: {exc}"
+        return False, _coded_reason("candidate_asset_unavailable", f"falha ao ler o arquivo baixado: {exc}")
+    if not downloaded_bytes:
+        return False, _coded_reason(
+            "candidate_asset_unavailable", "arquivo baixado vazio; nao ha bytes para comparar"
+        )
 
     direct_normalized = _normalized_url(direct_image_url)
     exact = [url for url in listed if _normalized_url(url) == direct_normalized]
+    exact_downloaded = False
+    exact_compared = False
+    exact_decode_failed = False
     for url in exact:
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if data is not None:
+            exact_downloaded = True
             if _md5(data) == downloaded_hash:
-                return True, "URL exata confirmada na pagina de origem (bytes iguais)"
+                return True, _coded_reason(
+                    "source_reference_found", "URL exata confirmada na pagina de origem (bytes iguais)"
+                )
             same_frame, level = verify_image_identity(downloaded_bytes, data)
             if same_frame:
-                return True, f"URL exata confirmada na pagina de origem ({level.lower()})"
+                return True, _coded_reason(
+                    "source_reference_found", f"URL exata confirmada na pagina de origem ({level.lower()})"
+                )
+            exact_compared = exact_compared or level == "MISMATCH"
+            exact_decode_failed = exact_decode_failed or level == "UNVERIFIED"
     if exact:
-        return (
-            False,
-            "CDN serviu conteudo divergente da URL exata listada na pagina de origem "
-            "(bytes diferentes); fonte instavel — troque a URL da imagem",
+        if exact_compared:
+            return False, _coded_reason(
+                "source_bytes_mismatch",
+                "CDN serviu conteudo divergente da URL exata listada na pagina de origem "
+                "(bytes diferentes); fonte instavel — troque a URL da imagem",
+            )
+        if exact_decode_failed:
+            return False, _coded_reason(
+                "source_decode_failed",
+                "a referência exata não pôde ser decodificada como imagem",
+            )
+        return False, _coded_reason(
+            "source_asset_unavailable",
+            "nao foi possivel baixar a URL exata para comparar os bytes",
         )
 
     slug = _slug(direct_image_url)
@@ -459,24 +549,43 @@ def verify_downloaded_against_source(
         if rendition_key and _asset_rendition_key(url) == rendition_key and url not in same_slug
     ]
     downloads = 0
+    compared = 0
+    unavailable = 0
+    decode_failed = False
     for url in [*same_slug, *same_rendition]:
         if downloads >= _MAX_DOWNLOADS:
             break
         downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
-        if data is not None:
-            if _md5(data) == downloaded_hash:
-                via = "slug" if url in same_slug else "rendicao CDN"
-                return True, f"imagem confirmada na pagina de origem por {via} e bytes"
-            same_frame, level = verify_image_identity(downloaded_bytes, data)
-            if same_frame:
-                via = "slug" if url in same_slug else "rendicao CDN"
-                return True, f"imagem confirmada na pagina de origem por {via} ({level.lower()})"
+        if data is None:
+            unavailable += 1
+            continue
+        compared += 1
+        if _md5(data) == downloaded_hash:
+            via = "slug" if url in same_slug else "rendicao CDN"
+            return True, _coded_reason(
+                "source_reference_found", f"imagem confirmada na pagina de origem por {via} e bytes"
+            )
+        same_frame, level = verify_image_identity(downloaded_bytes, data)
+        if same_frame:
+            via = "slug" if url in same_slug else "rendicao CDN"
+            return True, _coded_reason(
+                "source_reference_found", f"imagem confirmada na pagina de origem por {via} ({level.lower()})"
+            )
+        decode_failed = decode_failed or level == "UNVERIFIED"
     if same_slug or same_rendition:
-        return (
-            False,
-            "CDN serviu conteudo divergente da pagina de origem para a mesma imagem "
-            "(bytes diferentes); fonte instavel — troque a URL da imagem",
+        if compared:
+            return False, _coded_reason(
+                "source_bytes_mismatch",
+                "CDN serviu conteudo divergente da pagina de origem para a mesma imagem "
+                "(bytes diferentes); fonte instavel — troque a URL da imagem",
+            )
+        if decode_failed:
+            return False, _coded_reason(
+                "source_decode_failed", "referência da mesma imagem não pôde ser decodificada"
+            )
+        return False, _coded_reason(
+            "source_asset_unavailable", "referência da mesma imagem indisponível para comparação"
         )
     for url in listed:
         if downloads >= _MAX_DOWNLOADS:
@@ -484,13 +593,39 @@ def verify_downloaded_against_source(
         downloads += 1
         data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
         if data is not None:
+            compared += 1
             if _md5(data) == downloaded_hash:
-                return True, "imagem confirmada na pagina de origem (bytes iguais)"
+                return True, _coded_reason(
+                    "source_reference_found", "imagem confirmada na pagina de origem (bytes iguais)"
+                )
             same_frame, level = verify_image_identity(downloaded_bytes, data)
             if same_frame:
-                return True, f"imagem confirmada na pagina de origem ({level.lower()})"
-    return (
-        False,
+                return True, _coded_reason(
+                    "source_reference_found", f"imagem confirmada na pagina de origem ({level.lower()})"
+                )
+            decode_failed = decode_failed or level == "UNVERIFIED"
+        else:
+            unavailable += 1
+    if downloads < len(listed) and (downloads >= _MAX_DOWNLOADS or budget[0] <= 0):
+        return False, _coded_reason(
+            "source_scan_incomplete",
+            "limite de comparações ou bytes atingido antes de examinar toda a origem",
+        )
+    if decode_failed and not compared:
+        return False, _coded_reason(
+            "source_decode_failed", "referências da página não puderam ser decodificadas"
+        )
+    if unavailable and not compared:
+        return False, _coded_reason(
+            "source_asset_unavailable", "referências da página indisponíveis para comparação"
+        )
+    return False, _coded_reason(
+        "source_mismatch",
         "imagem baixada nao consta na pagina de origem (slug ausente e bytes nao "
         "correspondem a nenhuma imagem listada); troque por uma imagem da pagina",
     )
+
+
+def verify_downloaded_against_source_result(**kwargs: Any) -> dict[str, Any]:
+    """Return structured provenance verification while retaining the tuple API."""
+    return verification_result(*verify_downloaded_against_source(**kwargs))

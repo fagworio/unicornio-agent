@@ -272,6 +272,54 @@ class SourceVerifyTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertIn("URL exata", reason)
 
+    def test_exact_reference_timeout_is_inconclusive_not_bytes_mismatch(self):
+        path = self._downloaded("img.png", (10, 10, 200))
+        image_url = f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg"
+        with mock.patch(
+            "unicornio_editor.media.source_verify._fetch", return_value=None
+        ):
+            ok, reason = verify_downloaded_against_source(
+                source_page_url=f"{self.base}/page.html",
+                downloaded=path,
+                direct_image_url=image_url,
+                cache={f"{self.base}/page.html": [image_url]},
+            )
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("source_asset_unavailable:"), reason)
+        self.assertNotIn("source_bytes_mismatch", reason)
+
+    def test_html_reference_is_decode_failure_not_source_mismatch(self):
+        path = self._downloaded("img.png", (10, 10, 200))
+        image_url = f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg"
+        with mock.patch(
+            "unicornio_editor.media.source_verify._fetch",
+            return_value=b"<html>not an image</html>",
+        ):
+            ok, reason = verify_downloaded_against_source(
+                source_page_url=f"{self.base}/page.html",
+                downloaded=path,
+                direct_image_url=image_url,
+                cache={f"{self.base}/page.html": [image_url]},
+            )
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("source_decode_failed:"), reason)
+
+    def test_limited_scan_is_incomplete_not_absence_proof(self):
+        path = self._downloaded("img.png", (10, 10, 200))
+        listed = [f"{self.base}/img/decoy-{index}.jpg" for index in range(8)]
+        with mock.patch(
+            "unicornio_editor.media.source_verify._fetch",
+            return_value=_png_bytes((200, 10, 10)),
+        ):
+            ok, reason = verify_downloaded_against_source(
+                source_page_url=f"{self.base}/page.html",
+                downloaded=path,
+                direct_image_url=f"{self.base}/img/target.jpg",
+                cache={f"{self.base}/page.html": listed},
+            )
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("source_scan_incomplete:"), reason)
+
 
 if __name__ == "__main__":
     unittest.main()

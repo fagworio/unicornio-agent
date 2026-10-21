@@ -45,7 +45,7 @@ from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.text import sanitize_title
-from .media.source_verify import verify_downloaded_against_source
+from .media.source_verify import verification_result, verify_downloaded_against_source
 from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
 from .media.vision_gate import (
     VisionGateError,
@@ -2388,11 +2388,14 @@ def _execute_media_plan(
                         ),
                     )
                 if not ok:
+                    verification = verification_result(ok, verify_reason)
                     _funnel("source_verify", "rejected", item, position, verify_reason)
                     return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
                         "detail": f"verificacao de origem: {verify_reason}",
+                        "reason_code": verification["reason_code"],
+                        "recoverable": verification["recoverable"],
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))
