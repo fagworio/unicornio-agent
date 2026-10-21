@@ -668,9 +668,12 @@ def test_fully_reconciled_round_closes_authorization_without_replay(
         if kwargs.get("expected_selected_ids"):
             return {
                 "preview": True,
-                "selection_mismatch": True,
-                "actual_selected_ids": [],
-                "queue": {"selected_ids": [], "eligible_ids": []},
+                "selection_mismatch": False,
+                "actual_selected_ids": list(kwargs["expected_selected_ids"]),
+                "queue": {
+                    "selected_ids": list(kwargs["expected_selected_ids"]),
+                    "eligible_ids": list(kwargs["expected_selected_ids"]),
+                },
             }
         return {"preview": True, "queue": {"selected_ids": []}}
 

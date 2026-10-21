@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -697,6 +697,44 @@ def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -
     temporary.replace(target)
 
 
+def _write_v2_journal_payload(
+    target: Path,
+    payload: Mapping[str, Any],
+    *,
+    protect_incomplete: bool = True,
+) -> None:
+    """Atomically persist a V2 journal without erasing another run's work."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if protect_incomplete and target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot overwrite unreadable V2 journal for post {payload.get('post_id')}"
+            ) from exc
+        existing_complete = (
+            existing.get("status") == "committed"
+            and existing.get("readback") is True
+        )
+        existing_run_id = str(existing.get("run_id") or "")
+        payload_run_id = str(payload.get("run_id") or "")
+        same_run = (
+            (not existing_run_id and not payload_run_id)
+            or (bool(payload_run_id) and existing_run_id == payload_run_id)
+        )
+        if not existing_complete and not same_run:
+            raise RuntimeError(
+                f"cannot overwrite incomplete V2 journal for post {payload.get('post_id')}"
+            )
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(dict(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+
+
 def _write_v2_journal_checkpoint(
     root: Path,
     post_id: int,
@@ -709,23 +747,6 @@ def _write_v2_journal_checkpoint(
     authorization_id: str | None = None,
 ) -> None:
     target = Path(root) / "work" / "v2-journal" / f"{post_id}.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_file():
-        try:
-            existing = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError(
-                f"cannot overwrite unreadable V2 journal for post {post_id}"
-            ) from exc
-        existing_complete = (
-            existing.get("status") == "committed"
-            and existing.get("readback") is True
-        )
-        same_run = bool(run_id) and str(existing.get("run_id") or "") == str(run_id)
-        if not existing_complete and not same_run:
-            raise RuntimeError(
-                f"cannot overwrite incomplete V2 journal for post {post_id}"
-            )
     payload = {
         "status": status,
         "post_id": post_id,
@@ -735,12 +756,7 @@ def _write_v2_journal_checkpoint(
         **({"cycle_round": cycle_round} if cycle_round is not None else {}),
         **({"authorization_id": authorization_id} if authorization_id else {}),
     }
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(target)
+    _write_v2_journal_payload(target, payload)
 
 
 def _incomplete_v2_journal_conflicts(
@@ -2391,7 +2407,7 @@ class WordPressWriterV2:
         }
         if not candidate_fresh and outcome.type.value == "ready":
             raise RuntimeError("stale editorial candidate cannot produce READY")
-        journal.write_text(json.dumps(intent, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_v2_journal_payload(journal, intent)
         # A partial candidate is a checkpoint, never public/editor-facing
         # content.  Persist only lifecycle/media state until the complete
         # candidate passes every final gate and reaches READY.
@@ -2471,21 +2487,17 @@ class WordPressWriterV2:
                 if destination:
                     record["destination"] = destination
             try:
-                journal.write_text(
-                    json.dumps(
-                        {
-                            **intent,
-                            "status": "media_readback_failed",
-                            "media_state": "apply_readback_failed",
-                            "media_readback_status": "failed",
-                            "media_records": media_records,
-                            "apply_media_records": apply_media_records,
-                            "detail": str(exc)[:400],
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                _write_v2_journal_payload(
+                    journal,
+                    {
+                        **intent,
+                        "status": "media_readback_failed",
+                        "media_state": "apply_readback_failed",
+                        "media_readback_status": "failed",
+                        "media_records": media_records,
+                        "apply_media_records": apply_media_records,
+                        "detail": str(exc)[:400],
+                    },
                 )
             except Exception:
                 # The WordPress readback failure remains the primary error; a
@@ -2500,9 +2512,9 @@ class WordPressWriterV2:
             if outcome.type.value == "ready":
                 media_update["featured_media"] = candidate.get("featured_media")
             intent["media_state"] = "apply_started"
-            journal.write_text(
-                json.dumps({**intent, "status": "media_committing"}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            _write_v2_journal_payload(
+                journal,
+                {**intent, "status": "media_committing"},
             )
             try:
                 self.client.update_post(post_id, media_update)
@@ -2535,9 +2547,15 @@ class WordPressWriterV2:
                 payload_meta["_hermes_work_state"] = state_json
                 update["meta"] = dict(payload_meta)
                 intent["state"] = final_state.to_dict()
-            journal.write_text(
-                json.dumps({**intent, "status": "committing", "media_state": "inline_readback_confirmed", "media_readback_status": "confirmed", "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            _write_v2_journal_payload(
+                journal,
+                {
+                    **intent,
+                    "status": "committing",
+                    "media_state": "inline_readback_confirmed",
+                    "media_readback_status": "confirmed",
+                    "apply_media_records": apply_media_records,
+                },
             )
             self.client.update_post(post_id, update)
             readback = self.client.get_post(post_id)
@@ -2550,9 +2568,9 @@ class WordPressWriterV2:
             readback = post
             changed = False
         else:
-            journal.write_text(
-                json.dumps({**intent, "status": "committing"}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            _write_v2_journal_payload(
+                journal,
+                {**intent, "status": "committing"},
             )
             self.client.update_post(post_id, update)
             readback = self.client.get_post(post_id)
@@ -2640,7 +2658,17 @@ class WordPressWriterV2:
         if media_readback:
             media_state = "applied_readback_confirmed"
             media_readback_status = "confirmed"
-        journal.write_text(json.dumps({**intent, "status": "committed", "readback": True, "media_state": media_state, "media_readback_status": media_readback_status, "apply_media_records": apply_media_records}, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_v2_journal_payload(
+            journal,
+            {
+                **intent,
+                "status": "committed",
+                "readback": True,
+                "media_state": media_state,
+                "media_readback_status": media_readback_status,
+                "apply_media_records": apply_media_records,
+            },
+        )
         return {
             "wordpress_changed": changed,
             "readback": True,

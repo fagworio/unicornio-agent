@@ -4,7 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
-from unicornio_editor.pipeline_v2.runtime import _write_v2_journal_checkpoint, run_v2
+from unicornio_editor.pipeline_v2.runtime import (
+    _write_v2_journal_checkpoint,
+    _write_v2_journal_payload,
+    run_v2,
+)
 
 
 class Client:
@@ -228,6 +232,45 @@ def test_journal_checkpoint_guard_preserves_running_journal(tmp_path):
         )
 
     assert journal_path.read_text(encoding="utf-8") == before
+
+
+def test_journal_payload_is_atomic_and_preserves_other_run(tmp_path):
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    journal_path = journal_dir / "2.json"
+    previous = {
+        "status": "running",
+        "post_id": 2,
+        "run_id": "previous-run",
+        "state": {"state": "pending"},
+    }
+    journal_path.write_text(json.dumps(previous), encoding="utf-8")
+    before = journal_path.read_text(encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot overwrite incomplete"):
+        _write_v2_journal_payload(
+            journal_path,
+            {
+                "status": "committing",
+                "post_id": 2,
+                "run_id": "new-run",
+                "state": {"state": "ready"},
+            },
+        )
+
+    assert journal_path.read_text(encoding="utf-8") == before
+    assert not journal_path.with_suffix(".json.tmp").exists()
+
+    payload = {
+        "status": "committing",
+        "post_id": 2,
+        "run_id": "previous-run",
+        "state": {"state": "ready"},
+        "media_records": [{"media_id": 7}],
+    }
+    _write_v2_journal_payload(journal_path, payload)
+    assert json.loads(journal_path.read_text(encoding="utf-8")) == payload
+    assert not journal_path.with_suffix(".json.tmp").exists()
 
 
 def test_quarantine_blocks_reentry_and_manual_post_id_but_not_other_eligible_posts(tmp_path):

@@ -772,6 +772,26 @@ def run_v2_cycle(
                 preview_selected_ids=tuple(selected_ids),
                 budget_violation=budget_violation,
             )
+        if authorized_pending:
+            # A pending authorization is already an admitted write plan. If
+            # its journals prove that the plan completed, reconcile it before
+            # entering write mode so a resumed cron cannot replay WordPress
+            # operations merely because the cycle checkpoint lagged behind.
+            journal_dir = Path(root) / "work" / "v2-journal"
+            if any(
+                (journal_dir / f"{int(post_id)}.json").is_file()
+                for post_id in pending_ids
+            ):
+                reconciled = _reconcile_completed_round(
+                    client,
+                    root,
+                    pending_ids,
+                    expected_cycle_id=state.cycle_id,
+                    expected_cycle_round=request.round_number,
+                    expected_authorization_id=authorization_id,
+                )
+                if reconciled is not None:
+                    return reconciled
         if not authorized_pending:
             store.authorize_round(state, selected_ids)
 
