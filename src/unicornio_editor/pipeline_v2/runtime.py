@@ -2209,6 +2209,7 @@ class WordPressWriterV2:
                 "phash": str(item.phash or ""),
                 "visual_group_id": str(item.visual_group_id or ""),
                 "visual_verification": dict(item.visual_verification or {}),
+                "destination": "pending_apply",
             }
             for item in getattr(proposed_media, "inline", ())
             if getattr(item, "media_id", None)
@@ -2222,6 +2223,7 @@ class WordPressWriterV2:
                 "phash": str(proposed_featured.phash or ""),
                 "visual_group_id": str(proposed_featured.visual_group_id or ""),
                 "visual_verification": dict(proposed_featured.visual_verification or {}),
+                "destination": "pending_apply",
             })
         applied_inline_ids = {
             int(item.media_id)
@@ -2238,6 +2240,7 @@ class WordPressWriterV2:
                 "media_id": int(item.media_id),
                 "media_url": str(item.media_url or ""),
                 "readback_status": "not_attempted",
+                "destination": "apply_pending_readback",
             }
             for item in getattr(candidate_media, "inline", ())
             if getattr(item, "media_id", None)
@@ -2248,7 +2251,17 @@ class WordPressWriterV2:
                 "media_id": int(applied_featured.media_id),
                 "media_url": str(applied_featured.media_url or ""),
                 "readback_status": "not_attempted",
+                "destination": "apply_pending_readback",
             })
+        applied_media_ids = set(applied_media_ids)
+        will_apply_media = bool(content) and outcome.type.value == "ready"
+        for record in media_records:
+            if will_apply_media and int(record.get("media_id") or 0) in applied_media_ids:
+                record["destination"] = "apply_pending_readback"
+            elif str((record.get("visual_verification") or {}).get("decision") or "") in {
+                "SAME_IMAGE", "SAME_ART_CROP",
+            }:
+                record["destination"] = "rejected_duplicate"
         media_state = "accepted_working" if media_ids else "apply_not_attempted"
         media_readback_status = "not_attempted"
         journal = journal_dir / f"{post_id}.json"
@@ -2306,6 +2319,9 @@ class WordPressWriterV2:
                 else:
                     confirmed = _canonical_embedded_media_url(str(record.get("media_url") or "")) in embedded_readback_urls
                 record["readback_status"] = "confirmed" if confirmed else "failed"
+                record["destination"] = (
+                    "applied_readback_confirmed" if confirmed else "apply_readback_failed"
+                )
                 if not confirmed:
                     detail = f" for media_id={record.get('media_id')}"
                     if role == "featured":
@@ -2333,6 +2349,42 @@ class WordPressWriterV2:
             if expected_featured_id is not None and readback_post.get("featured_media") != expected_featured_id:
                 raise RuntimeError("featured media read-back mismatch")
 
+        def persist_media_readback_failure(exc: Exception) -> None:
+            """Keep an attempted-but-unconfirmed apply auditable and retryable."""
+            for record in apply_media_records:
+                if record.get("readback_status") != "confirmed":
+                    record["readback_status"] = "failed"
+                    record["destination"] = "apply_readback_failed"
+            destinations = {
+                int(record.get("media_id") or 0): str(record.get("destination") or "")
+                for record in apply_media_records
+            }
+            for record in media_records:
+                destination = destinations.get(int(record.get("media_id") or 0))
+                if destination:
+                    record["destination"] = destination
+            try:
+                journal.write_text(
+                    json.dumps(
+                        {
+                            **intent,
+                            "status": "media_readback_failed",
+                            "media_state": "apply_readback_failed",
+                            "media_readback_status": "failed",
+                            "media_records": media_records,
+                            "apply_media_records": apply_media_records,
+                            "detail": str(exc)[:400],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                # The WordPress readback failure remains the primary error; a
+                # local journal failure must not hide it.
+                pass
+
         if ready_two_phase:
             # Keep the WordPress lifecycle pending while media is verified. If
             # the second metadata write fails, the post remains eligible for
@@ -2345,11 +2397,23 @@ class WordPressWriterV2:
                 json.dumps({**intent, "status": "media_committing"}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            self.client.update_post(post_id, media_update)
-            media_readback_post = self.client.get_post(post_id)
-            if not isinstance(media_readback_post, dict):
-                raise RuntimeError("WordPress media read-back missing")
-            assert_media_readback(media_readback_post)
+            try:
+                self.client.update_post(post_id, media_update)
+                media_readback_post = self.client.get_post(post_id)
+                if not isinstance(media_readback_post, dict):
+                    raise RuntimeError("WordPress media read-back missing")
+                assert_media_readback(media_readback_post)
+            except Exception as exc:
+                persist_media_readback_failure(exc)
+                raise
+            destinations = {
+                int(record.get("media_id") or 0): str(record.get("destination") or "")
+                for record in apply_media_records
+            }
+            for record in media_records:
+                destination = destinations.get(int(record.get("media_id") or 0))
+                if destination:
+                    record["destination"] = destination
             if candidate_media_present:
                 final_state = replace(
                     proposed_state,
@@ -2403,7 +2467,19 @@ class WordPressWriterV2:
                 raise RuntimeError("Awaiting Human status read-back mismatch")
         media_readback = False
         if apply_inline or outcome.type.value == "ready":
-            assert_media_readback(readback)
+            try:
+                assert_media_readback(readback)
+            except Exception as exc:
+                persist_media_readback_failure(exc)
+                raise
+            destinations = {
+                int(record.get("media_id") or 0): str(record.get("destination") or "")
+                for record in apply_media_records
+            }
+            for record in media_records:
+                destination = destinations.get(int(record.get("media_id") or 0))
+                if destination:
+                    record["destination"] = destination
             readback_content = _html.unescape(str((readback.get("content") or {}).get("raw") or ""))
             embedded_readback_urls = set(_embedded_media_urls(readback_content))
             missing_inline = []

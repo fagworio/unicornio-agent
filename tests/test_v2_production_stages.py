@@ -511,6 +511,11 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
     with pytest.raises(RuntimeError, match="featured media read-back mismatch"):
         WordPressWriterV2(Client(), tmp_path).commit(130, {"post_id": 130}, state, Outcome.ready())
 
+    journal = json.loads((tmp_path / "work/v2-journal/130.json").read_text())
+    assert journal["status"] == "media_readback_failed"
+    assert journal["media_readback_status"] == "failed"
+    assert {row["destination"] for row in journal["apply_media_records"]} == {"apply_readback_failed"}
+    assert {row["destination"] for row in journal["media_records"]} == {"apply_readback_failed"}
     with connect_media_registry(tmp_path) as db:
         usages = db.execute(
             "SELECT status FROM media_usage WHERE post_id=?", (130,),
@@ -665,7 +670,17 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
     assert "meta" not in client.updates[0]
     journal = json.loads((tmp_path / "work/v2-journal/132.json").read_text())
     assert [row["media_id"] for row in journal["media_records"] if row["role"] == "inline"] == [200, 201, 202, 203, 204]
+    assert next(row for row in journal["media_records"] if row["media_id"] == 200)["destination"] == "rejected_duplicate"
+    assert all(
+        row["destination"] == "applied_readback_confirmed"
+        for row in journal["media_records"]
+        if row["media_id"] != 200
+    )
     assert all(row["readback_status"] == "confirmed" for row in journal["apply_media_records"])
+    assert all(
+        row["destination"] == "applied_readback_confirmed"
+        for row in journal["apply_media_records"]
+    )
     record_v2_observation(
         tmp_path,
         post_id=132,
@@ -1098,6 +1113,7 @@ def test_writer_does_not_apply_candidate_content_while_partial(tmp_path):
     assert journal["media_state"] == "accepted_working"
     assert journal["media_readback_status"] == "not_attempted"
     assert journal["media_ids"] == [14]
+    assert journal["media_records"][0]["destination"] == "pending_apply"
 
     second = WordPressWriterV2(client, tmp_path).commit(14, {"post_id": 14}, state, outcome)
     assert second["readback"] is True
