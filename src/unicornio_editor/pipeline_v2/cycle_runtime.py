@@ -292,6 +292,8 @@ def run_v2_cycle(
                 phase=report.phase,
                 drain_rounds=report.drain_rounds,
                 elapsed_seconds=report.elapsed_seconds,
+                ready_conversion_rate=report.ready_conversion_rate,
+                attempts_per_ready=report.attempts_per_ready,
             )
         except Exception:
             pass

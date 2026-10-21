@@ -201,3 +201,58 @@ def test_cycle_respects_total_attempt_budget():
     assert report.stop_reason == "attempt_budget"
     assert report.attempts_total == 4
     assert calls[1].batch_size == 1
+
+
+def test_cycle_e2e_replenishes_new_work_while_retrying_until_five_ready():
+    requests = []
+    selected_by_round = {
+        1: (1, 2, 3, 4, 5),
+        2: (1, 2, 3, 4, 6),
+        3: (2, 3, 4, 6, 7),
+        4: (3, 4, 6, 7, 8),
+        5: (4, 6, 7, 8, 9),
+        6: (5, 6, 7, 8, 9),
+    }
+    ready_after_round = {1: 2, 2: 3, 3: 4, 4: 5, 5: 6}
+
+    def execute(request):
+        requests.append(request)
+        # The first pass produces no READY posts. Each following pass keeps
+        # retrying the existing work while the admission budget supplies one
+        # new post, proving the cycle is not limited to its first batch.
+        selected = selected_by_round[request.round_number]
+        details = tuple(
+            ready_detail(post_id)
+            if post_id in {1, 2, 3, 4, 5}
+            and request.round_number >= ready_after_round[post_id]
+            else retry_detail(post_id)
+            for post_id in selected
+        )
+        return CycleRoundResult(
+            preview_selected_ids=selected,
+            executed_ids=selected,
+            details=details,
+        )
+
+    report = run_cycle(
+        execute,
+        config=CycleConfig(
+            ready_target=5,
+            new_batch_size=5,
+            max_unique_posts=9,
+            max_total_attempts=40,
+            max_attempts_per_post_per_cycle=5,
+        ),
+    )
+
+    assert report.stop_reason == "ready_target"
+    assert report.ready_count == 5
+    assert report.ready_post_ids == [1, 2, 3, 4, 5]
+    assert report.unique_posts == 9
+    assert report.attempts_total > 5
+    assert report.ready_conversion_rate == round(5 / 9, 6)
+    assert report.attempts_per_ready == round(report.attempts_total / 5, 6)
+    assert requests[0].max_new_posts == 9
+    assert requests[1].max_new_posts == 4
+    assert requests[4].max_new_posts == 1
+    assert requests[5].max_new_posts == 0

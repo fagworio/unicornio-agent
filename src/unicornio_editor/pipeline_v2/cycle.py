@@ -78,6 +78,8 @@ class CycleReport:
     drain_rounds: int = 0
     phase: str = "ADMISSION"
     elapsed_seconds: float = 0.0
+    ready_conversion_rate: float = 0.0
+    attempts_per_ready: float | None = None
     stop_reason: str = ""
     attempted_post_ids: list[int] = field(default_factory=list)
     attempts_by_post: dict[int, int] = field(default_factory=dict)
@@ -345,6 +347,16 @@ def run_cycle(
     report.ready_count = len(ready)
     report.unique_posts = len(seen)
     report.attempts_total = sum(attempts.values())
+    report.ready_conversion_rate = (
+        round(report.ready_count / report.unique_posts, 6)
+        if report.unique_posts
+        else 0.0
+    )
+    report.attempts_per_ready = (
+        round(report.attempts_total / report.ready_count, 6)
+        if report.ready_count
+        else None
+    )
     report.attempts_by_post = dict(sorted(attempts.items()))
     report.attempted_post_ids = sorted(seen)
     report.drain_rounds = drain_rounds
