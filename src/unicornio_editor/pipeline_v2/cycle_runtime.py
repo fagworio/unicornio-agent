@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,85 @@ def _selection_budget_violation(
     return None
 
 
-def _confirm_round_has_no_write(client, root: Path, selected_ids: list[int]) -> dict[str, Any] | None:
+def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | None:
+    path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            event.get("event") == "round_authorized"
+            and str(event.get("cycle_id") or "") == str(cycle_id)
+            and int(event.get("round_number", -1)) == int(round_number)
+        ):
+            return str(event.get("at") or "") or None
+    return None
+
+
+def _registry_has_round_evidence(
+    root: Path,
+    selected_ids: list[int],
+    *,
+    authorized_at: str | None,
+) -> dict[str, Any] | None:
+    """Find media-registry effects created after this round was authorized."""
+    path = Path(root) / "work" / "media_registry.sqlite"
+    if not path.is_file():
+        return {"media_registry_checked": False, "media_registry_absent": True}
+    placeholders = ",".join("?" for _ in selected_ids)
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            rows: list[tuple[str, Any, Any]] = []
+            for table, timestamp in (
+                ("media_runs", "created_at"),
+                ("media_decisions", "created_at"),
+                ("media_usage", "applied_at"),
+            ):
+                try:
+                    rows.extend(
+                        (table, row[0], row[1])
+                        for row in db.execute(
+                            f"SELECT post_id, {timestamp} FROM {table} WHERE post_id IN ({placeholders})",
+                            selected_ids,
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:
+                    return None
+    except (OSError, sqlite3.Error):
+        return None
+    if not rows:
+        return {"media_registry_checked": True, "media_registry_rows": 0}
+    if not authorized_at:
+        return None
+    current_rows = [
+        {"table": table, "post_id": int(post_id), "at": str(timestamp or "")}
+        for table, post_id, timestamp in rows
+        if timestamp and str(timestamp) >= str(authorized_at).replace("T", " ")[:19]
+    ]
+    if current_rows:
+        return None
+    return {
+        "media_registry_checked": True,
+        "media_registry_rows": len(rows),
+        "media_registry_current_round_rows": 0,
+    }
+
+
+def _confirm_round_has_no_write(
+    client,
+    root: Path,
+    selected_ids: list[int],
+    *,
+    cycle_id: str,
+    round_number: int,
+) -> dict[str, Any] | None:
     """Return evidence for invalidating a round only when no write is known.
 
     A journal file is treated as possible write evidence, including prepared or
@@ -59,6 +138,7 @@ def _confirm_round_has_no_write(client, root: Path, selected_ids: list[int]) -> 
     invocation can reconcile each post instead of discarding the authorization.
     """
     journal_dir = Path(root) / "work" / "v2-journal"
+    wordpress_statuses: dict[str, str] = {}
     for post_id in selected_ids:
         if (journal_dir / f"{int(post_id)}.json").exists():
             return None
@@ -68,9 +148,22 @@ def _confirm_round_has_no_write(client, root: Path, selected_ids: list[int]) -> 
             return None
         if not isinstance(post, dict):
             return None
+        status = str(post.get("status") or "")
+        if status != "pending":
+            return None
+        wordpress_statuses[str(int(post_id))] = status
+    registry_evidence = _registry_has_round_evidence(
+        root,
+        selected_ids,
+        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+    )
+    if registry_evidence is None:
+        return None
     return {
         "journal_files_absent": True,
         "wordpress_readback_checked": True,
+        "wordpress_statuses": wordpress_statuses,
+        **registry_evidence,
         "post_ids": [int(post_id) for post_id in selected_ids],
     }
 
@@ -80,6 +173,8 @@ def _reconcile_completed_round(
     root: Path,
     selected_ids: list[int],
     *,
+    expected_cycle_id: str,
+    expected_cycle_round: int,
     preauthorized_new_post_ids: tuple[int, ...] = (),
 ) -> CycleRoundResult | None:
     """Reconcile a round whose write completed before its cycle checkpoint.
@@ -114,8 +209,14 @@ def _reconcile_completed_round(
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return None
+        try:
+            journal_cycle_round = int(journal.get("cycle_round"))
+        except (TypeError, ValueError):
+            return None
         if (
-            state is None
+            str(journal.get("cycle_id") or "") != str(expected_cycle_id)
+            or journal_cycle_round != int(expected_cycle_round)
+            or state is None
             or journal.get("status") != "committed"
             or journal.get("readback") is not True
         ):
@@ -292,6 +393,8 @@ def run_v2_cycle(
                     client,
                     root,
                     pending_ids,
+                    expected_cycle_id=state.cycle_id,
+                    expected_cycle_round=request.round_number,
                     preauthorized_new_post_ids=tuple(
                         int(post_id)
                         for post_id in set(pending_ids) - set(authorized_seen_ids)
@@ -307,7 +410,13 @@ def run_v2_cycle(
                     excluded_post_ids=authorized_excluded_ids,
                 )
                 if budget_violation:
-                    evidence = _confirm_round_has_no_write(client, root, pending_ids)
+                    evidence = _confirm_round_has_no_write(
+                        client,
+                        root,
+                        pending_ids,
+                        cycle_id=state.cycle_id,
+                        round_number=request.round_number,
+                    )
                     if evidence is not None:
                         return CycleRoundResult(
                             preview_selected_ids=tuple(pending_ids),
@@ -358,7 +467,13 @@ def run_v2_cycle(
         )
         if budget_violation:
             if authorized_pending:
-                evidence = _confirm_round_has_no_write(client, root, selected_ids)
+                evidence = _confirm_round_has_no_write(
+                    client,
+                    root,
+                    selected_ids,
+                    cycle_id=state.cycle_id,
+                    round_number=request.round_number,
+                )
                 if evidence is not None:
                     return CycleRoundResult(
                         preview_selected_ids=tuple(selected_ids),

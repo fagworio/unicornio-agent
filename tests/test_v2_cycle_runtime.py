@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
 from unicornio_editor.pipeline_v2 import cycle_runtime
@@ -122,16 +123,50 @@ def test_reconcile_completed_round_rebuilds_mixed_post_results_from_journals(tmp
         (journal_dir / f"{post_id}.json").write_text(json.dumps({
             "status": "committed",
             "readback": True,
+            "cycle_id": "cycle-test",
+            "cycle_round": 1,
             "state": journal_state.to_dict(),
             "media_readback_status": "confirmed" if post_id == 2 else "not_attempted",
         }), encoding="utf-8")
 
-    result = cycle_runtime._reconcile_completed_round(client, tmp_path, [1, 2])
+    result = cycle_runtime._reconcile_completed_round(
+        client,
+        tmp_path,
+        [1, 2],
+        expected_cycle_id="cycle-test",
+        expected_cycle_round=1,
+    )
     assert result is not None
     assert result.executed_ids == (1, 2)
     assert [detail["outcome"] for detail in result.details] == ["ready", "retry"]
     assert result.details[0]["ready_verified"] is True
     assert result.details[1]["progress"] is True
+
+
+def test_reconcile_completed_round_rejects_journal_from_another_cycle(tmp_path):
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "1.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "cycle_id": "old-cycle",
+        "cycle_round": 1,
+    }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    assert cycle_runtime._reconcile_completed_round(
+        Client(),
+        tmp_path,
+        [1],
+        expected_cycle_id="new-cycle",
+        expected_cycle_round=2,
+    ) is None
 
 
 def test_cycle_does_not_touch_checkpoint_when_lock_is_busy(tmp_path):
@@ -268,3 +303,28 @@ def test_draining_invalid_authorization_is_audited_and_removed_without_write(tmp
     ]
     assert "round_authorization_invalidated" in events
     assert "round_completed" not in events
+
+
+def test_no_write_confirmation_blocks_when_media_registry_has_partial_effect(tmp_path):
+    registry_path = tmp_path / "work" / "media_registry.sqlite"
+    registry_path.parent.mkdir(parents=True)
+    with sqlite3.connect(registry_path) as db:
+        db.execute("CREATE TABLE media_runs (post_id INTEGER, created_at TEXT)")
+        db.execute("CREATE TABLE media_decisions (post_id INTEGER, created_at TEXT)")
+        db.execute("CREATE TABLE media_usage (post_id INTEGER, applied_at TEXT)")
+        db.execute(
+            "INSERT INTO media_runs(post_id, created_at) VALUES (?, ?)",
+            (115329, "2026-10-21 16:00:00"),
+        )
+
+    class Client:
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    assert cycle_runtime._confirm_round_has_no_write(
+        Client(),
+        tmp_path,
+        [115329],
+        cycle_id="cycle",
+        round_number=4,
+    ) is None

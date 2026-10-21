@@ -96,6 +96,10 @@ pendente antiga contrariar esse contrato e não houver journal nem evidência de
 write no readback, o ciclo registra `round_authorization_invalidated`, remove
 somente a pendência e preserva o histórico das rodadas anteriores. Com
 evidência parcial, a retomada permanece bloqueada para reconciliação por post.
+Uma reconciliação só aceita journal com o mesmo `cycle_id` e `cycle_round` da
+autorização pendente; registros de outro ciclo nunca são prova suficiente.
+Antes de invalidar, o runtime verifica também o status WordPress e o
+MediaRegistry em modo somente leitura.
 O limite de duração conta apenas o tempo de execução das sessões, não o
 intervalo em que o checkpoint ficou pausado entre invocações.
 

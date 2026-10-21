@@ -56,6 +56,10 @@ readback; o evento `round_authorization_invalidated` preserva a seleção e os
 contadores históricos sem contar uma rodada não executada. Qualquer evidência de
 write exige reconciliação por post. O limite de duração considera apenas tempo
 de execução, não o intervalo de pausa entre invocações do cron.
+Reconciliação só é válida quando `cycle_id` e `cycle_round` do journal
+coincidem exatamente com a autorização pendente; journal histórico de outro
+ciclo não pode ser reutilizado. A invalidação consulta WordPress e
+MediaRegistry somente para leitura e para diante de qualquer evidência parcial.
 
 Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
 `media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser
