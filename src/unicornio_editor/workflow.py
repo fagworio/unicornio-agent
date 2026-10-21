@@ -3236,8 +3236,21 @@ def _sync_published_readback(
     v2_post = client.get_post(post_id)
     if v2_post.get("status") != "publish":
         raise WorkflowError("WordPress publish read-back mismatch")
-    if read_state(v2_post).get("state") != STATE_PUBLISHED:
-        raise WorkflowError("legacy publish read-back mismatch")
+    legacy_state = read_state(v2_post).get("state")
+    if legacy_state != STATE_PUBLISHED:
+        # A publish request can commit the WordPress status while the legacy
+        # marker is omitted by a partial/older REST meta response. The remote
+        # status is already the write-side effect, so reconcile only the safe
+        # READY/legacy-empty states instead of issuing a second publication.
+        if legacy_state not in (None, STATE_READY):
+            raise WorkflowError("legacy publish read-back mismatch")
+        client.update_post(post_id, {"meta": {"_hermes_state": STATE_PUBLISHED}})
+        v2_post = client.get_post(post_id)
+        if (
+            v2_post.get("status") != "publish"
+            or read_state(v2_post).get("state") != STATE_PUBLISHED
+        ):
+            raise WorkflowError("legacy publish state reconciliation read-back mismatch")
     v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
     if "_hermes_work_state" in v2_meta:
         v2_store = _V2Store(_V2Backend(client))

@@ -272,6 +272,34 @@ def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path
     assert '"event": "post_published"' not in events
 
 
+def test_publish_reconciles_missing_legacy_state_without_second_publish(tmp_path):
+    class LegacyMetaDroppingClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            result = super().publish(post_id, **kwargs)
+            self.post["meta"].pop("_hermes_state", None)
+            return result
+
+    client = LegacyMetaDroppingClient(_pending_ready_post())
+    post = client.post
+    result = _publish_now(
+        client,
+        _config(),
+        post["id"],
+        root=tmp_path,
+        integrity="manifest_match",
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"],
+    )
+
+    assert result["status"] == "published"
+    assert len(client.publish_calls) == 1
+    assert client.post["meta"]["_hermes_state"] == "published"
+    assert any(
+        payload.get("meta", {}).get("_hermes_state") == "published"
+        for payload in client.updates
+    )
+
+
 def test_publish_timeout_before_commit_is_retryable_and_not_marked_published(tmp_path):
     class TimeoutBeforeCommitClient(FakePublicationClient):
         def publish(self, post_id, **kwargs):
