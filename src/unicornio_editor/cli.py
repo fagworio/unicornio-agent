@@ -1515,6 +1515,20 @@ def _resolve_media_batch(
         all_engines_verified = bool(
             all_engines_reported and not non_verified_engine_failures
         )
+        engine_diagnostics = {
+            name: {
+                "attempted": name in engine_reports,
+                "failure_kind": str((engine_reports.get(name) or {}).get("failure_kind") or "unknown"),
+                "error": str((engine_reports.get(name) or {}).get("error") or "")[:200],
+                "http_status": int((engine_reports.get(name) or {}).get("http_status") or 0),
+                "objects_parsed": int((engine_reports.get(name) or {}).get("objects_parsed") or 0),
+                "candidates": int((engine_reports.get(name) or {}).get("candidates") or 0),
+            }
+            for name in expected_engines
+        }
+        next_fallback_engines = [
+            name for name in expected_engines if name not in engine_reports
+        ]
         technical_engine_failure = bool(
             non_verified_engine_failures.intersection(technical_failure_kinds)
         ) or bool(
@@ -1564,10 +1578,13 @@ def _resolve_media_batch(
                 "expected_engines": list(expected_engines),
                 "attempted_engines": list(engines_attempted),
                 "reported_engines": sorted(engine_reports),
+                "engine_reports": engine_diagnostics,
                 "engine_results": {
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
                 },
+                "next_fallback_engines": next_fallback_engines,
+                "fallback_available": bool(next_fallback_engines),
                 "technical_failures": sorted(non_verified_engine_failures),
                 "planned_queries": 1 if needed_web > 0 else 0,
                 "completed_queries": 1 if search_completed else 0,

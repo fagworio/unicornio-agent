@@ -972,7 +972,7 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
             "query": "technical failure",
             "candidates": [],
             "engine_reports": {
-                "google_browser": {"failure_kind": "js_required"},
+                "google_browser": {"failure_kind": "js_required", "error": "browser unavailable"},
                 "bing": {"failure_kind": "no_results_legitimate"},
                 "yandex": {"failure_kind": "no_results_legitimate"},
                 "google": {"failure_kind": "no_results_legitimate"},
@@ -991,6 +991,39 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
     progress = result["posts"][0]["search"]
     assert progress["completed"] is False
     assert progress["completion_reason"] == "SEARCH_INCOMPLETE"
+    assert progress["coverage"]["engine_reports"]["google_browser"]["error"] == "browser unavailable"
+    assert progress["coverage"]["fallback_available"] is False
+
+
+def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
+    monkeypatch.setattr(
+        search,
+        "search_web_images_batch",
+        lambda *_args, **_kwargs: [{
+            "query": "fallback query",
+            "candidates": [],
+            "engine_reports": {"google_browser": {"failure_kind": "js_required"}},
+        }],
+    )
+
+    result = cli._resolve_media_batch(
+        object(), Config(), tmp_path,
+        {"schema_version": 1, "batch_id": "fallback-search", "posts": [{
+            "post_id": 115091, "subject": "Test", "query": "fallback query",
+            "needed": 1, "limit": 3, "engine": "auto",
+        }]},
+        full=True, allow_reuse=False,
+    )
+
+    coverage = result["posts"][0]["search"]["coverage"]
+    assert coverage["fallback_available"] is True
+    assert coverage["next_fallback_engines"] == ["bing", "yandex", "google"]
 
 
 def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
