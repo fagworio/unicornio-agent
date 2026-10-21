@@ -66,6 +66,10 @@ class CycleRoundResult:
     preauthorized_new_post_ids: tuple[int, ...] = ()
     authorization_invalidated: bool = False
     authorization_invalidation: Mapping[str, Any] | None = None
+    reconciled_without_replay: bool = False
+    reconciliation_info: Mapping[str, Any] | None = None
+    reconciliation_blocked: bool = False
+    reconciliation_blocking_info: Mapping[str, Any] | None = None
     historical_reconciliation: bool = False
     historical_reconciliation_info: Mapping[str, Any] | None = None
 
@@ -128,6 +132,18 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         authorization_invalidation=(
             dict(value["authorization_invalidation"])
             if isinstance(value.get("authorization_invalidation"), Mapping)
+            else None
+        ),
+        reconciled_without_replay=bool(value.get("reconciled_without_replay", False)),
+        reconciliation_info=(
+            dict(value["reconciliation_info"])
+            if isinstance(value.get("reconciliation_info"), Mapping)
+            else None
+        ),
+        reconciliation_blocked=bool(value.get("reconciliation_blocked", False)),
+        reconciliation_blocking_info=(
+            dict(value["reconciliation_blocking_info"])
+            if isinstance(value.get("reconciliation_blocking_info"), Mapping)
             else None
         ),
         historical_reconciliation=bool(value.get("historical_reconciliation", False)),
@@ -284,6 +300,43 @@ def run_cycle(
                 "round_authorization_invalidated",
                 round_number=request.round_number,
                 report=invalidation_report,
+            )
+            continue
+        if result.reconciliation_blocked:
+            blocking = dict(result.reconciliation_blocking_info or {})
+            blocked_report = {
+                "event": "round_reconciliation_blocked",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": list(result.executed_ids),
+                "post_results": [dict(detail) for detail in result.details],
+                **blocking,
+            }
+            report.round_reports.append(blocked_report)
+            report.stop_reason = "recovery_uncertain"
+            save(
+                "round_reconciliation_blocked",
+                round_number=request.round_number,
+                report=blocked_report,
+            )
+            break
+        if result.reconciled_without_replay:
+            reconciliation = dict(result.reconciliation_info or {})
+            reconciled_report = {
+                "event": "round_reconciled_without_replay",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": list(result.executed_ids),
+                "post_results": [dict(detail) for detail in result.details],
+                **reconciliation,
+            }
+            report.round_reports.append(reconciled_report)
+            save(
+                "round_reconciled",
+                round_number=request.round_number,
+                report=reconciled_report,
             )
             continue
         if result.historical_reconciliation:

@@ -235,6 +235,101 @@ def _confirm_round_has_no_write(
     }
 
 
+def _post_no_write_evidence(
+    client,
+    root: Path,
+    post_id: int,
+    *,
+    cycle_id: str,
+    round_number: int,
+) -> dict[str, Any] | None:
+    """Prove that one post has no effect belonging to the current round."""
+    try:
+        post = client.get_post(int(post_id))
+    except Exception:
+        return None
+    if not isinstance(post, dict) or str(post.get("status") or "") != "pending":
+        return None
+    registry_evidence = _registry_has_round_evidence(
+        root,
+        [int(post_id)],
+        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+    )
+    if registry_evidence is None:
+        return None
+    return {
+        "post_id": int(post_id),
+        "wordpress_status": "pending",
+        **registry_evidence,
+    }
+
+
+def _journal_correlation(
+    journal: dict[str, Any],
+    *,
+    expected_cycle_id: str,
+    expected_cycle_round: int,
+    expected_authorization_id: str | None,
+) -> str:
+    """Classify a journal as current, historical, or unsafe to infer."""
+    journal_authorization_id = str(journal.get("authorization_id") or "").strip()
+    if expected_authorization_id and journal_authorization_id == str(expected_authorization_id):
+        return "current"
+    try:
+        has_cycle_round = journal.get("cycle_id") is not None and journal.get("cycle_round") is not None
+        same_cycle_round = (
+            str(journal.get("cycle_id") or "") == str(expected_cycle_id)
+            and int(journal.get("cycle_round")) == int(expected_cycle_round)
+        )
+    except (TypeError, ValueError):
+        has_cycle_round = False
+        same_cycle_round = False
+    if not journal_authorization_id and same_cycle_round:
+        return "current"
+    if expected_authorization_id is None and same_cycle_round:
+        return "current"
+    if journal_authorization_id or has_cycle_round:
+        return "historical"
+    return "uncertain"
+
+
+def _reconciled_detail(
+    post_id: int,
+    journal: dict[str, Any],
+    state,
+) -> dict[str, Any] | None:
+    if state is None or state.state not in {
+        LifecycleState.READY,
+        LifecycleState.PENDING,
+        LifecycleState.HUMAN_REQUIRED,
+        LifecycleState.SKIPPED,
+    }:
+        return None
+    outcome = {
+        LifecycleState.READY: "ready",
+        LifecycleState.HUMAN_REQUIRED: "human_required",
+        LifecycleState.SKIPPED: "skipped",
+    }.get(state.state, "retry")
+    media_readback = journal.get("media_readback_status") == "confirmed"
+    return {
+        "post_id": int(post_id),
+        "initial_state": "pending",
+        "outcome": outcome,
+        "ready_verified": state.state is LifecycleState.READY,
+        "readback": True,
+        "state": state.to_dict(),
+        "media_readback": media_readback,
+        "media_readback_status": journal.get("media_readback_status"),
+        "progress": bool(
+            media_readback
+            or state.state is not LifecycleState.PENDING
+            or state.phase.value != "relevance"
+        ),
+        "detail": journal.get("detail"),
+        "reconciled": True,
+    }
+
+
 def _reconcile_completed_round(
     client,
     root: Path,
@@ -246,102 +341,142 @@ def _reconcile_completed_round(
     preauthorized_new_post_ids: tuple[int, ...] = (),
     historical_out_of_budget: bool = False,
 ) -> CycleRoundResult | None:
-    """Reconcile a round whose write completed before its cycle checkpoint.
-
-    A post-level V2 journal/readback is the authority. Each authorized post
-    is reconstructed independently, so a mixed READY/PENDING round is counted
-    without issuing another WordPress write. Missing or non-committed evidence
-    fails closed rather than repeating an unsafe write.
-    """
+    """Reconcile each authorized post without replaying any write."""
     reader = ProductionCandidateReader(client, root)
     contexts = dict(reader.snapshot(page_size=max(10, len(selected_ids))))
     details: list[dict[str, Any]] = []
+    executed_ids: list[int] = []
+    unresolved: list[dict[str, Any]] = []
+    has_journal_evidence = False
+    journal_dir = Path(root) / "work" / "v2-journal"
+
     for post_id in selected_ids:
         context = contexts.get(int(post_id))
         if context is None:
-            # HUMAN_REQUIRED posts are intentionally outside the pending
-            # listing. Reconstruct their read-only state directly, but never
-            # infer a result when WordPress cannot be read back.
             try:
                 post = client.get_post(int(post_id))
-                if not isinstance(post, dict):
-                    return None
-                context = reader.context_loader.load(post)
-                context["v2_state"] = reader._recovered_state(
-                    int(post_id), reader.state_store.load(int(post_id)), context
-                )
+                if isinstance(post, dict):
+                    context = reader.context_loader.load(post)
+                    context["v2_state"] = reader._recovered_state(
+                        int(post_id), reader.state_store.load(int(post_id)), context
+                    )
             except Exception:
-                return None
+                context = None
         state = context.get("v2_state") if context else None
-        journal_path = root / "work" / "v2-journal" / f"{int(post_id)}.json"
+        journal_path = journal_dir / f"{int(post_id)}.json"
+        if not journal_path.is_file():
+            no_write = _post_no_write_evidence(
+                client,
+                root,
+                int(post_id),
+                cycle_id=expected_cycle_id,
+                round_number=expected_cycle_round,
+            )
+            if no_write is not None:
+                details.append({
+                    "post_id": int(post_id),
+                    "initial_state": "pending",
+                    "outcome": "not_executed",
+                    "readback": True,
+                    "progress": False,
+                    "reconciled": True,
+                    "no_write_evidence": no_write,
+                })
+            else:
+                unresolved.append({"post_id": int(post_id), "reason": "missing_evidence"})
+            continue
+
+        has_journal_evidence = True
         try:
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return None
-        try:
-            journal_cycle_round = int(journal.get("cycle_round"))
-        except (TypeError, ValueError):
-            return None
-        if (
-            str(journal.get("cycle_id") or "") != str(expected_cycle_id)
-            or journal_cycle_round != int(expected_cycle_round)
-            or (
-                expected_authorization_id is not None
-                and str(journal.get("authorization_id") or "")
-                != str(expected_authorization_id)
-            )
-            or state is None
-            or journal.get("status") != "committed"
-            or journal.get("readback") is not True
-        ):
-            return None
-        if state.state not in {
-            LifecycleState.READY,
-            LifecycleState.PENDING,
-            LifecycleState.HUMAN_REQUIRED,
-            LifecycleState.SKIPPED,
-        }:
-            return None
-        outcome = {
-            LifecycleState.READY: "ready",
-            LifecycleState.HUMAN_REQUIRED: "human_required",
-            LifecycleState.SKIPPED: "skipped",
-        }.get(state.state, "retry")
-        media_readback = journal.get("media_readback_status") == "confirmed"
-        progressed = bool(
-            media_readback
-            or state.state is not LifecycleState.PENDING
-            or state.phase.value != "relevance"
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            unresolved.append({"post_id": int(post_id), "reason": "journal_unreadable"})
+            continue
+        correlation = _journal_correlation(
+            journal,
+            expected_cycle_id=expected_cycle_id,
+            expected_cycle_round=expected_cycle_round,
+            expected_authorization_id=expected_authorization_id,
         )
-        detail = {
-            "post_id": int(post_id),
-            "initial_state": "pending",
-            "outcome": outcome,
-            "ready_verified": state.state is LifecycleState.READY,
-            "readback": True,
-            "state": state.to_dict(),
-            "media_readback": media_readback,
-            "media_readback_status": journal.get("media_readback_status"),
-            "progress": progressed,
-            "detail": journal.get("detail"),
-            "reconciled": True,
-        }
+        if correlation == "uncertain":
+            unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+            continue
+        if correlation == "historical":
+            no_write = _post_no_write_evidence(
+                client,
+                root,
+                int(post_id),
+                cycle_id=expected_cycle_id,
+                round_number=expected_cycle_round,
+            )
+            if no_write is not None:
+                details.append({
+                    "post_id": int(post_id),
+                    "initial_state": "pending",
+                    "outcome": "not_executed",
+                    "readback": True,
+                    "progress": False,
+                    "reconciled": True,
+                    "historical_journal": True,
+                    "no_write_evidence": no_write,
+                })
+            else:
+                unresolved.append({"post_id": int(post_id), "reason": "historical_effect_uncertain"})
+            continue
+        if journal.get("status") != "committed" or journal.get("readback") is not True:
+            unresolved.append({
+                "post_id": int(post_id),
+                "reason": "journal_not_committed",
+                "journal_status": journal.get("status"),
+            })
+            continue
+        detail = _reconciled_detail(int(post_id), journal, state)
+        if detail is None:
+            unresolved.append({"post_id": int(post_id), "reason": "state_readback_invalid"})
+            continue
         details.append(detail)
-    return CycleRoundResult(
-        preview_selected_ids=tuple(selected_ids),
-        executed_ids=tuple(selected_ids),
-        details=tuple(details),
-        preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
-        historical_reconciliation=historical_out_of_budget,
-        historical_reconciliation_info=(
-            {
+        executed_ids.append(int(post_id))
+
+    if unresolved:
+        return CycleRoundResult(
+            preview_selected_ids=tuple(selected_ids),
+            executed_ids=tuple(executed_ids),
+            details=tuple(details),
+            preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
+            reconciliation_blocked=True,
+            reconciliation_blocking_info={
+                "authorization_status": "partially_reconciled",
+                "write_replayed": False,
+                "unresolved_posts": unresolved,
+                "reconciled_post_ids": [int(detail["post_id"]) for detail in details],
+            },
+        )
+    if not has_journal_evidence:
+        return None
+    if historical_out_of_budget and all(detail.get("outcome") != "not_executed" for detail in details):
+        return CycleRoundResult(
+            preview_selected_ids=tuple(selected_ids),
+            executed_ids=tuple(selected_ids),
+            details=tuple(details),
+            preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
+            historical_reconciliation=True,
+            historical_reconciliation_info={
                 "reason": "unique_post_budget_violation",
                 "authorization_status": "invalid_historical_execution",
                 "write_replayed": False,
-            }
-            if historical_out_of_budget
-            else None
-        ),
+            },
+        )
+    return CycleRoundResult(
+        preview_selected_ids=tuple(selected_ids),
+        executed_ids=tuple(executed_ids),
+        details=tuple(details),
+        preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
+        reconciled_without_replay=True,
+        reconciliation_info={
+            "authorization_status": "fully_reconciled",
+            "write_replayed": False,
+            "reconciled_post_ids": [int(detail["post_id"]) for detail in details],
+        },
     )
 
 
@@ -397,6 +532,9 @@ def run_v2_cycle(
                 report=fields.get("report") or {},
             )
             return
+        if event == "round_reconciled":
+            store.reconcile_round(current, report=fields.get("report") or {})
+            return
         if event == "cycle_finished":
             stop_reason = str(fields.get("stop_reason") or "")
             current.stop_reason = stop_reason
@@ -410,6 +548,7 @@ def run_v2_cycle(
                 "duplicate_selection",
                 "attempt_budget_violation",
                 "unique_post_budget_violation",
+                "recovery_uncertain",
             }:
                 current.status = "running"
                 current.active_started_at = None
