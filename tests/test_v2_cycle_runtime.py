@@ -61,6 +61,11 @@ def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path
     assert [call["preview"] for call in calls] == [True, False, True, False]
     assert all(call["cycle_id"] == report.cycle_id for call in calls)
     assert [call["cycle_round"] for call in calls] == [1, 1, 2, 2]
+    assert calls[0]["authorization_id"]
+    assert calls[0]["authorization_id"] == calls[1]["authorization_id"]
+    assert calls[2]["authorization_id"]
+    assert calls[2]["authorization_id"] == calls[3]["authorization_id"]
+    assert calls[0]["authorization_id"] != calls[2]["authorization_id"]
     state = json.loads((tmp_path / "work" / "v2-cycle" / "state.json").read_text())
     assert state["status"] == "completed"
     assert state["stop_reason"] == "ready_target"
@@ -307,6 +312,107 @@ def test_draining_invalid_authorization_is_audited_and_removed_without_write(tmp
     assert "round_completed" not in events
 
 
+def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_reasons(
+    tmp_path, monkeypatch
+):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="stale-selection")
+    state.phase = "DRAINING"
+    state.rounds = 3
+    state.seen_post_ids = [1, 2, 3]
+    state.attempts_by_post = {1: 1, 2: 1, 3: 1}
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    store.start_round(
+        state,
+        round_number=4,
+        request={
+            "round_number": 4,
+            "batch_size": 5,
+            "max_new_posts": 0,
+            "seen_post_ids": [1, 2, 3],
+            "excluded_post_ids": [],
+            "attempts_by_post": {1: 1, 2: 1, 3: 1},
+        },
+    )
+    store.authorize_round(state, [115592, 115629, 115282, 115631, 115530])
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        if kwargs.get("expected_selected_ids"):
+            return {
+                "preview": True,
+                "selection_mismatch": True,
+                "actual_selected_ids": [115282],
+                "queue": {
+                    "selected_ids": [115282],
+                    "actual_selected_ids": [115282],
+                    "eligible_ids": [115282, 115631],
+                    "cooldown_ids": [115592],
+                    "quarantined_ids": [115629],
+                    "cycle_excluded_ids": [115530],
+                },
+            }
+        return {"preview": True, "queue": {"selected_ids": []}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(Client(), _config(), tmp_path)
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 3
+    assert report.attempts_total == 3
+    assert report.round_reports[0]["event"] == "round_authorization_invalidated"
+    evidence = report.round_reports[0]["evidence"]
+    assert evidence["selection"]["reason_by_post"] == {
+        "115592": "cooldown_active",
+        "115629": "quarantined",
+        "115282": "selection_order_changed",
+        "115631": "selection_order_changed",
+        "115530": "attempt_budget_excluded",
+    }
+    assert report.round_reports[0]["executed_ids"] == []
+    persisted = cycle_runtime.CycleStateStore(tmp_path).load()
+    assert persisted.pending_round is None
+    events = [
+        json.loads(line) for line in (tmp_path / "work" / "v2-cycle" / "journal.jsonl").read_text().splitlines()
+    ]
+    assert any(event["event"] == "round_authorization_invalidated" for event in events)
+    assert not any(event["event"] == "round_completed" and event.get("round_number") == 4 for event in events)
+
+
+def test_no_write_confirmation_ignores_journal_from_different_authorization(tmp_path):
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "101.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "cycle_id": "cycle",
+        "cycle_round": 4,
+        "authorization_id": "old-authorization",
+    }), encoding="utf-8")
+
+    class Client:
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    evidence = cycle_runtime._confirm_round_has_no_write(
+        Client(),
+        tmp_path,
+        [101],
+        cycle_id="cycle",
+        round_number=4,
+        authorization_id="new-authorization",
+    )
+    assert evidence is not None
+    assert evidence["historical_journal_ids"] == [101]
+
+
 def test_no_write_confirmation_blocks_when_media_registry_has_partial_effect(tmp_path):
     registry_path = tmp_path / "work" / "media_registry.sqlite"
     registry_path.parent.mkdir(parents=True)
@@ -358,6 +464,7 @@ def test_invalid_committed_round_is_reconciled_without_reauthorizing_or_recounti
         },
     )
     store.authorize_round(state, [115329, 115288])
+    authorization_id = state.pending_round["authorization_id"]
 
     ready_state = WorkState(
         state=LifecycleState.READY,
@@ -389,6 +496,7 @@ def test_invalid_committed_round_is_reconciled_without_reauthorizing_or_recounti
             "readback": True,
             "cycle_id": cycle_id,
             "cycle_round": 4,
+            "authorization_id": authorization_id,
             "state": journal_state.to_dict(),
             "media_readback_status": "not_attempted",
         }), encoding="utf-8")

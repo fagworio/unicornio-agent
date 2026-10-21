@@ -25,6 +25,7 @@ def test_cycle_state_store_writes_atomic_checkpoint_and_append_only_journal(tmp_
     assert restored is not None
     assert restored.cycle_id == "cycle-test"
     assert restored.pending_round["preview_selected_ids"] == [11]
+    assert restored.pending_round["authorization_id"]
 
     store.complete_round(state, report={"round": 1, "executed_ids": [11]})
     store.finish(state, status="completed", stop_reason="no_eligible_work")

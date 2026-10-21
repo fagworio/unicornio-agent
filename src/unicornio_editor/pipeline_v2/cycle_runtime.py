@@ -52,6 +52,46 @@ def _selection_budget_violation(
     return None
 
 
+def _selection_mismatch_evidence(
+    selected_ids: list[int],
+    preview: dict[str, Any],
+) -> dict[str, Any]:
+    """Explain why an authorized selection no longer matches the queue."""
+    queue = preview.get("queue") if isinstance(preview.get("queue"), dict) else {}
+    eligible_ids = {int(value) for value in queue.get("eligible_ids", ())}
+    cooldown_ids = {int(value) for value in queue.get("cooldown_ids", ())}
+    quarantined_ids = {int(value) for value in queue.get("quarantined_ids", ())}
+    excluded_ids = {int(value) for value in queue.get("cycle_excluded_ids", ())}
+    actual_ids = [int(value) for value in preview.get("actual_selected_ids", ())]
+    policy_error = queue.get("quarantine_policy_error")
+    reason_by_post: dict[str, str] = {}
+    for post_id in selected_ids:
+        if policy_error and post_id not in eligible_ids:
+            reason = "quarantine_policy_error"
+        elif post_id in quarantined_ids:
+            reason = "quarantined"
+        elif post_id in cooldown_ids:
+            reason = "cooldown_active"
+        elif post_id in excluded_ids:
+            reason = "attempt_budget_excluded"
+        elif post_id not in eligible_ids:
+            reason = "not_eligible"
+        else:
+            reason = "selection_order_changed"
+        reason_by_post[str(post_id)] = reason
+    return {
+        "expected_selected_ids": [int(value) for value in selected_ids],
+        "actual_selected_ids": actual_ids,
+        "eligible_ids": sorted(eligible_ids),
+        "lost_eligibility_ids": sorted(
+            post_id for post_id in selected_ids if post_id not in eligible_ids
+        ),
+        "reason_by_post": reason_by_post,
+        "quarantine_policy_error": str(policy_error or ""),
+        "selection_drift": bool(queue.get("selection_drift")),
+    }
+
+
 def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | None:
     path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
     if not path.is_file():
@@ -130,18 +170,41 @@ def _confirm_round_has_no_write(
     *,
     cycle_id: str,
     round_number: int,
+    authorization_id: str | None = None,
+    selection_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return evidence for invalidating a round only when no write is known.
 
-    A journal file is treated as possible write evidence, including prepared or
-    partial journals.  In that case recovery must remain blocked so the next
-    invocation can reconcile each post instead of discarding the authorization.
+    A journal carrying this authorization is treated as possible write
+    evidence, including prepared or partial journals. Journals from a
+    different authorization are historical evidence and do not block this
+    recovery; a legacy journal with the same cycle/round remains ambiguous and
+    fails closed.
     """
     journal_dir = Path(root) / "work" / "v2-journal"
+    historical_journal_ids: list[int] = []
     wordpress_statuses: dict[str, str] = {}
     for post_id in selected_ids:
-        if (journal_dir / f"{int(post_id)}.json").exists():
-            return None
+        journal_path = journal_dir / f"{int(post_id)}.json"
+        if journal_path.exists():
+            if not authorization_id:
+                return None
+            try:
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                return None
+            journal_authorization_id = str(journal.get("authorization_id") or "").strip()
+            try:
+                same_legacy_round = (
+                    not journal_authorization_id
+                    and str(journal.get("cycle_id") or "") == str(cycle_id)
+                    and int(journal.get("cycle_round", -1)) == int(round_number)
+                )
+            except (TypeError, ValueError):
+                same_legacy_round = False
+            if journal_authorization_id == str(authorization_id) or same_legacy_round:
+                return None
+            historical_journal_ids.append(int(post_id))
         try:
             post = client.get_post(int(post_id))
         except Exception:
@@ -160,9 +223,13 @@ def _confirm_round_has_no_write(
     if registry_evidence is None:
         return None
     return {
-        "journal_files_absent": True,
+        "journal_files_absent": not historical_journal_ids,
+        "current_authorization_journal_absent": True,
         "wordpress_readback_checked": True,
         "wordpress_statuses": wordpress_statuses,
+        "authorization_id": str(authorization_id or ""),
+        "historical_journal_ids": historical_journal_ids,
+        "selection": dict(selection_evidence or {}),
         **registry_evidence,
         "post_ids": [int(post_id) for post_id in selected_ids],
     }
@@ -175,6 +242,7 @@ def _reconcile_completed_round(
     *,
     expected_cycle_id: str,
     expected_cycle_round: int,
+    expected_authorization_id: str | None = None,
     preauthorized_new_post_ids: tuple[int, ...] = (),
     historical_out_of_budget: bool = False,
 ) -> CycleRoundResult | None:
@@ -217,6 +285,11 @@ def _reconcile_completed_round(
         if (
             str(journal.get("cycle_id") or "") != str(expected_cycle_id)
             or journal_cycle_round != int(expected_cycle_round)
+            or (
+                expected_authorization_id is not None
+                and str(journal.get("authorization_id") or "")
+                != str(expected_authorization_id)
+            )
             or state is None
             or journal.get("status") != "committed"
             or journal.get("readback") is not True
@@ -356,6 +429,9 @@ def run_v2_cycle(
             else None
         )
         authorized_pending = pending_ids is not None
+        authorization_id = None
+        if authorized_pending:
+            authorization_id = store.ensure_round_authorization_id(state)
         authorization_request = (
             pending.get("request")
             if authorized_pending and pending and isinstance(pending.get("request"), dict)
@@ -404,6 +480,7 @@ def run_v2_cycle(
                 lock_held=True,
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
+                authorization_id=authorization_id,
             )
             if preview.get("selection_mismatch"):
                 budget_violation = _selection_budget_violation(
@@ -419,6 +496,7 @@ def run_v2_cycle(
                     pending_ids,
                     expected_cycle_id=state.cycle_id,
                     expected_cycle_round=request.round_number,
+                    expected_authorization_id=authorization_id,
                     preauthorized_new_post_ids=(
                         ()
                         if budget_violation == "unique_post_budget_violation"
@@ -440,6 +518,8 @@ def run_v2_cycle(
                         pending_ids,
                         cycle_id=state.cycle_id,
                         round_number=request.round_number,
+                        authorization_id=authorization_id,
+                        selection_evidence=_selection_mismatch_evidence(pending_ids, preview),
                     )
                     if evidence is not None:
                         return CycleRoundResult(
@@ -454,13 +534,31 @@ def run_v2_cycle(
                         preview_selected_ids=tuple(pending_ids),
                         budget_violation=budget_violation,
                     )
+                evidence = _confirm_round_has_no_write(
+                    client,
+                    root,
+                    pending_ids,
+                    cycle_id=state.cycle_id,
+                    round_number=request.round_number,
+                    authorization_id=authorization_id,
+                    selection_evidence=_selection_mismatch_evidence(pending_ids, preview),
+                )
+                if evidence is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(pending_ids),
+                        authorization_invalidated=True,
+                        authorization_invalidation={
+                            "reason": "selection_mismatch",
+                            "evidence": evidence,
+                        },
+                    )
                 return CycleRoundResult(
                     preview_selected_ids=tuple(pending_ids),
                     selection_mismatch=True,
                 )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
         else:
-            store.start_round(
+            authorization_id = store.start_round(
                 state,
                 round_number=request.round_number,
                 request=_request_dict(request),
@@ -477,6 +575,7 @@ def run_v2_cycle(
                 lock_held=True,
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
+                authorization_id=authorization_id,
             )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
             if preview.get("selection_mismatch"):
@@ -497,6 +596,7 @@ def run_v2_cycle(
                     selected_ids,
                     expected_cycle_id=state.cycle_id,
                     expected_cycle_round=request.round_number,
+                    expected_authorization_id=authorization_id,
                     historical_out_of_budget=True,
                 )
                 if reconciled is not None:
@@ -507,6 +607,8 @@ def run_v2_cycle(
                     selected_ids,
                     cycle_id=state.cycle_id,
                     round_number=request.round_number,
+                    authorization_id=authorization_id,
+                    selection_evidence=_selection_mismatch_evidence(selected_ids, preview),
                 )
                 if evidence is not None:
                     return CycleRoundResult(
@@ -540,6 +642,7 @@ def run_v2_cycle(
             lock_held=True,
             cycle_id=state.cycle_id,
             cycle_round=request.round_number,
+            authorization_id=authorization_id,
         )
         executed_ids = tuple(
             int(detail["post_id"])

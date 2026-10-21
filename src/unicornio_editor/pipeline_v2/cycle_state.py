@@ -186,13 +186,29 @@ class CycleStateStore:
             event="cycle_resumed" if state.rounds or state.pending_round else "cycle_run_started",
         )
 
-    def start_round(self, state: CycleState, *, round_number: int, request: Mapping[str, Any]) -> None:
+    def start_round(
+        self,
+        state: CycleState,
+        *,
+        round_number: int,
+        request: Mapping[str, Any],
+        authorization_id: str | None = None,
+    ) -> str:
+        authorization_id = str(authorization_id or uuid.uuid4().hex)
         state.pending_round = {
             "round_number": int(round_number),
             "request": dict(request),
             "preview_selected_ids": None,
+            "authorization_id": authorization_id,
         }
-        self.save(state, event="round_started", round_number=round_number, request=dict(request))
+        self.save(
+            state,
+            event="round_started",
+            round_number=round_number,
+            request=dict(request),
+            authorization_id=authorization_id,
+        )
+        return authorization_id
 
     def authorize_round(self, state: CycleState, selected_ids: list[int] | tuple[int, ...]) -> None:
         if not state.pending_round:
@@ -203,7 +219,26 @@ class CycleStateStore:
             event="round_authorized",
             round_number=state.pending_round["round_number"],
             selected_ids=list(state.pending_round["preview_selected_ids"]),
+            authorization_id=str(state.pending_round.get("authorization_id") or ""),
         )
+
+    def ensure_round_authorization_id(self, state: CycleState) -> str:
+        """Assign an identity to a legacy pending authorization exactly once."""
+        pending = state.pending_round
+        if not isinstance(pending, Mapping):
+            raise RuntimeError("cannot identify a round without a pending round")
+        current = str(pending.get("authorization_id") or "").strip()
+        if current:
+            return current
+        authorization_id = uuid.uuid4().hex
+        pending["authorization_id"] = authorization_id
+        self.save(
+            state,
+            event="round_authorization_reissued",
+            round_number=int(pending.get("round_number")),
+            authorization_id=authorization_id,
+        )
+        return authorization_id
 
     def complete_round(self, state: CycleState, *, report: Mapping[str, Any]) -> None:
         round_number = state.pending_round.get("round_number") if state.pending_round else None
@@ -233,6 +268,7 @@ class CycleStateStore:
             round_number=int(pending.get("round_number")),
             selected_ids=actual_ids,
             executed_ids=[],
+            authorization_id=str(pending.get("authorization_id") or ""),
             reason=str(reason),
             evidence=dict(evidence),
         )
@@ -258,6 +294,7 @@ class CycleStateStore:
             round_number=int(pending.get("round_number")),
             selected_ids=selected_ids,
             executed_ids=executed_ids,
+            authorization_id=str(pending.get("authorization_id") or ""),
             report=dict(report),
         )
 

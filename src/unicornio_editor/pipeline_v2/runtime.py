@@ -698,7 +698,15 @@ def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -
 
 
 def _write_v2_journal_checkpoint(
-    root: Path, post_id: int, status: str, state, *, run_id: str | None = None
+    root: Path,
+    post_id: int,
+    status: str,
+    state,
+    *,
+    run_id: str | None = None,
+    cycle_id: str | None = None,
+    cycle_round: int | None = None,
+    authorization_id: str | None = None,
 ) -> None:
     target = Path(root) / "work" / "v2-journal" / f"{post_id}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -709,6 +717,9 @@ def _write_v2_journal_checkpoint(
                 "post_id": post_id,
                 "state": state.to_dict(),
                 **({"run_id": run_id} if run_id else {}),
+                **({"cycle_id": cycle_id} if cycle_id else {}),
+                **({"cycle_round": cycle_round} if cycle_round is not None else {}),
+                **({"authorization_id": authorization_id} if authorization_id else {}),
             },
             ensure_ascii=False,
             indent=2,
@@ -2311,11 +2322,13 @@ class WordPressWriterV2:
         media_state = "accepted_working" if media_ids else "apply_not_attempted"
         media_readback_status = "not_attempted"
         journal = journal_dir / f"{post_id}.json"
+        authorization_id = str(context.get("v2_authorization_id") or "").strip()
         intent = {
             "status": "prepared", "post_id": post_id,
             "run_id": expected_run_id,
             "cycle_id": str(context.get("v2_cycle_id") or ""),
             "cycle_round": context.get("v2_cycle_round"),
+            **({"authorization_id": authorization_id} if authorization_id else {}),
             "validation_fresh": validation_fresh,
             "state": proposed_state.to_dict(), "ready_hash": ready_hash,
             "candidate_hash": hashlib.sha256(content.encode()).hexdigest(),
@@ -2611,6 +2624,7 @@ def run_v2(
     lock_held: bool = False,
     cycle_id: str | None = None,
     cycle_round: int | None = None,
+    authorization_id: str | None = None,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -2887,6 +2901,7 @@ def run_v2(
             context["v2_run_id"] = run_id
             context["v2_cycle_id"] = str(cycle_id or "")
             context["v2_cycle_round"] = int(cycle_round) if cycle_round is not None else None
+            context["v2_authorization_id"] = str(authorization_id or "")
             context["candidate_must_be_fresh"] = initial.phase is not Phase.VALIDATE
             post_started_at = monotonic()
             buffered = BufferedStateStore(initial)
@@ -2909,7 +2924,16 @@ def run_v2(
                 # Mark the transaction before any provider/media work. If the
                 # process dies after an upload, recovery must not mistake the
                 # previous committed journal for a completed run.
-                _write_v2_journal_checkpoint(root, post_id, "running", initial, run_id=run_id)
+                _write_v2_journal_checkpoint(
+                    root,
+                    post_id,
+                    "running",
+                    initial,
+                    run_id=run_id,
+                    cycle_id=str(cycle_id or ""),
+                    cycle_round=cycle_round,
+                    authorization_id=authorization_id,
+                )
                 try:
                     from ..media.registry import record_v2_observation
                     record_v2_observation(
@@ -2929,7 +2953,14 @@ def run_v2(
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
                 _write_v2_media_checkpoint(root, post_id, buffered.state.media)
                 _write_v2_journal_checkpoint(
-                    root, post_id, "validated", buffered.state, run_id=run_id
+                    root,
+                    post_id,
+                    "validated",
+                    buffered.state,
+                    run_id=run_id,
+                    cycle_id=str(cycle_id or ""),
+                    cycle_round=cycle_round,
+                    authorization_id=authorization_id,
                 )
                 error_path = root / "backups" / str(post_id) / "editorial.error.json"
                 if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
@@ -2943,7 +2974,14 @@ def run_v2(
                     ).commit(post_id, context, buffered.state, outcome)
                 except Exception as exc:
                     _write_v2_journal_checkpoint(
-                        root, post_id, "writer_failed", buffered.state, run_id=run_id
+                        root,
+                        post_id,
+                        "writer_failed",
+                        buffered.state,
+                        run_id=run_id,
+                        cycle_id=str(cycle_id or ""),
+                        cycle_round=cycle_round,
+                        authorization_id=authorization_id,
                     )
                     try:
                         from ..observability import append_telemetry
