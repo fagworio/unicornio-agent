@@ -62,6 +62,8 @@ class CycleRoundResult:
     details: tuple[Mapping[str, Any], ...] = ()
     locked: bool = False
     selection_mismatch: bool = False
+    budget_violation: str | None = None
+    preauthorized_new_post_ids: tuple[int, ...] = ()
 
 
 @dataclass
@@ -110,6 +112,14 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         details=tuple(item for item in details if isinstance(item, Mapping)),
         locked=bool(value.get("locked", False)),
         selection_mismatch=bool(value.get("selection_mismatch", False)),
+        budget_violation=(
+            str(value.get("budget_violation"))
+            if value.get("budget_violation")
+            else None
+        ),
+        preauthorized_new_post_ids=tuple(
+            int(item) for item in (value.get("preauthorized_new_post_ids") or ())
+        ),
     )
 
 
@@ -243,6 +253,17 @@ def run_cycle(
         if result.locked:
             report.stop_reason = "locked"
             break
+        if result.budget_violation:
+            report.stop_reason = str(result.budget_violation)
+            report.round_reports.append({
+                "round": request.round_number,
+                "phase": phase,
+                "budget_violation": report.stop_reason,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": [],
+                "preflight": True,
+            })
+            break
         if result.selection_mismatch or result.preview_selected_ids != result.executed_ids:
             report.stop_reason = "selection_mismatch"
             report.round_reports.append({
@@ -261,7 +282,12 @@ def run_cycle(
             report.stop_reason = "attempt_budget_violation"
             break
         new_ids = set(result.executed_ids) - seen
-        if len(new_ids) > request.max_new_posts:
+        preauthorized_new_ids = set(result.preauthorized_new_post_ids)
+        if not preauthorized_new_ids.issubset(new_ids):
+            report.stop_reason = "unique_post_budget_violation"
+            break
+        unbudgeted_new_ids = new_ids - preauthorized_new_ids
+        if len(unbudgeted_new_ids) > request.max_new_posts:
             report.stop_reason = "unique_post_budget_violation"
             break
 

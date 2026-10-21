@@ -28,7 +28,36 @@ def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
     }
 
 
-def _reconcile_completed_round(client, root: Path, selected_ids: list[int]) -> CycleRoundResult | None:
+def _selection_budget_violation(
+    selected_ids: list[int],
+    *,
+    seen_post_ids: list[int] | tuple[int, ...],
+    max_new_posts: int,
+    batch_size: int,
+    excluded_post_ids: list[int] | tuple[int, ...] | set[int] = (),
+) -> str | None:
+    """Validate admission before the write-mode V2 executor is called."""
+    if len(selected_ids) != len(set(selected_ids)):
+        return "duplicate_selection"
+    if len(selected_ids) > int(batch_size):
+        return "attempt_budget_violation"
+    if {int(value) for value in selected_ids}.intersection(
+        int(value) for value in excluded_post_ids
+    ):
+        return "attempt_budget_violation"
+    new_ids = set(selected_ids) - {int(value) for value in seen_post_ids}
+    if len(new_ids) > int(max_new_posts):
+        return "unique_post_budget_violation"
+    return None
+
+
+def _reconcile_completed_round(
+    client,
+    root: Path,
+    selected_ids: list[int],
+    *,
+    preauthorized_new_post_ids: tuple[int, ...] = (),
+) -> CycleRoundResult | None:
     """Reconcile a round whose write completed before its cycle checkpoint.
 
     A post-level V2 journal/readback is the authority. Each authorized post
@@ -103,6 +132,7 @@ def _reconcile_completed_round(client, root: Path, selected_ids: list[int]) -> C
         preview_selected_ids=tuple(selected_ids),
         executed_ids=tuple(selected_ids),
         details=tuple(details),
+        preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
     )
 
 
@@ -173,6 +203,25 @@ def run_v2_cycle(
             and isinstance(pending.get("preview_selected_ids"), list)
             else None
         )
+        authorized_pending = pending_ids is not None
+        authorization_request = (
+            pending.get("request")
+            if authorized_pending and pending and isinstance(pending.get("request"), dict)
+            else {}
+        )
+        authorized_seen_ids = [
+            int(value)
+            for value in authorization_request.get("seen_post_ids", request.seen_post_ids)
+        ]
+        authorized_max_new_posts = int(
+            authorization_request.get("max_new_posts", request.max_new_posts)
+        )
+        authorized_batch_size = int(
+            authorization_request.get("batch_size", request.batch_size)
+        )
+        authorized_excluded_ids = authorization_request.get(
+            "excluded_post_ids", request.excluded_post_ids
+        )
         if pending_ids is not None:
             preview = run_v2(
                 client,
@@ -189,7 +238,15 @@ def run_v2_cycle(
                 cycle_round=request.round_number,
             )
             if preview.get("selection_mismatch"):
-                reconciled = _reconcile_completed_round(client, root, pending_ids)
+                reconciled = _reconcile_completed_round(
+                    client,
+                    root,
+                    pending_ids,
+                    preauthorized_new_post_ids=tuple(
+                        int(post_id)
+                        for post_id in set(pending_ids) - set(authorized_seen_ids)
+                    ),
+                )
                 if reconciled is not None:
                     return reconciled
                 return CycleRoundResult(
@@ -219,6 +276,20 @@ def run_v2_cycle(
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
             if preview.get("selection_mismatch"):
                 return CycleRoundResult(selection_mismatch=True)
+
+        budget_violation = _selection_budget_violation(
+            selected_ids,
+            seen_post_ids=authorized_seen_ids,
+            max_new_posts=authorized_max_new_posts,
+            batch_size=authorized_batch_size,
+            excluded_post_ids=authorized_excluded_ids,
+        )
+        if budget_violation:
+            return CycleRoundResult(
+                preview_selected_ids=tuple(selected_ids),
+                budget_violation=budget_violation,
+            )
+        if not authorized_pending:
             store.authorize_round(state, selected_ids)
 
         if not selected_ids:
@@ -252,6 +323,19 @@ def run_v2_cycle(
             ),
             locked=bool(result.get("locked")),
             selection_mismatch=bool(result.get("selection_mismatch")),
+            budget_violation=(
+                str(result.get("budget_violation"))
+                if result.get("budget_violation")
+                else None
+            ),
+            preauthorized_new_post_ids=(
+                tuple(
+                    int(post_id)
+                    for post_id in set(selected_ids) - set(authorized_seen_ids)
+                )
+                if authorized_pending
+                else ()
+            ),
         )
 
     try:

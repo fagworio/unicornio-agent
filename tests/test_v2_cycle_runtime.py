@@ -143,3 +143,67 @@ def test_cycle_does_not_touch_checkpoint_when_lock_is_busy(tmp_path):
         lock.release()
     assert result["locked"] is True
     assert not (tmp_path / "work" / "v2-cycle" / "state.json").exists()
+
+
+def test_draining_budget_is_checked_before_v2_write(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="draining-budget")
+    state.phase = "DRAINING"
+    state.seen_post_ids = [99]
+    state.stagnant_rounds = 3
+    store.save(state, event="test_draining")
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("preview"):
+            return {"preview": True, "queue": {"selected_ids": [101]}}
+        raise AssertionError("write mode must not run after an admission violation")
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+
+    assert report.stop_reason == "unique_post_budget_violation"
+    assert len(calls) == 1
+    assert calls[0]["preview"] is True
+    persisted = cycle_runtime.CycleStateStore(tmp_path).load()
+    assert persisted.status == "running"
+    assert persisted.pending_round["preview_selected_ids"] is None
+
+
+def test_draining_executes_round_already_authorized_before_phase_change(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="draining-authorized")
+    state.phase = "DRAINING"
+    state.seen_post_ids = [99]
+    state.stagnant_rounds = 3
+    store.start_round(
+        state,
+        round_number=1,
+        request={
+            "round_number": 1,
+            "batch_size": 1,
+            "max_new_posts": 1,
+            "seen_post_ids": [99],
+            "excluded_post_ids": [],
+            "attempts_by_post": {},
+        },
+    )
+    store.authorize_round(state, [101])
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("preview"):
+            return {"preview": True, "queue": {"selected_ids": [101]}}
+        return {
+            "details": [_ready_detail(101)],
+            "locked": False,
+            "selection_mismatch": False,
+        }
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+
+    assert report.stop_reason == "ready_target"
+    assert [call["preview"] for call in calls] == [True, False]
