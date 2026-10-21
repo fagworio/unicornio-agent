@@ -468,6 +468,8 @@ def evidence_score(
     query: str = "",
     source_page_present: bool = True,
     image_in_source: bool = True,
+    source_verification_reason: str = "",
+    source_verification_recoverable: bool = False,
     duplicate_frame: bool = False,
 ) -> dict[str, Any]:
     """Score determinístico de evidência (Fase 11).
@@ -512,9 +514,23 @@ def evidence_score(
                 "needs_vision": False,
                 "reason": "sem página de origem: proveniência não resolvida"}
     if not image_in_source:
+        if source_verification_recoverable:
+            return {
+                **base,
+                "score": 0,
+                "gate": "provenance",
+                "verdict": "unresolved_source",
+                "penalties": ["source_verification_inconclusive"],
+                "needs_vision": False,
+                "recoverable": True,
+                "reason_code": source_verification_reason or "source_verification_inconclusive",
+                "reason": source_verification_reason or "verificação de origem inconclusiva",
+            }
         return {**base, "score": 0, "gate": "provenance",
                 "verdict": "source_mismatch", "penalties": ["not_in_source"],
                 "needs_vision": False,
+                "reason_code": "source_mismatch",
+                "source_comparison_proved": False,
                 "reason": "imagem não consta na página de origem (bytes/link divergem)"}
 
     # GATE C — DIVERSIDADE: frame repetido nunca entra, mesmo com score alto.

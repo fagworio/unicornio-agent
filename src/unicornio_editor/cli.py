@@ -1916,6 +1916,8 @@ def _enriquecer_candidatos(
         "source_resolution", "source_resolution_query",
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
+        "source_verification_reason_code", "source_verification_recoverable",
+        "source_comparison_proved",
         "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
         "local_image_path", "sha256", "mime", "width", "height",
     )
@@ -2065,6 +2067,15 @@ def _enriquecer_candidatos(
             )
             cand["valid"] = bool(veredito["valid"])
             cand["valid_reason"] = str(veredito.get("reason") or "")
+            cand["source_verification_reason_code"] = str(
+                veredito.get("reason_code") or ""
+            )
+            cand["source_verification_recoverable"] = bool(
+                veredito.get("recoverable")
+            )
+            cand["source_comparison_proved"] = bool(
+                veredito.get("source_comparison_proved")
+            )
             cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
             cand["verification_level"] = str(veredito.get("verification_level") or "")
             cand["verification_reason"] = str(veredito.get("reason") or "")
@@ -2094,6 +2105,12 @@ def _enriquecer_candidatos(
             query=termo,
             source_page_present=bool(pagina),
             image_in_source=bool(cand.get("valid")),
+            source_verification_reason=str(
+                cand.get("source_verification_reason_code") or ""
+            ),
+            source_verification_recoverable=bool(
+                cand.get("source_verification_recoverable")
+            ),
         )
         cand["evidence"] = pontos
         cand["evidence_score"] = pontos["score"]

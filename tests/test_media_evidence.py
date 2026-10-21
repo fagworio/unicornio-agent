@@ -133,6 +133,21 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(out2["verdict"], "ambiguous")
         self.assertTrue(out2["needs_vision"])
 
+    def test_recoverable_source_failure_stays_unresolved_not_mismatch(self):
+        out = evidence_score(
+            "metroid prime 4",
+            filename="metroid-prime-4.jpg",
+            page_url="https://example.test/article",
+            source_page_present=True,
+            image_in_source=False,
+            source_verification_reason="source_page_unavailable",
+            source_verification_recoverable=True,
+        )
+        self.assertEqual(out["verdict"], "unresolved_source")
+        self.assertEqual(out["reason_code"], "source_page_unavailable")
+        self.assertTrue(out["recoverable"])
+        self.assertNotEqual(out["verdict"], "source_mismatch")
+
     def test_penalidades_objetivas(self):
         sem_source = evidence_score("metroid", filename="metroid.jpg", source_page_present=False)
         self.assertIn("missing_source", sem_source["penalties"])

@@ -204,6 +204,17 @@ class SourceVerifyTests(unittest.TestCase):
             f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg",
         )
         self.assertEqual(out["verification_level"], "PIXEL_IDENTICAL")
+        self.assertTrue(out["source_comparison_proved"])
+
+    def test_html_reference_match_does_not_claim_byte_comparison(self):
+        image_url = f"{self.base}/img/gallery/green-lantern-rings-1786934482.jpg"
+        out = validate_discovered_candidate({
+            "direct_image_url": image_url,
+            "source_page_url": f"{self.base}/page.html",
+        })
+        self.assertTrue(out["valid"], out["reason"])
+        self.assertEqual(out["verification_level"], "EXACT_URL")
+        self.assertFalse(out["source_comparison_proved"])
 
     def test_accepts_image_without_slug_match_when_bytes_are_listed(self):
         # Same bytes as a listed image even though the URL slug differs.
@@ -319,6 +330,27 @@ class SourceVerifyTests(unittest.TestCase):
             )
         self.assertFalse(ok)
         self.assertTrue(reason.startswith("source_scan_incomplete:"), reason)
+
+    def test_partial_variant_comparison_is_not_bytes_mismatch(self):
+        path = self._downloaded("img.png", (10, 10, 200))
+        listed = [
+            f"{self.base}/img/gallery/hero.jpg?variant={index}"
+            for index in range(8)
+        ]
+        divergent = _png_bytes((200, 10, 10))
+        with mock.patch(
+            "unicornio_editor.media.source_verify._fetch",
+            side_effect=[divergent, None, divergent, divergent, divergent, divergent],
+        ):
+            ok, reason = verify_downloaded_against_source(
+                source_page_url=f"{self.base}/page.html",
+                downloaded=path,
+                direct_image_url=f"{self.base}/discovery/hero.jpg",
+                cache={f"{self.base}/page.html": listed},
+            )
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("source_scan_incomplete:"), reason)
+        self.assertNotIn("source_bytes_mismatch", reason)
 
 
 if __name__ == "__main__":

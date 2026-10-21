@@ -461,6 +461,27 @@ def test_source_mismatch_without_comparison_proof_is_revalidated(tmp_path):
     assert url in history["revalidation_urls"]
 
 
+def test_reference_match_metadata_without_comparison_proof_is_revalidated(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-reference-only"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/reference-only.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "source_mismatch",
+            "url": url,
+            "evidence": {
+                "verdict": "source_mismatch",
+                "verification_level": "EXACT_URL",
+                "matched_image_url": url,
+            },
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+    assert url in history["revalidation_urls"]
+
+
 def test_invalid_media_inherits_original_definitive_cause(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-inherited-definitive"
     batch.mkdir(parents=True)

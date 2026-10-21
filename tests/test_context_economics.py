@@ -471,6 +471,34 @@ class EnrichmentMemoTests(unittest.TestCase):
         # MESMA decisao (o memo e o resultado, nao um atalho).
         self.assertEqual(vereditos[0], vereditos[1])
 
+    def test_recoverable_preflight_failure_is_not_reclassified_as_mismatch(self):
+        from unicornio_editor import cli
+
+        candidate = self._candidate("https://a/temporarily-unavailable.jpg")
+        with mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={
+                "valid": False,
+                "reason": "source_page_unavailable: timeout",
+                "reason_code": "source_page_unavailable",
+                "recoverable": True,
+                "images_in_page": 0,
+            },
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
+        ):
+            approved, rejected, _deferred = cli._enriquecer_candidatos(
+                [candidate], subject="Redfall", termo="redfall"
+            )
+
+        assert not approved
+        assert len(rejected) == 1
+        evidence = rejected[0]["evidence"]
+        assert evidence["verdict"] == "unresolved_source"
+        assert evidence["reason_code"] == "source_page_unavailable"
+        assert evidence["recoverable"] is True
+
     def test_memo_never_overwrites_discovery_identity(self):
         from unicornio_editor import cli
 

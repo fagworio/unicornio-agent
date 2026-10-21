@@ -67,6 +67,12 @@ def verification_result(ok: bool, reason: str) -> dict[str, Any]:
         "reason": raw,
         "detail": detail.strip() if separator else raw,
         "recoverable": reason_code in SOURCE_VERIFICATION_RETRYABLE_CODES,
+        # This helper is used after the downloaded candidate was compared to
+        # assets read from the source page.  A mere EXACT_URL/SLUG_MATCH from
+        # the HTML preflight never reaches this path and is not proof of bytes.
+        "source_comparison_proved": reason_code in {
+            "source_reference_found", "source_mismatch", "source_bytes_mismatch"
+        },
     }
 
 
@@ -317,6 +323,7 @@ def validate_discovered_candidate(
         "reason": "",
         "reason_code": "",
         "recoverable": False,
+        "source_comparison_proved": False,
         "images_in_page": 0,
     }
     if not _valid_http(page_url):
@@ -437,6 +444,7 @@ def validate_discovered_candidate(
                     resultado["source_verified"] = True
                     resultado["matched_image_url"] = listed_url
                     resultado["verification_level"] = level
+                    resultado["source_comparison_proved"] = True
                     resultado["reason"] = "asset visualmente correspondente encontrado na pagina de origem"
                     return resultado
     except Exception:  # noqa: BLE001 - falha de rede/formato permanece fail-closed
@@ -548,11 +556,12 @@ def verify_downloaded_against_source(
         url for url in listed
         if rendition_key and _asset_rendition_key(url) == rendition_key and url not in same_slug
     ]
+    comparison_candidates = list(dict.fromkeys([*same_slug, *same_rendition]))
     downloads = 0
     compared = 0
     unavailable = 0
     decode_failed = False
-    for url in [*same_slug, *same_rendition]:
+    for url in comparison_candidates:
         if downloads >= _MAX_DOWNLOADS:
             break
         downloads += 1
@@ -573,16 +582,37 @@ def verify_downloaded_against_source(
                 "source_reference_found", f"imagem confirmada na pagina de origem por {via} ({level.lower()})"
             )
         decode_failed = decode_failed or level == "UNVERIFIED"
-    if same_slug or same_rendition:
+    if comparison_candidates:
         if compared:
+            if unavailable or downloads < len(comparison_candidates):
+                return False, _coded_reason(
+                    "source_scan_incomplete",
+                    "uma ou mais variantes da referência não puderam ser examinadas; "
+                    "a divergência parcial não prova mismatch",
+                )
+            if decode_failed:
+                return False, _coded_reason(
+                    "source_decode_failed",
+                    "uma referência da mesma imagem não pôde ser decodificada",
+                )
             return False, _coded_reason(
                 "source_bytes_mismatch",
                 "CDN serviu conteudo divergente da pagina de origem para a mesma imagem "
                 "(bytes diferentes); fonte instavel — troque a URL da imagem",
             )
         if decode_failed:
+            if downloads < len(comparison_candidates):
+                return False, _coded_reason(
+                    "source_scan_incomplete",
+                    "a varredura das variantes da referência não foi concluída",
+                )
             return False, _coded_reason(
                 "source_decode_failed", "referência da mesma imagem não pôde ser decodificada"
+            )
+        if downloads < len(comparison_candidates):
+            return False, _coded_reason(
+                "source_scan_incomplete",
+                "a varredura das variantes da referência não foi concluída",
             )
         return False, _coded_reason(
             "source_asset_unavailable", "referência da mesma imagem indisponível para comparação"
@@ -615,9 +645,16 @@ def verify_downloaded_against_source(
         return False, _coded_reason(
             "source_decode_failed", "referências da página não puderam ser decodificadas"
         )
-    if unavailable and not compared:
+    if decode_failed:
         return False, _coded_reason(
-            "source_asset_unavailable", "referências da página indisponíveis para comparação"
+            "source_decode_failed",
+            "uma ou mais referências da página não puderam ser decodificadas",
+        )
+    if unavailable:
+        return False, _coded_reason(
+            "source_scan_incomplete",
+            "uma ou mais referências da página ficaram indisponíveis; "
+            "a divergência parcial não prova mismatch",
         )
     return False, _coded_reason(
         "source_mismatch",

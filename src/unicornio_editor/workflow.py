@@ -2396,6 +2396,9 @@ def _execute_media_plan(
                         "detail": f"verificacao de origem: {verify_reason}",
                         "reason_code": verification["reason_code"],
                         "recoverable": verification["recoverable"],
+                        "source_comparison_proved": verification[
+                            "source_comparison_proved"
+                        ],
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))

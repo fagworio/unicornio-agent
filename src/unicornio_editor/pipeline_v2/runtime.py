@@ -410,8 +410,6 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             source_comparison_proved = bool(
                 row.get("source_comparison_proved")
                 or evidence.get("source_comparison_proved")
-                or evidence.get("verification_level")
-                or evidence.get("matched_image_url")
             )
             needs_revalidation = (
                 evidence_verdict == "source_mismatch" and not source_comparison_proved
@@ -1322,6 +1320,8 @@ class ProductionMediaResolver:
                     vision_evidence = result.get("vision_evidence")
                     if isinstance(vision_evidence, dict):
                         _attach_candidate_vision_evidence(item, vision_evidence)
+                    if result.get("source_comparison_proved") is True:
+                        item["source_comparison_proved"] = True
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
                     explicit_reason = str(result.get("reason_code") or "").casefold().strip()
