@@ -57,6 +57,10 @@ PENALIDADES: dict[str, int] = {
 }
 LIMIAR_MATCH = 7
 LIMIAR_AMBIGUO = 4
+# A source-confirmed candidate with only page-level context is not rejected as
+# irrelevant: it may be a valid image with a generic filename. It receives a
+# bounded visual escalation instead of an automatic approval.
+LIMIAR_RECUPERACAO_CONTEXTO = 2
 # Sinais que falam da IMAGEM (filename, alt original, figcaption, heading
 # próximo) versus os que falam da PÁGINA (page_title, og:title, url, query).
 # `deterministic_match` exige pelo menos um sinal local forte: sem isso uma
@@ -529,6 +533,8 @@ def evidence_score(
         # sem NADA sobre a imagem (o avatar do autor). Os dois pedem visão — e
         # nunca ACCEPT automático.
         veredito = "ambiguous"
+    elif score >= LIMIAR_RECUPERACAO_CONTEXTO:
+        veredito = "insufficient_source_context"
     else:
         veredito = "reject"
     return {
@@ -540,7 +546,12 @@ def evidence_score(
         "penalties": [],
         # A visão só entra em ambíguo E com proveniência já válida: uma IA
         # dizendo "parece Metroid" não resolve origem/licenciamento.
-        "needs_vision": veredito == "ambiguous",
+        "needs_vision": veredito in {"ambiguous", "insufficient_source_context"},
+        "recovery": (
+            "visual_context_limited"
+            if veredito == "insufficient_source_context"
+            else None
+        ),
     }
 
 

@@ -2118,7 +2118,9 @@ def _enriquecer_candidatos(
                     rejeitados.append(cand)
                     _guardar_memo(cand)
                     return
-        (aprovados if pontos["verdict"] in ("deterministic_match", "ambiguous") else rejeitados).append(cand)
+        (aprovados if pontos["verdict"] in (
+            "deterministic_match", "ambiguous", "insufficient_source_context"
+        ) else rejeitados).append(cand)
         _guardar_memo(cand)
 
     teto_resolver = int(capacity) if capacity and capacity > 0 else 0
@@ -2188,7 +2190,7 @@ def _enriquecer_candidatos(
         verdict = str((cand.get("evidence") or {}).get("verdict") or "")
         if cand.get("capacity_deferred"):
             deferidos.append(cand)
-        elif verdict in ("deterministic_match", "ambiguous"):
+        elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context"):
             aprovados.append(cand)
         else:
             rejeitados.append(cand)

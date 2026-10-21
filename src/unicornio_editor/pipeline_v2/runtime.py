@@ -304,6 +304,8 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
     urls: set[str] = set()
     fingerprints: set[str] = set()
     queries: set[str] = set()
+    revalidation_urls: set[str] = set()
+    revalidation_fingerprints: set[str] = set()
     paths = [
         root / "backups" / str(post_id) / "editorial.validation.json",
         root / "backups" / str(post_id) / "editorial.candidate.json",
@@ -378,7 +380,8 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             )
             transient_causes = (
                 "timeout", "network_error", "network", "source_page_unreachable",
-                "unreachable", "tempor", "cdn",
+                "unreachable", "tempor", "cdn", "source_page_unavailable",
+                "source_asset_unavailable", "source_scan_incomplete", "source_decode_failed",
             )
             has_definitive_cause = bool(
                 evidence_verdict in {"reject", "source_mismatch", "duplicate_existing_frame", "duplicate_frame", "unrelated"}
@@ -398,6 +401,34 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 or "unresolved_source" in raw_reason_value
             )
             if unresolved_source and not has_definitive_cause:
+                continue
+            evidence_score_value = evidence.get("score")
+            try:
+                weak_evidence = evidence_score_value is not None and int(evidence_score_value) < 4
+            except (TypeError, ValueError):
+                weak_evidence = False
+            source_comparison_proved = bool(
+                row.get("source_comparison_proved")
+                or evidence.get("source_comparison_proved")
+                or evidence.get("verification_level")
+                or evidence.get("matched_image_url")
+            )
+            needs_revalidation = (
+                evidence_verdict == "source_mismatch" and not source_comparison_proved
+            ) or (
+                evidence_verdict == "reject"
+                and weak_evidence
+                and not evidence.get("vision_decision")
+            )
+            if needs_revalidation:
+                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
+                    value = str(row.get(key) or "").strip()
+                    if value:
+                        revalidation_urls.add(_canonical_embedded_media_url(value))
+                for key in ("sha256", "phash", "visual_group_id"):
+                    value = str(row.get(key) or "").strip()
+                    if value:
+                        revalidation_fingerprints.add(value)
                 continue
             is_rejection = bool(
                 row.get("rejected_reason")
@@ -462,7 +493,14 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             query = str(row.get("search_query") or row.get("query") or "").strip()
             if query:
                 queries.add(query.casefold())
-    return {"reasons": reasons, "urls": urls, "fingerprints": fingerprints, "queries": queries}
+    return {
+        "reasons": reasons,
+        "urls": urls,
+        "fingerprints": fingerprints,
+        "queries": queries,
+        "revalidation_urls": revalidation_urls,
+        "revalidation_fingerprints": revalidation_fingerprints,
+    }
 
 
 def _adaptive_query_suffix(history: dict[str, Any], *, role: str) -> tuple[str, str]:
@@ -1882,7 +1920,9 @@ class ProductionMediaResolver:
         for index, candidate in enumerate(candidates):
             url = candidate.get("direct_image_url") or candidate.get("image_url")
             verdict = (candidate.get("evidence") or {}).get("verdict")
-            if url and verdict in {"ambiguous", "needs_vision", "inconclusive"}:
+            if url and verdict in {
+                "ambiguous", "insufficient_source_context", "needs_vision", "inconclusive",
+            }:
                 vision_candidates.append({
                     "candidate_id": str(candidate.get("candidate_id") or f"v2-{index}"),
                     "source_image_url": str(url),

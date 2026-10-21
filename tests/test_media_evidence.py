@@ -122,7 +122,9 @@ class ScoreTests(unittest.TestCase):
             filename="hero.jpg",
             page_url="https://site.com/metroid-prime-4-review/",
         )
-        self.assertEqual(out["verdict"], "reject")  # 2 pontos
+        self.assertEqual(out["verdict"], "insufficient_source_context")  # 2 pontos
+        self.assertTrue(out["needs_vision"])
+        self.assertEqual(out["recovery"], "visual_context_limited")
         out2 = evidence_score(
             "metroid prime 4",
             filename="metroid-prime-4.jpg",

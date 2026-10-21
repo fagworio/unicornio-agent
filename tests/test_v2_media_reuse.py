@@ -444,6 +444,23 @@ def test_derived_history_uses_original_cause_classification(tmp_path, cause, blo
     assert (url in history["urls"]) is blocked
 
 
+def test_source_mismatch_without_comparison_proof_is_revalidated(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-unverified-source"
+    batch.mkdir(parents=True)
+    url = "https://cdn.test/unverified-source.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "source_mismatch",
+            "url": url,
+            "evidence": {"verdict": "source_mismatch"},
+        }]}]}), encoding="utf-8",
+    )
+    history = _media_rejection_history(tmp_path, 115234)
+    assert url not in history["urls"]
+    assert url in history["revalidation_urls"]
+
+
 def test_invalid_media_inherits_original_definitive_cause(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-inherited-definitive"
     batch.mkdir(parents=True)
