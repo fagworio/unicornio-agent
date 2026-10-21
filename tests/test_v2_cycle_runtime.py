@@ -207,3 +207,5 @@ def test_draining_executes_round_already_authorized_before_phase_change(tmp_path
 
     assert report.stop_reason == "ready_target"
     assert [call["preview"] for call in calls] == [True, False]
+    assert [call["max_new_posts"] for call in calls] == [1, 1]
+    assert [call["retry_post_ids"] for call in calls] == [(99,), (99,)]

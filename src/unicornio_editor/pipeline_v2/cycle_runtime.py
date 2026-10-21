@@ -222,17 +222,33 @@ def run_v2_cycle(
         authorized_excluded_ids = authorization_request.get(
             "excluded_post_ids", request.excluded_post_ids
         )
+        executor_limit = authorized_batch_size if authorized_pending else request.batch_size
+        executor_retry_ids = (
+            tuple(authorized_seen_ids)
+            if authorized_pending
+            else request.seen_post_ids
+        )
+        executor_excluded_ids = (
+            authorized_excluded_ids
+            if authorized_pending
+            else request.excluded_post_ids
+        )
+        executor_max_new_posts = (
+            authorized_max_new_posts
+            if authorized_pending
+            else request.max_new_posts
+        )
         if pending_ids is not None:
             preview = run_v2(
                 client,
                 config,
                 root,
-                limit=request.batch_size,
+                limit=executor_limit,
                 preview=True,
                 expected_selected_ids=pending_ids,
-                retry_post_ids=request.seen_post_ids,
-                excluded_post_ids=request.excluded_post_ids,
-                max_new_posts=request.max_new_posts,
+                retry_post_ids=executor_retry_ids,
+                excluded_post_ids=executor_excluded_ids,
+                max_new_posts=executor_max_new_posts,
                 lock_held=True,
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
@@ -299,12 +315,12 @@ def run_v2_cycle(
             client,
             config,
             root,
-            limit=request.batch_size,
+            limit=executor_limit,
             preview=False,
             expected_selected_ids=selected_ids,
-            retry_post_ids=request.seen_post_ids,
-            excluded_post_ids=request.excluded_post_ids,
-            max_new_posts=request.max_new_posts,
+            retry_post_ids=executor_retry_ids,
+            excluded_post_ids=executor_excluded_ids,
+            max_new_posts=executor_max_new_posts,
             lock_held=True,
             cycle_id=state.cycle_id,
             cycle_round=request.round_number,
