@@ -98,6 +98,10 @@ somente a pendência e preserva o histórico das rodadas anteriores. Com
 evidência parcial, a retomada permanece bloqueada para reconciliação por post.
 Uma reconciliação só aceita journal com o mesmo `cycle_id` e `cycle_round` da
 autorização pendente; registros de outro ciclo nunca são prova suficiente.
+Se o journal válido comprovar que uma autorização inválida chegou a executar,
+o runtime registra `round_reconciled_out_of_budget`, preserva os detalhes por
+post e limpa somente a pendência. Essa anomalia não incrementa `rounds`,
+`seen_post_ids` ou `attempts_by_post`, nem autoriza novo write.
 Antes de invalidar, o runtime verifica também o status WordPress e o
 MediaRegistry em modo somente leitura.
 O limite de duração conta apenas o tempo de execução das sessões, não o

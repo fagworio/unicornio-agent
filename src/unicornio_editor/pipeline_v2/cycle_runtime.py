@@ -176,6 +176,7 @@ def _reconcile_completed_round(
     expected_cycle_id: str,
     expected_cycle_round: int,
     preauthorized_new_post_ids: tuple[int, ...] = (),
+    historical_out_of_budget: bool = False,
 ) -> CycleRoundResult | None:
     """Reconcile a round whose write completed before its cycle checkpoint.
 
@@ -258,6 +259,16 @@ def _reconcile_completed_round(
         executed_ids=tuple(selected_ids),
         details=tuple(details),
         preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
+        historical_reconciliation=historical_out_of_budget,
+        historical_reconciliation_info=(
+            {
+                "reason": "unique_post_budget_violation",
+                "authorization_status": "invalid_historical_execution",
+                "write_replayed": False,
+            }
+            if historical_out_of_budget
+            else None
+        ),
     )
 
 
@@ -305,6 +316,12 @@ def run_v2_cycle(
                 reason=str(report.get("reason") or "invalid_authorization"),
                 selected_ids=[int(value) for value in report.get("preview_selected_ids", ())],
                 evidence=report.get("evidence") or {},
+            )
+            return
+        if event == "round_reconciled_out_of_budget":
+            store.reconcile_historical_round(
+                current,
+                report=fields.get("report") or {},
             )
             return
         if event == "cycle_finished":
@@ -389,19 +406,6 @@ def run_v2_cycle(
                 cycle_round=request.round_number,
             )
             if preview.get("selection_mismatch"):
-                reconciled = _reconcile_completed_round(
-                    client,
-                    root,
-                    pending_ids,
-                    expected_cycle_id=state.cycle_id,
-                    expected_cycle_round=request.round_number,
-                    preauthorized_new_post_ids=tuple(
-                        int(post_id)
-                        for post_id in set(pending_ids) - set(authorized_seen_ids)
-                    ),
-                )
-                if reconciled is not None:
-                    return reconciled
                 budget_violation = _selection_budget_violation(
                     pending_ids,
                     seen_post_ids=authorized_seen_ids,
@@ -409,6 +413,26 @@ def run_v2_cycle(
                     batch_size=authorized_batch_size,
                     excluded_post_ids=authorized_excluded_ids,
                 )
+                reconciled = _reconcile_completed_round(
+                    client,
+                    root,
+                    pending_ids,
+                    expected_cycle_id=state.cycle_id,
+                    expected_cycle_round=request.round_number,
+                    preauthorized_new_post_ids=(
+                        ()
+                        if budget_violation == "unique_post_budget_violation"
+                        else tuple(
+                            int(post_id)
+                            for post_id in set(pending_ids) - set(authorized_seen_ids)
+                        )
+                    ),
+                    historical_out_of_budget=(
+                        budget_violation == "unique_post_budget_violation"
+                    ),
+                )
+                if reconciled is not None:
+                    return reconciled
                 if budget_violation:
                     evidence = _confirm_round_has_no_write(
                         client,
@@ -466,7 +490,17 @@ def run_v2_cycle(
             excluded_post_ids=authorized_excluded_ids,
         )
         if budget_violation:
-            if authorized_pending:
+            if authorized_pending and budget_violation == "unique_post_budget_violation":
+                reconciled = _reconcile_completed_round(
+                    client,
+                    root,
+                    selected_ids,
+                    expected_cycle_id=state.cycle_id,
+                    expected_cycle_round=request.round_number,
+                    historical_out_of_budget=True,
+                )
+                if reconciled is not None:
+                    return reconciled
                 evidence = _confirm_round_has_no_write(
                     client,
                     root,

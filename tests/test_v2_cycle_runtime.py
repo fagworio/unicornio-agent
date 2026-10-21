@@ -2,6 +2,8 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from unicornio_editor.pipeline_v2 import cycle_runtime
 from unicornio_editor.pipeline_v2.lock import RunSessionLock
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
@@ -328,3 +330,107 @@ def test_no_write_confirmation_blocks_when_media_registry_has_partial_effect(tmp
         cycle_id="cycle",
         round_number=4,
     ) is None
+
+
+@pytest.mark.parametrize("selection_mismatch", [False, True])
+def test_invalid_committed_round_is_reconciled_without_reauthorizing_or_recounting(
+    tmp_path, monkeypatch, selection_mismatch
+):
+    cycle_id = "historical-cycle"
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id=cycle_id)
+    state.phase = "DRAINING"
+    state.rounds = 3
+    state.seen_post_ids = [1, 2, 3]
+    state.attempts_by_post = {1: 1, 2: 1, 3: 1}
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    store.start_round(
+        state,
+        round_number=4,
+        request={
+            "round_number": 4,
+            "batch_size": 2,
+            "max_new_posts": 0,
+            "seen_post_ids": [1, 2, 3],
+            "excluded_post_ids": [],
+            "attempts_by_post": {1: 1, 2: 1, 3: 1},
+        },
+    )
+    store.authorize_round(state, [115329, 115288])
+
+    ready_state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    )
+    retry_state = WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA)
+    posts = {
+        115329: {
+            "id": 115329,
+            "status": "pending",
+            "title": {"raw": "A"},
+            "content": {"raw": "<p>a</p>"},
+            "meta": {"_hermes_work_state": json.dumps(ready_state.to_dict())},
+        },
+        115288: {
+            "id": 115288,
+            "status": "pending",
+            "title": {"raw": "B"},
+            "content": {"raw": "<p>b</p>"},
+            "meta": {"_hermes_work_state": json.dumps(retry_state.to_dict())},
+        },
+    }
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    for post_id, journal_state in ((115329, ready_state), (115288, retry_state)):
+        (journal_dir / f"{post_id}.json").write_text(json.dumps({
+            "status": "committed",
+            "readback": True,
+            "cycle_id": cycle_id,
+            "cycle_round": 4,
+            "state": journal_state.to_dict(),
+            "media_readback_status": "not_attempted",
+        }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return list(posts.values()) if page == 1 else []
+
+        def get_post(self, post_id):
+            return posts[post_id]
+
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("expected_selected_ids"):
+            return {
+                "preview": True,
+                "queue": {
+                    "selected_ids": [] if selection_mismatch else [115329, 115288]
+                },
+                "selection_mismatch": selection_mismatch,
+            }
+        return {"preview": True, "queue": {"selected_ids": []}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(Client(), _config(), tmp_path)
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 3
+    assert report.attempts_by_post == {1: 1, 2: 1, 3: 1}
+    assert len(calls) == 2
+    assert all(call["preview"] is True for call in calls)
+    persisted = cycle_runtime.CycleStateStore(tmp_path).load()
+    assert persisted.pending_round is None
+    assert any(
+        report_item.get("event") == "round_reconciled_out_of_budget"
+        for report_item in report.round_reports
+    )
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "work" / "v2-cycle" / "journal.jsonl").read_text().splitlines()
+    ]
+    assert "round_reconciled_out_of_budget" in events
+    assert "round_completed" not in events

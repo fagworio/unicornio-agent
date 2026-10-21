@@ -237,6 +237,30 @@ class CycleStateStore:
             evidence=dict(evidence),
         )
 
+    def reconcile_historical_round(
+        self,
+        state: CycleState,
+        *,
+        report: Mapping[str, Any],
+    ) -> None:
+        """Close a committed but out-of-budget round without recounting it."""
+        pending = state.pending_round
+        if not isinstance(pending, Mapping):
+            raise RuntimeError("cannot reconcile without a pending round")
+        selected_ids = [int(value) for value in (pending.get("preview_selected_ids") or [])]
+        executed_ids = [int(value) for value in (report.get("executed_ids") or [])]
+        if selected_ids != executed_ids:
+            raise RuntimeError("historical reconciliation must cover the authorized selection")
+        state.pending_round = None
+        self.save(
+            state,
+            event="round_reconciled_out_of_budget",
+            round_number=int(pending.get("round_number")),
+            selected_ids=selected_ids,
+            executed_ids=executed_ids,
+            report=dict(report),
+        )
+
     def finish(self, state: CycleState, *, status: str, stop_reason: str) -> None:
         state.status = status
         state.stop_reason = stop_reason

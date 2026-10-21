@@ -66,6 +66,8 @@ class CycleRoundResult:
     preauthorized_new_post_ids: tuple[int, ...] = ()
     authorization_invalidated: bool = False
     authorization_invalidation: Mapping[str, Any] | None = None
+    historical_reconciliation: bool = False
+    historical_reconciliation_info: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -126,6 +128,12 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         authorization_invalidation=(
             dict(value["authorization_invalidation"])
             if isinstance(value.get("authorization_invalidation"), Mapping)
+            else None
+        ),
+        historical_reconciliation=bool(value.get("historical_reconciliation", False)),
+        historical_reconciliation_info=(
+            dict(value["historical_reconciliation_info"])
+            if isinstance(value.get("historical_reconciliation_info"), Mapping)
             else None
         ),
     )
@@ -276,6 +284,24 @@ def run_cycle(
                 "round_authorization_invalidated",
                 round_number=request.round_number,
                 report=invalidation_report,
+            )
+            continue
+        if result.historical_reconciliation:
+            reconciliation = dict(result.historical_reconciliation_info or {})
+            historical_report = {
+                "event": "round_reconciled_out_of_budget",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": list(result.executed_ids),
+                "post_results": [dict(detail) for detail in result.details],
+                **reconciliation,
+            }
+            report.round_reports.append(historical_report)
+            save(
+                "round_reconciled_out_of_budget",
+                round_number=request.round_number,
+                report=historical_report,
             )
             continue
         if result.budget_violation:

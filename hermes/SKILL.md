@@ -60,6 +60,9 @@ Reconciliação só é válida quando `cycle_id` e `cycle_round` do journal
 coincidem exatamente com a autorização pendente; journal histórico de outro
 ciclo não pode ser reutilizado. A invalidação consulta WordPress e
 MediaRegistry somente para leitura e para diante de qualquer evidência parcial.
+Quando um journal válido comprova execução fora do orçamento, registre
+`round_reconciled_out_of_budget`: preserve os resultados individuais, remova a
+pendência e não incremente contadores nem repita writes.
 
 Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
 `media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser
