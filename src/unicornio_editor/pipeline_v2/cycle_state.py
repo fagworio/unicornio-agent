@@ -171,17 +171,15 @@ class CycleStateStore:
             os.fsync(handle.fileno())
 
     def begin_run(self, state: CycleState) -> None:
-        """Start a process invocation and carry forward uncheckpointed time."""
+        """Start a process invocation without charging inter-run downtime.
+
+        ``active_started_at`` describes an invocation that may still be
+        running.  A persisted value can also be left behind by a crash, so it
+        must never be treated as proof that the process ran during the time
+        between two cron invocations.  The cycle persists elapsed execution
+        time at checkpoints; the next invocation starts a fresh session clock.
+        """
         now = datetime.now(timezone.utc)
-        if state.active_started_at:
-            try:
-                previous = datetime.fromisoformat(state.active_started_at.replace("Z", "+00:00"))
-                if previous.tzinfo is None:
-                    previous = previous.replace(tzinfo=timezone.utc)
-                state.elapsed_seconds += max(0.0, (now - previous).total_seconds())
-            except ValueError:
-                # A malformed diagnostic timestamp must not reset the budget.
-                state.elapsed_seconds = max(state.elapsed_seconds, 0.0)
         state.active_started_at = now.isoformat()
         self.save(
             state,
@@ -211,6 +209,33 @@ class CycleStateStore:
         round_number = state.pending_round.get("round_number") if state.pending_round else None
         state.pending_round = None
         self.save(state, event="round_completed", round_number=round_number, report=dict(report))
+
+    def invalidate_round_authorization(
+        self,
+        state: CycleState,
+        *,
+        reason: str,
+        selected_ids: list[int] | tuple[int, ...],
+        evidence: Mapping[str, Any],
+    ) -> None:
+        """Discard only an unexecuted authorization, retaining its audit trail."""
+        pending = state.pending_round
+        if not isinstance(pending, Mapping):
+            raise RuntimeError("cannot invalidate a round without a pending round")
+        expected_ids = [int(value) for value in (pending.get("preview_selected_ids") or [])]
+        actual_ids = [int(value) for value in selected_ids]
+        if expected_ids != actual_ids:
+            raise RuntimeError("round authorization does not match the pending selection")
+        state.pending_round = None
+        self.save(
+            state,
+            event="round_authorization_invalidated",
+            round_number=int(pending.get("round_number")),
+            selected_ids=actual_ids,
+            executed_ids=[],
+            reason=str(reason),
+            evidence=dict(evidence),
+        )
 
     def finish(self, state: CycleState, *, status: str, stop_reason: str) -> None:
         state.status = status

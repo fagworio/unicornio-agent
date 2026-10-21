@@ -49,6 +49,13 @@ estagnação ou encontra divergência crítica. Em `DRAINING`, novas admissões 
 fechadas e somente retries elegíveis podem entrar.
 Falhas de autorização ou executor deixam o checkpoint em estado retomável; não
 use `--fresh` para descartar uma execução interrompida.
+Retries editoriais fora de `seen_post_ids` são novas admissões para o ciclo e
+nunca podem entrar em `DRAINING`. Uma autorização pendente incompatível pode ser
+invalidada somente sob o lock, quando não há journal nem evidência de write no
+readback; o evento `round_authorization_invalidated` preserva a seleção e os
+contadores históricos sem contar uma rodada não executada. Qualquer evidência de
+write exige reconciliação por post. O limite de duração considera apenas tempo
+de execução, não o intervalo de pausa entre invocações do cron.
 
 Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
 `media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser

@@ -64,6 +64,8 @@ class CycleRoundResult:
     selection_mismatch: bool = False
     budget_violation: str | None = None
     preauthorized_new_post_ids: tuple[int, ...] = ()
+    authorization_invalidated: bool = False
+    authorization_invalidation: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -119,6 +121,12 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         ),
         preauthorized_new_post_ids=tuple(
             int(item) for item in (value.get("preauthorized_new_post_ids") or ())
+        ),
+        authorization_invalidated=bool(value.get("authorization_invalidated", False)),
+        authorization_invalidation=(
+            dict(value["authorization_invalidation"])
+            if isinstance(value.get("authorization_invalidation"), Mapping)
+            else None
         ),
     )
 
@@ -253,6 +261,23 @@ def run_cycle(
         if result.locked:
             report.stop_reason = "locked"
             break
+        if result.authorization_invalidated:
+            invalidation = dict(result.authorization_invalidation or {})
+            invalidation_report = {
+                "event": "round_authorization_invalidated",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": [],
+                **invalidation,
+            }
+            report.round_reports.append(invalidation_report)
+            save(
+                "round_authorization_invalidated",
+                round_number=request.round_number,
+                report=invalidation_report,
+            )
+            continue
         if result.budget_violation:
             report.stop_reason = str(result.budget_violation)
             report.round_reports.append({

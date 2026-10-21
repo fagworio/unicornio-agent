@@ -90,6 +90,14 @@ por rodada, mantém o lock durante o ciclo e grava `work/v2-cycle/state.json` e
 `drain_rounds`, `elapsed_seconds` e `stop_reason`. Após estagnação, a fase
 `DRAINING` fecha novas admissões e tenta somente retries elegíveis até
 `EDITOR_V2_CYCLE_MAX_DRAIN_ROUNDS`.
+Qualquer retry editorial que não pertença a `seen_post_ids` consome uma
+admissão nova; portanto não entra durante `DRAINING`. Se uma autorização
+pendente antiga contrariar esse contrato e não houver journal nem evidência de
+write no readback, o ciclo registra `round_authorization_invalidated`, remove
+somente a pendência e preserva o histórico das rodadas anteriores. Com
+evidência parcial, a retomada permanece bloqueada para reconciliação por post.
+O limite de duração conta apenas o tempo de execução das sessões, não o
+intervalo em que o checkpoint ficou pausado entre invocações.
 
 ### Quarentena operacional por post
 

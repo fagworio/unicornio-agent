@@ -133,6 +133,23 @@ def select(
     )
     retry_items = [item for item, _state, _reopened in queues["retry"]]
     new_items = [item for item, _state, _reopened in queues["new"]]
+    cycle_retry_ids = {int(post_id) for post_id in retry_post_ids}
+    cycle_retry_items = [item for item in retry_items if int(item[0]) in cycle_retry_ids]
+    external_retry_items = [item for item in retry_items if int(item[0]) not in cycle_retry_ids]
+    if max_new_posts is not None:
+        # Every post outside this cycle's admitted set consumes a new-post
+        # admission, even when its editorial state is already in MEDIA or it
+        # was manually reopened.  Otherwise DRAINING could admit an external
+        # retry while max_new_posts=0 and authorize a post unseen by the cycle.
+        admission_items = external_retry_items + new_items
+        if max_new_posts == 0:
+            return cycle_retry_items[:limit]
+        retry_slots = min(
+            len(cycle_retry_items),
+            limit if not admission_items else max(0, limit - 1),
+        )
+        admission_slots = min(limit - retry_slots, max_new_posts)
+        return cycle_retry_items[:retry_slots] + admission_items[:admission_slots]
     if limit == 1 and new_items and (max_new_posts is None or max_new_posts > 0):
         # Reserve one deterministic two-hour slot out of every three for an
         # aged NEW post. The other two slots remain retry-first, bounding

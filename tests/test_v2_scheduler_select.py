@@ -110,7 +110,23 @@ def test_select_treats_seen_relevance_posts_as_retry_and_can_close_new_admission
         retry_post_ids=(1,),
         max_new_posts=0,
     )
-    assert [item[0] for item in result] == [3, 1]
+    assert [item[0] for item in result] == [1]
+
+
+def test_select_counts_external_editorial_retry_against_admission_budget():
+    states = {
+        1: WorkState(),
+        2: WorkState(),
+        3: WorkState(phase=Phase.MEDIA, blocker=BlockerCode.INLINE_MISSING, relevance_approved=True),
+    }
+    result = select(
+        [(post_id, {}) for post_id in states],
+        Store(states),
+        limit=2,
+        retry_post_ids=(1,),
+        max_new_posts=1,
+    )
+    assert [item[0] for item in result] == [1, 3]
 
 
 def test_select_excludes_retry_cooldown_before_composing_queues():

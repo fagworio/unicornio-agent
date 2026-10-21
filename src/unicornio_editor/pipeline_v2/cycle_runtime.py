@@ -51,6 +51,30 @@ def _selection_budget_violation(
     return None
 
 
+def _confirm_round_has_no_write(client, root: Path, selected_ids: list[int]) -> dict[str, Any] | None:
+    """Return evidence for invalidating a round only when no write is known.
+
+    A journal file is treated as possible write evidence, including prepared or
+    partial journals.  In that case recovery must remain blocked so the next
+    invocation can reconcile each post instead of discarding the authorization.
+    """
+    journal_dir = Path(root) / "work" / "v2-journal"
+    for post_id in selected_ids:
+        if (journal_dir / f"{int(post_id)}.json").exists():
+            return None
+        try:
+            post = client.get_post(int(post_id))
+        except Exception:
+            return None
+        if not isinstance(post, dict):
+            return None
+    return {
+        "journal_files_absent": True,
+        "wordpress_readback_checked": True,
+        "post_ids": [int(post_id) for post_id in selected_ids],
+    }
+
+
 def _reconcile_completed_round(
     client,
     root: Path,
@@ -173,6 +197,15 @@ def run_v2_cycle(
         if event == "round_completed":
             store.complete_round(current, report=fields.get("report") or {})
             return
+        if event == "round_authorization_invalidated":
+            report = fields.get("report") or {}
+            store.invalidate_round_authorization(
+                current,
+                reason=str(report.get("reason") or "invalid_authorization"),
+                selected_ids=[int(value) for value in report.get("preview_selected_ids", ())],
+                evidence=report.get("evidence") or {},
+            )
+            return
         if event == "cycle_finished":
             stop_reason = str(fields.get("stop_reason") or "")
             current.stop_reason = stop_reason
@@ -188,6 +221,7 @@ def run_v2_cycle(
                 "unique_post_budget_violation",
             }:
                 current.status = "running"
+                current.active_started_at = None
                 store.save(current, event="cycle_paused", stop_reason=stop_reason)
             else:
                 store.finish(current, status="completed", stop_reason=stop_reason)
@@ -265,6 +299,28 @@ def run_v2_cycle(
                 )
                 if reconciled is not None:
                     return reconciled
+                budget_violation = _selection_budget_violation(
+                    pending_ids,
+                    seen_post_ids=authorized_seen_ids,
+                    max_new_posts=authorized_max_new_posts,
+                    batch_size=authorized_batch_size,
+                    excluded_post_ids=authorized_excluded_ids,
+                )
+                if budget_violation:
+                    evidence = _confirm_round_has_no_write(client, root, pending_ids)
+                    if evidence is not None:
+                        return CycleRoundResult(
+                            preview_selected_ids=tuple(pending_ids),
+                            authorization_invalidated=True,
+                            authorization_invalidation={
+                                "reason": budget_violation,
+                                "evidence": evidence,
+                            },
+                        )
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(pending_ids),
+                        budget_violation=budget_violation,
+                    )
                 return CycleRoundResult(
                     preview_selected_ids=tuple(pending_ids),
                     selection_mismatch=True,
@@ -301,6 +357,17 @@ def run_v2_cycle(
             excluded_post_ids=authorized_excluded_ids,
         )
         if budget_violation:
+            if authorized_pending:
+                evidence = _confirm_round_has_no_write(client, root, selected_ids)
+                if evidence is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        authorization_invalidated=True,
+                        authorization_invalidation={
+                            "reason": budget_violation,
+                            "evidence": evidence,
+                        },
+                    )
             return CycleRoundResult(
                 preview_selected_ids=tuple(selected_ids),
                 budget_violation=budget_violation,
