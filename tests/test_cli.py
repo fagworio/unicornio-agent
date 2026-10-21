@@ -277,6 +277,105 @@ class CompactOutputTests(unittest.TestCase):
         }
         self.assertEqual(_monitor_line(report), _monitor_line(report))
 
+    def test_monitor_line_wakes_for_running_v2_checkpoint(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-7f401e9",
+            "status": "running",
+            "phase": "DRAINING",
+            "pending_round": {
+                "round_number": 4,
+                "preview_selected_ids": [115329, 115288],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            first = _monitor_line(report, root)
+            self.assertTrue(first.startswith("recovery=v1:cycle-7f401e9:DRAINING:4:"))
+            self.assertEqual(first, _monitor_line(report, root))
+
+    def test_monitor_line_changes_when_v2_authorized_round_changes(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-7f401e9",
+            "status": "running",
+            "phase": "ADMISSION",
+            "pending_round": {
+                "round_number": 1,
+                "preview_selected_ids": [101, 102],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            first = _monitor_line(report, root)
+
+            state["pending_round"]["round_number"] = 2
+            state["pending_round"]["preview_selected_ids"] = [103]
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            second = _monitor_line(report, root)
+
+            self.assertNotEqual(first, second)
+
+    def test_monitor_line_removes_completed_v2_checkpoint_marker(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-7f401e9",
+            "status": "running",
+            "phase": "COMPLETED",
+            "pending_round": None,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.assertIn("recovery=v1:", _monitor_line(report, root))
+
+            state["status"] = "completed"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.assertEqual(_monitor_line(report, root), "0")
+
+    def test_monitor_line_keeps_invalid_v2_checkpoint_error_stable(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("{invalid", encoding="utf-8")
+            first = _monitor_line(report, root)
+            self.assertEqual(first, "recovery_error=v1:checkpoint_invalid")
+            self.assertEqual(first, _monitor_line(report, root))
+
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})
         self.assertEqual(ok, {"status": "pass", "failed": []})

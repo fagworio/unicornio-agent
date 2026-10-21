@@ -1788,7 +1788,80 @@ def _compact_checklist(checklist: dict) -> dict:
     return {"status": "pass" if not failed else "fail", "failed": failed}
 
 
-def _monitor_line(report: dict) -> str:
+_V2_RECOVERY_MONITOR_PROTOCOL = "v1"
+_V2_CYCLE_PHASES = frozenset({"ADMISSION", "DRAINING", "COMPLETED"})
+
+
+def _v2_recovery_monitor_marker(root: Path) -> str | None:
+    """Return a stable wake marker for a resumable V2 cycle checkpoint.
+
+    The Hermes monitor hashes this line and only wakes the agent when it
+    changes.  Recovery therefore needs a marker that changes for meaningful
+    checkpoint transitions, but never for timestamps or polling counters.
+    Invalid checkpoints stay visible as one stable error marker so recovery
+    cannot silently stall or spin.
+    """
+    state_path = Path(root) / "work" / "v2-cycle" / "state.json"
+    if not state_path.is_file():
+        return None
+    try:
+        value = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+
+    cycle_id = value.get("cycle_id")
+    status = value.get("status")
+    phase = value.get("phase")
+    if (
+        not isinstance(cycle_id, str)
+        or not cycle_id
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", cycle_id)
+        or status not in {"running", "completed", "failed"}
+        or phase not in _V2_CYCLE_PHASES
+    ):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+    if status != "running":
+        return None
+
+    pending = value.get("pending_round")
+    if pending is None:
+        pending = {}
+    if not isinstance(pending, dict):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+
+    round_number = pending.get("round_number", 0)
+    selected_ids = pending.get("preview_selected_ids")
+    if selected_ids is None:
+        selected_ids = []
+    if (
+        isinstance(round_number, bool)
+        or not isinstance(round_number, int)
+        or round_number < 0
+        or not isinstance(selected_ids, list)
+    ):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+    if any(isinstance(post_id, bool) or not isinstance(post_id, int) for post_id in selected_ids):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+    authorized_ids = list(selected_ids)
+    if (
+        any(post_id <= 0 for post_id in authorized_ids)
+        or len(authorized_ids) != len(set(authorized_ids))
+    ):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+
+    authorized_digest = hashlib.sha256(
+        json.dumps(authorized_ids, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return (
+        f"recovery={_V2_RECOVERY_MONITOR_PROTOCOL}:{cycle_id}:"
+        f"{phase}:{round_number}:{authorized_digest}"
+    )
+
+
+def _monitor_line(report: dict, root: Path | None = None) -> str:
     """Linha ESTAVEL do monitor (hasheada pelo cron).
 
     So muda quando ha trabalho elegivel real: pending nao processado (id),
@@ -1826,6 +1899,10 @@ def _monitor_line(report: dict) -> str:
         )
     )
     parts += in_cooldown
+    if root is not None:
+        recovery_marker = _v2_recovery_monitor_marker(root)
+        if recovery_marker:
+            parts.append(recovery_marker)
     return " ".join(parts) or "0"
 
 
@@ -2664,7 +2741,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.monitor:
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
-                print(_monitor_line(report))
+                print(_monitor_line(report, args.root))
                 return 0
             result = _compact_queue(report) if args.compact else report
         elif args.command == "cards":
