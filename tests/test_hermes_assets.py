@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -57,6 +58,93 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("--monitor-script", content)
         self.assertIn("unicornio-editor-monitor.sh", content)
         self.assertIn("references", content)
+        self.assertIn("validate-monitor.sh", content)
+
+    def test_rendered_monitor_validator_rejects_unresolved_placeholder(self):
+        validator = ROOT / "hermes" / "validate-monitor.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            rendered = Path(directory) / "monitor.sh"
+            rendered.write_text(
+                'ROOT="@PROJECT_ROOT@"\n'
+                'queue --monitor --root "$ROOT"\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", str(validator), str(rendered), directory],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unresolved @PROJECT_ROOT@", result.stderr)
+
+    def test_cron_install_renders_monitor_and_is_idempotent(self):
+        script = ROOT / "hermes" / "cron-install.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            hermes_home = Path(directory) / "hermes"
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            fake_hermes = fake_bin / "hermes"
+            fake_hermes.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path(os.environ["HERMES_HOME"])
+jobs_file = home / "cron" / "jobs.json"
+jobs_file.parent.mkdir(parents=True, exist_ok=True)
+data = json.loads(jobs_file.read_text()) if jobs_file.exists() else {"jobs": []}
+args = sys.argv[1:]
+command = args[1] if len(args) > 1 else ""
+name = args[args.index("--name") + 1] if "--name" in args else "UnicornioHater editorial pending"
+jobs = data.setdefault("jobs", [])
+if command == "create":
+    jobs.append({"id": "fake-editorial", "name": name})
+elif command == "edit":
+    pass
+elif command == "remove":
+    jobs[:] = [job for job in jobs if job.get("id") != args[2]]
+jobs_file.write_text(json.dumps(data), encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+            fake_hermes.chmod(0o755)
+            env = {
+                **os.environ,
+                "HERMES_HOME": str(hermes_home),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+            first = subprocess.run(
+                ["bash", str(script), "every 2h"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            second = subprocess.run(
+                ["bash", str(script), "every 2h"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            monitor = hermes_home / "scripts" / "unicornio-editor-monitor.sh"
+            jobs = json.loads(
+                (hermes_home / "cron" / "jobs.json").read_text(encoding="utf-8")
+            )["jobs"]
+            monitor_exists = monitor.is_file()
+            monitor_executable = os.access(monitor, os.X_OK)
+            rendered = monitor.read_text(encoding="utf-8") if monitor_exists else ""
+            job_count = len(jobs)
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertTrue(monitor_exists)
+        self.assertTrue(monitor_executable)
+        self.assertNotIn("@PROJECT_ROOT@", rendered)
+        self.assertIn(f'ROOT="{ROOT}"', rendered)
+        self.assertEqual(job_count, 1)
 
     def test_cron_installer_is_idempotent(self):
         # Nao duplica jobs: o install DEVE editar um job existente (em vez de

@@ -27,8 +27,15 @@ fi
 # hermes cron) e rodar do workdir do projeto para achar .env e o CLI.
 # Substitui o placeholder pelo caminho real do projeto (o script vive sob
 # $HERMES_HOME/scripts/, fora do workdir, entao nao pode inferir ROOT sozinho).
-sed "s|@PROJECT_ROOT@|$ROOT|g" "$ROOT/hermes/monitor.sh" > "$MONITOR_SCRIPT"
-chmod +x "$MONITOR_SCRIPT"
+# Renderiza em arquivo temporario e valida antes de substituir o monitor ativo:
+# uma falha de interpolacao nunca pode deixar o cron com um monitor quebrado.
+RENDERED_MONITOR="$MONITOR_SCRIPT.tmp.$$"
+trap 'rm -f "$RENDERED_MONITOR"' EXIT
+sed "s|@PROJECT_ROOT@|$ROOT|g" "$ROOT/hermes/monitor.sh" > "$RENDERED_MONITOR"
+"$ROOT/hermes/validate-monitor.sh" "$RENDERED_MONITOR" "$ROOT"
+chmod +x "$RENDERED_MONITOR"
+mv -f "$RENDERED_MONITOR" "$MONITOR_SCRIPT"
+trap - EXIT
 
 # O job editorial usa exclusivamente o lifecycle V2. O instalador deve ser a
 # fonte persistente dessa decisão: uma reinstalação nunca pode reintroduzir os
