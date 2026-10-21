@@ -109,6 +109,7 @@ PARSER_VERSION = 2
 FAILURE_KINDS = (
     "ok",
     "cooldown_skip",          # engine pulada por cooldown transitório ativo
+    "budget_exhausted",       # orçamento da operação acabou antes do fallback
     "network_error",          # DNS/timeout/conexão — transitório
     "rate_limited",           # 429/503 — transitório
     "http_error",             # 4xx/5xx inesperado — transitório
@@ -915,6 +916,7 @@ def search_web_images(
     remote_url_policy: str = "audit",
     audit: Any = None,
     reports: dict[str, dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """Busca AGREGADA entre as engines (Fase 3), com parada por capacidade.
 
@@ -956,6 +958,17 @@ def search_web_images(
     for name in order:
         breaker_name = provider_key(name)
         relatorio: dict[str, Any] = {}
+        if deadline is not None:
+            remaining = float(deadline) - time.monotonic()
+            if remaining <= 0:
+                relatorio = {
+                    "http_status": 0, "html_bytes": 0, "objects_parsed": 0,
+                    "candidates": 0, "failure_kind": "budget_exhausted",
+                    "parser_version": PARSER_VERSION,
+                }
+                if reports is not None:
+                    reports[name] = dict(relatorio)
+                break
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
         if not engine_disponivel(breaker_name):
@@ -967,11 +980,14 @@ def search_web_images(
                 reports[name] = dict(relatorio)
             continue
         try:
+            effective_timeout = float(timeout)
+            if deadline is not None:
+                effective_timeout = min(effective_timeout, max(0.05, remaining))
             kwargs = {
                 "size": size,
                 "ratio": ratio,
                 "limit": alvo,
-                "timeout": timeout,
+                "timeout": effective_timeout,
                 "report": relatorio,
             }
             if name == "google_browser":
@@ -995,7 +1011,11 @@ def search_web_images(
             espera = engine_falhou(breaker_name)
             if espera:
                 try:
-                    time.sleep(min(float(espera), 8.0))
+                    pausa = min(float(espera), 8.0)
+                    if deadline is not None:
+                        pausa = min(pausa, max(0.0, float(deadline) - time.monotonic()))
+                    if pausa > 0:
+                        time.sleep(pausa)
                 except Exception:  # noqa: BLE001 - sleep interrompido não quebra
                     pass
             continue
@@ -1040,6 +1060,7 @@ def search_web_images_batch(
     accept: Any = None,
     remote_url_policy: str = "audit",
     audit: Any = None,
+    budget_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Discover candidates for several distinct works concurrently.
 
@@ -1061,6 +1082,9 @@ def search_web_images_batch(
         raise ValueError(f"media-search-listicle accepts at most {_MAX_BATCH_QUERIES} distinct titles")
     if not unique:
         return []
+    deadline = None
+    if budget_seconds is not None and float(budget_seconds) > 0:
+        deadline = time.monotonic() + float(budget_seconds)
 
     def _search(query: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         # O callback do batch recebe TAMBÉM a query: cada item do listicle tem o
@@ -1076,6 +1100,7 @@ def search_web_images_batch(
             accept=_accept_do_item if accept is not None else None,
             remote_url_policy=remote_url_policy,
             audit=audit,
+            deadline=deadline,
             reports=relatorios,
         )
         return candidatos, relatorios
@@ -1100,6 +1125,11 @@ def search_web_images_batch(
             # Por que cada engine entregou (ou não entregou): sem isso uma engine
             # podia sumir do resultado sem deixar rastro na telemetria.
             "engine_reports": relatorios_por_query.get(query, {}),
+            "budget_exhausted": any(
+                str(report.get("failure_kind") or "") == "budget_exhausted"
+                for report in (relatorios_por_query.get(query, {}) or {}).values()
+                if isinstance(report, dict)
+            ),
         }
         for query in unique
     ]

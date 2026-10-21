@@ -53,6 +53,39 @@ class SearchWebImagesTests(unittest.TestCase):
         ):
             self.assertEqual(search_web_images("redfall"), [])
 
+    def test_expired_operation_budget_does_not_start_provider(self):
+        from unicornio_editor.media import search
+
+        reports = {}
+        with mock.patch.object(search.time, "monotonic", return_value=100.0), \
+             mock.patch.object(search, "search_bing_images") as browser:
+            rows = search.search_web_images(
+                "redfall", engine="bing", reports=reports, deadline=99.0
+            )
+
+        self.assertEqual(rows, [])
+        browser.assert_not_called()
+        self.assertEqual(
+            reports["bing"]["failure_kind"], "budget_exhausted"
+        )
+
+    def test_operation_budget_caps_remaining_provider_timeout(self):
+        from unicornio_editor.media import search
+
+        seen = {}
+
+        def bing(_query, **kwargs):
+            seen["timeout"] = kwargs["timeout"]
+            return []
+
+        with mock.patch.object(search, "search_bing_images", bing), \
+             mock.patch.object(search.time, "monotonic", return_value=99.0):
+            search.search_web_images(
+                "redfall", engine="bing", timeout=30.0, deadline=100.0
+            )
+
+        self.assertEqual(seen["timeout"], 1.0)
+
     def test_parses_candidates_and_drops_google_previews(self):
         html = (
             '<html><body><script>var data = '

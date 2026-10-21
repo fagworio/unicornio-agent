@@ -1417,6 +1417,9 @@ def _resolve_media_batch(
         audit=lambda finding: append_telemetry(
             root, "remote_url_audit", url=finding.url, reason=finding.reason
         ),
+        budget_seconds=float(
+            getattr(config, "media_operation_timeout_seconds", 180.0) or 0.0
+        ),
     )
     by_query = {str(row.get("query")): row.get("candidates") or [] for row in found}
     found_row_by_query = {str(row.get("query")): row for row in found}
@@ -1539,9 +1542,17 @@ def _resolve_media_batch(
             in FAILURE_KINDS_TRANSITORIOS
             for name in expected_engines
         )
+        budget_exhausted = any(
+            str((engine_reports.get(name) or {}).get("failure_kind") or "")
+            == "budget_exhausted"
+            for name in expected_engines
+        )
         if needed_web > 0 and accepted_count >= needed_web:
             completion_reason = "TARGET_REACHED"
             search_completed = True
+        elif budget_exhausted:
+            completion_reason = "BUDGET_EXHAUSTED"
+            search_completed = False
         elif transient_engine_failure:
             completion_reason = "PROVIDER_ERROR"
             search_completed = False

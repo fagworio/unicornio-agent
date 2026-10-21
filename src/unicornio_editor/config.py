@@ -23,6 +23,7 @@ class Config:
     dry_run: bool = True
     batch_limit: int = 5
     http_timeout: float = 15.0
+    media_operation_timeout_seconds: float = 180.0
     lock_ttl: int = 900
     min_relevance_confidence: float = 0.80
     min_skip_confidence: float = 0.90
@@ -116,6 +117,7 @@ class Config:
             f"wordpress_api_base={self.wordpress_api_base!r}, "
             f"app_user={self.app_user!r}, dry_run={self.dry_run!r}, "
             f"batch_limit={self.batch_limit!r}, http_timeout={self.http_timeout!r}, "
+            f"media_operation_timeout_seconds={self.media_operation_timeout_seconds!r}, "
             f"lock_ttl={self.lock_ttl!r}, "
             f"min_relevance_confidence={self.min_relevance_confidence!r}, "
             f"min_skip_confidence={self.min_skip_confidence!r}, "
@@ -294,6 +296,9 @@ def load_config() -> Config:
         dry_run=dry_run,
         batch_limit=_int("EDITOR_BATCH_LIMIT", 5, 1, 10),
         http_timeout=_float("EDITOR_HTTP_TIMEOUT", 15.0, 1.0, 120.0),
+        media_operation_timeout_seconds=_float(
+            "EDITOR_MEDIA_OPERATION_TIMEOUT_SECONDS", 180.0, 0.0, 3600.0
+        ),
         lock_ttl=_int("EDITOR_LOCK_TTL", 900, 30, 86400),
         min_relevance_confidence=_float(
             "EDITOR_MIN_RELEVANCE_CONFIDENCE", 0.80, 0.0, 1.0
