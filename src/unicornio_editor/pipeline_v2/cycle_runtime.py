@@ -273,10 +273,11 @@ def _journal_correlation(
 ) -> str:
     """Classify a journal as current, historical, or unsafe to infer."""
     journal_authorization_id = str(journal.get("authorization_id") or "").strip()
-    if expected_authorization_id and journal_authorization_id == str(expected_authorization_id):
-        return "current"
     try:
-        has_cycle_round = journal.get("cycle_id") is not None and journal.get("cycle_round") is not None
+        has_cycle_round = (
+            journal.get("cycle_id") is not None
+            and journal.get("cycle_round") is not None
+        )
         same_cycle_round = (
             str(journal.get("cycle_id") or "") == str(expected_cycle_id)
             and int(journal.get("cycle_round")) == int(expected_cycle_round)
@@ -284,9 +285,11 @@ def _journal_correlation(
     except (TypeError, ValueError):
         has_cycle_round = False
         same_cycle_round = False
+    if journal_authorization_id:
+        if journal_authorization_id != str(expected_authorization_id or ""):
+            return "historical"
+        return "current" if same_cycle_round else "uncertain"
     if not journal_authorization_id and same_cycle_round:
-        return "current"
-    if expected_authorization_id is None and same_cycle_round:
         return "current"
     if journal_authorization_id or has_cycle_round:
         return "historical"

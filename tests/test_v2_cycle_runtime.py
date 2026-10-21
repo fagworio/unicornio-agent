@@ -180,6 +180,41 @@ def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path
     assert result.details[0]["outcome"] == "not_executed"
 
 
+def test_reconcile_completed_round_rejects_matching_authorization_with_wrong_round(
+    tmp_path,
+):
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "1.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "cycle_id": "other-cycle",
+        "cycle_round": 9,
+        "authorization_id": "authorization-1",
+    }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(),
+        tmp_path,
+        [1],
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=4,
+        expected_authorization_id="authorization-1",
+    )
+    assert result is not None
+    assert result.reconciliation_blocked is True
+    assert result.reconciliation_blocking_info["unresolved_posts"] == [
+        {"post_id": 1, "reason": "journal_uncorrelated"}
+    ]
+
+
 def test_cycle_does_not_touch_checkpoint_when_lock_is_busy(tmp_path):
     lock = RunSessionLock(tmp_path / "work" / "v2-run.lock")
     assert lock.acquire() is True
@@ -523,6 +558,103 @@ def test_legacy_round_reconciles_per_post_and_blocks_uncorrelated_running_journa
     ]
     persisted = cycle_runtime.CycleStateStore(tmp_path).load()
     assert persisted.pending_round["preview_selected_ids"] == selected_ids
+
+
+def test_fully_reconciled_round_closes_authorization_without_replay(
+    tmp_path, monkeypatch
+):
+    cycle_id = "fully-reconciled-cycle"
+    selected_ids = [201, 202, 203, 204, 205]
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 5}, cycle_id=cycle_id)
+    state.phase = "DRAINING"
+    state.rounds = 3
+    state.seen_post_ids = [1, 2, 3, *selected_ids]
+    state.attempts_by_post = {1: 1, 2: 1, 3: 1}
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    store.start_round(
+        state,
+        round_number=4,
+        request={
+            "round_number": 4,
+            "batch_size": 5,
+            "max_new_posts": 0,
+            "seen_post_ids": [1, 2, 3, *selected_ids],
+            "excluded_post_ids": [],
+            "attempts_by_post": {1: 1, 2: 1, 3: 1},
+        },
+    )
+    store.authorize_round(state, selected_ids)
+    authorization_id = state.pending_round["authorization_id"]
+
+    ready_state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    )
+    posts = {
+        post_id: {
+            "id": post_id,
+            "status": "pending",
+            "title": {"raw": str(post_id)},
+            "content": {"raw": "<p>conteudo</p>"},
+            "meta": {"_hermes_work_state": json.dumps(ready_state.to_dict())},
+        }
+        for post_id in selected_ids
+    }
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    for post_id in selected_ids:
+        (journal_dir / f"{post_id}.json").write_text(json.dumps({
+            "status": "committed",
+            "readback": True,
+            "cycle_id": cycle_id,
+            "cycle_round": 4,
+            "authorization_id": authorization_id,
+            "state": ready_state.to_dict(),
+        }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return posts[post_id]
+
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("expected_selected_ids"):
+            return {
+                "preview": True,
+                "selection_mismatch": True,
+                "actual_selected_ids": [],
+                "queue": {"selected_ids": [], "eligible_ids": []},
+            }
+        return {"preview": True, "queue": {"selected_ids": []}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(Client(), _config(), tmp_path)
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 3
+    assert report.attempts_total == 3
+    assert calls and all(call["preview"] is True for call in calls)
+    reconciled = report.round_reports[0]
+    assert reconciled["event"] == "round_reconciled_without_replay"
+    assert [detail["outcome"] for detail in reconciled["post_results"]] == [
+        "ready"
+    ] * 5
+    persisted = cycle_runtime.CycleStateStore(tmp_path).load()
+    assert persisted.pending_round is None
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "work" / "v2-cycle" / "journal.jsonl").read_text().splitlines()
+    ]
+    assert "round_reconciled" in events
+    assert "round_completed" not in events
 
 
 def test_no_write_confirmation_blocks_when_media_registry_has_partial_effect(tmp_path):
