@@ -475,10 +475,17 @@ def _reconcile_completed_round(
         details=tuple(details),
         preauthorized_new_post_ids=tuple(preauthorized_new_post_ids),
         reconciled_without_replay=True,
+        reconciled_execution=bool(executed_ids),
         reconciliation_info={
             "authorization_status": "fully_reconciled",
             "write_replayed": False,
             "reconciled_post_ids": [int(detail["post_id"]) for detail in details],
+            "counted_post_ids": [int(post_id) for post_id in executed_ids],
+            "not_executed_post_ids": [
+                int(detail["post_id"])
+                for detail in details
+                if detail.get("outcome") == "not_executed"
+            ],
         },
     )
 

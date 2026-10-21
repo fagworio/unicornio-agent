@@ -67,6 +67,7 @@ class CycleRoundResult:
     authorization_invalidated: bool = False
     authorization_invalidation: Mapping[str, Any] | None = None
     reconciled_without_replay: bool = False
+    reconciled_execution: bool = False
     reconciliation_info: Mapping[str, Any] | None = None
     reconciliation_blocked: bool = False
     reconciliation_blocking_info: Mapping[str, Any] | None = None
@@ -135,6 +136,7 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
             else None
         ),
         reconciled_without_replay=bool(value.get("reconciled_without_replay", False)),
+        reconciled_execution=bool(value.get("reconciled_execution", False)),
         reconciliation_info=(
             dict(value["reconciliation_info"])
             if isinstance(value.get("reconciliation_info"), Mapping)
@@ -323,9 +325,42 @@ def run_cycle(
             break
         if result.reconciled_without_replay:
             reconciliation = dict(result.reconciliation_info or {})
+            if result.reconciled_execution:
+                details_by_id = {
+                    int(detail["post_id"]): detail
+                    for detail in result.details
+                    if detail.get("post_id") is not None
+                }
+                round_ready: list[int] = []
+                round_progress = False
+                for post_id in result.executed_ids:
+                    attempts[post_id] = attempts.get(post_id, 0) + 1
+                    seen.add(post_id)
+                    detail = details_by_id.get(post_id, {})
+                    transition = _ready_transition(detail)
+                    if transition and post_id not in ready:
+                        ready.add(post_id)
+                        round_ready.append(post_id)
+                    round_progress = _detail_progressed(detail, transition) or round_progress
+                report.rounds += 1
+                if round_progress:
+                    stagnant = 0
+                    report.progress_rounds += 1
+                else:
+                    stagnant += 1
+                if phase == "DRAINING":
+                    drain_rounds += 1
+                report.stagnant_rounds = stagnant
+                report.drain_rounds = drain_rounds
+                reconciliation.update({
+                    "counted_executed_ids": list(result.executed_ids),
+                    "ready_post_ids": round_ready,
+                    "progress": round_progress,
+                    "drain_rounds": drain_rounds,
+                })
             reconciled_report = {
                 "event": "round_reconciled_without_replay",
-                "round": request.round_number,
+                "round": report.rounds if result.reconciled_execution else request.round_number,
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": list(result.executed_ids),

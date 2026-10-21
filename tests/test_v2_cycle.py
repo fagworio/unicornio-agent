@@ -1,4 +1,5 @@
 from unicornio_editor.pipeline_v2.cycle import CycleConfig, CycleRoundResult, run_cycle
+from unicornio_editor.pipeline_v2.cycle_state import CycleState
 
 
 def ready_detail(post_id, *, initial_state="pending", progress=True):
@@ -74,6 +75,60 @@ def test_cycle_replaces_completed_posts_and_counts_ready_once():
     assert report.unique_posts == 7
     assert report.attempts_total == 15
     assert requests[1].seen_post_ids == (1, 2, 3, 4, 5)
+
+
+def test_cycle_counts_reconciled_execution_without_counting_historical_no_write():
+    state = {
+        "cycle_id": "reconcile-accounting",
+        "phase": "DRAINING",
+        "rounds": 3,
+        "seen_post_ids": [99],
+        "attempts_by_post": {99: 1},
+        "stagnant_rounds": 3,
+    }
+    results = iter((
+        CycleRoundResult(
+            preview_selected_ids=(10, 11, 12),
+            executed_ids=(10, 11),
+            details=(
+                ready_detail(10),
+                retry_detail(11),
+                {"post_id": 12, "outcome": "not_executed", "progress": False},
+            ),
+            reconciled_without_replay=True,
+            reconciled_execution=True,
+            reconciliation_info={
+                "reconciled_post_ids": [10, 11, 12],
+                "counted_post_ids": [10, 11],
+                "not_executed_post_ids": [12],
+            },
+        ),
+        CycleRoundResult(),
+    ))
+    events = []
+
+    def checkpoint(_state, event, _fields):
+        events.append(event)
+
+    report = run_cycle(
+        lambda _request: next(results),
+        state=CycleState(**state),
+        config=CycleConfig(
+            ready_target=2,
+            max_total_attempts=10,
+            max_stagnant_rounds=3,
+            max_drain_rounds=3,
+        ),
+        checkpoint=checkpoint,
+    )
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 4
+    assert report.ready_post_ids == [10]
+    assert report.attempts_by_post == {10: 1, 11: 1, 99: 1}
+    assert report.unique_posts == 3
+    assert report.attempts_total == 3
+    assert events == ["round_reconciled", "cycle_finished"]
 
 
 def test_cycle_excludes_posts_that_reached_attempt_budget():

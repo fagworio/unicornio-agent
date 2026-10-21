@@ -638,12 +638,19 @@ def test_fully_reconciled_round_closes_authorization_without_replay(
     monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
     report = cycle_runtime.run_v2_cycle(Client(), _config(), tmp_path)
 
-    assert report.stop_reason == "no_eligible_work"
-    assert report.rounds == 3
-    assert report.attempts_total == 3
+    assert report.stop_reason == "ready_target"
+    assert report.rounds == 4
+    assert report.ready_count == 5
+    assert report.ready_post_ids == selected_ids
+    assert report.attempts_total == 8
+    assert report.attempts_by_post == {
+        1: 1, 2: 1, 3: 1, 201: 1, 202: 1, 203: 1, 204: 1, 205: 1
+    }
     assert calls and all(call["preview"] is True for call in calls)
     reconciled = report.round_reports[0]
     assert reconciled["event"] == "round_reconciled_without_replay"
+    assert reconciled["counted_executed_ids"] == selected_ids
+    assert reconciled["ready_post_ids"] == selected_ids
     assert [detail["outcome"] for detail in reconciled["post_results"]] == [
         "ready"
     ] * 5
