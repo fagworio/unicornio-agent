@@ -292,6 +292,7 @@ class CompactOutputTests(unittest.TestCase):
             "pending_round": {
                 "round_number": 4,
                 "preview_selected_ids": [115329, 115288],
+                "authorization_id": "authorization-4",
             },
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -301,8 +302,36 @@ class CompactOutputTests(unittest.TestCase):
             state_path.write_text(json.dumps(state), encoding="utf-8")
 
             first = _monitor_line(report, root)
-            self.assertTrue(first.startswith("recovery=v1:cycle-7f401e9:DRAINING:4:"))
+            self.assertTrue(
+                first.startswith("recovery=v2:cycle-7f401e9:DRAINING:4:authorization-4:")
+            )
             self.assertEqual(first, _monitor_line(report, root))
+
+    def test_monitor_line_keeps_legacy_v1_marker_without_authorization_id(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "legacy-cycle",
+            "status": "running",
+            "phase": "DRAINING",
+            "pending_round": {
+                "round_number": 4,
+                "preview_selected_ids": [115329],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.assertTrue(
+                _monitor_line(report, root).startswith("recovery=v1:legacy-cycle:")
+            )
 
     def test_monitor_line_changes_when_v2_authorized_round_changes(self):
         report = {
@@ -373,7 +402,7 @@ class CompactOutputTests(unittest.TestCase):
             state_path.parent.mkdir(parents=True)
             state_path.write_text("{invalid", encoding="utf-8")
             first = _monitor_line(report, root)
-            self.assertEqual(first, "recovery_error=v1:checkpoint_invalid")
+            self.assertEqual(first, "recovery_error=v2:checkpoint_invalid")
             self.assertEqual(first, _monitor_line(report, root))
 
     def test_compact_checklist_failure_only(self):

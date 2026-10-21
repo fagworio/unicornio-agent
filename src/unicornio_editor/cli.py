@@ -1788,7 +1788,8 @@ def _compact_checklist(checklist: dict) -> dict:
     return {"status": "pass" if not failed else "fail", "failed": failed}
 
 
-_V2_RECOVERY_MONITOR_PROTOCOL = "v1"
+_V2_RECOVERY_MONITOR_PROTOCOL = "v2"
+_V2_RECOVERY_MONITOR_LEGACY_PROTOCOL = "v1"
 _V2_CYCLE_PHASES = frozenset({"ADMISSION", "DRAINING", "COMPLETED"})
 
 
@@ -1832,6 +1833,15 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
     if not isinstance(pending, dict):
         return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
 
+    authorization_id = pending.get("authorization_id")
+    if authorization_id in {None, ""}:
+        authorization_id = None
+    elif (
+        not isinstance(authorization_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", authorization_id)
+    ):
+        return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
+
     round_number = pending.get("round_number", 0)
     selected_ids = pending.get("preview_selected_ids")
     if selected_ids is None:
@@ -1855,9 +1865,15 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
     authorized_digest = hashlib.sha256(
         json.dumps(authorized_ids, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
+    protocol = (
+        _V2_RECOVERY_MONITOR_PROTOCOL
+        if authorization_id
+        else _V2_RECOVERY_MONITOR_LEGACY_PROTOCOL
+    )
+    authorization_segment = f":{authorization_id}" if authorization_id else ""
     return (
-        f"recovery={_V2_RECOVERY_MONITOR_PROTOCOL}:{cycle_id}:"
-        f"{phase}:{round_number}:{authorized_digest}"
+        f"recovery={protocol}:{cycle_id}:{phase}:{round_number}"
+        f"{authorization_segment}:{authorized_digest}"
     )
 
 

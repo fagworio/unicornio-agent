@@ -319,7 +319,7 @@ def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_r
     state = store.create({"ready_target": 1}, cycle_id="stale-selection")
     state.phase = "DRAINING"
     state.rounds = 3
-    state.seen_post_ids = [1, 2, 3]
+    state.seen_post_ids = [1, 2, 3, 115592, 115629, 115282, 115631, 115530]
     state.attempts_by_post = {1: 1, 2: 1, 3: 1}
     state.stagnant_rounds = 3
     store.save(state, event="seed_draining")
@@ -330,7 +330,7 @@ def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_r
             "round_number": 4,
             "batch_size": 5,
             "max_new_posts": 0,
-            "seen_post_ids": [1, 2, 3],
+            "seen_post_ids": [1, 2, 3, 115592, 115629, 115282, 115631, 115530],
             "excluded_post_ids": [],
             "attempts_by_post": {1: 1, 2: 1, 3: 1},
         },
