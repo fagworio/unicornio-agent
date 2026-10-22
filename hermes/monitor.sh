@@ -142,6 +142,12 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
     emitir_assinatura_congelada
     exit 0
   fi
+  if [ "${guard_status:-0}" -eq 0 ] \
+    && [[ "$guard_out" == *'"reason": "attribution_unavailable"'* ]]; then
+    mkdir -p "$ROOT/work" 2>/dev/null || true
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$guard_out" \
+      >> "$BUDGET_LOG" 2>/dev/null || true
+  fi
 fi
 
 monitor_log_error() {

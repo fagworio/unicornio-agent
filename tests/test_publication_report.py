@@ -1,12 +1,15 @@
+import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from hermes import relatorio_publicacao as report
+from hermes import cost_guard
 from hermes.cost_guard import cost_in_last_24h, cost_measurement_in_last_24h
 
 
@@ -83,6 +86,37 @@ class PublicationReportCostTests(unittest.TestCase):
             self._database(with_job_id=False, with_project=True), project_root="/project"
         )
         self.assertEqual(measured, (0.20, 1, "projeto editorial (cwd/git_repo_root)"))
+
+    def test_null_cwd_project_fallback_is_attribution_unavailable(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        path = Path(handle.name)
+        db = sqlite3.connect(path)
+        db.execute(
+            "CREATE TABLE sessions (source TEXT, started_at INTEGER, "
+            "estimated_cost_usd REAL, cwd TEXT, git_repo_root TEXT)"
+        )
+        db.execute(
+            "INSERT INTO sessions VALUES ('cron', ?, 0.80, NULL, NULL)",
+            (int(time.time()),),
+        )
+        db.commit()
+        db.close()
+        self.addCleanup(path.unlink)
+
+        self.assertIsNone(
+            cost_measurement_in_last_24h(path, project_root="/project")
+        )
+        output = StringIO()
+        with patch("sys.argv", [
+            "cost_guard.py", "--state-db", str(path),
+            "--project-root", "/project", "--limit", "1",
+        ]), patch("sys.stdout", output):
+            self.assertEqual(cost_guard.main(), 0)
+        self.assertEqual(
+            json.loads(output.getvalue())["reason"],
+            "attribution_unavailable",
+        )
 
     def test_report_distinguishes_pending_from_posts_ready_to_publish(self):
         data = {

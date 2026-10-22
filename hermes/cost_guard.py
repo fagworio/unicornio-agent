@@ -324,6 +324,13 @@ def usage_measurement_in_last_24h(
             f"AND started_at > strftime('%s','now') - ? AND {predicate}",
             (int(hours) * 3600, *params),
         ).fetchone()
+        # A project fallback with zero matching sessions is not evidence of
+        # zero spend. Modern cron sessions may have cwd=NULL, so treating this
+        # empty result as a measured project total would silently allow a
+        # stale/missing job attribution.
+        if scope.startswith("projeto editorial") and int(row[1] or 0) == 0:
+            db.close()
+            return None
         # Uso AUXILIAR do Hermes (vision/compressao/titulo/aprovacao): gravado em
         # session_model_usage com task != '' e FORA dos contadores de `sessions`.
         # O filtro por task é OBRIGATÓRIO: o main-loop TAMBÉM aparece em
