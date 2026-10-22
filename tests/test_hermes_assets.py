@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -228,11 +229,76 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
         self.assertIn("cost_guard.py", content)
 
     def test_monitor_resolves_stale_budget_job_id_from_hermes_catalog(self):
-        content = (ROOT / "hermes" / "monitor.sh").read_text()
-        self.assertIn('EDITORIAL_JOB_NAME="UnicornioHater editorial pending"', content)
-        self.assertIn('jobs_file="${HERMES_HOME:-$HOME/.hermes}/cron/jobs.json"', content)
-        self.assertIn("elif len(ids) == 1:", content)
-        self.assertIn('--job-id "$EDITORIAL_JOB_ID"', content)
+        template = (ROOT / "hermes" / "monitor.sh").read_text()
+        actual_id = "66126ac17de0"
+
+        def run_with_catalog(catalog, configured="fake-editorial"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "project"
+                hermes_home = Path(directory) / "hermes"
+                root.mkdir()
+                (root / "work").mkdir()
+                (root / ".env").write_text(
+                    "HERMES_EDITORIAL_CRON_JOB_ID=" + configured + "\n"
+                    "HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT=1\n",
+                    encoding="utf-8",
+                )
+                (hermes_home / "cron").mkdir(parents=True)
+                jobs_file = hermes_home / "cron" / "jobs.json"
+                if catalog is not None:
+                    jobs_file.write_text(catalog, encoding="utf-8")
+                venv_bin = root / ".venv" / "bin"
+                venv_bin.mkdir(parents=True)
+                call_log = Path(directory) / "cost-guard-args.json"
+                python_wrapper = venv_bin / "python"
+                python_wrapper.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, subprocess, sys\n"
+                    "if sys.argv[1:2] == ['-']:\n"
+                    f"    raise SystemExit(subprocess.call([{sys.executable!r}, *sys.argv[1:]]))\n"
+                    "if sys.argv[1:2] and sys.argv[1].endswith('cost_guard.py'):\n"
+                    "    with open(os.environ['CALL_LOG'], 'w', encoding='utf-8') as handle:\n"
+                    "        json.dump(sys.argv[1:], handle)\n"
+                    "    print(json.dumps({'decision': 'allow'}))\n"
+                    "    raise SystemExit(0)\n"
+                    "raise SystemExit(0)\n",
+                    encoding="utf-8",
+                )
+                python_wrapper.chmod(0o755)
+                editor = venv_bin / "unicornio-editor"
+                editor.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+                editor.chmod(0o755)
+                monitor = root / "monitor.sh"
+                monitor.write_text(
+                    template.replace("@PROJECT_ROOT@", str(root)), encoding="utf-8"
+                )
+                monitor.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", str(monitor)],
+                    env={
+                        **os.environ,
+                        "HOME": directory,
+                        "HERMES_HOME": str(hermes_home),
+                        "CALL_LOG": str(call_log),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads(call_log.read_text(encoding="utf-8"))
+                return args[args.index("--job-id") + 1]
+
+        one_job = json.dumps({"jobs": [{"id": actual_id, "name": "UnicornioHater editorial pending"}]})
+        duplicate_jobs = json.dumps({"jobs": [
+            {"id": actual_id, "name": "UnicornioHater editorial pending"},
+            {"id": "other-editorial", "name": "UnicornioHater editorial pending"},
+        ]})
+        self.assertEqual(run_with_catalog(one_job), actual_id)
+        self.assertEqual(run_with_catalog(one_job, configured=actual_id), actual_id)
+        self.assertEqual(run_with_catalog(duplicate_jobs), "")
+        self.assertEqual(run_with_catalog(json.dumps({"jobs": []})), "")
+        self.assertEqual(run_with_catalog("not-json"), "")
+        self.assertEqual(run_with_catalog(None), "")
 
     def test_cost_guard_is_valid_python(self):
         script = ROOT / "hermes" / "cost_guard.py"

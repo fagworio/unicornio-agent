@@ -44,7 +44,7 @@ resolver_id_editorial() {
   local jobs_file="${HERMES_HOME:-$HOME/.hermes}/cron/jobs.json"
   local resolvido
   if [ ! -s "$jobs_file" ]; then
-    printf '%s' "$configurado"
+    printf ''
     return 0
   fi
   resolvido="$($ROOT/.venv/bin/python - "$jobs_file" "$EDITORIAL_JOB_NAME" "$configurado" <<'PYEOF'
@@ -55,7 +55,7 @@ from pathlib import Path
 try:
     data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 except (OSError, TypeError, ValueError):
-    print(sys.argv[3])
+    print("")
     raise SystemExit(0)
 
 name = sys.argv[2]
@@ -69,10 +69,9 @@ if configured and configured in ids:
     print(configured)
 elif len(ids) == 1:
     print(ids[0])
-elif not ids:
-    print(configured)
 else:
-    # Ambiguidade não pode escolher um job arbitrário para atribuir custo.
+    # Catálogo ausente, inexistente ou ambíguo não pode virar custo zero
+    # falsamente atribuído a um ID obsoleto ou a um job arbitrário.
     print("")
 PYEOF
   )"
