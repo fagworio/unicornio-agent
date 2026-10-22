@@ -1038,6 +1038,12 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     assert progress["coverage"]["verified"] is False
     assert progress["coverage"]["capacity_reached"] is True
     assert progress["coverage"]["provider_strategy_complete"] is False
+    assert progress["coverage"]["strategy_complete"] is False
+    _active, _proofs, coverage_valid = _aggregate_active_coverage(
+        [{"_planned_query": "target reached query", "coverage": progress["coverage"]}],
+        ["target reached query"],
+    )
+    assert coverage_valid is False
 
 
 def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
@@ -1074,6 +1080,11 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
     assert progress["completion_reason"] == "SEARCH_INCOMPLETE"
     assert progress["coverage"]["engine_reports"]["google_browser"]["error"] == "browser unavailable"
     assert progress["coverage"]["fallback_available"] is False
+    _active, _proofs, coverage_valid = _aggregate_active_coverage(
+        [{"_planned_query": "technical failure", "coverage": progress["coverage"]}],
+        ["technical failure"],
+    )
+    assert coverage_valid is False
 
 
 def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path):
@@ -1154,9 +1165,16 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     assert progress["completion_reason"] == "EXHAUSTED_VERIFIED"
     assert progress["coverage"]["version"] == 1
     assert progress["coverage"]["verified"] is True
+    assert progress["coverage"]["strategy_complete"] is True
     assert progress["coverage"]["expected_engines"] == [
         "google_browser", "bing", "yandex", "google"
     ]
+    active, _proofs, coverage_valid = _aggregate_active_coverage(
+        [{"_planned_query": "empty query", "coverage": progress["coverage"]}],
+        ["empty query"],
+    )
+    assert coverage_valid is True
+    assert active["strategy_complete"] is True
 
 
 def _verified_search_coverage(query):

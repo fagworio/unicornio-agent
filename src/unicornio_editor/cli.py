@@ -1646,6 +1646,15 @@ def _resolve_media_batch(
                     and all_engines_verified
                     and search_completed
                 ),
+                # Compatibilidade com o contrato consumido por pipeline_v2:
+                # somente a exaustão verificada pode provar a estratégia
+                # completa e autorizar a reconciliação de coverage.
+                "strategy_complete": bool(
+                    completion_reason == "EXHAUSTED_VERIFIED"
+                    and expected_engines
+                    and all_engines_verified
+                    and search_completed
+                ),
                 "engine_results": {
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
