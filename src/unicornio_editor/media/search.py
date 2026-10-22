@@ -224,6 +224,7 @@ def summarize_engine_reports(
     reports: dict[str, dict[str, Any]] | None,
     *,
     expected_engines: list[str] | tuple[str, ...] | None = None,
+    completion_reason: str = "",
 ) -> dict[str, Any]:
     """Resume a saúde dos providers de uma consulta sem perder os detalhes.
 
@@ -259,18 +260,21 @@ def summarize_engine_reports(
         if str(_report_for(name).get("failure_kind") or "unknown")
         not in FAILURE_KINDS_VERIFICADOS
     ]
+    reason = str(completion_reason or "INCOMPLETE_PROVIDER")
+    missing = [name for name in expected if name not in normalized]
     return {
         "version": 1,
+        "completion_reason": reason,
         "expected_engines": expected,
         "reported_engines": reported,
         "completed_engines": completed,
-        "missing_engines": [name for name in expected if name not in normalized],
+        "missing_engines": missing,
+        "not_attempted_engines": missing if reason == "TARGET_REACHED" else [],
+        "unresolved_engines": missing if reason == "INCOMPLETE_PROVIDER" else [],
         "provider_failures": len(non_verified),
         "transient_failures": len(transient),
         "strategy_complete": bool(
-            expected
-            and not any(name not in normalized for name in expected)
-            and not non_verified
+            reason in {"TARGET_REACHED", "EXHAUSTED_VERIFIED"}
         ),
         "failure_kinds": dict(sorted(failure_kinds.items())),
         "failure_engines": non_verified,
@@ -1162,12 +1166,28 @@ def search_web_images_batch(
     if budget_seconds is not None and float(budget_seconds) > 0:
         deadline = time.monotonic() + float(budget_seconds)
 
-    def _search(query: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    expected_engines = [engine] if engine != "auto" else [
+        "google_browser", "bing", "yandex", "google"
+    ]
+    if engine == "auto" and os.environ.get(
+        "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
+    ).strip().lower() in {"0", "false", "no", "off"}:
+        expected_engines.remove("google_browser")
+
+    def _search(
+        query: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], str]:
         # O callback do batch recebe TAMBÉM a query: cada item do listicle tem o
         # seu próprio subject e o aceite precisa ser medido por item (antes o
         # batch caía no critério antigo "usable" e encerrava a busca do item).
+        stop_reason = ""
+
         def _accept_do_item(novos: list[dict[str, Any]]) -> int:
-            return int(accept(novos, query) or 0) if accept is not None else 0
+            nonlocal stop_reason
+            accepted = int(accept(novos, query) or 0) if accept is not None else 0
+            if accepted >= max(1, int(limit or 1)):
+                stop_reason = "TARGET_REACHED"
+            return accepted
 
         relatorios: dict[str, dict[str, Any]] = {}
         candidatos = search_web_images(
@@ -1179,29 +1199,44 @@ def search_web_images_batch(
             deadline=deadline,
             reports=relatorios,
         )
-        return candidatos, relatorios
-
-    expected_engines = [engine] if engine != "auto" else [
-        "google_browser", "bing", "yandex", "google"
-    ]
-    if engine == "auto" and os.environ.get(
-        "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
-    ).strip().lower() in {"0", "false", "no", "off"}:
-        expected_engines.remove("google_browser")
+        if not stop_reason and accept is None and len(candidatos) >= max(1, int(limit or 1)):
+            stop_reason = "TARGET_REACHED"
+        if not stop_reason:
+            if any(
+                str(report.get("failure_kind") or "") == "budget_exhausted"
+                for report in relatorios.values()
+                if isinstance(report, dict)
+            ):
+                stop_reason = "STOPPED_BY_BUDGET"
+            elif (
+                expected_engines
+                and all(name in relatorios for name in expected_engines)
+                and not any(
+                    str((relatorios.get(name) or {}).get("failure_kind") or "")
+                    not in FAILURE_KINDS_VERIFICADOS
+                    for name in expected_engines
+                )
+            ):
+                stop_reason = "EXHAUSTED_VERIFIED"
+            else:
+                stop_reason = "INCOMPLETE_PROVIDER"
+        return candidatos, relatorios, stop_reason
 
     found: dict[str, list[dict[str, Any]]] = {}
     relatorios_por_query: dict[str, dict[str, dict[str, Any]]] = {}
+    motivos_por_query: dict[str, str] = {}
     workers = min(_BATCH_WORKERS, len(unique))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_search, query): query for query in unique}
         for future in as_completed(futures):
             query = futures[future]
             try:
-                candidatos, relatorios = future.result()
+                candidatos, relatorios, stop_reason = future.result()
             except Exception:  # noqa: BLE001 - one failed engine must not lose the batch
-                candidatos, relatorios = [], {}
+                candidatos, relatorios, stop_reason = [], {}, "INCOMPLETE_PROVIDER"
             found[query] = candidatos
             relatorios_por_query[query] = relatorios
+            motivos_por_query[query] = stop_reason
     return [
         {
             "query": query,
@@ -1212,7 +1247,9 @@ def search_web_images_batch(
             "engine_summary": summarize_engine_reports(
                 relatorios_por_query.get(query, {}),
                 expected_engines=expected_engines,
+                completion_reason=motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
             ),
+            "completion_reason": motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
             "budget_exhausted": any(
                 str(report.get("failure_kind") or "") == "budget_exhausted"
                 for report in (relatorios_por_query.get(query, {}) or {}).values()

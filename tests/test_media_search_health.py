@@ -253,6 +253,24 @@ class TelemetriaPorEngineTests(unittest.TestCase):
         self.assertEqual(resumo["candidates_discovered"], 2)
         self.assertEqual(resumo["objects_parsed"], 3)
 
+    def test_resumo_nao_trata_fallbacks_nao_tentados_como_falha(self):
+        resumo = search.summarize_engine_reports(
+            {
+                "google_browser": {"failure_kind": "google_browser_unavailable"},
+                "bing": {"failure_kind": "ok", "candidates": 3},
+            },
+            expected_engines=["google_browser", "bing", "yandex", "google"],
+            completion_reason="TARGET_REACHED",
+        )
+
+        self.assertTrue(resumo["strategy_complete"])
+        self.assertEqual(resumo["completion_reason"], "TARGET_REACHED")
+        self.assertEqual(resumo["not_attempted_engines"], ["yandex", "google"])
+        self.assertEqual(resumo["unresolved_engines"], [])
+        # A reported browser failure remains visible; only the unattempted
+        # fallbacks stop being interpreted as failures.
+        self.assertEqual(resumo["provider_failures"], 1)
+
     def test_media_engine_health_registra_os_campos_pedidos(self):
         from unicornio_editor import cli
 
@@ -319,6 +337,14 @@ class TelemetriaPorEngineTests(unittest.TestCase):
         self.assertIn("engine_summary", linhas_duas[0])
         self.assertEqual(linhas_duas[0]["engine_summary"]["provider_failures"], 1)
         self.assertEqual(linhas_duas[0]["engine_summary"]["failure_kinds"].get("ok"), 3)
+        self.assertEqual(linhas[0]["completion_reason"], "TARGET_REACHED")
+        self.assertEqual(
+            linhas[0]["engine_summary"]["not_attempted_engines"],
+            [
+                name for name in ("google_browser", "bing", "yandex", "google")
+                if name not in linhas[0]["engine_reports"]
+            ],
+        )
 
 
 if __name__ == "__main__":

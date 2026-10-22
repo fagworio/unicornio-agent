@@ -1522,10 +1522,19 @@ def _resolve_media_batch(
             engines_disabled.append("google_browser")
         else:
             expected_engines = [requested_engine]
-        provider_health = search_row.get("engine_summary") or summarize_engine_reports(
-            engine_reports,
-            expected_engines=expected_engines,
-        )
+        if needed_web > 0:
+            provider_health = search_row.get("engine_summary") or summarize_engine_reports(
+                engine_reports,
+                expected_engines=expected_engines,
+            )
+            provider_stop_reason = str(
+                provider_health.get("completion_reason") or "INCOMPLETE_PROVIDER"
+            )
+        else:
+            # Reuse completou a necessidade sem consultar providers; isso não
+            # deve aparecer como provider incompleto na telemetria.
+            provider_health = {}
+            provider_stop_reason = "NOT_REQUIRED"
         engines_attempted = tuple(
             name for name in expected_engines if name in engine_reports
         )
@@ -1625,6 +1634,7 @@ def _resolve_media_batch(
                 "reported_engines": sorted(engine_reports),
                 "engine_reports": engine_diagnostics,
                 "provider_health": provider_health,
+                "provider_stop_reason": provider_stop_reason,
                 "engine_results": {
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
@@ -1654,6 +1664,7 @@ def _resolve_media_batch(
             accepted=accepted_count,
             completion_reason=completion_reason,
             completed=search_completed,
+            provider_stop_reason=provider_stop_reason,
             providers_reported=len(provider_health.get("reported_engines") or []),
             providers_completed=len(provider_health.get("completed_engines") or []),
             provider_failures=int(provider_health.get("provider_failures") or 0),
@@ -3353,6 +3364,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     batch=True,
                     results_found=len(candidates),
                     completed=bool(provider_health.get("strategy_complete")),
+                    provider_stop_reason=str(
+                        provider_health.get("completion_reason") or "INCOMPLETE_PROVIDER"
+                    ),
                     providers_reported=len(provider_health.get("reported_engines") or []),
                     providers_completed=len(provider_health.get("completed_engines") or []),
                     provider_failures=int(provider_health.get("provider_failures") or 0),
@@ -3489,6 +3503,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "decision": str(decisao_item.get("decision") or ""),
                     "coverage": str(decisao_item.get("coverage") or ""),
                     "provider_health": provider_health,
+                    "provider_stop_reason": str(
+                        provider_health.get("completion_reason") or "INCOMPLETE_PROVIDER"
+                    ),
                     "select": decisao_item.get("select"),
                     "options": decisao_item.get("options") or [],
                     "candidates": compact,
