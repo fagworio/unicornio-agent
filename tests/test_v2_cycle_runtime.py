@@ -220,6 +220,69 @@ def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path
     assert result.details[0]["outcome"] == "not_executed"
 
 
+def test_resume_five_post_authorized_round_reconciles_recovered_post_without_replay(tmp_path, monkeypatch):
+    post_ids = [115641, 115598, 115676, 115631, 115633]
+    states = {
+        115641: ("retry", "featured_vision"),
+        115598: ("human_required", "inline_missing"),
+        115676: ("interrupted_pre_writer", "process_interrupted"),
+        115631: ("historical", ""),
+        115633: ("historical", ""),
+    }
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    for post_id in post_ids:
+        kind, failure_class = states[post_id]
+        payload = {
+            "cycle_id": "old-cycle" if post_id in {115631, 115633} else "929621ed4ea945ed9ecc560d3efb9b90",
+            "cycle_round": 1,
+            "authorization_id": "old-auth" if post_id in {115631, 115633} else "auth-929621",
+            "state": WorkState(
+                state=LifecycleState.PENDING,
+                phase=Phase.MEDIA,
+                relevance_approved=True,
+            ).to_dict(),
+        }
+        if post_id == 115676:
+            payload.update({
+                "status": kind, "resumable": True, "writer_started": False,
+                "readback": False, "failure_class": failure_class,
+            })
+        elif post_id in {115631, 115633}:
+            payload.update({"status": "historical", "readback": False})
+        else:
+            payload.update({"status": "committed", "readback": True})
+        (journal_dir / f"{post_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{"id": post_id, "status": "pending"} for post_id in post_ids] if page == 1 else []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_post_no_write_evidence",
+        lambda *args, **kwargs: {"post_id": int(args[2]), "media_registry_current_round_rows": 0},
+    )
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, post_ids,
+        expected_cycle_id="929621ed4ea945ed9ecc560d3efb9b90",
+        expected_cycle_round=1,
+        expected_authorization_id="auth-929621",
+    )
+    assert result is not None
+    assert result.reconciliation_blocked is False
+    assert result.reconciled_without_replay is True
+    detail = {item["post_id"]: item for item in result.details}
+    assert detail[115676]["outcome"] == "retry"
+    assert detail[115676]["write_replayed"] is False
+    assert detail[115676]["recovery_status"] == "interrupted_pre_writer"
+    assert 115676 in result.executed_ids
+    assert len(result.details) == len(post_ids)
+
+
 def test_reconcile_completed_round_rejects_matching_authorization_with_wrong_round(
     tmp_path,
 ):
