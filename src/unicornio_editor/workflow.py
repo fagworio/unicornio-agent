@@ -8,10 +8,13 @@ from threading import Lock
 import datetime
 import hashlib
 import json
+import logging
+import os
 import re
 import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -44,6 +47,7 @@ from .media.converter import (
 from .media.downloader import download_image
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
 from .media.text import sanitize_title
 from .media.source_verify import verification_result, verify_downloaded_against_source
 from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
@@ -95,6 +99,8 @@ from .pipeline_v2.quarantine import (
 )
 from .pipeline_v2.lock import RunSessionLock
 
+META_PUBLISH_OPERATION_ID = "_ai_editor_publish_operation_id"
+
 
 # Media plan: download/upload/verificacao sao I/O-bound (rede); threads
 # liberam o GIL durante E/S. Falhas de item são registradas no próprio item;
@@ -121,6 +127,36 @@ def _acquire_post_lock(root: Path, config: Config, post_id: int):
         return LockManager(root / "work" / "locks", ttl=config.lock_ttl).acquire(post_id)
     except LockError as exc:
         raise WorkflowError(f"post {post_id} is already being processed") from exc
+
+
+class _PostLockGuardedClient:
+    """Assert current lock ownership immediately before each WordPress write."""
+
+    _MUTATING_METHODS = {"update_post", "move_to_status", "publish", "upload_media"}
+
+    def __init__(self, client: Any, lock_handle: Any):
+        self._client = client
+        self._lock_handle = lock_handle
+
+    def __getattr__(self, name: str):
+        method = getattr(self._client, name)
+        if name not in self._MUTATING_METHODS:
+            return method
+
+        def guarded_write(*args, **kwargs):
+            self._lock_handle.assert_owned()
+            scope = getattr(self._client, "post_write_guard", None)
+            if callable(scope):
+                with scope(self._lock_handle.assert_owned):
+                    self._lock_handle.assert_owned()
+                    return method(*args, **kwargs)
+            return method(*args, **kwargs)
+
+        return guarded_write
+
+
+def _guard_post_client(client: Any, lock_handle: Any) -> _PostLockGuardedClient:
+    return _PostLockGuardedClient(client, lock_handle)
 
 
 def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str, Any]:
@@ -245,8 +281,9 @@ def apply_editorial(
 ) -> dict[str, Any]:
     """Apply an editorial result while exclusively owning the post."""
     assert_post_not_quarantined(root, post_id, operation="apply")
-    with _acquire_post_lock(root, config, post_id):
-        return _apply_editorial_unlocked(client, config, root, post_id, payload)
+    with _acquire_post_lock(root, config, post_id) as lock_handle:
+        guarded_client = _guard_post_client(client, lock_handle)
+        return _apply_editorial_unlocked(guarded_client, config, root, post_id, payload)
 
 
 def _apply_editorial_unlocked(
@@ -867,6 +904,15 @@ def _apply_editorial_unlocked(
 
     latest = client.get_post(post_id)
     _require_pending(latest)
+    if _post_write_guard_signature(latest) != _post_write_guard_signature(post):
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "dry_run": False,
+            "status": "retry",
+            "retryable": True,
+            "reason": "WordPress post changed during apply preflight; refusing stale overwrite",
+        }
     manifest = build_ready_manifest(
         post_id=post_id,
         content=content,
@@ -1316,9 +1362,9 @@ def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) ->
         if indice_paragrafo < len(paragrafos):
             limite = paragrafos[indice_paragrafo].start()
     if limite < 0:
-        return numerados[0].heading
+        return ""
     candidatos = [item.heading for item in numerados if item.heading_start <= limite]
-    return candidatos[-1] if candidatos else numerados[0].heading
+    return candidatos[-1] if candidatos else ""
 
 
 def _item_entities(
@@ -1334,7 +1380,27 @@ def _item_entities(
     article entity set.
     """
     declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
-    if not _expected_subject(item, editorial) and isinstance(editorial, dict):
+    expected_subject = _expected_subject(item, editorial)
+    if expected_subject:
+        # Specific section identities stay item-scoped. Generic headings such
+        # as "Jogo 1" do not replace the article's concrete identity (and must
+        # not make every source image fail relevance).
+        normalized_expected = expected_subject.casefold()
+        if any(
+            entity.casefold() in normalized_expected
+            or normalized_expected in entity.casefold()
+            for entity in entities if entity
+        ):
+            declarado = normalized_expected
+        else:
+            return set(entities)
+    elif isinstance(editorial, dict):
+        is_listicle = len(extract_list_items(
+            str((editorial.get("seo") or {}).get("title") or ""),
+            str(editorial.get("cleaned_html") or ""),
+        )) >= 2
+        if is_listicle:
+            return set()
         # Ordinary posts share the same canonical subject as V2 discovery and
         # featured vision. Listicle items keep their section-specific identity.
         seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
@@ -2069,7 +2135,12 @@ def get_cleaned_content(
     }
 
 
-def _is_final_phash_duplicate(final_phash: str, baseline_phashes: list[str] | tuple[str, ...], *, threshold: int = 6) -> bool:
+def _is_final_phash_duplicate(
+    final_phash: str,
+    baseline_phashes: list[str] | tuple[str, ...],
+    *,
+    threshold: int = PHASH_DUPLICATE_MAX_DISTANCE,
+) -> bool:
     """Return whether a final WebP pHash repeats an accepted frame."""
     if not final_phash:
         return False
@@ -2145,20 +2216,31 @@ def _execute_media_plan(
     # Quando o media_plan nao declara `subject`, usa o MESMO subject que o
     # `media-search-web` deriva do post (entidade principal do titulo) — antes a
     # entrada ia para o indice com subject vazio e o reuso nunca achava nada.
-    subject_idx = ""
+    subjects_for_index: list[dict[str, Any]] = []
     try:
         from .media.evidence import post_subjects
 
-        _subs = post_subjects(
+        subjects_for_index = post_subjects(
             title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
             content_html=str(vision_editorial.get("cleaned_html") or ""),
             focus_keyword=str((vision_editorial.get("seo") or {}).get("focus_keyword") or ""),
             game_name=vision_editorial.get("game_name"),
         )
-        if _subs:
-            subject_idx = str(_subs[0].get("subject") or "")
     except Exception:  # noqa: BLE001 - registro do indice e otimizacao
-        subject_idx = ""
+        subjects_for_index = []
+
+    def _index_subject(item: dict[str, Any]) -> str:
+        # Listicle assets belong to their own section. If the section cannot
+        # be mapped, leave the index entry unbound instead of using item one.
+        expected = _expected_subject(item, vision_editorial)
+        if expected:
+            return expected
+        if len(subjects_for_index) > 1:
+            return ""
+        declared = str(item.get("subject") or "").strip()
+        if declared:
+            return declared
+        return str(subjects_for_index[0].get("subject") or "") if subjects_for_index else ""
 
     attachment_cache: dict[int, dict[str, Any]] = {}
 
@@ -2383,6 +2465,7 @@ def _execute_media_plan(
                         direct_image_url=str(download_url),
                         cache=page_cache,
                         cache_lock=page_cache_lock,
+                        url_policy=config.remote_url_policy,
                         audit=lambda finding: append_telemetry(
                             root, "remote_url_audit", url=finding.url, reason=finding.reason
                         ),
@@ -2641,7 +2724,7 @@ def _execute_media_plan(
                         phash=str(final_phash or ""),
                         source_url=str(item.get("direct_image_url") or ""),
                         source_page=str(item.get("source_page_url") or ""),
-                        subject=str(item.get("subject") or "") or subject_idx,
+                        subject=_index_subject(item),
                         media_id=int(media_id),
                         article_id=int(post_id) if post_id else None,
                         sha256=identity.sha256,
@@ -3095,8 +3178,9 @@ def publish_post(
 ) -> dict[str, Any]:
     """Publish one post while excluding a concurrent editorial mutation."""
     assert_post_not_quarantined(root, post_id, operation="publish")
-    with _acquire_post_lock(root, config, post_id):
-        return _publish_post_unlocked(client, config, root, post_id)
+    with _acquire_post_lock(root, config, post_id) as lock_handle:
+        guarded_client = _guard_post_client(client, lock_handle)
+        return _publish_post_unlocked(guarded_client, config, root, post_id)
 
 
 def _read_v2_work_state(post: dict[str, Any]) -> dict[str, Any] | None:
@@ -3189,7 +3273,59 @@ def _uncertain_publication_path(root: Path, post_id: int) -> Path:
     return root / "work" / "v2-publication-uncertain" / f"{int(post_id)}.json"
 
 
-def _mark_uncertain_publication(root: Path, post_id: int, error: Exception | str) -> None:
+def _persist_publish_intent(
+    root: Path,
+    post_id: int,
+    *,
+    ready_hash: str,
+    ready_manifest: str | None,
+    publication_operation_id: str,
+) -> None:
+    """Durably fence a publication before sending its remote write."""
+    path = _uncertain_publication_path(root, post_id)
+    directory_preexisted = path.parent.is_dir()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "post_id": int(post_id),
+        "status": "intent",
+        "intent_persisted": True,
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "ready_hash": str(ready_hash or ""),
+        "ready_manifest_sha256": hashlib.sha256(
+            ready_manifest.encode("utf-8")
+        ).hexdigest() if ready_manifest is not None else "",
+        "publication_operation_id": str(publication_operation_id),
+    }
+    atomic_write_text(
+        path, json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+    # atomic_write_text fsyncs the file before rename; fsync the directory too
+    # so a sudden process/host interruption cannot lose the new fence entry.
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    if not directory_preexisted:
+        parent_fd = os.open(
+            path.parent.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+
+
+def _mark_uncertain_publication(
+    root: Path,
+    post_id: int,
+    error: Exception | str,
+    *,
+    ready_hash: str = "",
+    ready_manifest: str | None = None,
+    publication_operation_id: str = "",
+) -> None:
     """Persist a local fence after a publish request with unknown outcome.
 
     A timeout can happen after WordPress commits the post but before the client
@@ -3206,6 +3342,11 @@ def _mark_uncertain_publication(root: Path, post_id: int, error: Exception | str
                     "error_type": type(error).__name__ if isinstance(error, Exception) else "Error",
                     "error": str(error)[:240],
                     "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                    "ready_hash": str(ready_hash or ""),
+                    "ready_manifest_sha256": hashlib.sha256(
+                        ready_manifest.encode("utf-8")
+                    ).hexdigest() if ready_manifest is not None else "",
+                    "publication_operation_id": str(publication_operation_id or ""),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3224,6 +3365,16 @@ def _clear_uncertain_publication(root: Path, post_id: int) -> None:
         pass
 
 
+def _append_publish_telemetry(root: str | Path, event: str, **fields: Any) -> None:
+    """Keep telemetry auxiliary to the WordPress publication transaction."""
+    try:
+        append_telemetry(root, event, **fields)
+    except Exception as exc:  # noqa: BLE001 - never change a publish decision
+        logging.getLogger(__name__).warning(
+            "publication telemetry unavailable for %s: %s", event, type(exc).__name__
+        )
+
+
 def _sync_published_readback(
     client: WordPressClient,
     config: Config,
@@ -3232,6 +3383,7 @@ def _sync_published_readback(
     root: Path | None,
     ready_hash: str,
     ready_manifest: str | None,
+    expected_operation_id: str = "",
 ) -> dict[str, Any]:
     """Synchronize V2 state and verify an already-published WordPress post."""
     from dataclasses import replace as _replace
@@ -3242,6 +3394,9 @@ def _sync_published_readback(
     v2_post = client.get_post(post_id)
     if v2_post.get("status") != "publish":
         raise WorkflowError("WordPress publish read-back mismatch")
+    initial_meta = v2_post.get("meta") if isinstance(v2_post.get("meta"), dict) else {}
+    if expected_operation_id and initial_meta.get(META_PUBLISH_OPERATION_ID) != expected_operation_id:
+        raise WorkflowError("publication operation identity read-back mismatch")
     legacy_state = read_state(v2_post).get("state")
     if legacy_state != STATE_PUBLISHED:
         # A publish request can commit the WordPress status while the legacy
@@ -3261,6 +3416,8 @@ def _sync_published_readback(
     if "_hermes_work_state" in v2_meta:
         v2_store = _V2Store(_V2Backend(client))
         v2_current = v2_store.load(post_id)
+        if v2_current.state not in {_LifecycleState.READY, _LifecycleState.PUBLISHED}:
+            raise WorkflowError("V2 publish reconciliation requires READY or PUBLISHED state")
         v2_store.mark_published(
             post_id,
             _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None),
@@ -3276,6 +3433,8 @@ def _sync_published_readback(
         raise WorkflowError("ready hash read-back mismatch after publish")
     if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
         raise WorkflowError("ready manifest read-back mismatch after publish")
+    if expected_operation_id and verified_meta.get(META_PUBLISH_OPERATION_ID) != expected_operation_id:
+        raise WorkflowError("publication operation identity changed during read-back")
     return verified_post
 
 
@@ -3297,10 +3456,23 @@ def _reconcile_uncertain_publication(
     marker = _uncertain_publication_path(root, post_id)
     if not marker.is_file():
         return None
+    try:
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "marcador de publicação incerta ilegível; reconciliação bloqueada",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    if not isinstance(marker_data, dict):
+        marker_data = {}
     if post.get("status") == "pending":
         _clear_uncertain_publication(root, post_id)
         return None
-    if post.get("status") != "publish" or read_state(post).get("state") != STATE_PUBLISHED:
+    if post.get("status") != "publish":
         return {
             "post_id": post_id,
             "wordpress_changed": False,
@@ -3308,14 +3480,88 @@ def _reconcile_uncertain_publication(
             "reason": "resultado anterior da publicação permanece incerto; status remoto não confirma publicação",
             "state": STATE_READY,
         }
+    legacy_state = read_state(post).get("state")
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    v2_state = _read_v2_work_state(post)
+    marker_has_identity = bool(
+        marker_data.get("ready_hash") or marker_data.get("ready_manifest_sha256")
+    )
+    publication_operation_id = str(marker_data.get("publication_operation_id") or "")
+    if not publication_operation_id:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "marcador antigo sem identidade de operação; autoria da publicação não comprovada",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    operation_identity_matches = meta.get(META_PUBLISH_OPERATION_ID) == publication_operation_id
+    identity_matches = bool(
+        marker_data.get("ready_hash")
+        and marker_data.get("ready_hash") == ready_hash
+        and marker_data.get("ready_manifest_sha256")
+        and isinstance(ready_manifest, str)
+        and marker_data.get("ready_manifest_sha256")
+        == hashlib.sha256(ready_manifest.encode("utf-8")).hexdigest()
+        and meta.get(META_READY_HASH) == ready_hash
+        and meta.get(META_READY_MANIFEST) == ready_manifest
+        and (v2_state is None or v2_state.get("state") in {"ready", "published"})
+    )
+    # Legacy markers without identity retain the previous strict contract:
+    # only an already-confirmed PUBLISHED projection is accepted. New markers
+    # may reconcile READY/absent projections only when the exact READY payload
+    # that preceded the ambiguous request still matches remotely.
+    if publication_operation_id and not operation_identity_matches:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "operação remota não corresponde ao identificador de publicação autorizado",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    if legacy_state != STATE_PUBLISHED and not (
+        marker_has_identity and identity_matches and operation_identity_matches
+    ):
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "publicação remota sem identidade READY comprovada; reconciliação bloqueada",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    if legacy_state not in {None, STATE_READY, STATE_PUBLISHED}:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "estado legado incompatível com reconciliação de publicação",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
+    if marker_has_identity and not identity_matches:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": "identidade READY diverge do marcador de publicação incerta",
+            "state": STATE_READY,
+            "uncertain": True,
+        }
     try:
         _sync_published_readback(
             client, config, post_id, root=root,
             ready_hash=ready_hash,
             ready_manifest=ready_manifest,
+            expected_operation_id=publication_operation_id,
         )
     except Exception as exc:  # noqa: BLE001 - preserve the no-blind-retry fence
-        _mark_uncertain_publication(root, post_id, exc)
+        _mark_uncertain_publication(
+            root, post_id, exc, ready_hash=ready_hash, ready_manifest=ready_manifest,
+            publication_operation_id=publication_operation_id,
+        )
         return {
             "post_id": post_id,
             "wordpress_changed": False,
@@ -3325,9 +3571,9 @@ def _reconcile_uncertain_publication(
             "uncertain": True,
         }
     _clear_uncertain_publication(root, post_id)
-    append_telemetry(root, "post_publication_reconciled", post_id=post_id)
-    append_telemetry(root, "post_published_reconciled", post_id=post_id)
-    append_telemetry(
+    _append_publish_telemetry(root, "post_publication_reconciled", post_id=post_id)
+    _append_publish_telemetry(root, "post_published_reconciled", post_id=post_id)
+    _append_publish_telemetry(
         root,
         "v2_funnel",
         stage="published",
@@ -3531,6 +3777,27 @@ def _publish_post_unlocked(
             "corpo é saída de comando do CLI (envelope JSON operacional) — "
             "o post precisa de conteúdo editorial real antes de publicar"
         )
+        v2_reopened = _reopen_v2_ready_after_publish_block(
+            client,
+            config,
+            root,
+            post_id,
+            post,
+            {"items": [{
+                "status": "fail",
+                "name": "conteudo_sem_metadados_operacionais",
+                "phase": "editorial",
+            }]},
+        )
+        if not v2_reopened:
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "falha ao reabrir estado V2 após bloqueio de envelope operacional",
+                "state": state,
+                "retryable": True,
+            }
         try:
             _write_state_markers(
                 client, config, post_id, STATE_BLOCKED, root=root,
@@ -3563,6 +3830,23 @@ def _publish_post_unlocked(
             "idioma_pt_br: campos predominantemente em inglês: "
             + ", ".join(language_report.get("failing_fields") or [])
         )
+        v2_reopened = _reopen_v2_ready_after_publish_block(
+            client,
+            config,
+            root,
+            post_id,
+            post,
+            {"items": [{"status": "fail", "name": "idioma_pt_br", "phase": "editorial"}]},
+        )
+        if not v2_reopened:
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "falha ao reabrir estado V2 após bloqueio de idioma",
+                "state": state,
+                "retryable": True,
+            }
         try:
             _write_state_markers(client, config, post_id, STATE_BLOCKED, root=root, last_error=reason)
         except Exception:  # noqa: BLE001
@@ -3607,6 +3891,7 @@ def _publish_post_unlocked(
                 ready_manifest=meta.get(META_READY_MANIFEST)
                 if isinstance(meta.get(META_READY_MANIFEST), str)
                 else None,
+                expected_post=post,
             )
         # STALE: algo mudou desde o preflight -> revalida com o checklist.
     editorial_path = root / "backups" / str(post_id) / "editorial.latest.json"
@@ -3770,6 +4055,7 @@ def _publish_post_unlocked(
         integrity="revalidated",
         ready_hash=manifest_hash(refreshed_manifest),
         ready_manifest=serialize_manifest(refreshed_manifest),
+        expected_post=post,
     )
 
 
@@ -3782,6 +4068,7 @@ def _publish_now(
     integrity: str,
     ready_hash: str = "",
     ready_manifest: str | None = None,
+    expected_post: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publica de fato e marca PUBLISHED (gate PUBLISH_ENABLED já verificado)."""
     if not config.publish_enabled:
@@ -3791,7 +4078,29 @@ def _publish_now(
             "status": "blocked",
             "reason": "PUBLISH_ENABLED=false (gate de publicacao desligado)",
         }
+    if expected_post is not None:
+        try:
+            current_post = client.get_post(post_id)
+        except Exception as exc:  # noqa: BLE001 - no write was attempted
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": f"pre-publish concurrency read failed: {type(exc).__name__}",
+                "retryable": True,
+                "state": STATE_READY,
+            }
+        if _post_write_guard_signature(current_post) != _post_write_guard_signature(expected_post):
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "WordPress post changed during publish preflight; refusing stale publish",
+                "retryable": True,
+                "state": STATE_READY,
+            }
     published_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    publication_operation_id = uuid.uuid4().hex
     publish_meta = {
         **build_state_markers(
             STATE_PUBLISHED,
@@ -3799,15 +4108,34 @@ def _publish_now(
             ready_hash=ready_hash,
         ),
     }
+    publish_meta[META_PUBLISH_OPERATION_ID] = publication_operation_id
     if ready_manifest is not None:
         publish_meta[META_READY_MANIFEST] = ready_manifest
     try:
-        append_telemetry(
+        _persist_publish_intent(
+            root or Path("."),
+            post_id,
+            ready_hash=ready_hash,
+            ready_manifest=ready_manifest,
+            publication_operation_id=publication_operation_id,
+        )
+    except OSError as exc:
+        return {
+            "post_id": post_id,
+            "wordpress_changed": False,
+            "status": "retry",
+            "reason": f"intenção de publicação não pôde ser persistida; write não enviado ({type(exc).__name__})",
+            "retryable": True,
+            "state": STATE_READY,
+        }
+    try:
+        _append_publish_telemetry(
             root or Path("."),
             "v2_funnel",
             stage="publish_attempted",
             post_id=int(post_id),
             integrity=integrity,
+            publication_operation_id=publication_operation_id,
         )
         result = client.publish(
             post_id,
@@ -3820,8 +4148,12 @@ def _publish_now(
         try:
             observed = client.get_post(post_id)
         except Exception as read_exc:  # noqa: BLE001 - preserve the fence
-            _mark_uncertain_publication(root or Path("."), post_id, exc)
-            append_telemetry(
+            _mark_uncertain_publication(
+                root or Path("."), post_id, exc,
+                ready_hash=ready_hash, ready_manifest=ready_manifest,
+                publication_operation_id=publication_operation_id,
+            )
+            _append_publish_telemetry(
                 root or Path("."),
                 "publish_outcome_uncertain",
                 post_id=post_id,
@@ -3839,7 +4171,7 @@ def _publish_now(
             }
         if observed.get("status") == "pending":
             _clear_uncertain_publication(root or Path("."), post_id)
-            append_telemetry(root or Path("."), "publish_write_not_applied", post_id=post_id)
+            _append_publish_telemetry(root or Path("."), "publish_write_not_applied", post_id=post_id)
             return {
                 "post_id": post_id,
                 "wordpress_changed": False,
@@ -3856,10 +4188,15 @@ def _publish_now(
                 root=root,
                 ready_hash=ready_hash,
                 ready_manifest=ready_manifest,
+                expected_operation_id=publication_operation_id,
             )
         except Exception as sync_exc:  # noqa: BLE001 - do not retry blindly
-            _mark_uncertain_publication(root or Path("."), post_id, sync_exc)
-            append_telemetry(
+            _mark_uncertain_publication(
+                root or Path("."), post_id, sync_exc,
+                ready_hash=ready_hash, ready_manifest=ready_manifest,
+                publication_operation_id=publication_operation_id,
+            )
+            _append_publish_telemetry(
                 root or Path("."),
                 "publish_outcome_uncertain",
                 post_id=post_id,
@@ -3877,9 +4214,9 @@ def _publish_now(
                 "state": STATE_READY,
             }
         _clear_uncertain_publication(root or Path("."), post_id)
-        append_telemetry(root or Path("."), "post_publication_reconciled", post_id=post_id)
-        append_telemetry(root or Path("."), "post_published_reconciled", post_id=post_id)
-        append_telemetry(
+        _append_publish_telemetry(root or Path("."), "post_publication_reconciled", post_id=post_id)
+        _append_publish_telemetry(root or Path("."), "post_published_reconciled", post_id=post_id)
+        _append_publish_telemetry(
             root or Path("."),
             "v2_funnel",
             stage="published",
@@ -3900,21 +4237,24 @@ def _publish_now(
         _sync_published_readback(
             client, config, post_id, root=root,
             ready_hash=ready_hash, ready_manifest=ready_manifest,
+            expected_operation_id=publication_operation_id,
         )
     except Exception as exc:
-        _mark_uncertain_publication(root or Path("."), post_id, exc)
+        _mark_uncertain_publication(
+            root or Path("."), post_id, exc,
+            ready_hash=ready_hash, ready_manifest=ready_manifest,
+            publication_operation_id=publication_operation_id,
+        )
         try:
-            append_telemetry(
-                root or Path("."),
-                "publish_v2_sync_failed",
-                post_id=post_id,
-                error=str(exc)[:200],
+            _append_publish_telemetry(
+                root or Path("."), "publish_v2_sync_failed",
+                post_id=post_id, error=str(exc)[:200],
             )
-        except Exception:  # noqa: BLE001 - telemetry must not hide the root failure
+        except Exception:  # noqa: BLE001 - defensive; helper is already fail-soft
             pass
         raise
     _clear_uncertain_publication(root or Path("."), post_id)
-    append_telemetry(
+    _append_publish_telemetry(
         root or Path("."),
         "v2_funnel",
         stage="published",
@@ -3956,12 +4296,14 @@ def publish_ready_posts(
     page = 1
     while True:
         chunk = client.list_pending(page=page, per_page=100)
+        if page > 100:
+            raise WorkflowError(
+                f"pending publish queue exceeds 100 pages; resume scan at page {page}"
+            )
         posts.extend(chunk)
         if len(chunk) < 100:
             break
         page += 1
-        if page > 100:
-            break  # limite de seguranca (paginas sao baratas, mas nao infinitas)
     for candidate in posts:
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, int):
@@ -4029,7 +4371,7 @@ def publish_ready_posts(
         ):
             # Base durável do relatório: custo e publicações usam a mesma
             # janela móvel de 24h, sem inferir o denominador da janela atual.
-            append_telemetry(root, "post_published", post_id=candidate_id)
+            _append_publish_telemetry(root, "post_published", post_id=candidate_id)
     return outcomes
 
 
@@ -4054,8 +4396,9 @@ def _reconcile_persisted_uncertain_publications(
         except ValueError:
             continue
         try:
-            with _acquire_post_lock(root, config, post_id):
-                post = client.get_post(post_id)
+            with _acquire_post_lock(root, config, post_id) as lock_handle:
+                guarded_client = _guard_post_client(client, lock_handle)
+                post = guarded_client.get_post(post_id)
                 if config.dry_run:
                     outcomes.append({
                         "post_id": post_id,
@@ -4069,7 +4412,7 @@ def _reconcile_persisted_uncertain_publications(
                     continue
                 meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
                 outcome = _reconcile_uncertain_publication(
-                    client,
+                    guarded_client,
                     config,
                     root,
                     post,
@@ -4205,6 +4548,30 @@ def _post_title(post: dict[str, Any]) -> str | None:
     if isinstance(title, str):
         return sanitize_title(title) or None
     return None
+
+
+def _post_write_guard_signature(post: dict[str, Any]) -> str:
+    """Fingerprint fields whose concurrent change invalidates a long preflight."""
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    guarded_meta = {
+        key: meta.get(key)
+        for key in sorted(meta)
+        if key.startswith("_hermes") or key.startswith("rank_math_") or key == "original_link"
+    }
+    fields = {
+        "id": post.get("id"),
+        "status": post.get("status"),
+        "title": post.get("title"),
+        "content": post.get("content"),
+        "excerpt": post.get("excerpt"),
+        "featured_media": post.get("featured_media"),
+        "categories": post.get("categories"),
+        "tags": post.get("tags"),
+        "modified_gmt": post.get("modified_gmt"),
+        "meta": guarded_meta,
+    }
+    payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 
@@ -5204,6 +5571,18 @@ def retry_post(
     root: Path,
     post_id: int,
 ) -> dict[str, Any]:
+    """Reopen a post while sharing the per-post writer lock with the pipeline."""
+    with _acquire_post_lock(root, config, post_id) as lock_handle:
+        guarded_client = _guard_post_client(client, lock_handle)
+        return _retry_post_unlocked(guarded_client, config, root, post_id)
+
+
+def _retry_post_unlocked(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+) -> dict[str, Any]:
     """Reabre um post AWAITING_HUMAN/BLOCKED para nova tentativa automática.
 
     Operação explícita de revisão humana: zera as tentativas e o cooldown
@@ -5217,9 +5596,11 @@ def retry_post(
     if config.dry_run:
         raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
     existing_v2 = (post.get("meta") or {}).get("_hermes_work_state")
+    reopened = None
     if existing_v2:
         try:
             from .pipeline_v2.model import LifecycleState, RetryInfo, WorkState
+
             raw_v2 = json.loads(existing_v2) if isinstance(existing_v2, str) else existing_v2
             previous = WorkState.from_dict(raw_v2)
             reopened = WorkState(
@@ -5231,22 +5612,21 @@ def retry_post(
                 media=previous.media,
             )
             serialized = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
-            if post.get("status") == "awaiting_human":
-                client.move_to_status(post_id, "pending")
             client.update_post(post_id, {"meta": {"_hermes_work_state": serialized}})
             readback = client.get_post(post_id)
             meta = readback.get("meta") or {}
-            verified = meta.get("_hermes_work_state") == serialized
-            if not verified:
+            if meta.get("_hermes_work_state") != serialized:
                 raise WorkflowError(f"V2 retry read-back failed for post {post_id}")
-            return {"post_id": post_id, "status": "retried", "state": reopened.state.value, "phase": reopened.phase.value, "blocker": reopened.blocker.value if reopened.blocker else None, "attempts": 0, "wordpress_changed": True, "readback": True}
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise WorkflowError(f"estado V2 invalido para retry {post_id}: {exc}") from exc
 
-        # Devolve ao fluxo: status pending + reset de estado (o hook
-        # transition_post_status do mu-plugin limpa as metas de pipeline).
+    if post.get("status") == "awaiting_human":
         client.move_to_status(post_id, "pending")
-    _write_state_markers(
+        moved = client.get_post(post_id)
+        if str(moved.get("status") or "") != "pending":
+            raise WorkflowError(f"retry status read-back failed for post {post_id}")
+
+    if not _write_state_markers(
         client,
         config,
         post_id,
@@ -5254,17 +5634,42 @@ def retry_post(
         root=root,
         attempts=0,
         last_error="reaberto por revisao humana (retry)",
-    )
+    ):
+        raise WorkflowError(f"estado legado BLOCKED nao persistiu no retry do post {post_id}")
+    final = client.get_post(post_id)
+    final_meta = final.get("meta") if isinstance(final.get("meta"), dict) else {}
+    if final_meta.get("_hermes_state") != STATE_BLOCKED or str(final_meta.get("_hermes_attempts") or "") != "0":
+        raise WorkflowError(f"retry legacy read-back failed for post {post_id}")
+    if reopened is not None:
+        from .pipeline_v2.model import WorkState
+        raw_final = final_meta.get("_hermes_work_state")
+        raw_final = json.loads(raw_final) if isinstance(raw_final, str) else raw_final
+        if not isinstance(raw_final, dict) or WorkState.from_dict(raw_final) != reopened:
+            raise WorkflowError(f"V2 retry final read-back failed for post {post_id}")
     return {
         "post_id": post_id,
         "status": "retried",
-        "state": STATE_BLOCKED,
+        "state": reopened.state.value if reopened is not None else STATE_BLOCKED,
         "attempts": 0,
         "wordpress_changed": True,
+        "readback": True,
     }
 
 
 def discard_post(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Discard a post under the same cross-process lock as pipeline writes."""
+    with _acquire_post_lock(root, config, post_id) as lock_handle:
+        guarded_client = _guard_post_client(client, lock_handle)
+        return _discard_post_unlocked(guarded_client, config, root, post_id, reason=reason)
+
+
+def _discard_post_unlocked(
     client: WordPressClient,
     config: Config,
     root: Path,
@@ -5317,6 +5722,32 @@ def discard_post(
     # discard é decisão definitiva: não é uma nova rodada de incerteza.
     _target_state = STATE_SKIPPED
     _next_retry = ""
+    skipped_v2 = None
+    had_v2_state = "_hermes_work_state" in meta
+    if had_v2_state:
+        try:
+            from dataclasses import replace as _replace
+            from .pipeline_v2.model import LifecycleState, WorkState
+
+            raw_v2 = meta.get("_hermes_work_state")
+            raw_v2 = json.loads(raw_v2) if isinstance(raw_v2, str) else raw_v2
+            if not isinstance(raw_v2, dict):
+                raise ValueError("V2 work state is not an object")
+            current_v2 = WorkState.from_dict(raw_v2)
+            skipped_v2 = _replace(current_v2, state=LifecycleState.SKIPPED)
+            serialized_v2 = json.dumps(
+                skipped_v2.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            client.update_post(post_id, {"meta": {"_hermes_work_state": serialized_v2}})
+            v2_readback = client.get_post(post_id)
+            v2_meta = v2_readback.get("meta") if isinstance(v2_readback.get("meta"), dict) else {}
+            read_v2 = v2_meta.get("_hermes_work_state")
+            read_v2 = json.loads(read_v2) if isinstance(read_v2, str) else read_v2
+            if not isinstance(read_v2, dict) or WorkState.from_dict(read_v2) != skipped_v2:
+                raise WorkflowError(f"V2 SKIPPED read-back failed for post {post_id}")
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise WorkflowError(f"estado V2 invalido para discard {post_id}: {exc}") from exc
+
     persisted = _write_state_markers(
         client,
         config,
@@ -5331,6 +5762,16 @@ def discard_post(
         raise WorkflowError(
             f"estado SKIPPED nao persistiu no WordPress (post {post_id})"
         )
+    state_readback = client.get_post(post_id)
+    state_meta = state_readback.get("meta") if isinstance(state_readback.get("meta"), dict) else {}
+    if state_meta.get("_hermes_state") != STATE_SKIPPED:
+        raise WorkflowError(f"legacy SKIPPED read-back failed for post {post_id}")
+    if had_v2_state:
+        from .pipeline_v2.model import WorkState
+        raw_v2 = state_meta.get("_hermes_work_state")
+        raw_v2 = json.loads(raw_v2) if isinstance(raw_v2, str) else raw_v2
+        if not isinstance(raw_v2, dict) or WorkState.from_dict(raw_v2) != skipped_v2:
+            raise WorkflowError(f"V2 SKIPPED projection read-back failed for post {post_id}")
     if _target_state == STATE_AWAITING_HUMAN and not config.dry_run:
         client.move_to_status(post_id, "awaiting_human")
     # `awaiting_human` ele continuaria aparecendo no filtro como se ainda

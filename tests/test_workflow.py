@@ -2444,6 +2444,60 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(meta["_hermes_attempts"], "0")
             self.assertEqual(meta["_hermes_next_retry_at"], "")
 
+    def test_retry_v2_awaiting_human_moves_to_pending_and_verifies_both_states(self):
+        post = self.post()
+        post["status"] = "awaiting_human"
+        previous = WorkState(
+            state=LifecycleState.HUMAN_REQUIRED,
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.INLINE_MISSING,
+            retry=replace(WorkState().retry, attempts=3, no_progress=2),
+        )
+        post["meta"] = {
+            "_hermes_state": "awaiting_human",
+            "_hermes_attempts": "3",
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+        }
+
+        class StatusClient(FakeClient):
+            def move_to_status(self, post_id, status):
+                self.post["status"] = status
+                self.updated.append((post_id, {"status": status}))
+                return {"id": post_id, "status": status}
+
+        client = StatusClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            result = retry_post(client, self.config(False), Path(directory), 42)
+
+        saved = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+        self.assertTrue(result["readback"])
+        self.assertEqual(client.post["status"], "pending")
+        self.assertIs(saved.state, LifecycleState.PENDING)
+        self.assertIs(saved.phase, Phase.MEDIA)
+        self.assertIs(saved.blocker, BlockerCode.INLINE_MISSING)
+        self.assertEqual(saved.retry.attempts, 0)
+        self.assertEqual(saved.retry.no_progress, 0)
+        self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
+
+    def test_discard_projects_terminal_skipped_into_v2_state(self):
+        post = self.post()
+        ready = WorkState(
+            state=LifecycleState.READY,
+            phase=Phase.VALIDATE,
+            relevance_approved=True,
+        )
+        post["meta"] = {
+            "_hermes_state": "ready",
+            "_hermes_work_state": json.dumps(ready.to_dict()),
+        }
+        client = FakeClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            result = discard_post(client, self.config(False), Path(directory), 42, "decisão humana")
+        saved = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+        self.assertEqual(result["state"], "skipped")
+        self.assertIs(saved.state, LifecycleState.SKIPPED)
+        self.assertEqual(client.post["meta"]["_hermes_state"], "skipped")
+
     def test_discard_post_marks_skipped_and_leaves_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

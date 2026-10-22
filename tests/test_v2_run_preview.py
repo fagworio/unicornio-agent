@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from unicornio_editor.locking import LockManager
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
 from unicornio_editor.pipeline_v2.runtime import (
     _write_v2_journal_checkpoint,
@@ -166,6 +167,44 @@ def test_write_pins_preview_ids_when_queue_order_changes(tmp_path):
     assert result["queue"]["selection_revalidated"] is True
     assert result["queue"]["selection_drift"] is True
     assert result["queue"]["selected_ids"] == [2]
+
+
+def test_write_batch_skips_before_journaling_when_any_post_lock_is_busy(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
+    client = Client([
+        post(2, "2026-10-09T01:00:00Z", WorkState(state=LifecycleState.PENDING)),
+        post(3, "2026-10-09T02:00:00Z", WorkState(state=LifecycleState.PENDING)),
+    ])
+    config_value = config(cohort, tmp_path)
+    lock_manager = LockManager(tmp_path / "work" / "locks", ttl=60)
+    occupied = lock_manager.acquire(3)
+
+    try:
+        result = run_v2(
+            client,
+            config_value,
+            tmp_path,
+            limit=2,
+            expected_selected_ids=[2, 3],
+        )
+    finally:
+        occupied.release()
+
+    assert result["locked"] is True
+    assert result["stop_reason"] == "skipped_locked"
+    assert result["locked_post_id"] == 3
+    assert "already locked" in result["lock_error"]
+    assert result["selected"] == 2
+    assert result["completed"] == 0
+    assert result["details"] == []
+    assert client.updates == []
+    assert not (tmp_path / "work" / "v2-journal" / "2.json").exists()
+
+    # The earlier lock in the batch was released when acquisition of post 3
+    # failed, so no partial reservation is left behind.
+    released = lock_manager.acquire(2)
+    released.release()
 
 
 def test_write_preflight_preserves_incomplete_journal_when_selection_is_valid(tmp_path):

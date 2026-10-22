@@ -13,17 +13,19 @@ mu-plugin para isso.
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import threading
 from pathlib import Path
 from typing import Any
+from .phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
 
 _CAMINHO_RELATIVO = Path("work") / "media_index.json"
 
 # O media plan roda em ThreadPoolExecutor(max_workers=4) e cada worker pode
 # registrar mídia: sem lock, dois workers leem 10 entradas, cada um grava a sua
-# 11ª e a primeira atualização é PERDIDA. Também protege contra duas execuções
-# CLI simultâneas (select+replace é atômico no filesystem).
+# 11ª e a primeira atualização é PERDIDA. Um flock adicional serializa o
+# read-modify-write entre processos; replace isolado não protege essa sequência.
 _LOCK = threading.Lock()
 
 
@@ -87,10 +89,21 @@ def register(
     if not (phash or source_url or subject):
         return
     with _LOCK:
-        _registrar_sem_lock(root, phash=phash, source_url=source_url,
-                            source_page=source_page, subject=subject,
-                            media_id=media_id, article_id=article_id,
-                            sha256=sha256, visual_group_id=visual_group_id)
+        path = _caminho(root)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.with_suffix(path.suffix + ".lock").open("a+", encoding="utf-8") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    _registrar_sem_lock(root, phash=phash, source_url=source_url,
+                                        source_page=source_page, subject=subject,
+                                        media_id=media_id, article_id=article_id,
+                                        sha256=sha256, visual_group_id=visual_group_id)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            # The index is an optimization, never a write gate.
+            return
 
 
 def _registrar_sem_lock(
@@ -144,7 +157,9 @@ def find_by_source_url(root: Path | str, source_url: str) -> dict[str, Any] | No
     return None
 
 
-def find_similar(root: Path | str, phash: str, *, threshold: int = 6) -> dict[str, Any] | None:
+def find_similar(
+    root: Path | str, phash: str, *, threshold: int = PHASH_DUPLICATE_MAX_DISTANCE
+) -> dict[str, Any] | None:
     """Já temos este frame (mesmo recomprimido/redimensionado)?"""
     if not phash:
         return None

@@ -78,8 +78,8 @@ def _repair_orphan_media(html: str) -> str:
         r"(<img\b[^>]*>)\s*(<figure\b[^>]*>.*?</figure>)", re.IGNORECASE | re.DOTALL
     )
 
-    def _fold(match: re.Match[str]) -> str:
-        figure, img = match.group(1), match.group(2)
+    def _fold(match: re.Match[str], *, image_first: bool = False) -> str:
+        img, figure = (match.group(1), match.group(2)) if image_first else (match.group(2), match.group(1))
         if "<img" in figure.lower():
             return match.group(0)
         caption = re.search(r"<figcaption>", figure, re.IGNORECASE)
@@ -90,7 +90,7 @@ def _repair_orphan_media(html: str) -> str:
     result = html
     for _ in range(10):
         folded = _FIG_WITH_IMG.sub(_fold, result)
-        folded = _IMG_WITH_FIG.sub(_fold, folded)
+        folded = _IMG_WITH_FIG.sub(lambda match: _fold(match, image_first=True), folded)
         if folded == result:
             break
         result = folded
@@ -129,13 +129,30 @@ def _sanitize_wp_caption_block(block: str) -> str:
     img = re.search(r"<img\b[^>]*>", block, re.IGNORECASE)
     if not img:
         return block
+    parser = _TreeParser()
+    parser.feed(img.group(0))
+    parser.close()
+    parsed_img = next(
+        (node for node in parser.root.children if isinstance(node, _Node) and node.tag == "img"),
+        None,
+    )
+    if parsed_img is None:
+        return ""
+    safe_attrs = _safe_attrs(parsed_img.attrs)
+    src = next((value for name, value in safe_attrs if name == "src"), None)
+    if not src:
+        return ""
+    scheme = urlparse(src.strip()).scheme.lower()
+    if (scheme and scheme not in {"http", "https"}) or src.strip().startswith(("//", "\\")):
+        return ""
+    safe_img = _serialize_img(parsed_img)
     head = block[: img.start()]
     tail = block[img.end():]
     caption = re.sub(r"<[^>]+>", " ", tail)
     caption = re.sub(r"[\s\u00a0]+", " ", caption).strip()
     if not caption.lower().startswith("crédito da imagem:"):
         caption = "Crédito da imagem: " + caption
-    return head + img.group(0) + " " + caption
+    return head + safe_img + " " + caption
 
 
 def normalize_h1_headings(html: str, *, post_title: str = "") -> str:

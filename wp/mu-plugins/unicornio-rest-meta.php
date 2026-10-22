@@ -49,6 +49,9 @@ add_action( 'init', function () {
 		'_ai_editor_processed_at'    => 'sanitize_text_field',
 		'_ai_editor_correlation_id'  => 'sanitize_text_field',
 		'_ai_editor_published_at'    => 'sanitize_text_field',
+		// Unique identity of one publish request, used only to reconcile an
+		// ambiguous REST response without attributing a human publication.
+		'_ai_editor_publish_operation_id' => 'sanitize_text_field',
 	);
 
 	foreach ( $meta_fields as $key => $sanitize ) {

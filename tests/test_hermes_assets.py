@@ -21,6 +21,11 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("5 posts READY", content)
         self.assertIn("liberam a vaga", content)
 
+    def test_wordpress_meta_exposes_publish_operation_identity(self):
+        content = (ROOT / "wp" / "mu-plugins" / "unicornio-rest-meta.php").read_text()
+        self.assertIn("'_ai_editor_publish_operation_id'", content)
+        self.assertIn("sanitize_text_field", content)
+
     def test_cron_installer_has_valid_shell_and_project_workdir(self):
         script = ROOT / "hermes" / "cron-install.sh"
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
@@ -56,6 +61,61 @@ class HermesAssetsTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Publicacao desabilitada", result.stderr)
+
+    def test_publish_cron_reports_partial_success_without_replaying_publish_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'run\\n' >> \"$PUBLISH_CALL_LOG\"\n"
+                "printf '%s\\n' '{\"published\":3,\"posts\":[{\"post_id\":115700},"
+                "{\"post_id\":115701},{\"post_id\":115704}],"
+                "\"retryable_count\":1,\"retryable_posts\":[{\"post_id\":115702}]} '\n"
+                "exit 75\n",
+                encoding="utf-8",
+            )
+            editor.chmod(0o755)
+            fake_python = bin_dir / "python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\ncat > \"$PUBLISH_REPORT_CAPTURE\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            (root / "hermes" / "relatorio_publicacao.py").write_text(
+                "# replaced by the isolated test wrapper\n", encoding="utf-8"
+            )
+            call_log = root / "publish-calls.log"
+            report_capture = root / "report.json"
+
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "UNICORNIO_AGENT_ROOT": str(root),
+                    "PUBLISH_CALL_LOG": str(call_log),
+                    "PUBLISH_REPORT_CAPTURE": str(report_capture),
+                },
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["run"])
+            reported = json.loads(report_capture.read_text(encoding="utf-8"))
+            self.assertEqual(reported["published"], 3)
+            self.assertEqual(reported["retryable_posts"][0]["post_id"], 115702)
+            window_log = (root / "work" / "publish-window.log").read_text(encoding="utf-8")
+            self.assertIn("resultado parcial; retries adiados", window_log)
 
     def test_cron_installer_wires_monitor_script_and_references(self):
         script = ROOT / "hermes" / "cron-install.sh"

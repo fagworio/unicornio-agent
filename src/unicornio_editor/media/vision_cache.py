@@ -175,7 +175,10 @@ def set_cached_visual_comparison(root: str | Path, reference_sha256: str, candid
         return
     try:
         path = visual_comparison_cache_path(root)
-        with _CACHE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name("vision_cache.json.lock")
+        with _CACHE_LOCK, lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 cache = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
             except (OSError, ValueError):
@@ -183,6 +186,7 @@ def set_cached_visual_comparison(root: str | Path, reference_sha256: str, candid
             if isinstance(cache, dict):
                 cache[key] = dict(decision)
                 _atomic_write(path, cache)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     except OSError:
         pass
 

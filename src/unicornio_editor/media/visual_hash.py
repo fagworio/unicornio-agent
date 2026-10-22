@@ -19,31 +19,37 @@ import io
 import urllib.request
 from typing import Any
 
+from .url_safety import urlopen_remote
+from .phash_policy import PHASH_DUPLICATE_MAX_DISTANCE, PHASH_POLICY_VERSION
+
 # Distancia de Hamming no pHash: 0 = identicas, <=6 = mesmo frame/screenshot
 # (observado em producao: o mesmo print de fontes diferentes da 0-2).
-DEFAULT_THRESHOLD = 6
+DEFAULT_THRESHOLD = PHASH_DUPLICATE_MAX_DISTANCE
+DEFAULT_POLICY_VERSION = PHASH_POLICY_VERSION
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0"
 
 
-def _phash(url: str, *, timeout: float = 20.0):
+def _phash(url: str, *, timeout: float = 20.0, url_policy: str = "audit", audit=None):
     from PIL import Image
     import imagehash
 
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urlopen_remote(req, timeout=timeout, mode=url_policy, audit=audit) as resp:
         data = resp.read(8_000_000)
     return imagehash.phash(Image.open(io.BytesIO(data)))
 
 
-def image_hashes(urls: list[str], *, timeout: float = 20.0) -> dict[str, Any]:
+def image_hashes(
+    urls: list[str], *, timeout: float = 20.0, url_policy: str = "audit", audit=None
+) -> dict[str, Any]:
     """url -> pHash (fail-soft: imagens inacessiveis ficam de fora)."""
     out: dict[str, Any] = {}
     for url in urls:
         if not url or url in out:
             continue
         try:
-            out[url] = _phash(url, timeout=timeout)
+            out[url] = _phash(url, timeout=timeout, url_policy=url_policy, audit=audit)
         except Exception:  # noqa: BLE001 - rede/formato: ignora a imagem
             continue
     return out

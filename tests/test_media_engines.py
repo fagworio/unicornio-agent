@@ -53,6 +53,10 @@ class CircuitBreakerTests(unittest.TestCase):
             os.unlink(self.tmp.name)
         except OSError:
             pass
+        try:
+            os.unlink(self.tmp.name + ".lock")
+        except OSError:
+            pass
 
     def test_backoff_cresce_e_terceira_falha_abre_o_circuito(self):
         self.assertTrue(search.engine_disponivel("bing_images"))

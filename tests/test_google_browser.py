@@ -27,6 +27,19 @@ def test_google_browser_fails_safe_when_playwright_is_unavailable(monkeypatch):
     assert "playwright" in report["error"].lower()
 
 
+def test_google_browser_lock_wait_is_bounded_and_uses_report(monkeypatch):
+    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setattr(google_browser, "_BROWSER_DISABLED", False)
+    google_browser._BROWSER_LOCK.acquire()
+    try:
+        report = {}
+        assert search_google_browser_images("bounded", timeout=0.01, report=report) == []
+        assert report["failure_kind"] == "google_browser_unavailable"
+        assert report["error"] == "browser_lock_timeout"
+    finally:
+        google_browser._BROWSER_LOCK.release()
+
+
 @pytest.mark.parametrize(
     ("url", "title", "body", "expected"),
     [

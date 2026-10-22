@@ -20,7 +20,7 @@ para sempre, contado como 18 "falhas" seguidas). O Google permanece na ordem
 estiver indisponível, usa Bing e depois Yandex em ordem fixa:
 
   1. Google Browser (discovery + página exibida, nunca a fonte)
-  2. Bing Images or Yandex Images (fallback, alternates by query)
+  2. Bing Images then Yandex Images (bounded fallback order)
   3. the other of the two
 
 IMPORTANT policy: the search engine is only a DISCOVERY INDEX, never the source.
@@ -33,6 +33,7 @@ must still open source_page_url and confirm the image is listed there
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import html as html_lib
 import ipaddress
 import json
@@ -40,11 +41,12 @@ import os
 import random
 import sys
 import time
+import tempfile
+from contextlib import contextmanager
 from collections import Counter
-from threading import Lock
+from threading import Lock, get_ident
 from pathlib import Path
 import re
-import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -839,17 +841,6 @@ def search_yandex_images(
 # Rotating facade
 # ---------------------------------------------------------------------------
 
-def _primary_engine(query: str) -> str:
-    """Escolhe a engine primaria por hash estavel da query (CRC32).
-
-    Alterna Bing/Yandex entre buscas diferentes (~50/50) mantendo a MESMA
-    engine para a MESMA query (determinismo em retentativas). Google nunca e
-    primaria: bloqueia IPs de datacenter, fica como fallback final.
-    """
-    return "yandex" if (zlib.crc32((query or "").encode("utf-8")) & 1) else "bing"
-
-
-
 # --- Circuit breaker por engine (decisão registrada: NÃO tentar "vencer" o
 # rate-limit com rotação de User-Agent). Estratégia: backoff com jitter, cache
 # de resultados e cooldown da engine — o pipeline simplesmente usa as outras
@@ -861,7 +852,12 @@ def _engine_state_path() -> Path:
     Constante avaliada no import ignoraria ``UNICORNIO_ENGINE_STATE`` definido
     depois — o que fazia os testes compartilharem o arquivo real.
     """
-    return Path(os.environ.get("UNICORNIO_ENGINE_STATE") or "/tmp/unicornio_media_engines.json")
+    configured = os.environ.get("UNICORNIO_ENGINE_STATE")
+    if configured:
+        return Path(configured)
+    project_root = Path(os.environ.get("UNICORNIO_AGENT_ROOT") or Path.cwd()).resolve()
+    project_key = hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"unicornio_media_engines_{project_key}.json"
 _COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
 _BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
 
@@ -905,9 +901,33 @@ def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
     try:
         caminho = _engine_state_path()
         caminho.parent.mkdir(parents=True, exist_ok=True)
-        caminho.write_text(json.dumps(dados), encoding="utf-8")
+        temporario = caminho.with_name(f".{caminho.name}.{os.getpid()}.{get_ident()}.tmp")
+        with temporario.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(dados))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporario, caminho)
     except Exception:  # noqa: BLE001
         pass
+
+
+@contextmanager
+def _engine_state_update():
+    path = _engine_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_context = path.with_suffix(path.suffix + ".lock").open("a+", encoding="utf-8")
+    except OSError:
+        # Provider health is operational telemetry; inability to persist it
+        # must not abort a media search.
+        yield
+        return
+    with lock_context as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def engine_disponivel(nome: str, *, agora: float | None = None) -> bool:
@@ -928,20 +948,21 @@ def engine_falhou(nome: str) -> float:
     """
     if not _breaker_ativo():
         return 0.0
-    dados = _ler_estado_engines()
-    atual = dados.get(nome) or {}
-    falhas = int(atual.get("failures") or 0) + 1
-    espera = 0.0
-    if falhas >= 3:
-        espera = _COOLDOWN_SEGUNDOS
-        bloqueio = time.time() + espera
-    else:
-        base = _BACKOFF_SEGUNDOS[min(falhas, len(_BACKOFF_SEGUNDOS)) - 1]
-        espera = base + random.uniform(0, base) * 0.6  # jitter (não é UA rotation)
-        bloqueio = time.time() + espera
-    dados[nome] = {"failures": falhas, "blocked_until": bloqueio,
-                   "last_failure": time.time()}
-    _gravar_estado_engines(dados)
+    with _engine_state_update():
+        dados = _ler_estado_engines()
+        atual = dados.get(nome) or {}
+        falhas = int(atual.get("failures") or 0) + 1
+        espera = 0.0
+        if falhas >= 3:
+            espera = _COOLDOWN_SEGUNDOS
+            bloqueio = time.time() + espera
+        else:
+            base = _BACKOFF_SEGUNDOS[min(falhas, len(_BACKOFF_SEGUNDOS)) - 1]
+            espera = base + random.uniform(0, base) * 0.6
+            bloqueio = time.time() + espera
+        dados[nome] = {"failures": falhas, "blocked_until": bloqueio,
+                       "last_failure": time.time()}
+        _gravar_estado_engines(dados)
     return espera
 
 
@@ -957,25 +978,27 @@ def engine_degradada(nome: str, kind: str) -> None:
     """
     if not _breaker_ativo():
         return
-    dados = _ler_estado_engines()
-    dados[nome] = {
-        "failures": 0,
-        "blocked_until": 0,
-        "last_failure": time.time(),
-        "failure_kind": kind,
-        "non_transient": True,
-    }
-    _gravar_estado_engines(dados)
+    with _engine_state_update():
+        dados = _ler_estado_engines()
+        dados[nome] = {
+            "failures": 0,
+            "blocked_until": 0,
+            "last_failure": time.time(),
+            "failure_kind": kind,
+            "non_transient": True,
+        }
+        _gravar_estado_engines(dados)
 
 
 def engine_ok(nome: str) -> None:
     """Sucesso zera o contador (circuit breaker fechado)."""
     if not _breaker_ativo():
         return
-    dados = _ler_estado_engines()
-    if nome in dados:
-        dados.pop(nome, None)
-        _gravar_estado_engines(dados)
+    with _engine_state_update():
+        dados = _ler_estado_engines()
+        if nome in dados:
+            dados.pop(nome, None)
+            _gravar_estado_engines(dados)
 
 
 def engines_status() -> dict[str, dict[str, Any]]:
@@ -1004,8 +1027,8 @@ def search_web_images(
     a busca parava ali e o pipeline seguia com menos material do que a web
     oferecia — sem saber.
 
-    Agora consulta as engines em ordem (a primaria alterna por hash estavel da
-    query: ~50/50 Bing/Yandex; Google e fallback), acumula candidatos com
+    Agora consulta as engines em ordem determinística (Google Browser, Bing,
+    Yandex e Google HTML), acumula candidatos com
     dedupe por URL e PARA quando ja existem ``limit`` candidatos UTILIZAVEIS
     (com pagina de origem). Engine concreta usa apenas aquela.
 

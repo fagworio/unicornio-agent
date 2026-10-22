@@ -387,13 +387,16 @@ def _recover_locked(
         ):
             raise ValueError("attachment id is already present with conflicting state")
         source_check = validate_discovered_candidate(
-            {"direct_image_url": direct_url, "source_page_url": source_page}, subject=subject,
+            {"direct_image_url": direct_url, "source_page_url": source_page},
+            subject=subject,
+            url_policy=str(getattr(config, "remote_url_policy", "audit")),
         )
         if not source_check.get("valid") or not source_check.get("source_verified"):
             raise ValueError("source page no longer verifies the historical image URL")
         byte_match, byte_reason = verify_downloaded_against_source(
             source_page_url=source_page, downloaded=attachment_path,
             direct_image_url=direct_url,
+            url_policy=str(getattr(config, "remote_url_policy", "audit")),
         )
         if not byte_match:
             raise ValueError("attachment bytes do not match the verified source image")

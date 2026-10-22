@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import threading
 import uuid
+from contextlib import contextmanager
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,11 @@ from .config import Config
 class WordPressError(RuntimeError):
     """Base error for WordPress API failures."""
 
+    def __init__(self, message: str, *, status_code: int | None = None, api_code: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.api_code = api_code
+
 
 class SafetyError(WordPressError):
     """Raised when a request would violate an editorial safety invariant."""
@@ -29,6 +36,28 @@ class WordPressClient:
     def __init__(self, config: Config):
         self.config = config
         self.base_url = f"{config.wordpress_url}{config.wordpress_api_base}"
+        self._write_guard_context = threading.local()
+
+    @contextmanager
+    def post_write_guard(self, guard):
+        """Attach a per-thread lock assertion to the next REST write."""
+        previous = getattr(self._write_guard_context, "callback", None)
+        self._write_guard_context.callback = guard
+        try:
+            yield
+        finally:
+            if previous is None:
+                try:
+                    del self._write_guard_context.callback
+                except AttributeError:
+                    pass
+            else:
+                self._write_guard_context.callback = previous
+
+    def _assert_write_guard(self) -> None:
+        guard = getattr(self._write_guard_context, "callback", None)
+        if guard is not None:
+            guard()
 
     def list_pending(
         self, *, page: int = 1, per_page: int = 10, include: list[int] | None = None,
@@ -51,12 +80,24 @@ class WordPressClient:
         try:
             data = self._request("GET", "/posts", query)
         except WordPressError as exc:
-            # Some installations reject even a read query containing `status`
-            # (HTTP 4xx). Fall back to an unfiltered page and filter locally.
-            if not str(exc).startswith("WordPress HTTP"):
+            # Compatibility fallback is safe only for an explicit WordPress
+            # REST complaint about the `status` query parameter. Auth, rate
+            # limit, server and unrelated client errors remain visible.
+            message = str(exc).lower()
+            status_unsupported = (
+                exc.status_code == 400
+                and exc.api_code == "rest_invalid_param"
+                and "status" in message
+            )
+            if not status_unsupported:
                 raise
+            fallback_query: dict[str, Any] = {
+                "context": "edit", "page": page, "per_page": per_page,
+            }
+            if include:
+                fallback_query["include"] = ",".join(str(int(pid)) for pid in include)
             data = self._request(
-                "GET", "/posts", {"context": "edit", "page": page, "per_page": per_page}
+                "GET", "/posts", fallback_query
             )
         if not isinstance(data, list):
             raise WordPressError("WordPress returned an invalid posts collection")
@@ -206,6 +247,7 @@ class WordPressClient:
             method="POST",
         )
         try:
+            self._assert_write_guard()
             with urlopen(request, timeout=self.config.http_timeout) as response:
                 value = json.loads(response.read())
         except (UrlHTTPError, URLError, json.JSONDecodeError) as exc:
@@ -246,11 +288,24 @@ class WordPressClient:
             headers["Content-Type"] = "application/json"
         request = Request(url, data=encoded_body, headers=headers, method=method)
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                self._assert_write_guard()
             with urlopen(request, timeout=self.config.http_timeout) as response:
                 raw = response.read()
         except UrlHTTPError as exc:
             detail = exc.read(512).decode("utf-8", errors="replace")
-            raise WordPressError(f"WordPress HTTP {exc.code}: {detail}") from exc
+            api_code = ""
+            try:
+                error_payload = json.loads(detail)
+                if isinstance(error_payload, dict):
+                    api_code = str(error_payload.get("code") or "")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            raise WordPressError(
+                f"WordPress HTTP {exc.code}: {detail}",
+                status_code=int(exc.code),
+                api_code=api_code,
+            ) from exc
         except URLError as exc:
             raise WordPressError(f"WordPress connection failed: {exc.reason}") from exc
         try:

@@ -106,6 +106,8 @@ class ProductionCandidateReader:
             ),
         )
         self.now = now
+        self.load_errors: list[dict[str, Any]] = []
+        self.pagination: dict[str, Any] = {"truncated": False, "next_page": None}
 
     def _recovered_state(
         self,
@@ -266,22 +268,40 @@ class ProductionCandidateReader:
     def snapshot(self, *, page_size: int = 100, max_pages: int = 100) -> list[tuple[int, dict[str, Any]]]:
         """Return all pending posts, including cooldown/terminal V2 states."""
         candidates: list[tuple[int, dict[str, Any]]] = []
+        self.load_errors = []
+        self.pagination = {"truncated": False, "next_page": None}
         seen: set[int] = set()
-        for page in range(1, max_pages + 1):
+        for page in range(1, max_pages + 2):
             posts = self.client.list_pending(page=page, per_page=page_size, status="pending")
             if not posts:
                 break
+            if page > max_pages:
+                self.pagination = {"truncated": True, "next_page": page}
+                raise BatchError(
+                    f"pending queue exceeds snapshot limit {max_pages} pages; resume at page {page}"
+                )
             for post in posts:
                 post_id = post.get("id")
                 if not isinstance(post_id, int) or post_id in seen:
                     continue
                 seen.add(post_id)
-                context = self.context_loader.load(post)
-                state = self._recovered_state(
-                    post_id,
-                    self.state_store.load(post_id),
-                    context,
-                )
+                try:
+                    context = self.context_loader.load(post)
+                    state = self._recovered_state(
+                        post_id,
+                        self.state_store.load(post_id),
+                        context,
+                    )
+                except (BatchError, TypeError, ValueError, KeyError) as exc:
+                    # A malformed artifact/state for this candidate must not
+                    # poison the whole queue, nor silently turn it into NEW.
+                    # Transport and other operational errors still propagate.
+                    self.load_errors.append({
+                        "post_id": post_id,
+                        "error_class": type(exc).__name__,
+                        "detail": str(exc)[:240],
+                    })
+                    continue
                 context["v2_state"] = state
                 candidates.append((post_id, context))
             if len(posts) < page_size:

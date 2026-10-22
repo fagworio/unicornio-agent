@@ -117,9 +117,12 @@ def find_game_trailer_with_status(
     candidates = _search_youtube(f"{name} trailer", limit=max_candidates, timeout=timeout)
     if candidates is None:
         return None, "search_failed"
+    unverified_candidates = False
     for candidate in candidates:
         title = candidate.get("title") or ""
         if not _looks_like_trailer(title):
+            if "trailer" in title.casefold():
+                unverified_candidates = True
             continue
         if not _matches_game(title, name):
             continue
@@ -128,6 +131,9 @@ def find_game_trailer_with_status(
         if not meta:
             continue
         channel = candidate.get("channel") or ""
+        if not _official_channel_consistent(title, channel, meta):
+            unverified_candidates = True
+            continue
         return {
             "video_id": video_id,
             "title": meta.get("title") or title,
@@ -140,7 +146,7 @@ def find_game_trailer_with_status(
             "thumbnail_url": meta.get("thumbnail_url") or "",
             "matched_title": title,
         }, "found"
-    return None, "official_not_found"
+    return None, "unverified_candidates" if unverified_candidates else "official_not_found"
 
 
 def find_cached_game_trailer_with_status(
@@ -240,9 +246,19 @@ def _search_youtube(query: str, *, limit: int, timeout: float) -> list[dict[str,
             html = response.read(2_000_000).decode("utf-8", errors="replace")
     except (HTTPError, URLError, TimeoutError, OSError):
         return None
+    lowered = html.casefold()
+    if any(marker in lowered for marker in (
+        "captcha", "unusual traffic", "consent.youtube.com", "before you continue to youtube",
+        "temporarily blocked", "enable javascript",
+    )):
+        return None
     videos = _parse_initial_data(html)
     if not videos:
         videos = _parse_video_ids_fallback(html)
+        # A changed/blocked search page is not evidence that no official
+        # trailer exists; only cache absence after a parseable search response.
+        if not videos and "ytinitialdata" not in lowered:
+            return None
     return videos[:limit]
 
 
@@ -322,7 +338,34 @@ def _fetch_oembed(video_id: str, *, timeout: float) -> dict[str, str] | None:
 
 
 def _looks_like_trailer(title: str) -> bool:
-    return "trailer" in title.lower()
+    folded = title.casefold()
+    disqualifiers = (
+        "fan trailer", "fan-made", "fan made", "unofficial", "reaction",
+        "gameplay", "walkthrough", "concept trailer", "trailer edit", "parody",
+    )
+    if any(marker in folded for marker in disqualifiers):
+        return False
+    return "trailer" in folded and "official" in folded
+
+
+def _official_channel_consistent(title: str, candidate_channel: str, meta: dict[str, str]) -> bool:
+    """Require an official-title signal and matching YouTube channel metadata.
+
+    YouTube search/oEmbed cannot prove publisher ownership; this consistency
+    check rejects obvious fan/misattributed candidates and never turns a search
+    transport failure into an official-absence waiver.
+    """
+    if not _looks_like_trailer(title) or not candidate_channel.strip():
+        return False
+    author = str(meta.get("author_name") or "").strip()
+    author_url = urlparse(str(meta.get("author_url") or ""))
+    if author_url.scheme != "https" or (author_url.hostname or "").casefold() not in {
+        "youtube.com", "www.youtube.com", "m.youtube.com",
+    }:
+        return False
+    candidate_tokens = _normalize(candidate_channel)
+    author_tokens = _normalize(author)
+    return bool(candidate_tokens and author_tokens and candidate_tokens == author_tokens)
 
 
 def _matches_game(title: str, game_name: str) -> bool:

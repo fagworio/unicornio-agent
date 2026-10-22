@@ -3,10 +3,12 @@ import sqlite3
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.runtime import (
+    _record_v2_writer_exception,
     _write_v2_journal_checkpoint,
     recover_interrupted_journal,
 )
 from unicornio_editor.pipeline_v2.model import WorkState
+from unicornio_editor.locking import LockManager
 
 
 def _journal(root: Path, payload: dict) -> Path:
@@ -54,6 +56,85 @@ def test_recover_protocol_running_journal_as_pre_writer_interruption(tmp_path):
     assert saved["resumable"] is True
     assert saved["failure_class"] == "process_interrupted"
     assert saved["recovered_from_run_id"] == "run-a"
+
+
+def test_recovery_waits_for_shared_post_lock_and_preserves_journal_when_busy(tmp_path):
+    _empty_media_registry(tmp_path)
+    path = _journal(tmp_path, {
+        "status": "running", "post_id": 115676, "run_id": "run-a",
+        "cycle_id": "cycle-a", "cycle_round": 1,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False, "state": {"state": "pending", "phase": "media"},
+    })
+    held = LockManager(tmp_path / "work" / "locks").acquire(115676)
+    held.__enter__()
+    try:
+        result = recover_interrupted_journal(tmp_path, 115676, apply=True)
+        assert result["recovered"] is False
+        assert result["locked"] is True
+        assert result["reason"] == "post_lock_unavailable"
+        assert json.loads(path.read_text(encoding="utf-8"))["status"] == "running"
+    finally:
+        held.__exit__(None, None, None)
+
+    resumed = recover_interrupted_journal(tmp_path, 115676, apply=True)
+    assert resumed["recovered"] is True
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "interrupted_pre_writer"
+
+
+def test_recovery_rechecks_expected_journal_identity_under_post_lock(tmp_path):
+    _empty_media_registry(tmp_path)
+    path = _journal(tmp_path, {
+        "status": "running", "post_id": 115676, "run_id": "run-current",
+        "cycle_id": "cycle-current", "cycle_round": 3,
+        "authorization_id": "auth-current", "protocol_version": 2,
+        "writer_started": False, "state": {"state": "pending", "phase": "media"},
+    })
+
+    result = recover_interrupted_journal(
+        tmp_path,
+        115676,
+        apply=True,
+        expected_identity={
+            "run_id": "run-old",
+            "cycle_id": "cycle-current",
+            "authorization_id": "auth-current",
+        },
+    )
+
+    assert result["recovered"] is False
+    assert result["reason"] == "journal_identity_mismatch"
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "running"
+
+
+def test_recover_validated_protocol_journal_only_with_pre_writer_evidence(tmp_path):
+    _empty_media_registry(tmp_path)
+    path = _journal(tmp_path, {
+        "status": "validated", "post_id": 115676, "run_id": "run-validated",
+        "cycle_id": "cycle-a", "cycle_round": 2,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False, "state": {"state": "pending", "phase": "media"},
+    })
+
+    result = recover_interrupted_journal(tmp_path, 115676, apply=True)
+
+    assert result["recovered"] is True
+    assert json.loads(path.read_text())["status"] == "interrupted_pre_writer"
+
+
+def test_recover_validated_journal_with_writer_intent_remains_blocked(tmp_path):
+    _empty_media_registry(tmp_path)
+    path = _journal(tmp_path, {
+        "status": "validated", "post_id": 115676, "run_id": "run-validated",
+        "protocol_version": 2, "writer_started": True,
+        "state": {"state": "pending", "phase": "media"},
+    })
+
+    result = recover_interrupted_journal(tmp_path, 115676, apply=True)
+
+    assert result["recovered"] is False
+    assert result["reason"] == "insufficient_protocol_evidence"
+    assert json.loads(path.read_text())["status"] == "validated"
 
 
 def test_recovery_refuses_ambiguous_running_journal(tmp_path):
@@ -193,3 +274,27 @@ def test_resumable_journal_preserves_recovery_chain_for_new_run(tmp_path):
     assert saved["run_id"] == "new-run"
     assert saved["recovered_from_run_id"] == "old-run"
     assert saved["recovery_chain"][0]["run_id"] == "old-run"
+
+
+def test_outer_writer_exception_preserves_detailed_media_readback_journal(tmp_path):
+    path = _journal(tmp_path, {
+        "status": "media_readback_failed", "post_id": 115676, "run_id": "run-a",
+        "protocol_version": 2, "writer_started": True,
+        "media_readback_status": "failed",
+        "media_readback_failure": {"field": "featured_media", "expected": 9, "actual": 0},
+        "apply_media_records": [{"media_id": 9, "destination": "apply_readback_failed"}],
+        "state": WorkState().to_dict(),
+    })
+
+    _record_v2_writer_exception(
+        tmp_path, 115676, WorkState(), run_id="run-a", error=RuntimeError("outer failure")
+    )
+
+    saved = json.loads(path.read_text())
+    assert saved["status"] == "media_readback_failed"
+    assert saved["media_readback_status"] == "failed"
+    assert saved["media_readback_failure"]["field"] == "featured_media"
+    assert saved["apply_media_records"][0]["media_id"] == 9
+    assert saved["writer_exception"] == {
+        "error_class": "RuntimeError", "detail": "outer failure"
+    }

@@ -334,7 +334,7 @@ def run_pre_publish_checklist(
         try:
             from .media.visual_hash import distinct_image_count, image_hashes
 
-            img_hashes = image_hashes(img_urls)
+            img_hashes = image_hashes(img_urls, url_policy=config.remote_url_policy)
             distinct_frames = distinct_image_count(img_urls, hashes=img_hashes)
         except Exception:  # noqa: BLE001 - deps/rede: mantem a politica cheia
             img_hashes = None
@@ -578,7 +578,7 @@ def run_pre_publish_checklist(
             from .media.visual_hash import image_hashes, similar_image_pairs
 
             if img_hashes is None:
-                img_hashes = image_hashes(urls)
+                img_hashes = image_hashes(urls, url_policy=config.remote_url_policy)
             similares = similar_image_pairs(urls, hashes=img_hashes)
         except Exception:  # noqa: BLE001 - deps/rede: nao bloqueia o pipeline
             similares = []
@@ -757,7 +757,9 @@ def run_pre_publish_checklist(
 
             pairs = similar_image_pairs(
                 [featured_url, *img_urls],
-                hashes=image_hashes([featured_url, *img_urls]),
+                hashes=image_hashes(
+                    [featured_url, *img_urls], url_policy=config.remote_url_policy
+                ),
             )
             duplicate_inline_urls = {
                 right if left == featured_url else left

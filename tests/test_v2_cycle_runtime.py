@@ -7,6 +7,7 @@ import pytest
 from unicornio_editor.pipeline_v2 import cycle_runtime
 from unicornio_editor.pipeline_v2.lock import RunSessionLock
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
+from unicornio_editor.locking import LockError, LockManager
 
 
 def _config():
@@ -210,6 +211,58 @@ def test_reconcile_interrupted_pre_writer_as_retry_without_replay(tmp_path):
     assert result.reconciled_without_replay is True
     assert result.details[0]["outcome"] == "retry"
     assert result.details[0]["recovery_status"] == "interrupted_pre_writer"
+
+
+def test_cycle_recovery_reports_post_lock_contention_without_rewriting_journal(tmp_path):
+    post_id = 115676
+    _empty_media_registry(tmp_path)
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+    journal_path = tmp_path / "work" / "v2-journal" / f"{post_id}.json"
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.write_text(json.dumps({
+        "status": "running",
+        "post_id": post_id,
+        "run_id": "interrupted-run",
+        "cycle_id": "cycle-test",
+        "cycle_round": 1,
+        "authorization_id": "auth-test",
+        "protocol_version": 2,
+        "writer_started": False,
+        "state": state.to_dict(),
+    }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{
+                "id": post_id,
+                "status": "pending",
+                "title": {"raw": "A"},
+                "content": {"raw": "<p>A</p>"},
+                "meta": {"_hermes_work_state": json.dumps(state.to_dict())},
+            }] if page == 1 else []
+
+        def get_post(self, requested_id):
+            assert int(requested_id) == post_id
+            return self.list_pending(page=1, per_page=1, status="pending")[0]
+
+    held = LockManager(tmp_path / "work" / "locks").acquire(post_id)
+    held.__enter__()
+    try:
+        result = cycle_runtime._reconcile_completed_round(
+            Client(), tmp_path, [post_id], expected_cycle_id="cycle-test",
+            expected_cycle_round=1, expected_authorization_id="auth-test",
+        )
+    finally:
+        held.__exit__(None, None, None)
+
+    assert result is not None
+    assert result.locked is True
+    assert result.reconciliation_blocking_info["locked_post_id"] == post_id
+    assert json.loads(journal_path.read_text(encoding="utf-8"))["status"] == "running"
 
 
 def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_path):
@@ -720,7 +773,11 @@ def test_cycle_executor_lock_skip_preserves_resumable_checkpoint(tmp_path, monke
         lambda *_args, **kwargs: (
             {"preview": True, "queue": {"selected_ids": [101]}}
             if kwargs.get("preview")
-            else {"locked": True}
+            else {
+                "locked": True,
+                "locked_post_id": 101,
+                "lock_error": "post 101 is already locked",
+            }
         ),
     )
     report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
@@ -732,6 +789,98 @@ def test_cycle_executor_lock_skip_preserves_resumable_checkpoint(tmp_path, monke
     assert persisted.pending_round is not None
     assert persisted.pending_round["preview_selected_ids"] == [101]
     assert persisted.round_reports[0]["event"] == "cycle_skipped_locked"
+    assert persisted.round_reports[0]["locked_post_id"] == 101
+    assert persisted.round_reports[0]["reason"] == "post_lock_busy"
+
+
+def test_unadmitted_round_reselects_around_busy_post_before_authorizing(tmp_path, monkeypatch):
+    calls = []
+    def fake_run_v2(_client, _config_value, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("preview"):
+            excluded = set(kwargs.get("excluded_post_ids") or ())
+            selected = [101, 103] if 102 in excluded else [101, 102]
+            return {"preview": True, "queue": {"selected_ids": selected}}
+        assert kwargs["expected_selected_ids"] == [101, 103]
+        assert kwargs["excluded_post_ids"] == (102,)
+        assert set(kwargs["reserved_post_locks"]) == {101, 103}
+        pending = cycle_runtime.CycleStateStore(_root).load().pending_round
+        assert pending["request"]["excluded_post_ids"] == [102]
+        for handle in kwargs["reserved_post_locks"].values():
+            handle.assert_owned()
+        return {"details": [_ready_detail(101), _ready_detail(103)]}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    manager = LockManager(tmp_path / "work" / "locks")
+    occupied = manager.acquire(102)
+    occupied.__enter__()
+    try:
+        report = cycle_runtime.run_v2_cycle(
+            object(),
+            _config(),
+            tmp_path,
+            cycle_config=cycle_runtime.CycleConfig(
+                ready_target=2,
+                new_batch_size=2,
+                max_unique_posts=5,
+                max_total_attempts=10,
+                max_attempts_per_post_per_cycle=2,
+                max_stagnant_rounds=2,
+                max_drain_rounds=2,
+                max_duration_seconds=60,
+            ),
+        )
+    finally:
+        occupied.__exit__(None, None, None)
+
+    assert report.stop_reason == "ready_target"
+    assert report.ready_post_ids == [101, 103]
+    assert [call["preview"] for call in calls] == [True, True, False]
+    assert calls[1]["excluded_post_ids"] == {102}
+    for post_id in (101, 103):
+        released = manager.acquire(post_id)
+        released.release()
+
+
+def test_authorized_round_keeps_original_ids_when_one_post_lock_is_busy(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="authorized-lock")
+    store.start_round(
+        state,
+        round_number=1,
+        request={
+            "round_number": 1,
+            "batch_size": 2,
+            "max_new_posts": 2,
+            "seen_post_ids": [],
+            "excluded_post_ids": [],
+            "attempts_by_post": {},
+        },
+    )
+    store.authorize_round(state, [101, 102])
+    calls = []
+
+    def fake_run_v2(_client, _config_value, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("preview"):
+            return {"preview": True, "queue": {"selected_ids": [101, 102]}}
+        raise AssertionError("an authorized locked round must not enter write mode")
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    manager = LockManager(tmp_path / "work" / "locks")
+    occupied = manager.acquire(102)
+    occupied.__enter__()
+    try:
+        report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+    finally:
+        occupied.__exit__(None, None, None)
+
+    persisted = store.load()
+    assert report.stop_reason == "skipped_locked"
+    assert [call["preview"] for call in calls] == [True]
+    assert persisted.pending_round["preview_selected_ids"] == [101, 102]
+    assert persisted.round_reports[0]["locked_post_id"] == 102
+    assert persisted.round_reports[0]["authorization_preserved"] is True
 
 
 def test_cycle_blocks_write_when_incomplete_journal_is_detected(tmp_path, monkeypatch):

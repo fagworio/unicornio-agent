@@ -41,11 +41,26 @@ LOG="work/publish-window.log"
 ATTEMPT=1
 while [ "$ATTEMPT" -le 3 ]; do
   if out="$("$ROOT/.venv/bin/unicornio-editor" publish-ready 2>&1)"; then
-    # Watchdog pattern: stdout vazio = nada a publicar (silencioso).
+    publish_status=0
+  else
+    publish_status=$?
+  fi
+
+  if [ "$publish_status" -eq 0 ] || [ "$publish_status" -eq 75 ]; then
+    # A saída 75 significa que o lote foi processado, mas alguns posts ficaram
+    # em retry. Os sucessos parciais devem ser relatados agora; repetir o lote
+    # dentro da mesma janela só cria leituras/escritas desnecessárias. Os
+    # retries permanecem para a próxima janela natural.
     if [ -n "$out" ]; then
-      # JSON cru vai para o log (auditoria); o Telegram recebe o relatorio
-      # legivel (posts id/titulo/data/status + custo de tokens das ultimas 24h).
-      printf '%s\n' "$out" | tee "$LOG" | "$ROOT/.venv/bin/python" "$ROOT/hermes/relatorio_publicacao.py"
+      if ! printf '%s\n' "$out" | tee "$LOG" >/dev/null; then
+        printf '[%s] falha ao salvar o resultado da janela\n' "$(date -Iseconds)" >> "$LOG" || true
+      fi
+      if ! printf '%s\n' "$out" | "$ROOT/.venv/bin/python" "$ROOT/hermes/relatorio_publicacao.py"; then
+        printf '[%s] falha ao gerar relatorio; publish-ready nao sera repetido\n' "$(date -Iseconds)" >> "$LOG" || true
+      fi
+    fi
+    if [ "$publish_status" -eq 75 ]; then
+      printf '[%s] resultado parcial; retries adiados para a proxima janela\n' "$(date -Iseconds)" >> "$LOG"
     fi
     exit 0
   fi

@@ -115,6 +115,13 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
     if executed_ids is None:
         executed_ids = [item.get("post_id") for item in value.get("details", ()) if isinstance(item, Mapping)]
     details = value.get("details", ())
+    lock_info = value.get("reconciliation_blocking_info")
+    if not isinstance(lock_info, Mapping) and value.get("locked"):
+        lock_info = {
+            "reason": "post_lock_busy" if value.get("locked_post_id") else "v2_run_lock_busy",
+            "locked_post_id": value.get("locked_post_id"),
+            "lock_error": value.get("lock_error"),
+        }
     return CycleRoundResult(
         preview_selected_ids=tuple(int(item) for item in preview_ids or ()),
         executed_ids=tuple(int(item) for item in executed_ids or ()),
@@ -144,8 +151,8 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         ),
         reconciliation_blocked=bool(value.get("reconciliation_blocked", False)),
         reconciliation_blocking_info=(
-            dict(value["reconciliation_blocking_info"])
-            if isinstance(value.get("reconciliation_blocking_info"), Mapping)
+            dict(lock_info)
+            if isinstance(lock_info, Mapping)
             else None
         ),
         historical_reconciliation=bool(value.get("historical_reconciliation", False)),
@@ -285,6 +292,7 @@ def run_cycle(
             break
 
         if result.locked:
+            lock_info = dict(result.reconciliation_blocking_info or {})
             report.stop_reason = "skipped_locked"
             report.round_reports.append({
                 "event": "cycle_skipped_locked",
@@ -292,7 +300,8 @@ def run_cycle(
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": [],
-                "reason": "v2_run_lock_busy",
+                "reason": lock_info.get("reason") or "v2_run_lock_busy",
+                **lock_info,
             })
             break
         if result.authorization_invalidated:

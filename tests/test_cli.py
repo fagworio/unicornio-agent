@@ -602,7 +602,7 @@ class CompactOutputTests(unittest.TestCase):
                 code = cli.main(["publish-ready", "--root", str(root)])
 
         report = json.loads(output.getvalue())
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 75)
         self.assertEqual(report["published"], 0)
         self.assertEqual(report["retryable_count"], 1)
         self.assertEqual(report["retryable_posts"][0]["post_id"], 115286)

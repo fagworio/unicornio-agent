@@ -100,6 +100,18 @@ class HtmlCleanerTests(unittest.TestCase):
         safe = "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure><img src=\"https://s3.example/y.jpg\" />"
         self.assertEqual(clean_html(_repair_orphan_media(safe)), "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure>")
 
+    def test_repairs_orphan_img_before_credit_figure(self):
+        from unicornio_editor.html_cleaner import _repair_orphan_media
+
+        broken = (
+            '<img src="https://cdn.example/cena.jpg" />'
+            '<figure><figcaption>Crédito da imagem: Autor. Cena. Uso com crédito '
+            '(https://source.example/page).</figcaption></figure>'
+        )
+        repaired = _repair_orphan_media(broken)
+        self.assertIn('<figure><img src="https://cdn.example/cena.jpg" />', repaired)
+        self.assertLess(repaired.index("<img"), repaired.index("<figcaption"))
+
     def test_drops_image_when_figure_has_no_figcaption(self):
         result = clean_html(
             '<figure class="aligncenter"><img src="https://s3.example/x.webp" alt="x" /></figure>'
@@ -144,6 +156,20 @@ class HtmlCleanerTests(unittest.TestCase):
         self.assertIn("<p>Texto do post.</p>", result)
         self.assertIn("<p>Mais texto.</p>", result)
         self.assertIn('<img src="https://s3.example/inline.webp"', result)
+
+    def test_wp_caption_image_uses_safe_attributes_and_url_scheme(self):
+        unsafe = clean_html(
+            '[caption]<img src="javascript:alert(1)" onerror="run()" alt="x"> '
+            "Crédito da imagem: Autor. Uso com crédito.[/caption]"
+        )
+        self.assertNotIn("<img", unsafe)
+        self.assertNotIn("javascript:", unsafe)
+        safe = clean_html(
+            '[caption]<img src="https://cdn.example/a.jpg" onerror="run()" alt="x"> '
+            "Crédito da imagem: Autor. Uso com crédito.[/caption]"
+        )
+        self.assertIn('<img src="https://cdn.example/a.jpg" alt="x" />', safe)
+        self.assertNotIn("onerror", safe)
 
 
 if __name__ == "__main__":

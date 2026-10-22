@@ -8,7 +8,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from unicornio_editor.config import Config
-from unicornio_editor.wordpress import SafetyError, WordPressClient
+from unicornio_editor.wordpress import SafetyError, WordPressClient, WordPressError
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -16,12 +16,20 @@ class ApiHandler(BaseHTTPRequestHandler):
     # When False, requests carrying a `status` query parameter are rejected
     # with HTTP 400 (simulates installs that refuse status in read queries).
     allow_status_query = True
+    status_query_http_error = None
 
     def do_GET(self):
         self.__class__.requests.append(("GET", self.path, dict(self.headers)))
         if self.path.startswith("/wp-json/wp/v2/posts/42"):
             self._send(200, {"id": 42, "status": "pending", "content": {"raw": "x"}})
         elif self.path.startswith("/wp-json/wp/v2/posts"):
+            if self.__class__.status_query_http_error and "status" in parse_qs(
+                urlparse(self.path).query
+            ):
+                self._send(self.__class__.status_query_http_error, {
+                    "code": "rest_invalid_param", "message": "invalid status"
+                })
+                return
             if not self.__class__.allow_status_query and "status" in parse_qs(
                 urlparse(self.path).query
             ):
@@ -64,6 +72,8 @@ class WordPressClientTests(unittest.TestCase):
 
     def setUp(self):
         ApiHandler.requests.clear()
+        ApiHandler.status_query_http_error = None
+        ApiHandler.allow_status_query = True
         self.config = Config(
             content_source="wordpress",
             wordpress_url=self.base,
@@ -85,14 +95,24 @@ class WordPressClientTests(unittest.TestCase):
     def test_list_pending_falls_back_to_local_filter_when_status_rejected(self):
         ApiHandler.allow_status_query = False
         try:
-            posts = WordPressClient(self.config).list_pending(per_page=2)
+            posts = WordPressClient(self.config).list_pending(per_page=2, include=[42])
         finally:
             ApiHandler.allow_status_query = True
         self.assertEqual(posts[0]["id"], 42)
         queries = [parse_qs(urlparse(path).query) for _, path, _ in ApiHandler.requests]
         self.assertEqual(queries[0]["status"], ["pending"])  # primary attempt
         self.assertNotIn("status", queries[1])  # fallback retry without status
+        self.assertEqual(queries[1]["include"], ["42"])
         self.assertEqual(len(queries), 2)
+
+    def test_list_pending_does_not_hide_service_unavailable_as_empty_queue(self):
+        ApiHandler.status_query_http_error = 503
+
+        with self.assertRaises(WordPressError) as error:
+            WordPressClient(self.config).list_pending(per_page=2)
+
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(len(ApiHandler.requests), 1)
 
     def test_get_post(self):
         self.assertEqual(WordPressClient(self.config).get_post(42)["status"], "pending")

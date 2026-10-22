@@ -110,10 +110,6 @@ def _state_resolution(row: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _state_from_inventory_row(row: dict[str, Any]) -> WorkState | None:
-    return _state_resolution(row).get("state")
-
-
 def _media_diagnostics(state: WorkState, row: dict[str, Any] | None = None) -> dict[str, Any]:
     media = state.media
     checklist = row.get("checklist_approved") if isinstance(row, dict) else None

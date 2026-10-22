@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+from ..locking import LockError, LockManager
 from .cycle import CycleConfig, CycleReport, CycleRoundRequest, CycleRoundResult, run_cycle
 from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
@@ -27,6 +28,40 @@ def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
             for post_id, count in request.attempts_by_post.items()
         },
     }
+
+
+def _reserve_post_lock_batch(
+    root: Path,
+    selected_ids: list[int],
+    *,
+    lock_ttl: int,
+) -> tuple[dict[int, Any], int | None, str]:
+    """Reserve a complete batch or release it without leaving partial locks."""
+    if not selected_ids:
+        return {}, None, ""
+    manager = LockManager(Path(root) / "work" / "locks", ttl=int(lock_ttl))
+    handles: dict[int, Any] = {}
+    current_post_id: int | None = None
+    try:
+        for post_id in sorted({int(value) for value in selected_ids}):
+            current_post_id = post_id
+            handle = manager.acquire(post_id)
+            handles[post_id] = handle
+            handle.__enter__()
+        for handle in handles.values():
+            handle.assert_owned()
+        return handles, None, ""
+    except (LockError, OSError, RuntimeError, ValueError) as exc:
+        _release_post_lock_batch(handles)
+        return {}, current_post_id, str(exc)[:240]
+
+
+def _release_post_lock_batch(handles: Mapping[int, Any]) -> None:
+    for handle in reversed(list(handles.values())):
+        try:
+            handle.__exit__(None, None, None)
+        except Exception:
+            pass
 
 
 def _selection_budget_violation(
@@ -405,10 +440,16 @@ def _reconcile_completed_round(
     expected_authorization_id: str | None = None,
     preauthorized_new_post_ids: tuple[int, ...] = (),
     historical_out_of_budget: bool = False,
+    lock_ttl: int = 900,
 ) -> CycleRoundResult | None:
     """Reconcile each authorized post without replaying any write."""
     reader = ProductionCandidateReader(client, root)
     contexts = dict(reader.snapshot(page_size=max(10, len(selected_ids))))
+    load_errors = {
+        int(item["post_id"]): item
+        for item in reader.load_errors
+        if isinstance(item, Mapping) and item.get("post_id") is not None
+    }
     details: list[dict[str, Any]] = []
     executed_ids: list[int] = []
     unresolved: list[dict[str, Any]] = []
@@ -417,6 +458,13 @@ def _reconcile_completed_round(
 
     for post_id in selected_ids:
         context = contexts.get(int(post_id))
+        if context is None and int(post_id) in load_errors:
+            unresolved.append({
+                "post_id": int(post_id),
+                "reason": "candidate_context_invalid",
+                "load_error": load_errors[int(post_id)],
+            })
+            continue
         if context is None:
             try:
                 post = client.get_post(int(post_id))
@@ -548,8 +596,18 @@ def _reconcile_completed_round(
                 })
             else:
                 recovery = recover_interrupted_journal(
-                    root, int(post_id), apply=True
+                    root, int(post_id), apply=True, lock_ttl=lock_ttl
                 )
+                if recovery.get("locked"):
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": str(recovery.get("reason") or "post_lock_unavailable"),
+                            "locked_post_id": int(post_id),
+                            "lock_error": str(recovery.get("error") or ""),
+                        },
+                    )
                 if not recovery.get("recovered"):
                     unresolved.append({
                         "post_id": int(post_id),
@@ -868,6 +926,7 @@ def run_v2_cycle(
                     historical_out_of_budget=(
                         budget_violation == "unique_post_budget_violation"
                     ),
+                    lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
                     return reconciled
@@ -958,6 +1017,7 @@ def run_v2_cycle(
                     expected_cycle_round=request.round_number,
                     expected_authorization_id=authorization_id,
                     historical_out_of_budget=True,
+                    lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
                     return reconciled
@@ -1000,30 +1060,121 @@ def run_v2_cycle(
                     expected_cycle_id=state.cycle_id,
                     expected_cycle_round=request.round_number,
                     expected_authorization_id=authorization_id,
+                    lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
                     return reconciled
+
+        reserved_post_locks: dict[int, Any] = {}
+        round_excluded_post_ids = executor_excluded_ids
+        if selected_ids:
+            lock_ttl = int(getattr(config, "lock_ttl", 900))
+            excluded_for_lock_retry = {
+                int(value) for value in (executor_excluded_ids or ())
+            }
+            lock_reselection_count = 0
+            while selected_ids:
+                handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                    root, selected_ids, lock_ttl=lock_ttl
+                )
+                if locked_post_id is None:
+                    reserved_post_locks = handles
+                    break
+                if authorized_pending:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(pending_ids or selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_busy",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                            "authorization_preserved": True,
+                        },
+                    )
+                if locked_post_id in excluded_for_lock_retry:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_reselection_exhausted",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                excluded_for_lock_retry.add(locked_post_id)
+                round_excluded_post_ids = tuple(sorted(excluded_for_lock_retry))
+                lock_reselection_count += 1
+                if lock_reselection_count > max(1, int(cycle_config.max_unique_posts)):
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_reselection_exhausted",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                preview = run_v2(
+                    client,
+                    config,
+                    root,
+                    limit=executor_limit,
+                    preview=True,
+                    retry_post_ids=executor_retry_ids,
+                    excluded_post_ids=excluded_for_lock_retry,
+                    max_new_posts=executor_max_new_posts,
+                    lock_held=True,
+                    cycle_id=state.cycle_id,
+                    cycle_round=request.round_number,
+                    authorization_id=authorization_id,
+                )
+                if preview.get("selection_mismatch"):
+                    return CycleRoundResult(selection_mismatch=True)
+                selected_ids = [
+                    int(value)
+                    for value in preview.get("queue", {}).get("selected_ids", ())
+                ]
+                budget_violation = _selection_budget_violation(
+                    selected_ids,
+                    seen_post_ids=authorized_seen_ids,
+                    max_new_posts=authorized_max_new_posts,
+                    batch_size=authorized_batch_size,
+                    excluded_post_ids=authorized_excluded_ids,
+                )
+                if budget_violation:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        budget_violation=budget_violation,
+                    )
         if not authorized_pending:
+            pending_request = state.pending_round.get("request")
+            if isinstance(pending_request, dict):
+                pending_request["excluded_post_ids"] = sorted(
+                    int(value) for value in (round_excluded_post_ids or ())
+                )
             store.authorize_round(state, selected_ids)
 
         if not selected_ids:
             return CycleRoundResult()
-
-        result = run_v2(
-            client,
-            config,
-            root,
-            limit=executor_limit,
-            preview=False,
-            expected_selected_ids=selected_ids,
-            retry_post_ids=executor_retry_ids,
-            excluded_post_ids=executor_excluded_ids,
-            max_new_posts=executor_max_new_posts,
-            lock_held=True,
-            cycle_id=state.cycle_id,
-            cycle_round=request.round_number,
-            authorization_id=authorization_id,
-        )
+        try:
+            result = run_v2(
+                client,
+                config,
+                root,
+                limit=executor_limit,
+                preview=False,
+                expected_selected_ids=selected_ids,
+                retry_post_ids=executor_retry_ids,
+                excluded_post_ids=round_excluded_post_ids,
+                max_new_posts=executor_max_new_posts,
+                lock_held=True,
+                cycle_id=state.cycle_id,
+                cycle_round=request.round_number,
+                authorization_id=authorization_id,
+                reserved_post_locks=reserved_post_locks,
+            )
+        finally:
+            _release_post_lock_batch(reserved_post_locks)
         if result.get("journal_conflict"):
             return CycleRoundResult(
                 preview_selected_ids=tuple(selected_ids),
@@ -1047,6 +1198,15 @@ def run_v2_cycle(
                 if isinstance(detail, dict)
             ),
             locked=bool(result.get("locked")),
+            reconciliation_blocking_info=(
+                {
+                    "reason": "post_lock_busy",
+                    "locked_post_id": result.get("locked_post_id"),
+                    "lock_error": result.get("lock_error"),
+                }
+                if result.get("locked")
+                else None
+            ),
             selection_mismatch=bool(result.get("selection_mismatch")),
             budget_violation=(
                 str(result.get("budget_violation"))

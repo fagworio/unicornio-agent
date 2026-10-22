@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .library_index import hamming
+from .phash_policy import PHASH_NEAR_EXACT_MAX_DISTANCE
 from .vision_cache import get_cached_visual_comparison, set_cached_visual_comparison
 from .vision_gate import compare_visual_assets, prepare_vision_image_input_from_path
 from .visual_hash import phash_from_path
@@ -66,7 +67,7 @@ def verify_candidate_identity(
         if ref_sha and ref_sha == identity.sha256:
             return identity, VisualIdentityDecision("SAME_IMAGE", True, ref_id, "sha256_exact")
         # pHash is a cheap definitive catch for an exact/recompressed frame.
-        if ref_phash and identity.phash and hamming(ref_phash, identity.phash) <= 2:
+        if ref_phash and identity.phash and hamming(ref_phash, identity.phash) <= PHASH_NEAR_EXACT_MAX_DISTANCE:
             return identity, VisualIdentityDecision("SAME_IMAGE", True, ref_id, "phash_near_exact")
         if not bool(getattr(config, "vision_enabled", False)) or not str(getattr(config, "vision_api_key", "")):
             return identity, VisualIdentityDecision("UNVERIFIED", False, ref_id, "vision_identity_unavailable")

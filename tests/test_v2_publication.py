@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from unittest import mock
 
@@ -6,6 +7,7 @@ import pytest
 
 from unicornio_editor.config import Config
 from unicornio_editor.manifest import build_ready_manifest, manifest_hash, manifest_matches, serialize_manifest
+from unicornio_editor.locking import LockError, LockManager
 from unicornio_editor.pipeline_v2.model import (
     FeaturedProgress,
     FeaturedStatus,
@@ -20,7 +22,16 @@ from unicornio_editor.pipeline_v2.publication import (
     repair_lost_ready_hash,
     reconcile_published_v2,
 )
-from unicornio_editor.workflow import _publish_now, publish_ready_posts
+from unicornio_editor.workflow import (
+    META_PUBLISH_OPERATION_ID,
+    _publish_now,
+    _publish_post_unlocked,
+    _guard_post_client,
+    _reconcile_uncertain_publication,
+    _reconcile_persisted_uncertain_publications,
+    publish_ready_posts,
+)
+from unicornio_editor.wordpress import WordPressClient
 
 
 def _ready_post(post_id=114840):
@@ -232,6 +243,76 @@ def test_publish_failure_after_wordpress_success_is_telemetrized(tmp_path):
     assert "publish_v2_sync_failed" in events
 
 
+def test_publish_preflight_refuses_concurrent_wordpress_edit_without_write(tmp_path):
+    expected = _pending_ready_post()
+
+    class ConcurrentEditClient(FakePublicationClient):
+        def __init__(self, post):
+            super().__init__(post)
+            self.post["content"]["raw"] = "human edit before guard"
+
+    client = ConcurrentEditClient(expected)
+    result = _publish_now(
+        client,
+        _config(),
+        expected["id"],
+        root=tmp_path,
+        integrity="manifest_match",
+        expected_post=expected,
+    )
+    assert result["status"] == "retry"
+    assert "changed during publish preflight" in result["reason"]
+    assert client.publish_calls == []
+
+
+def test_lost_post_lock_blocks_guarded_wordpress_mutation(tmp_path):
+    client = FakePublicationClient(_pending_ready_post())
+    lock_root = tmp_path / "locks"
+    handle = LockManager(lock_root, ttl=60).acquire(client.post["id"])
+    guarded = _guard_post_client(client, handle)
+    with handle:
+        replacement = lock_root / "replacement.lock"
+        replacement.write_text('{"token":"new-owner","released":true}', encoding="utf-8")
+        replacement.replace(lock_root / f"{client.post['id']}.lock")
+        with pytest.raises(LockError, match="replaced"):
+            guarded.update_post(client.post["id"], {"meta": {"_hermes_state": "blocked"}})
+    assert client.updates == []
+
+
+def test_wordpress_transport_rechecks_post_lock_immediately_before_request(tmp_path):
+    client = WordPressClient(_config())
+    handle = LockManager(tmp_path / "locks", ttl=60).acquire(42)
+    guarded = _guard_post_client(client, handle)
+
+    with handle:
+        with mock.patch.object(
+            handle,
+            "assert_owned",
+            side_effect=[None, None, LockError("ownership lost at transport boundary")],
+        ) as assert_owned, mock.patch("unicornio_editor.wordpress.urlopen") as open_url:
+            with pytest.raises(LockError, match="transport boundary"):
+                guarded.update_post(42, {"title": "test"})
+
+    assert assert_owned.call_count == 3
+    open_url.assert_not_called()
+
+
+def test_publish_queue_page_cap_is_explicit_and_precedes_post_writes(tmp_path):
+    class QueueClient:
+        def __init__(self):
+            self.published = []
+
+        def list_pending(self, *, page, per_page):
+            return [{"id": page * 100 + index} for index in range(100)] if page <= 100 else [{"id": 99999}]
+
+    from unicornio_editor.workflow import WorkflowError
+
+    client = QueueClient()
+    with pytest.raises(WorkflowError, match="resume scan at page 101"):
+        publish_ready_posts(client, _config(), tmp_path, limit=1)
+    assert client.published == []
+
+
 def _pending_ready_post():
     post = _ready_post()
     post["status"] = "pending"
@@ -270,6 +351,67 @@ def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path
     assert "post_publication_reconciled" in events
     assert "post_published_reconciled" in events
     assert '"event": "post_published"' not in events
+
+
+def test_publish_intent_is_durable_before_remote_write_and_recovers_process_crash(tmp_path):
+    class CrashAfterCommitClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post_id}.json"
+            intent = json.loads(marker.read_text(encoding="utf-8"))
+            operation_id = kwargs["meta"][META_PUBLISH_OPERATION_ID]
+            assert intent["status"] == "intent"
+            assert intent["intent_persisted"] is True
+            assert intent["publication_operation_id"] == operation_id
+            super().publish(post_id, **kwargs)
+            # Simulate process death after WordPress commits but before the
+            # caller can receive a response or replace the local intent.
+            raise SystemExit("simulated abrupt process termination")
+
+    client = CrashAfterCommitClient(_pending_ready_post())
+    post = client.post
+    with pytest.raises(SystemExit, match="simulated abrupt"):
+        _publish_now(
+            client,
+            _config(),
+            post["id"],
+            root=tmp_path,
+            integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"],
+        )
+
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    assert json.loads(marker.read_text(encoding="utf-8"))["status"] == "intent"
+    outcomes = _reconcile_persisted_uncertain_publications(
+        client, _config(), tmp_path
+    )
+
+    assert [item["status"] for item in outcomes] == ["published"]
+    assert len(client.publish_calls) == 1
+    assert not marker.exists()
+
+
+def test_publish_is_not_sent_when_intent_cannot_be_persisted(tmp_path):
+    client = FakePublicationClient(_pending_ready_post())
+    post = client.post
+    with mock.patch(
+        "unicornio_editor.workflow.atomic_write_text",
+        side_effect=OSError("disk full"),
+    ):
+        result = _publish_now(
+            client,
+            _config(),
+            post["id"],
+            root=tmp_path,
+            integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"],
+        )
+
+    assert result["status"] == "retry"
+    assert "write não enviado" in result["reason"]
+    assert client.publish_calls == []
+    assert client.post["status"] == "pending"
 
 
 def test_publish_reconciles_missing_legacy_state_without_second_publish(tmp_path):
@@ -324,11 +466,39 @@ def test_publish_timeout_before_commit_is_retryable_and_not_marked_published(tmp
     assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json").exists()
 
 
+def test_telemetry_failure_does_not_abort_publish_transaction(tmp_path):
+    client = FakePublicationClient(_pending_ready_post())
+    post = client.post
+
+    with mock.patch(
+        "unicornio_editor.workflow.append_telemetry", side_effect=OSError("disk full")
+    ):
+        result = _publish_now(
+            client,
+            _config(),
+            post["id"],
+            root=tmp_path,
+            integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"],
+        )
+
+    assert result["status"] == "published"
+    assert client.publish_calls
+    assert client.post["status"] == "publish"
+
+
 def test_publisher_reconciles_uncertain_marker_even_when_post_left_pending_queue(tmp_path):
     client = FakePublicationClient(_ready_post())
+    operation_id = "known-publish-operation"
+    client.post["meta"][META_PUBLISH_OPERATION_ID] = operation_id
     marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
     marker.parent.mkdir(parents=True)
-    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+    marker.write_text(json.dumps({
+        "post_id": client.post["id"],
+        "status": "uncertain",
+        "publication_operation_id": operation_id,
+    }), encoding="utf-8")
 
     outcomes = publish_ready_posts(client, _config(), tmp_path, limit=1)
 
@@ -337,6 +507,166 @@ def test_publisher_reconciles_uncertain_marker_even_when_post_left_pending_queue
     assert outcomes[0]["reconciled"] is True
     assert client.publish_calls == []
     assert not marker.exists()
+
+
+def test_uncertain_legacy_marker_cannot_attribute_published_status_without_operation_id(tmp_path):
+    post = _ready_post()
+    client = FakePublicationClient(post)
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    result = _reconcile_uncertain_publication(
+        client,
+        _config(),
+        tmp_path,
+        client.post,
+        post["id"],
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"],
+    )
+
+    assert result["status"] == "retry"
+    assert result["uncertain"] is True
+    assert "autoria" in result["reason"]
+    assert client.updates == []
+    assert client.publish_calls == []
+    assert marker.exists()
+
+
+def test_persisted_uncertain_publish_reconciles_ready_projection_with_matching_identity(tmp_path):
+    post = _pending_ready_post()
+    post["status"] = "publish"
+    post["meta"]["_hermes_state"] = "ready"
+    operation_id = "publish-op-114840-1"
+    post["meta"][META_PUBLISH_OPERATION_ID] = operation_id
+    client = FakePublicationClient(post)
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    manifest = post["meta"]["_hermes_ready_manifest"]
+    marker.write_text(json.dumps({
+        "post_id": post["id"],
+        "status": "uncertain",
+        "publication_operation_id": operation_id,
+        "ready_hash": post["meta"]["_hermes_ready_hash"],
+        "ready_manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+    }), encoding="utf-8")
+
+    result = _reconcile_uncertain_publication(
+        client,
+        _config(),
+        tmp_path,
+        client.post,
+        post["id"],
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=manifest,
+    )
+
+    assert result["status"] == "published"
+    assert result["reconciled"] is True
+    assert client.post["meta"]["_hermes_state"] == "published"
+    assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "published"
+    assert not marker.exists()
+
+
+def test_uncertain_publication_does_not_claim_manual_publish_without_operation_id(tmp_path):
+    post = _pending_ready_post()
+    post["status"] = "publish"
+    post["meta"]["_hermes_state"] = "ready"
+    client = FakePublicationClient(post)
+    operation_id = "agent-publish-attempt"
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    manifest = post["meta"]["_hermes_ready_manifest"]
+    marker.write_text(json.dumps({
+        "post_id": post["id"],
+        "status": "uncertain",
+        "publication_operation_id": operation_id,
+        "ready_hash": post["meta"]["_hermes_ready_hash"],
+        "ready_manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+    }), encoding="utf-8")
+
+    result = _reconcile_uncertain_publication(
+        client,
+        _config(),
+        tmp_path,
+        client.post,
+        post["id"],
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=manifest,
+    )
+
+    assert result["status"] == "retry"
+    assert result["uncertain"] is True
+    assert "não corresponde" in result["reason"]
+    assert client.updates == []
+    assert client.post["meta"]["_hermes_state"] == "ready"
+    assert marker.exists()
+
+
+def test_persisted_uncertain_publish_identity_mismatch_stays_fenced(tmp_path):
+    post = _pending_ready_post()
+    post["status"] = "publish"
+    post["meta"]["_hermes_state"] = "ready"
+    client = FakePublicationClient(post)
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "post_id": post["id"],
+        "status": "uncertain",
+        "ready_hash": "stale-hash",
+        "ready_manifest_sha256": hashlib.sha256(b"stale-manifest").hexdigest(),
+    }), encoding="utf-8")
+
+    result = _reconcile_uncertain_publication(
+        client,
+        _config(),
+        tmp_path,
+        client.post,
+        post["id"],
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"],
+    )
+
+    assert result["status"] == "retry"
+    assert result["uncertain"] is True
+    assert client.post["meta"]["_hermes_state"] == "ready"
+    assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "ready"
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("gate", "title", "content"),
+    [
+        (
+            "envelope",
+            "Título válido",
+            '{"post_id": 114840, "status": "publish", "cleaned_html": "<p>raw</p>"}',
+        ),
+        (
+            "language",
+            "A Long English Headline About a Major Video Game Release",
+            "<p>This is a detailed English article about a major video game release. "
+            "The story explains the new platform, launch date, characters, gameplay, "
+            "development team, and the publisher's announcement for international readers.</p>",
+        ),
+    ],
+)
+def test_early_publish_gate_reopens_v2_ready_state(tmp_path, gate, title, content):
+    post = _pending_ready_post()
+    post["title"] = {"raw": title}
+    post["content"] = {"raw": content}
+    client = FakePublicationClient(post)
+
+    result = _publish_post_unlocked(client, _config(), tmp_path, post["id"])
+
+    state = json.loads(client.post["meta"]["_hermes_work_state"])
+    assert result["status"] == "blocked"
+    assert client.publish_calls == []
+    assert state["state"] == "pending"
+    assert state["phase"] == "editorial"
+    assert state["blocker"] == "text_quality"
+    assert client.post["meta"]["_hermes_state"] == "blocked"
 
 
 def test_reconciled_publication_does_not_consume_new_publish_quota(tmp_path):
@@ -399,9 +729,15 @@ def test_persisted_uncertain_reconciliation_respects_dry_run(tmp_path):
 
 def test_persisted_reconciliation_does_not_emit_new_publication_event(tmp_path):
     client = FakePublicationClient(_ready_post())
+    operation_id = "known-publish-operation"
+    client.post["meta"][META_PUBLISH_OPERATION_ID] = operation_id
     marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
     marker.parent.mkdir(parents=True)
-    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+    marker.write_text(json.dumps({
+        "post_id": client.post["id"],
+        "status": "uncertain",
+        "publication_operation_id": operation_id,
+    }), encoding="utf-8")
 
     outcomes = publish_ready_posts(client, _config(), tmp_path, limit=1)
 

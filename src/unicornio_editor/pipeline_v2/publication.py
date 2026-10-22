@@ -282,21 +282,22 @@ def repair_lost_ready_hash(
             for item in before if item.get("eligible")
         ]
         return result_base
-    from ..workflow import _acquire_post_lock
+    from ..workflow import _acquire_post_lock, _guard_post_client
 
     for item in before:
         post_id = int(item["post_id"])
         if not item.get("eligible"):
             continue
         try:
-            with _acquire_post_lock(root, config, post_id):
+            with _acquire_post_lock(root, config, post_id) as lock_handle:
+                guarded_client = _guard_post_client(client, lock_handle)
                 current = _lost_ready_hash_report(
-                    client, root, post_id, policy_version=config.policy_version
+                    guarded_client, root, post_id, policy_version=config.policy_version
                 )
                 if current.get("precondition_signature") != item.get("precondition_signature"):
                     result_base["skipped"].append({"post_id": post_id, "reason": "changed_after_scan"})
                     continue
-                post = client.get_post(post_id)
+                post = guarded_client.get_post(post_id)
                 meta = _meta(post)
                 manifest_raw = meta.get(META_READY_MANIFEST)
                 ready_hash = str(current.get("recovered_ready_hash") or "")
@@ -315,11 +316,11 @@ def repair_lost_ready_hash(
                         "rank_math_title", "rank_math_description", "rank_math_focus_keyword", "original_link"
                     )},
                 }
-                client.update_post(post_id, {"meta": {
+                guarded_client.update_post(post_id, {"meta": {
                     "_hermes_ready_hash": ready_hash,
                     "_hermes_work_state": json.dumps(updated.to_dict(), ensure_ascii=False, separators=(",", ":")),
                 }})
-                verified_post = client.get_post(post_id)
+                verified_post = guarded_client.get_post(post_id)
                 verified_meta = _meta(verified_post)
                 verified_state = _v2_state(verified_post)
                 immutable_ok = (
@@ -389,7 +390,7 @@ def reconcile_published_v2(
             "reconciled": [],
             "skipped": [{"post_id": report["post_id"], "reason": "dry_run_enabled"} for report in reports if report.get("eligible")],
         }
-    from ..workflow import _acquire_post_lock
+    from ..workflow import _acquire_post_lock, _guard_post_client
 
     for report in reports:
         post_id = int(report["post_id"])
@@ -398,12 +399,13 @@ def reconcile_published_v2(
                 skipped.append({"post_id": post_id, "reason": "precondition_not_eligible"})
             continue
         try:
-            with _acquire_post_lock(root, config, post_id):
-                current = audit_publication_post(client, post_id, policy_version=config.policy_version)
+            with _acquire_post_lock(root, config, post_id) as lock_handle:
+                guarded_client = _guard_post_client(client, lock_handle)
+                current = audit_publication_post(guarded_client, post_id, policy_version=config.policy_version)
                 if current.get("precondition_signature") != report.get("precondition_signature"):
                     skipped.append({"post_id": post_id, "reason": "changed_after_scan"})
                     continue
-                post = client.get_post(post_id)
+                post = guarded_client.get_post(post_id)
                 if _precondition_signature(
                     post,
                     legacy_state=str(read_state(post).get("state") or "") or None,
@@ -422,9 +424,9 @@ def reconcile_published_v2(
                 updated = replace(state, state=LifecycleState.PUBLISHED, phase=Phase.PUBLISH, blocker=None)
                 meta = _meta(post)
                 payload_meta = {"_hermes_work_state": json.dumps(updated.to_dict(), ensure_ascii=False, separators=(",", ":"))}
-                client.update_post(post_id, {"meta": payload_meta})
-                verified_post = client.get_post(post_id)
-                verified = audit_publication_post(client, post_id, policy_version=config.policy_version)
+                guarded_client.update_post(post_id, {"meta": payload_meta})
+                verified_post = guarded_client.get_post(post_id)
+                verified = audit_publication_post(guarded_client, post_id, policy_version=config.policy_version)
                 verified_state = _v2_state(verified_post)
                 immutable_ok = (
                     verified_post.get("status") == "publish"

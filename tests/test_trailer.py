@@ -133,6 +133,25 @@ class TrailerDiscoveryTests(unittest.TestCase):
         self.assertIsNone(trailer)
         self.assertEqual(status, "search_failed")
 
+    def test_fan_or_misattributed_trailer_is_not_accepted_or_cached_as_absence(self):
+        fan = self._candidate(title="Hellraiser Revival Fan Trailer")
+        with mock.patch("unicornio_editor.trailer._search_youtube", return_value=[fan]), mock.patch(
+            "unicornio_editor.trailer._fetch_oembed", return_value=self._oembed()
+        ):
+            trailer, status = find_game_trailer_with_status("Hellraiser Revival")
+        self.assertIsNone(trailer)
+        self.assertEqual(status, "unverified_candidates")
+
+    def test_search_interstitial_is_not_cached_as_official_absence(self):
+        with mock.patch(
+            "unicornio_editor.trailer.urlopen",
+            return_value=mock.MagicMock(__enter__=lambda self: self, __exit__=lambda *_a: None,
+                                        read=lambda _n: b"captcha unusual traffic"),
+        ):
+            self.assertIsNone(__import__("unicornio_editor.trailer", fromlist=["_search_youtube"])._search_youtube(
+                "example trailer", limit=5, timeout=1
+            ))
+
     def test_rejects_empty_game_name(self):
         with self.assertRaises(TrailerError):
             find_game_trailer("   ")

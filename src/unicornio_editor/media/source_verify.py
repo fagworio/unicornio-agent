@@ -19,9 +19,10 @@ from typing import Any
 from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
-from .url_safety import inspect_remote_url
+from urllib.request import Request
+from .url_safety import urlopen_remote
 from .page_assets import extract_page_assets, is_noise_image_url, rank_page_assets
+from .phash_policy import PHASH_NEAR_EXACT_MAX_DISTANCE
 
 _PAGE_MAX_BYTES = 2 * 1024 * 1024
 _IMG_MAX_BYTES = 8 * 1024 * 1024
@@ -33,12 +34,6 @@ _UA = (
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 _IMG_EXT = re.compile(r"\.(?:jpe?g|png|webp|gif|avif|bmp)(?:\?|#|$)", re.IGNORECASE)
-_SRC_RE = re.compile(r'<img\b[^>]*\b(?:src|data-src)=["\']([^"\']+)', re.IGNORECASE)
-_SRCSET_RE = re.compile(r'<(?:img|source)\b[^>]*\b(?:srcset|data-srcset)=["\']([^"\']+)', re.IGNORECASE)
-_OG_IMAGE_RE = re.compile(
-    r'<meta\b[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
 
 SOURCE_VERIFICATION_RETRYABLE_CODES = frozenset({
     "source_page_unavailable",
@@ -84,6 +79,7 @@ def discover_article_source_candidates(
     limit: int = 32,
     audit=None,
     stats: dict[str, int] | None = None,
+    url_policy: str = "audit",
 ) -> list[dict[str, Any]]:
     """Extract candidates directly from the article's ``Fonte`` page.
 
@@ -93,7 +89,7 @@ def discover_article_source_candidates(
     if not _valid_http(page_url):
         return []
     budget = [_VERIFY_TOTAL_MAX_BYTES]
-    payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+    payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
     if payload is None:
         return []
     html = payload.decode("utf-8", "ignore")
@@ -103,6 +99,18 @@ def discover_article_source_candidates(
         if normalized and normalized.casefold() not in {item.casefold() for item in editorial_subjects}:
             editorial_subjects.append(normalized)
     primary_subject = editorial_subjects[0] if editorial_subjects else subject
+
+    def subject_for_asset(asset) -> str:
+        if len(editorial_subjects) <= 1:
+            return primary_subject
+        context = " ".join((asset.heading, asset.alt, asset.figcaption)).casefold()
+        context_tokens = set(re.findall(r"[a-z0-9]+", context))
+        matches = []
+        for candidate_subject in editorial_subjects:
+            tokens = [token for token in re.findall(r"[a-z0-9]+", candidate_subject.casefold()) if len(token) >= 3]
+            if tokens and all(token in context_tokens for token in tokens):
+                matches.append(candidate_subject)
+        return matches[0] if len(matches) == 1 else ""
     extracted_assets = extract_page_assets(html, page_url)
     editorial_assets = [
         asset for asset in extracted_assets
@@ -133,6 +141,11 @@ def discover_article_source_candidates(
             continue
         seen.add(url)
         if asset.context_kind == "excluded":
+            continue
+        asset_subject = subject_for_asset(asset)
+        if len(editorial_subjects) > 1 and not asset_subject:
+            # An asset from a listicle source without an unambiguous local
+            # heading/alt/caption must not inherit item one's identity.
             continue
         parsed = urlparse(unquote(url))
         stem = re.sub(r"\.[a-z0-9]{2,5}$", "", parsed.path.rsplit("/", 1)[-1], flags=re.I)
@@ -170,9 +183,9 @@ def discover_article_source_candidates(
             "evidence_score": 100,
             "valid": True,
             "verification_level": "ARTICLE_SOURCE",
-            "alt_text": asset.alt or asset.figcaption or asset.heading or primary_subject,
+            "alt_text": asset.alt or asset.figcaption or asset.heading or asset_subject,
             "credit_text": f"Crédito da imagem: {(parsed.hostname or 'fonte original').lower()}",
-            "subject": primary_subject,
+            "subject": asset_subject,
             "subjects": list(editorial_subjects),
             "source_context_kind": asset.context_kind,
             "role": "inline",
@@ -180,21 +193,24 @@ def discover_article_source_candidates(
     return result
 
 
-def _fetch(url: str, accept: str, max_bytes: int, budget: list[int], audit=None) -> bytes | None:
+def _fetch(
+    url: str,
+    accept: str,
+    max_bytes: int,
+    budget: list[int],
+    audit=None,
+    url_policy: str = "audit",
+) -> bytes | None:
     if budget[0] <= 0:
         return None
     try:
-        finding = inspect_remote_url(url)
-        if finding and audit:
-            audit(finding)
         request = Request(
             url,
             headers={"User-Agent": _UA, "Accept": accept},
         )
-        with urlopen(request, timeout=_FETCH_TIMEOUT) as response:
-            finding = inspect_remote_url(response.geturl())
-            if finding and audit:
-                audit(finding)
+        with urlopen_remote(
+            request, timeout=_FETCH_TIMEOUT, mode=url_policy, audit=audit
+        ) as response:
             data = response.read(min(max_bytes, budget[0]) + 1)
             if len(data) > max_bytes:
                 return None
@@ -248,7 +264,7 @@ def verify_image_identity(
     downloaded: bytes,
     source: bytes,
     *,
-    phash_threshold: int = 2,
+    phash_threshold: int = PHASH_NEAR_EXACT_MAX_DISTANCE,
 ) -> tuple[bool, str]:
     """Classifica bytes diferentes que ainda representam o mesmo frame.
 
@@ -300,6 +316,7 @@ def validate_discovered_candidate(
     cache_html: dict[str, str] | None = None,
     subject: str = "",
     audit=None,
+    url_policy: str = "audit",
 ) -> dict[str, Any]:
     """Valida um candidato ANTES do media_plan (Fase 5).
 
@@ -344,7 +361,7 @@ def validate_discovered_candidate(
     cache = cache if cache is not None else {}
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     if page_url not in cache:
-        pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+        pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
         texto = pagina.decode("utf-8", "ignore") if pagina is not None else ""
         cache[page_url] = _image_urls_in_page(texto, page_url) if pagina is not None else None
         # Guarda o HTML da origem: o chamador extrai o contexto (og:title,
@@ -432,10 +449,10 @@ def validate_discovered_candidate(
             except OSError:
                 candidate_bytes = None
         if candidate_bytes is None:
-            candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit)
+            candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
         if candidate_bytes is not None:
             for listed_url in ranked_urls[: max(_MAX_DOWNLOADS, 10)]:
-                asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit)
+                asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
                 if asset_bytes is None:
                     continue
                 same_frame, level = verify_image_identity(candidate_bytes, asset_bytes)
@@ -460,6 +477,7 @@ def verify_downloaded_against_source(
     cache: dict[str, list[str] | None] | None = None,
     cache_lock: Lock | None = None,
     audit=None,
+    url_policy: str = "audit",
 ) -> tuple[bool, str]:
     """Confirma que ``downloaded`` corresponde a uma imagem listada na pagina.
 
@@ -476,7 +494,7 @@ def verify_downloaded_against_source(
     def populate_page_cache() -> None:
         if source_page_url in cache:
             return
-        page_html = _fetch(source_page_url, "text/html", _PAGE_MAX_BYTES, budget, audit)
+        page_html = _fetch(source_page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
         cache[source_page_url] = (
             _image_urls_in_page(page_html.decode("utf-8", "ignore"), source_page_url)
             if page_html is not None
@@ -518,7 +536,7 @@ def verify_downloaded_against_source(
     exact_compared = False
     exact_decode_failed = False
     for url in exact:
-        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
         if data is not None:
             exact_downloaded = True
             if _md5(data) == downloaded_hash:
@@ -565,7 +583,7 @@ def verify_downloaded_against_source(
         if downloads >= _MAX_DOWNLOADS:
             break
         downloads += 1
-        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
         if data is None:
             unavailable += 1
             continue
@@ -621,7 +639,7 @@ def verify_downloaded_against_source(
         if downloads >= _MAX_DOWNLOADS:
             break
         downloads += 1
-        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit)
+        data = _fetch(url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
         if data is not None:
             compared += 1
             if _md5(data) == downloaded_hash:

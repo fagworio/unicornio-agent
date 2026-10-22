@@ -91,7 +91,7 @@ class MediaPipelineTests(unittest.TestCase):
                 self.done = True
                 return ImageHandler.payload
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "unicornio_editor.media.downloader.urlopen", return_value=Response()
+            "unicornio_editor.media.downloader.urlopen_remote", return_value=Response()
         ) as opener:
             download_image(self.url, Path(directory) / "source.png", timeout=7.5)
         self.assertEqual(opener.call_args.kwargs["timeout"], 7.5)

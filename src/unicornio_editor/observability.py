@@ -517,6 +517,12 @@ def read_telemetry_summary(
         "tool_calls": 0,
         "external_http_requests": 0,
         "model_cost_usd": 0.0,
+        "direct_editorial_cost_usd": 0.0,
+        "direct_vision_cost_usd": 0.0,
+        "direct_editorial_unpriced_requests": 0,
+        "direct_vision_unpriced_requests": 0,
+        "direct_editorial_input_tokens": 0,
+        "direct_editorial_output_tokens": 0,
         "input_tokens": 0,
         "output_tokens": 0,
     }
@@ -600,6 +606,15 @@ def read_telemetry_summary(
             cost = record.get("model_cost_usd", record.get("cost_usd"))
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 economics["model_cost_usd"] += float(cost)
+            if event in {"editorial_model_request", "vision_api_request"}:
+                scope = "editorial" if event == "editorial_model_request" else "vision"
+                if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                    economics[f"direct_{scope}_cost_usd"] += float(cost)
+                else:
+                    economics[f"direct_{scope}_unpriced_requests"] += 1
+                if scope == "editorial":
+                    economics["direct_editorial_input_tokens"] += int(record.get("input_tokens") or 0)
+                    economics["direct_editorial_output_tokens"] += int(record.get("output_tokens") or 0)
             reason = record.get("reason")
             if isinstance(reason, str) and reason.strip():
                 bucket = reasons.setdefault(event, {})
@@ -894,6 +909,8 @@ def read_telemetry_summary(
         "economics": {
             **economics,
             "model_cost_usd": round(float(economics["model_cost_usd"]), 8),
+            "direct_editorial_cost_usd": round(float(economics["direct_editorial_cost_usd"]), 8),
+            "direct_vision_cost_usd": round(float(economics["direct_vision_cost_usd"]), 8),
             "posts_per_editorial_request": (
                 round(economics["editorial_posts_generated"] / economics["editorial_model_requests"], 4)
                 if economics["editorial_model_requests"] else None

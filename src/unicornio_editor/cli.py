@@ -1425,6 +1425,7 @@ def _resolve_media_batch(
             excluded_urls=blocked_urls,
             excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
+            url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
         )
         accepted = [
             candidate for candidate in aprovados
@@ -1481,6 +1482,7 @@ def _resolve_media_batch(
             existing_media_phashes=item.get("existing_media_phashes") or {},
             excluded_urls=excluded_urls.get(post_id, set()),
             excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
+            url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1999,6 +2001,7 @@ def _enriquecer_candidatos(
     excluded_urls: set[str] | None = None,
     excluded_fingerprints: set[str] | None = None,
     emit_terminal: bool = True,
+    url_policy: str = "audit",
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -2134,7 +2137,7 @@ def _enriquecer_candidatos(
     if existing_urls:
         try:
             missing_urls = [url for url in existing_urls if url not in existing_hashes]
-            existing_hashes.update(image_hashes(missing_urls))
+            existing_hashes.update(image_hashes(missing_urls, url_policy=url_policy))
         except Exception:  # noqa: BLE001 - pHash é fail-soft
             existing_hashes = {}
 
@@ -2142,7 +2145,7 @@ def _enriquecer_candidatos(
         chave = str(url or "")
         if chave and chave not in hashes_locais:
             try:
-                hashes_locais.update(image_hashes([chave]))
+                hashes_locais.update(image_hashes([chave], url_policy=url_policy))
             except Exception:  # noqa: BLE001 - pHash é fail-soft
                 pass
         return hashes_locais.get(chave)
@@ -2217,7 +2220,16 @@ def _enriquecer_candidatos(
             return
         if verify:
             veredito = validate_discovered_candidate(
-                cand, cache=cache_paginas, cache_html=cache_html, subject=subject
+                cand,
+                cache=cache_paginas,
+                cache_html=cache_html,
+                subject=subject,
+                url_policy=url_policy,
+                audit=(
+                    lambda finding: append_telemetry(
+                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                    )
+                ) if root is not None else None,
             )
             cand["valid"] = bool(veredito["valid"])
             cand["valid_reason"] = str(veredito.get("reason") or "")
@@ -2335,7 +2347,16 @@ def _enriquecer_candidatos(
                     cand,
                     subject,
                     verifier=lambda c: validate_discovered_candidate(
-                        c, cache=cache_paginas, cache_html=cache_html, subject=subject
+                        c,
+                        cache=cache_paginas,
+                        cache_html=cache_html,
+                        subject=subject,
+                        url_policy=url_policy,
+                        audit=(
+                            lambda finding: append_telemetry(
+                                root, "remote_url_audit", url=finding.url, reason=finding.reason
+                            )
+                        ) if root is not None else None,
                     ),
                 )
             except Exception:  # noqa: BLE001 - resolver é best-effort
@@ -2728,6 +2749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = recover_interrupted_journal(
                 args.root, int(args.post_id), apply=bool(args.apply),
                 legacy_evidence=legacy_evidence,
+                expected_identity=expected,
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment
@@ -3116,6 +3138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         enriched_cache=memo,
                         post_id=post_id_ref,
                         emit_terminal=False,
+                        url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return len(_frames_fortes)
@@ -3186,6 +3209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     capacity=needed_web,
                     enriched_cache=memo,
                     post_id=post_id_ref,
+                    url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                 )
             if rejeitados:
                 append_telemetry(
@@ -3338,6 +3362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         termo=item,
                         root=args.root,
                         enriched_cache=_memo_listicle,
+                        url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return 0
@@ -3417,6 +3442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         capacity=1,
                         post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
                         emit_terminal=False,
+                        url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item
@@ -3993,6 +4019,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result.setdefault("session", session_budget.status(args.root, config))
         _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+        if args.command == "publish-ready" and (errors or retryable):
+            # Technical/uncertain per-post failures ask the publisher wrapper
+            # for bounded backoff; quality blocks and clean skips are normal.
+            return 75
         return 0
     except (ConfigError, EditorialProviderError, WordPressError, WorkflowError, OSError, ValueError) as exc:
         # WorkflowError incluido de proposito: um traceback Python no contexto do

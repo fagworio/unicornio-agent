@@ -661,7 +661,7 @@ class EnrichmentMemoTests(unittest.TestCase):
             },
         ), mock.patch(
             "unicornio_editor.media.visual_hash.image_hashes",
-            side_effect=lambda urls: {
+            side_effect=lambda urls, **_kwargs: {
                 url: FakeHash(
                     0 if "sony-3" in url else 2 if "sony-5" in url else 20
                 )

@@ -322,6 +322,7 @@ def _per_ready(
     tocados: int,
     bytes_contexto: int,
     media_economy: dict[str, Any],
+    direct_provider: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """KPIs na unidade POR READY (o volume/tipo de posts da janela varia)."""
     prompt = hermes["prompt_tokens"] if hermes else None
@@ -331,18 +332,32 @@ def _per_ready(
     gasto = hermes["cost_usd"] if hermes else None
     aux = (hermes or {}).get("aux") or {}
     grande = dict((hermes or {}).get("grand_total") or {})
-    # VISÃO DIRETA (chamadas próprias do pipeline, fora do accounting do Hermes):
-    # entra no "observed grand total" — sem ela o total não é o total. Custo da
-    # visão direta não tem preço/accounting próprio, então NÃO é inventado.
+    # Providers diretos (Editorial e Visão) ficam separados do accounting Hermes.
+    # Só entram no total combinado quando a atribuição disponível está explícita.
+    direct_provider = direct_provider or {}
     visao_requests = int(media_economy.get("vision_api_requests") or 0)
     visao_prompt = int(media_economy.get("vision_input_tokens") or 0)
     visao_output = int(media_economy.get("vision_output_tokens") or 0)
+    editorial_requests = int(direct_provider.get("editorial_model_requests") or 0)
+    editorial_prompt = int(direct_provider.get("direct_editorial_input_tokens") or 0)
+    editorial_output = int(direct_provider.get("direct_editorial_output_tokens") or 0)
+    direct_cost = float(direct_provider.get("direct_vision_cost_usd") or 0) + float(
+        direct_provider.get("direct_editorial_cost_usd") or 0
+    )
+    unpriced_direct = int(direct_provider.get("direct_vision_unpriced_requests") or 0) + int(
+        direct_provider.get("direct_editorial_unpriced_requests") or 0
+    )
+    hermes_cost = (hermes or {}).get("grand_total", {}).get("cost_usd")
     if grande:
         grande["requests"] = int(grande.get("requests") or 0) + visao_requests
-        grande["prompt_tokens"] = int(grande.get("prompt_tokens") or 0) + visao_prompt
+        grande["requests"] += editorial_requests
+        grande["prompt_tokens"] = int(grande.get("prompt_tokens") or 0) + visao_prompt + editorial_prompt
         grande["total_model_tokens"] = (
-            int(grande.get("total_model_tokens") or 0) + visao_prompt + visao_output
+            int(grande.get("total_model_tokens") or 0)
+            + visao_prompt + visao_output + editorial_prompt + editorial_output
         )
+        if isinstance(hermes_cost, (int, float)):
+            grande["cost_usd"] = float(hermes_cost) + direct_cost
     return {
         # tool_context_bytes_per_ready e a metrica PRINCIPAL de contexto: mede o
         # que o pipeline DEVOLVEU ao modelo (nao o tamanho dos arquivos de
@@ -366,13 +381,13 @@ def _per_ready(
             grande.get("total_model_tokens"), ready
         ),
         "grand_total_requests_per_ready": _ratio(grande.get("requests"), ready),
-        # Custo: Hermes main + auxiliar. A visão direta NÃO tem accounting de
-        # custo no state.db — o número aqui é marcado como parcial.
+        # Direct provider calls are combined only when each component is known;
+        # known values remain explicitly lower-bound when attribution is partial.
         "grand_total_cost_per_ready_usd": (
             round(float(grande.get("cost_usd") or 0) / ready, 6)
-            if grande and ready else None
+            if grande and ready and isinstance(hermes_cost, (int, float)) else None
         ),
-        "grand_total_cost_partial": bool(visao_requests),
+        "grand_total_cost_partial": bool(unpriced_direct or not isinstance(hermes_cost, (int, float))),
         "requests_per_ready": _ratio(requests, ready),
         "requests_per_post_touched": _ratio(requests, tocados),
         "cost_per_ready_usd": (
@@ -442,6 +457,13 @@ def session_metrics(
             banco, hours=max(1, int(hours)), job_id=job_id, project_root=project_root
         )
     media_economy = resumo.get("media_economy") or {}
+    economics = resumo.get("economics") or {}
+    hermes_cost = (hermes or {}).get("grand_total", {}).get("cost_usd")
+    direct_cost_partial = bool(
+        int(economics.get("direct_vision_unpriced_requests") or 0)
+        or int(economics.get("direct_editorial_unpriced_requests") or 0)
+        or not isinstance(hermes_cost, (int, float))
+    )
     origens = completo.get("run_sources") or {}
     nota = (
         "KPI oficial: somente eventos do cron editorial. Execucao manual/"
@@ -493,25 +515,57 @@ def session_metrics(
             "tokens_partial": bool(
                 int(media_economy.get("vision_requests_without_usage") or 0)
             ),
-            "cost_usd": None,  # sem accounting de custo no state.db
+            "cost_usd": (
+                round(float(economics.get("direct_vision_cost_usd") or 0), 8)
+                if not int(economics.get("direct_vision_unpriced_requests") or 0)
+                else None
+            ),
+            "estimated_cost_usd": round(float(economics.get("direct_vision_cost_usd") or 0), 8),
+            "unpriced_requests": int(economics.get("direct_vision_unpriced_requests") or 0),
+            "cost_partial": bool(int(economics.get("direct_vision_unpriced_requests") or 0)),
+        },
+        "direct_editorial": {
+            "requests": int(economics.get("editorial_model_requests") or 0),
+            "prompt_tokens": int(economics.get("direct_editorial_input_tokens") or 0),
+            "output_tokens": int(economics.get("direct_editorial_output_tokens") or 0),
+            "cost_usd": (
+                round(float(economics.get("direct_editorial_cost_usd") or 0), 8)
+                if not int(economics.get("direct_editorial_unpriced_requests") or 0)
+                else None
+            ),
+            "estimated_cost_usd": round(float(economics.get("direct_editorial_cost_usd") or 0), 8),
+            "unpriced_requests": int(economics.get("direct_editorial_unpriced_requests") or 0),
+            "cost_partial": bool(int(economics.get("direct_editorial_unpriced_requests") or 0)),
         },
         "observed_grand_total": {
             "prompt_tokens": (
                 int((hermes or {}).get("grand_total", {}).get("prompt_tokens") or 0)
                 + int(media_economy.get("vision_input_tokens") or 0)
+                + int(economics.get("direct_editorial_input_tokens") or 0)
+            ),
+            "output_tokens": (
+                int((hermes or {}).get("grand_total", {}).get("output_tokens") or 0)
+                + int(media_economy.get("vision_output_tokens") or 0)
+                + int(economics.get("direct_editorial_output_tokens") or 0)
             ),
             "requests": (
                 int((hermes or {}).get("grand_total", {}).get("requests") or 0)
                 + int(media_economy.get("vision_api_requests") or 0)
+                + int(economics.get("editorial_model_requests") or 0)
+            ),
+            "cost_usd": None if not isinstance(hermes_cost, (int, float)) else round(
+                float(hermes_cost)
+                + float(economics.get("direct_vision_cost_usd") or 0)
+                + float(economics.get("direct_editorial_cost_usd") or 0), 8
             ),
             "tokens_partial": bool(
                 int(media_economy.get("vision_requests_without_usage") or 0)
             ),
+            "cost_partial": direct_cost_partial,
             "note": (
-                "Hermes main + auxiliar + visao DIRETA do pipeline. O custo em USD "
-                "cobre apenas as camadas do Hermes (a visao direta nao tem preco no "
-                "state.db). tokens_partial=true quando houve requisicao de visao sem "
-                "`usage` (ex.: HTTP 500): nesse caso o total e LOWER BOUND."
+                "Hermes main + auxiliar + custos diretos de Editorial e Visão quando "
+                "precificados no momento da chamada. Campos *_unpriced_requests "
+                "indicam custos diretos não cobertos; valores conhecidos são lower bound."
             ),
         },
         # Todas as origens (cron + manual + teste): mostra a contaminacao em vez
@@ -531,6 +585,7 @@ def session_metrics(
             tocados=tocados,
             bytes_contexto=bytes_contexto,
             media_economy=media_economy,
+            direct_provider=economics,
         ),
     }
 

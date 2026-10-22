@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -435,20 +436,30 @@ def search_google_browser_images(
     if os.environ.get("EDITOR_GOOGLE_BROWSER_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
         _report(report, kind="google_browser_unavailable", error="provider disabled")
         return []
-    with _BROWSER_LOCK:
+    started = time.monotonic()
+    if not _BROWSER_LOCK.acquire(timeout=max(0.0, float(timeout))):
+        _report(report, kind="google_browser_unavailable", error="browser_lock_timeout")
+        return []
+    try:
         if _BROWSER_DISABLED:
             _report(report, kind="google_browser_unavailable", error="browser disabled after prior block")
+            return []
+        remaining = float(timeout) - (time.monotonic() - started)
+        if remaining <= 0:
+            _report(report, kind="google_browser_unavailable", error="browser_budget_exhausted_before_start")
             return []
         return _search_google_browser_images_locked(
             query,
             size=size,
             ratio=ratio,
             limit=limit,
-            timeout=timeout,
+            timeout=remaining,
             report=report,
             remote_url_policy=remote_url_policy,
             audit=audit,
         )
+    finally:
+        _BROWSER_LOCK.release()
 
 
 __all__ = ["search_google_browser_images", "cleanup_browser_artifacts", "_extract_open_result"]

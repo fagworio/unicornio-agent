@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .url_safety import URLSafetyError, enforce_remote_url
+from .url_safety import URLSafetyError, urlopen_remote
 
 
 class MediaDownloadError(RuntimeError):
@@ -61,9 +61,6 @@ def download_image(
     timeout: float = 30.0,
     audit=None,
 ) -> Path:
-    finding = enforce_remote_url(url, mode=url_policy)
-    if finding is not None and audit is not None:
-        audit(finding)
     if not url.startswith(("http://", "https://")):
         raise MediaDownloadError("image URL must use HTTP(S)")
     if max_bytes < 1024:
@@ -72,7 +69,9 @@ def download_image(
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            with urlopen(request, timeout=timeout) as response:
+            with urlopen_remote(
+                request, timeout=timeout, mode=url_policy, audit=audit
+            ) as response:
                 content_type = response.headers.get_content_type()
                 if not content_type.startswith("image/"):
                     raise MediaDownloadError("remote resource is not an image")

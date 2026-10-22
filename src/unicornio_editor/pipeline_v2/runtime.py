@@ -20,6 +20,7 @@ from ..content_quality import word_count
 from ..manifest import build_ready_manifest, manifest_hash, serialize_manifest
 from ..media.evidence import diverse_item_queries, editorial_subjects, item_query, post_subjects
 from ..media.relevance import iter_content_images
+from ..locking import LockError, LockManager
 from ..list_quality import detect_list_format
 from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
@@ -780,6 +781,63 @@ def _write_v2_journal_checkpoint(
     _write_v2_journal_payload(target, payload)
 
 
+def _record_v2_writer_exception(
+    root: Path,
+    post_id: int,
+    state,
+    *,
+    run_id: str,
+    cycle_id: str | None = None,
+    cycle_round: int | None = None,
+    authorization_id: str | None = None,
+    error: Exception,
+) -> None:
+    """Record an outer writer error without erasing a more precise journal.
+
+    The writer may already have persisted a readback/apply failure (or even a
+    committed result) before propagating an exception. Keep that evidence and
+    attach the outer exception rather than replacing the journal wholesale.
+    """
+    target = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
+    if target.is_file():
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict) or str(existing.get("run_id") or "") != str(run_id):
+            raise RuntimeError("writer journal identity changed before exception recording")
+        prior_status = str(existing.get("status") or "")
+        detailed_statuses = {
+            "committed", "media_readback_failed", "media_apply_failed",
+            "writer_failed", "readback_failed",
+        }
+        if prior_status not in detailed_statuses:
+            existing["status"] = "writer_failed"
+            existing["state"] = state.to_dict()
+            existing["protocol_version"] = 2
+            existing["writer_started"] = True
+            existing["last_safe_point"] = "writer_exception"
+            if cycle_id:
+                existing["cycle_id"] = cycle_id
+            if cycle_round is not None:
+                existing["cycle_round"] = cycle_round
+            if authorization_id:
+                existing["authorization_id"] = authorization_id
+        existing["writer_exception"] = {
+            "error_class": type(error).__name__,
+            "detail": str(error)[:400],
+        }
+        _write_v2_journal_payload(target, existing, protect_incomplete=False)
+        return
+    _write_v2_journal_checkpoint(
+        root,
+        post_id,
+        "writer_failed",
+        state,
+        run_id=run_id,
+        cycle_id=cycle_id,
+        cycle_round=cycle_round,
+        authorization_id=authorization_id,
+    )
+
+
 def _media_effect_evidence(
     root: Path,
     post_id: int,
@@ -954,6 +1012,69 @@ def recover_interrupted_journal(
     *,
     apply: bool = True,
     legacy_evidence: Mapping[str, Any] | None = None,
+    lock_held: bool = False,
+    lock_handle: Any | None = None,
+    lock_ttl: int = 900,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Recover a pre-writer journal while holding its shared post lock.
+
+    The cycle's write executor can pass the lock it already owns. Standalone
+    recovery commands acquire the same cross-process lock themselves, so a
+    journal cannot be rewritten concurrently with a legacy workflow.
+    """
+    post_id = int(post_id)
+    if not apply or lock_held:
+        if apply and lock_handle is not None:
+            try:
+                lock_handle.assert_owned()
+            except LockError as exc:
+                return {
+                    "post_id": post_id,
+                    "recovered": False,
+                    "locked": True,
+                    "reason": "post_lock_lost",
+                    "error": str(exc),
+                }
+        return _recover_interrupted_journal_locked(
+            root, post_id, apply=apply, legacy_evidence=legacy_evidence,
+            lock_handle=lock_handle, expected_identity=expected_identity,
+        )
+
+    handle = None
+    try:
+        handle = LockManager(
+            Path(root) / "work" / "locks", ttl=int(lock_ttl)
+        ).acquire(post_id)
+        handle.__enter__()
+        handle.assert_owned()
+    except (LockError, OSError, RuntimeError, ValueError) as exc:
+        if handle is not None:
+            handle.__exit__(None, None, None)
+        return {
+            "post_id": post_id,
+            "recovered": False,
+            "locked": True,
+            "reason": "post_lock_unavailable",
+            "error": str(exc)[:240],
+        }
+    try:
+        return _recover_interrupted_journal_locked(
+            root, post_id, apply=True, legacy_evidence=legacy_evidence,
+            lock_handle=handle, expected_identity=expected_identity,
+        )
+    finally:
+        handle.__exit__(None, None, None)
+
+
+def _recover_interrupted_journal_locked(
+    root: Path,
+    post_id: int,
+    *,
+    apply: bool,
+    legacy_evidence: Mapping[str, Any] | None,
+    lock_handle: Any | None,
+    expected_identity: Mapping[str, str] | None,
 ) -> dict[str, Any]:
     """Recover only a protocol-v2 pre-writer journal after process loss.
 
@@ -968,9 +1089,24 @@ def recover_interrupted_journal(
         journal = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return {"post_id": int(post_id), "recovered": False, "reason": "journal_unreadable"}
+    if expected_identity:
+        actual_identity = {
+            key: str(journal.get(key) or "")
+            for key in expected_identity
+        }
+        expected = {key: str(value or "") for key, value in expected_identity.items()}
+        if actual_identity != expected:
+            return {
+                "post_id": int(post_id),
+                "recovered": False,
+                "reason": "journal_identity_mismatch",
+                "expected_identity": expected,
+                "actual_identity": actual_identity,
+            }
+    recoverable_statuses = {"running", "validated"}
     if journal.get("status") == "interrupted_pre_writer":
         return {"post_id": int(post_id), "recovered": False, "reason": "already_recovered"}
-    if journal.get("status") != "running":
+    if journal.get("status") not in recoverable_statuses:
         return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
     media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
     if media_evidence.get("evidence_status") != "no_effects_detected":
@@ -1032,15 +1168,36 @@ def recover_interrupted_journal(
         },
         "recovered_at": datetime.now(timezone.utc).isoformat(),
     })
+    if lock_handle is not None:
+        try:
+            lock_handle.assert_owned()
+        except LockError as exc:
+            return {
+                "post_id": int(post_id),
+                "recovered": False,
+                "locked": True,
+                "reason": "post_lock_lost",
+                "error": str(exc),
+            }
     _write_v2_journal_payload(path, payload, protect_incomplete=False)
     return result | {"applied": True}
 
 
-def _recover_stale_protocol_journals(root: Path, selected_ids: Collection[int]) -> list[dict[str, Any]]:
+def _recover_stale_protocol_journals(
+    root: Path,
+    selected_ids: Collection[int],
+    *,
+    lock_handles: Mapping[int, Any],
+) -> list[dict[str, Any]]:
     """Convert only proven pre-writer losses; leave ambiguous journals blocked."""
     recovered: list[dict[str, Any]] = []
     for post_id in selected_ids:
-        result = recover_interrupted_journal(root, int(post_id), apply=True)
+        handle = lock_handles.get(int(post_id))
+        if handle is None:
+            continue
+        result = recover_interrupted_journal(
+            root, int(post_id), apply=True, lock_held=True, lock_handle=handle
+        )
         if result.get("recovered"):
             recovered.append(result)
     return recovered
@@ -1865,6 +2022,7 @@ class ProductionMediaResolver:
                     subjects=source_subjects,
                     limit=max(8, max(inline_needed, featured_needed) * 4),
                     stats=source_stats,
+                    url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
                 )
             except Exception as exc:
                 from ..observability import record_unexpected_error, append_telemetry
@@ -3014,6 +3172,7 @@ def run_v2(
     cycle_id: str | None = None,
     cycle_round: int | None = None,
     authorization_id: str | None = None,
+    reserved_post_locks: Mapping[int, Any] | None = None,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -3021,7 +3180,15 @@ def run_v2(
         raise ValueError("max_new_posts must not be negative")
     lock = None if lock_held else RunSessionLock(Path(root) / "work" / "v2-run.lock")
     if lock is not None and not lock.acquire():
+        for handle in reversed(list((reserved_post_locks or {}).values())):
+            handle.__exit__(None, None, None)
         return {"selected": 0, "locked": True, "details": []}
+    post_lock_handles: dict[int, Any] = {}
+    if reserved_post_locks is not None:
+        post_lock_handles = {
+            int(post_id): handle
+            for post_id, handle in reserved_post_locks.items()
+        }
     try:
         reader = ProductionCandidateReader(client, root)
         snapshot = reader.snapshot(page_size=max(10, limit))
@@ -3161,6 +3328,7 @@ def run_v2(
         queue = {
             "scanned": len(snapshot),
             "pending_total": len(snapshot),
+            "candidate_load_errors": list(reader.load_errors),
             "admitted_pending": len(admitted_pending),
             "admitted_total": len(admitted),
             "pending": len(pending),
@@ -3271,8 +3439,86 @@ def run_v2(
                     for selected_id, context in selected
                 ],
             }
+        # V2 and legacy workflow actions share per-post locks. Acquire the
+        # entire selected batch before journal recovery or any other mutation;
+        # if one post is already owned elsewhere, release this batch and let
+        # the natural next run retry it without partial execution.
+        if selected and reserved_post_locks is not None:
+            selected_id_set = {int(item[0]) for item in selected}
+            if set(post_lock_handles) != selected_id_set:
+                return {
+                    "selected": len(selected),
+                    "completed": 0,
+                    "failed": 0,
+                    "locked": True,
+                    "stop_reason": "skipped_locked",
+                    "locked_post_id": next(
+                        iter(sorted(selected_id_set - set(post_lock_handles))), None
+                    ),
+                    "lock_error": "reserved post lock set does not match revalidated selection",
+                    "queue": queue,
+                    "details": [],
+                }
+            try:
+                for handle in post_lock_handles.values():
+                    handle.assert_owned()
+            except LockError as exc:
+                return {
+                    "selected": len(selected),
+                    "completed": 0,
+                    "failed": 0,
+                    "locked": True,
+                    "stop_reason": "skipped_locked",
+                    "lock_error": str(exc)[:240],
+                    "queue": queue,
+                    "details": [],
+                }
+        elif selected:
+            lock_manager = LockManager(
+                Path(root) / "work" / "locks",
+                ttl=int(getattr(config, "lock_ttl", 900)),
+            )
+            locked_post_id = None
+            try:
+                for selected_id, _context in selected:
+                    locked_post_id = int(selected_id)
+                    handle = lock_manager.acquire(int(selected_id))
+                    post_lock_handles[int(selected_id)] = handle
+                    handle.__enter__()
+            except (LockError, OSError, RuntimeError, ValueError) as exc:
+                for handle in reversed(list(post_lock_handles.values())):
+                    try:
+                        handle.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                post_lock_handles.clear()
+                try:
+                    from ..observability import append_telemetry
+
+                    append_telemetry(
+                        root,
+                        "v2_post_batch_skipped_locked",
+                        selected_ids=[int(item[0]) for item in selected],
+                        locked_post_id=locked_post_id,
+                        lock_error=str(exc)[:240],
+                    )
+                except Exception:
+                    pass
+                return {
+                    "selected": len(selected),
+                    "completed": 0,
+                    "failed": 0,
+                    "locked": True,
+                    "stop_reason": "skipped_locked",
+                    "locked_post_id": locked_post_id,
+                    "lock_error": str(exc)[:240],
+                    "queue": queue,
+                    "details": [],
+                }
         _recover_stale_protocol_journals(
-            root, [int(item[0]) for item in selected]
+            root,
+            [int(item[0]) for item in selected],
+            lock_handles=post_lock_handles,
         )
         journal_conflicts = _incomplete_v2_journal_conflicts(
             root,
@@ -3293,16 +3539,19 @@ def run_v2(
         details = []
         completed = 0
         failed = 0
-        stages = {
-            "editorial": ProductionEditorialStage(client, config, root),
-            "media": ProductionMediaStage(
-                client, config, root,
-                resolver=ProductionMediaResolver(client, config, root),
-            ),
-            "compose": ProductionComposeStage(config, root),
-            "validate": ProductionValidateStage(client, config, root),
-        }
+        from ..workflow import _guard_post_client
+
         for post_id, context in selected:
+            post_client = _guard_post_client(client, post_lock_handles[int(post_id)])
+            stages = {
+                "editorial": ProductionEditorialStage(post_client, config, root),
+                "media": ProductionMediaStage(
+                    post_client, config, root,
+                    resolver=ProductionMediaResolver(post_client, config, root),
+                ),
+                "compose": ProductionComposeStage(config, root),
+                "validate": ProductionValidateStage(post_client, config, root),
+            }
             context["root"] = root
             initial = context["v2_state"]
             run_id = uuid.uuid4().hex
@@ -3378,19 +3627,29 @@ def run_v2(
                         context["provider_reason"] = "provider_error"
                 try:
                     write = WordPressWriterV2(
-                        client, root, policy_version=config.policy_version
+                        post_client, root, policy_version=config.policy_version
                     ).commit(post_id, context, buffered.state, outcome)
                 except Exception as exc:
-                    _write_v2_journal_checkpoint(
-                        root,
-                        post_id,
-                        "writer_failed",
-                        buffered.state,
-                        run_id=run_id,
-                        cycle_id=str(cycle_id or ""),
-                        cycle_round=cycle_round,
-                        authorization_id=authorization_id,
-                    )
+                    try:
+                        _record_v2_writer_exception(
+                            root,
+                            post_id,
+                            buffered.state,
+                            run_id=run_id,
+                            cycle_id=str(cycle_id or "") or None,
+                            cycle_round=cycle_round,
+                            authorization_id=authorization_id,
+                            error=exc,
+                        )
+                    except Exception as journal_exc:  # noqa: BLE001 - preserve original failure
+                        try:
+                            from ..observability import record_unexpected_error
+                            record_unexpected_error(
+                                root, journal_exc, post_id=int(post_id), run_id=run_id,
+                                file="pipeline_v2/runtime.py", field="journal.writer_exception",
+                            )
+                        except Exception:
+                            pass
                     try:
                         from ..observability import append_telemetry
 
@@ -3561,5 +3820,7 @@ def run_v2(
             "details": details,
         }
     finally:
+        for handle in reversed(list(post_lock_handles.values())):
+            handle.__exit__(None, None, None)
         if lock is not None:
             lock.release()
