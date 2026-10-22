@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -151,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     v2_recover_interrupted_parser.add_argument("--cycle-id", required=True)
     v2_recover_interrupted_parser.add_argument("--authorization-id", required=True)
     v2_recover_interrupted_parser.add_argument("--apply", action="store_true")
+    v2_recover_interrupted_parser.add_argument(
+        "--legacy-pre-writer-evidence", action="store_true",
+        help="permite migração pontual somente após auditoria explícita de ausência de writer",
+    )
 
     v2_recover_media_parser = subparsers.add_parser(
         "v2-recover-media",
@@ -2643,8 +2648,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             actual = {key: str(journal.get(key) or "") for key in expected}
             if actual != expected:
                 raise ValueError(f"journal identity mismatch: expected={expected} actual={actual}")
+            legacy_evidence = None
+            if args.legacy_pre_writer_evidence:
+                telemetry_path = Path(args.root) / "work" / "telemetry.jsonl"
+                writer_events = []
+                if telemetry_path.is_file():
+                    for raw in telemetry_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                        try:
+                            event = json.loads(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if event.get("run_id") == args.run_id and event.get("event") in {
+                            "v2_writer_failure", "media_apply_readback",
+                        }:
+                            writer_events.append(event.get("event"))
+                db_path = Path(args.root) / "work" / "media_registry.sqlite"
+                run_started = False
+                applied_usage_count = 1
+                if db_path.is_file():
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+                        run_started = bool(db.execute(
+                            "SELECT 1 FROM media_runs WHERE run_id=? AND post_id=? AND acquisition_outcome='started'",
+                            (args.run_id, int(args.post_id)),
+                        ).fetchone())
+                        applied_usage_count = int(db.execute(
+                            "SELECT COUNT(*) FROM media_usage WHERE post_id=? AND applied_at IS NOT NULL",
+                            (int(args.post_id),),
+                        ).fetchone()[0])
+                post = client.get_post(int(args.post_id))
+                wordpress_status = str(post.get("status") or "") if isinstance(post, dict) else ""
+                legacy_evidence = {
+                    "writer_not_started": not writer_events and run_started,
+                    "writer_events": writer_events,
+                    "media_run_started": run_started,
+                    "applied_usage_count": applied_usage_count,
+                    "wordpress_status": wordpress_status,
+                    "readback_checked": True,
+                }
+                if not legacy_evidence["writer_not_started"] or wordpress_status != "pending" or applied_usage_count:
+                    raise ValueError(f"legacy pre-writer evidence failed: {legacy_evidence}")
             result = recover_interrupted_journal(
-                args.root, int(args.post_id), apply=bool(args.apply)
+                args.root, int(args.post_id), apply=bool(args.apply),
+                legacy_evidence=legacy_evidence,
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment

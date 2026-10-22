@@ -43,6 +43,25 @@ def test_recovery_refuses_ambiguous_running_journal(tmp_path):
     assert json.loads(path.read_text())["status"] == "running"
 
 
+def test_legacy_recovery_requires_explicit_evidence(tmp_path):
+    path = _journal(tmp_path, {
+        "status": "running", "post_id": 115676, "run_id": "run-a",
+        "cycle_id": "cycle-a", "cycle_round": 1,
+        "authorization_id": "auth-a", "state": {"state": "pending", "phase": "media"},
+    })
+    evidence = {
+        "writer_not_started": True,
+        "writer_events": [],
+        "wordpress_status": "pending",
+        "applied_usage_count": 0,
+    }
+    result = recover_interrupted_journal(tmp_path, 115676, apply=True, legacy_evidence=evidence)
+    saved = json.loads(path.read_text())
+    assert result["recovered"] is True
+    assert saved["legacy_recovery_evidence"] == evidence
+    assert saved["status"] == "interrupted_pre_writer"
+
+
 def test_recovery_is_idempotent(tmp_path):
     _journal(tmp_path, {
         "status": "running", "post_id": 115676, "run_id": "run-a",

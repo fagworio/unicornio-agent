@@ -784,6 +784,7 @@ def recover_interrupted_journal(
     post_id: int,
     *,
     apply: bool = True,
+    legacy_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recover only a protocol-v2 pre-writer journal after process loss.
 
@@ -802,7 +803,15 @@ def recover_interrupted_journal(
         return {"post_id": int(post_id), "recovered": False, "reason": "already_recovered"}
     if journal.get("status") != "running":
         return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
-    if journal.get("protocol_version") != 2 or journal.get("writer_started") is not False:
+    protocol_evidence = journal.get("protocol_version") == 2 and journal.get("writer_started") is False
+    legacy_evidence_ok = bool(
+        isinstance(legacy_evidence, Mapping)
+        and legacy_evidence.get("writer_not_started") is True
+        and legacy_evidence.get("wordpress_status") == "pending"
+        and int(legacy_evidence.get("applied_usage_count", 1)) == 0
+        and not legacy_evidence.get("writer_events")
+    )
+    if not protocol_evidence and not legacy_evidence_ok:
         return {
             "post_id": int(post_id),
             "recovered": False,
@@ -821,6 +830,7 @@ def recover_interrupted_journal(
         "readback": "not_attempted",
         "recovered_from_run_id": str(journal["run_id"]),
         "failure_class": "process_interrupted",
+        "legacy_evidence": dict(legacy_evidence or {}),
     }
     if not apply:
         return result | {"applied": False}
@@ -833,6 +843,7 @@ def recover_interrupted_journal(
         "readback": False,
         "media_readback_status": "not_attempted",
         "recovered_from_run_id": str(journal["run_id"]),
+        "legacy_recovery_evidence": dict(legacy_evidence or {}),
         "recovery_evidence": {
             "protocol_version": 2,
             "writer_intent_persisted": False,
