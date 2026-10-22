@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from unicornio_editor.pipeline_v2 import cycle_runtime
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
@@ -20,6 +21,23 @@ def _state(state, phase):
 def test_round4_mixed_journals_reconcile_without_replay_or_fake_correlation(tmp_path):
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (
+                run_id TEXT, post_id INTEGER, planned_deficits TEXT,
+                acquisition_outcome TEXT, created_at TEXT
+            );
+            CREATE TABLE media_decisions (
+                run_id TEXT, post_id INTEGER, candidate_id TEXT,
+                disposition TEXT, reason_code TEXT, scope TEXT, created_at TEXT
+            );
+            CREATE TABLE media_usage (
+                post_id INTEGER, wordpress_media_id INTEGER,
+                status TEXT, applied_at TEXT
+            );
+            """
+        )
     posts = {}
 
     # Current authorization: committed evidence is reconciled, never replayed.

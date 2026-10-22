@@ -843,7 +843,7 @@ def _media_effect_evidence(
         return {
             "media_registry_checked": False,
             "effects_detected": bool(reasons),
-            "evidence_status": "effects_detected" if reasons else "not_available",
+            "evidence_status": "effects_detected" if reasons else "evidence_unavailable",
             "reasons": reasons,
             "accepted_media_ids": sorted(accepted_media_ids),
             "applied_media_ids": sorted(applied_media_ids),
@@ -859,6 +859,11 @@ def _media_effect_evidence(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
+            missing_tables = sorted(
+                {"media_runs", "media_decisions", "media_usage"} - table_names
+            )
+            if missing_tables:
+                reasons.append("media_registry_incomplete")
             if "media_decisions" in table_names and run_id:
                 rows = db.execute(
                     """SELECT candidate_id, disposition, reason_code, scope
@@ -927,10 +932,15 @@ def _media_effect_evidence(
             "accepted_decision_count": accepted_decision_count,
         }
 
+    effect_reasons = [reason for reason in reasons if reason != "media_registry_incomplete"]
     return {
         "media_registry_checked": True,
-        "effects_detected": bool(reasons),
-        "evidence_status": "effects_detected" if reasons else "no_effects_detected",
+        "effects_detected": bool(effect_reasons),
+        "evidence_status": (
+            "evidence_unavailable"
+            if "media_registry_incomplete" in reasons
+            else "effects_detected" if effect_reasons else "no_effects_detected"
+        ),
         "reasons": reasons,
         "accepted_media_ids": sorted(accepted_media_ids),
         "applied_media_ids": sorted(applied_media_ids),
@@ -963,7 +973,7 @@ def recover_interrupted_journal(
     if journal.get("status") != "running":
         return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
     media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
-    if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+    if media_evidence.get("evidence_status") != "no_effects_detected":
         return {
             "post_id": int(post_id),
             "recovered": False,
@@ -1055,16 +1065,25 @@ def _incomplete_v2_journal_conflicts(
                 "reason": "journal_unreadable",
             })
             continue
-        if journal.get("status") in {"committed", "interrupted_pre_writer"} and (
-            journal.get("status") == "interrupted_pre_writer"
-            or journal.get("readback") is True
-        ):
+        if journal.get("status") == "committed" and journal.get("readback") is True:
+            continue
+        if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}:
+            media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
+            if media_evidence.get("evidence_status") != "no_effects_detected":
+                conflicts.append({
+                    "post_id": int(post_id),
+                    "reason": "media_effects_pre_writer",
+                    "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                    "status": str(journal.get("status") or "unknown"),
+                    "run_id": str(journal.get("run_id") or "") or None,
+                    "media_effect_evidence": media_evidence,
+                })
             continue
         if journal.get("status") in {"running", "validated"} and (
             journal.get("writer_started") is False
         ):
             media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
-            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+            if media_evidence.get("evidence_status") != "no_effects_detected":
                 conflicts.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",

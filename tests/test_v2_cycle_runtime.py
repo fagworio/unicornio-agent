@@ -32,6 +32,28 @@ def _ready_detail(post_id):
     }
 
 
+def _empty_media_registry(root):
+    path = root / "work" / "media_registry.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (
+                run_id TEXT, post_id INTEGER, planned_deficits TEXT,
+                acquisition_outcome TEXT, created_at TEXT
+            );
+            CREATE TABLE media_decisions (
+                run_id TEXT, post_id INTEGER, candidate_id TEXT,
+                disposition TEXT, reason_code TEXT, scope TEXT, created_at TEXT
+            );
+            CREATE TABLE media_usage (
+                post_id INTEGER, wordpress_media_id INTEGER,
+                status TEXT, applied_at TEXT
+            );
+            """
+        )
+
+
 def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path, monkeypatch):
     calls = []
     next_id = iter((101, 102))
@@ -153,6 +175,7 @@ def test_reconcile_completed_round_rebuilds_mixed_post_results_from_journals(tmp
 
 
 def test_reconcile_interrupted_pre_writer_as_retry_without_replay(tmp_path):
+    _empty_media_registry(tmp_path)
     class Client:
         def list_pending(self, *, page, per_page, status):
             return [{
@@ -247,8 +270,8 @@ def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_p
         "media_effect_evidence": {
             "media_registry_checked": True,
             "effects_detected": True,
-            "evidence_status": "effects_detected",
-            "reasons": ["accepted_media_decision"],
+            "evidence_status": "evidence_unavailable",
+            "reasons": ["media_registry_incomplete", "accepted_media_decision"],
             "accepted_media_ids": [],
             "applied_media_ids": [],
             "accepted_decision_count": 1,
@@ -258,6 +281,7 @@ def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_p
 
 
 def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path):
+    _empty_media_registry(tmp_path)
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True)
     (journal_dir / "1.json").write_text(json.dumps({
@@ -287,7 +311,47 @@ def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path
     assert result.details[0]["outcome"] == "not_executed"
 
 
+def test_historical_journals_reconcile_only_with_complete_no_effect_evidence(tmp_path):
+    _empty_media_registry(tmp_path)
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    for post_id in (115668, 115666):
+        (journal_dir / f"{post_id}.json").write_text(json.dumps({
+            "status": "committed",
+            "readback": True,
+            "cycle_id": "historical-cycle",
+            "cycle_round": 2,
+            "authorization_id": "old-authorization",
+            "state": WorkState(
+                state=LifecycleState.PENDING,
+                phase=Phase.MEDIA,
+            ).to_dict(),
+        }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [115668, 115666],
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=4,
+        expected_authorization_id="current-authorization",
+    )
+
+    assert result is not None
+    assert result.reconciliation_blocked is False
+    assert result.reconciled_without_replay is True
+    assert result.executed_ids == ()
+    assert [item["post_id"] for item in result.details] == [115668, 115666]
+    assert all(item["outcome"] == "not_executed" for item in result.details)
+
+
 def test_resume_five_post_authorized_round_reconciles_recovered_post_without_replay(tmp_path, monkeypatch):
+    _empty_media_registry(tmp_path)
     post_ids = [115641, 115598, 115676, 115631, 115633]
     states = {
         115641: ("retry", "featured_vision"),
@@ -376,6 +440,7 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
 def test_resume_five_post_round_through_cycle_updates_checkpoint_without_writes(
     tmp_path, monkeypatch
 ):
+    _empty_media_registry(tmp_path)
     cycle_id = "resume-five-post-cycle"
     post_ids = [115641, 115598, 115676, 115631, 115633]
     store = cycle_runtime.CycleStateStore(tmp_path)
@@ -696,6 +761,7 @@ def test_draining_executes_round_already_authorized_before_phase_change(tmp_path
 
 
 def test_draining_invalid_authorization_is_audited_and_removed_without_write(tmp_path, monkeypatch):
+    _empty_media_registry(tmp_path)
     store = cycle_runtime.CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="invalidate-known-round")
     state.phase = "DRAINING"
@@ -756,6 +822,7 @@ def test_draining_invalid_authorization_is_audited_and_removed_without_write(tmp
 def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_reasons(
     tmp_path, monkeypatch
 ):
+    _empty_media_registry(tmp_path)
     store = cycle_runtime.CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="stale-selection")
     state.phase = "DRAINING"
@@ -828,6 +895,7 @@ def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_r
 
 
 def test_no_write_confirmation_ignores_journal_from_different_authorization(tmp_path):
+    _empty_media_registry(tmp_path)
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True)
     (journal_dir / "101.json").write_text(json.dumps({
@@ -857,6 +925,7 @@ def test_no_write_confirmation_ignores_journal_from_different_authorization(tmp_
 def test_legacy_round_reconciles_per_post_and_blocks_uncorrelated_running_journal(
     tmp_path, monkeypatch
 ):
+    _empty_media_registry(tmp_path)
     cycle_id = "mixed-legacy-cycle"
     selected_ids = [115592, 115629, 115282, 115631, 115530]
     store = cycle_runtime.CycleStateStore(tmp_path)

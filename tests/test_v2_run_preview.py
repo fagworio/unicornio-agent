@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -209,6 +210,56 @@ def test_write_preflight_preserves_incomplete_journal_when_selection_is_valid(tm
     }]
     assert client.updates == []
     assert journal_path.read_text(encoding="utf-8") == before
+
+
+def test_write_blocks_recovered_journal_when_media_decision_was_accepted(tmp_path):
+    cohort = tmp_path / "cohort.json"
+    cohort.write_text(json.dumps({"version": 1, "posts": []}), encoding="utf-8")
+    client = Client([
+        post(2, "2026-10-09T03:00:00Z", WorkState(state=LifecycleState.PENDING))
+    ])
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "2.json").write_text(json.dumps({
+        "status": "interrupted_pre_writer", "post_id": 2,
+        "run_id": "previous-run", "resumable": True,
+        "writer_started": False, "readback": False,
+        "state": WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA).to_dict(),
+    }), encoding="utf-8")
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (
+                run_id TEXT, post_id INTEGER, planned_deficits TEXT,
+                acquisition_outcome TEXT, created_at TEXT
+            );
+            CREATE TABLE media_decisions (
+                run_id TEXT, post_id INTEGER, candidate_id TEXT,
+                disposition TEXT, reason_code TEXT, scope TEXT, created_at TEXT
+            );
+            CREATE TABLE media_usage (
+                post_id INTEGER, wordpress_media_id INTEGER,
+                status TEXT, applied_at TEXT
+            );
+            INSERT INTO media_decisions
+                (run_id, post_id, candidate_id, disposition, reason_code, scope, created_at)
+                VALUES ('previous-run', 2, 'candidate-1', 'accepted',
+                        'candidate_accepted', 'candidate', '2026-10-22 00:00:00');
+            """
+        )
+
+    result = run_v2(
+        client,
+        config(cohort, tmp_path),
+        tmp_path,
+        limit=1,
+        expected_selected_ids=[2],
+    )
+
+    assert result["journal_conflict"] is True
+    assert result["journal_conflicts"][0]["reason"] == "media_effects_pre_writer"
+    assert result["journal_conflicts"][0]["recovery_classification"] == "MEDIA_EFFECTS_PRE_WRITER"
+    assert client.updates == []
 
 
 def test_journal_checkpoint_guard_preserves_running_journal(tmp_path):

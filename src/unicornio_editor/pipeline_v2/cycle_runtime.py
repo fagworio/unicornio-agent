@@ -123,7 +123,7 @@ def _registry_has_round_evidence(
     """Find media-registry effects created after this round was authorized."""
     path = Path(root) / "work" / "media_registry.sqlite"
     if not path.is_file():
-        return {"media_registry_checked": False, "media_registry_absent": True}
+        return None
     placeholders = ",".join("?" for _ in selected_ids)
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
@@ -454,7 +454,7 @@ def _reconcile_completed_round(
             journal.get("writer_started") is False
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+            if media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
@@ -473,7 +473,7 @@ def _reconcile_completed_round(
             and journal.get("readback") is not True
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+            if media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
