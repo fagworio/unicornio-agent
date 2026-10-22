@@ -426,6 +426,27 @@ def _reconcile_completed_round(
             else:
                 unresolved.append({"post_id": int(post_id), "reason": "historical_effect_uncertain"})
             continue
+        if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"} and (
+            journal.get("resumable") is True
+            and journal.get("writer_started") is False
+            and journal.get("readback") is not True
+        ):
+            detail = _reconciled_detail(int(post_id), journal, state)
+            if detail is None:
+                unresolved.append({"post_id": int(post_id), "reason": "state_readback_invalid"})
+                continue
+            detail.update({
+                "outcome": "retry",
+                "ready_verified": False,
+                "progress": True,
+                "reconciled": True,
+                "write_replayed": False,
+                "recovery_status": str(journal.get("status")),
+                "failure_class": str(journal.get("failure_class") or "process_interrupted"),
+            })
+            details.append(detail)
+            executed_ids.append(int(post_id))
+            continue
         if journal.get("status") != "committed" or journal.get("readback") is not True:
             unresolved.append({
                 "post_id": int(post_id),

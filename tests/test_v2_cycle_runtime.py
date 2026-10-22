@@ -150,6 +150,46 @@ def test_reconcile_completed_round_rebuilds_mixed_post_results_from_journals(tmp
     assert result.details[1]["progress"] is True
 
 
+
+
+def test_reconcile_interrupted_pre_writer_as_retry_without_replay(tmp_path):
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{
+                "id": 115676, "status": "pending", "title": {"raw": "A"},
+                "content": {"raw": "<p>a</p>"},
+                "meta": {"_hermes_work_state": json.dumps(
+                    WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA,
+                              relevance_approved=True).to_dict()
+                )},
+            }] if page == 1 else []
+
+        def get_post(self, post_id):
+            return self.list_pending(page=1, per_page=1, status="pending")[0]
+
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "115676.json").write_text(json.dumps({
+        "status": "interrupted_pre_writer", "resumable": True,
+        "readback": False, "writer_started": False,
+        "run_id": "run-old", "cycle_id": "cycle-test", "cycle_round": 1,
+        "authorization_id": "auth-test",
+        "state": WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA,
+                            relevance_approved=True).to_dict(),
+    }), encoding="utf-8")
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [115676], expected_cycle_id="cycle-test",
+        expected_cycle_round=1, expected_authorization_id="auth-test",
+    )
+    assert result is not None
+    assert result.reconciliation_blocked is False
+    assert result.executed_ids == (115676,)
+    assert result.reconciled_without_replay is True
+    assert result.details[0]["outcome"] == "retry"
+    assert result.details[0]["recovery_status"] == "interrupted_pre_writer"
+
+
+
 def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path):
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True)
