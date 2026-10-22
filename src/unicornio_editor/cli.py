@@ -141,6 +141,17 @@ def build_parser() -> argparse.ArgumentParser:
     v2_abandon_parser.add_argument("--exclude-post-id", type=int, default=None)
     v2_abandon_parser.add_argument("--apply", action="store_true", help="aplica a transição após as validações")
 
+    v2_recover_interrupted_parser = subparsers.add_parser(
+        "v2-recover-interrupted",
+        help="recupera um journal protocol-v2 interrompido antes do writer; dry-run por padrão",
+    )
+    v2_recover_interrupted_parser.add_argument("post_id", type=int)
+    v2_recover_interrupted_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_recover_interrupted_parser.add_argument("--run-id", required=True)
+    v2_recover_interrupted_parser.add_argument("--cycle-id", required=True)
+    v2_recover_interrupted_parser.add_argument("--authorization-id", required=True)
+    v2_recover_interrupted_parser.add_argument("--apply", action="store_true")
+
     v2_recover_media_parser = subparsers.add_parser(
         "v2-recover-media",
         help="revalida e reconcilia um attachment V2 já existente; somente leitura por padrão",
@@ -2618,6 +2629,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 new_cycle_id=args.new_cycle_id,
                 exclude_post_id=args.exclude_post_id,
                 apply=bool(args.apply),
+            )
+        elif args.command == "v2-recover-interrupted":
+            from .pipeline_v2.runtime import recover_interrupted_journal
+
+            journal_path = Path(args.root) / "work" / "v2-journal" / f"{int(args.post_id)}.json"
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            expected = {
+                "run_id": str(args.run_id),
+                "cycle_id": str(args.cycle_id),
+                "authorization_id": str(args.authorization_id),
+            }
+            actual = {key: str(journal.get(key) or "") for key in expected}
+            if actual != expected:
+                raise ValueError(f"journal identity mismatch: expected={expected} actual={actual}")
+            result = recover_interrupted_journal(
+                args.root, int(args.post_id), apply=bool(args.apply)
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment

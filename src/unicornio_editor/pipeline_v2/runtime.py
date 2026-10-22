@@ -719,11 +719,28 @@ def _write_v2_journal_payload(
         )
         existing_run_id = str(existing.get("run_id") or "")
         payload_run_id = str(payload.get("run_id") or "")
+        existing_resumable = bool(
+            existing.get("resumable") is True
+            and existing.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}
+        )
+        if existing_resumable and str(payload.get("status") or "") == "running":
+            payload = dict(payload)
+            chain = list(existing.get("recovery_chain") or [])
+            chain.append({
+                "run_id": existing_run_id,
+                "status": existing.get("status"),
+                "failure_class": existing.get("failure_class"),
+                "journal_sha256": hashlib.sha256(
+                    json.dumps(existing, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+            })
+            payload["recovery_chain"] = chain[-10:]
+            payload["recovered_from_run_id"] = existing_run_id
         same_run = (
             (not existing_run_id and not payload_run_id)
             or (bool(payload_run_id) and existing_run_id == payload_run_id)
         )
-        if not existing_complete and not same_run:
+        if not existing_complete and not same_run and not existing_resumable:
             raise RuntimeError(
                 f"cannot overwrite incomplete V2 journal for post {payload.get('post_id')}"
             )
@@ -751,12 +768,91 @@ def _write_v2_journal_checkpoint(
         "status": status,
         "post_id": post_id,
         "state": state.to_dict(),
+        "protocol_version": 2,
+        "writer_started": status in {"committing", "writer_failed", "media_readback_failed"},
+        "last_safe_point": "before_writer" if status in {"running", "validated"} else status,
         **({"run_id": run_id} if run_id else {}),
         **({"cycle_id": cycle_id} if cycle_id else {}),
         **({"cycle_round": cycle_round} if cycle_round is not None else {}),
         **({"authorization_id": authorization_id} if authorization_id else {}),
     }
     _write_v2_journal_payload(target, payload)
+
+
+def recover_interrupted_journal(
+    root: Path,
+    post_id: int,
+    *,
+    apply: bool = True,
+) -> dict[str, Any]:
+    """Recover only a protocol-v2 pre-writer journal after process loss.
+
+    This transition never touches WordPress or MediaRegistry.  It is allowed
+    only when the durable journal proves that the writer had not started.
+    Writer/readback states remain unresolved and fail closed.
+    """
+    path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
+    if not path.is_file():
+        return {"post_id": int(post_id), "recovered": False, "reason": "journal_missing"}
+    try:
+        journal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {"post_id": int(post_id), "recovered": False, "reason": "journal_unreadable"}
+    if journal.get("status") == "interrupted_pre_writer":
+        return {"post_id": int(post_id), "recovered": False, "reason": "already_recovered"}
+    if journal.get("status") != "running":
+        return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
+    if journal.get("protocol_version") != 2 or journal.get("writer_started") is not False:
+        return {
+            "post_id": int(post_id),
+            "recovered": False,
+            "reason": "insufficient_protocol_evidence",
+        }
+    if not journal.get("run_id") or not journal.get("state"):
+        return {
+            "post_id": int(post_id),
+            "recovered": False,
+            "reason": "insufficient_protocol_evidence",
+        }
+    result = {
+        "post_id": int(post_id),
+        "recovered": True,
+        "write_started": False,
+        "readback": "not_attempted",
+        "recovered_from_run_id": str(journal["run_id"]),
+        "failure_class": "process_interrupted",
+    }
+    if not apply:
+        return result | {"applied": False}
+    payload = dict(journal)
+    payload.update({
+        "status": "interrupted_pre_writer",
+        "failure_class": "process_interrupted",
+        "resumable": True,
+        "writer_started": False,
+        "readback": False,
+        "media_readback_status": "not_attempted",
+        "recovered_from_run_id": str(journal["run_id"]),
+        "recovery_evidence": {
+            "protocol_version": 2,
+            "writer_intent_persisted": False,
+            "writer_started": False,
+            "readback": "not_attempted",
+        },
+        "recovered_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _write_v2_journal_payload(path, payload, protect_incomplete=False)
+    return result | {"applied": True}
+
+
+def _recover_stale_protocol_journals(root: Path, selected_ids: Collection[int]) -> list[dict[str, Any]]:
+    """Convert only proven pre-writer losses; leave ambiguous journals blocked."""
+    recovered: list[dict[str, Any]] = []
+    for post_id in selected_ids:
+        result = recover_interrupted_journal(root, int(post_id), apply=True)
+        if result.get("recovered"):
+            recovered.append(result)
+    return recovered
 
 
 def _incomplete_v2_journal_conflicts(
@@ -778,7 +874,10 @@ def _incomplete_v2_journal_conflicts(
                 "reason": "journal_unreadable",
             })
             continue
-        if journal.get("status") == "committed" and journal.get("readback") is True:
+        if journal.get("status") in {"committed", "interrupted_pre_writer"} and (
+            journal.get("status") == "interrupted_pre_writer"
+            or journal.get("readback") is True
+        ):
             continue
         conflicts.append({
             "post_id": int(post_id),
@@ -2958,6 +3057,9 @@ def run_v2(
                     for selected_id, context in selected
                 ],
             }
+        _recover_stale_protocol_journals(
+            root, [int(item[0]) for item in selected]
+        )
         journal_conflicts = _incomplete_v2_journal_conflicts(
             root,
             [int(item[0]) for item in selected],
@@ -3171,12 +3273,42 @@ def run_v2(
                     pass
             except Exception as exc:  # noqa: BLE001 - isolate one post
                 failed += 1
+                journal_status = None
+                try:
+                    journal_path = root / "work" / "v2-journal" / f"{int(post_id)}.json"
+                    current_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                    journal_status = str(current_journal.get("status") or "")
+                    if (
+                        str(current_journal.get("run_id") or "") == run_id
+                        and journal_status in {"running", "validated"}
+                        and current_journal.get("writer_started") is False
+                    ):
+                        failure_payload = {
+                            **current_journal,
+                            "status": "failed_pre_writer",
+                            "failure_class": "recoverable_pre_writer",
+                            "resumable": True,
+                            "writer_started": False,
+                            "readback": False,
+                            "media_readback_status": "not_attempted",
+                            "failure_detail": str(exc)[:400],
+                            "failed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        _write_v2_journal_payload(
+                            journal_path, failure_payload, protect_incomplete=False
+                        )
+                        journal_status = "failed_pre_writer"
+                except Exception:
+                    # Preserve the primary exception; the next run will fail
+                    # closed if the journal cannot prove its safe point.
+                    pass
                 details.append({
                     "post_id": post_id,
                     "initial_state": initial.state.value,
                     "outcome": "error",
                     "blocker": "internal_error",
                     "detail": str(exc)[:400],
+                    "journal_status": journal_status,
                     "run_id": run_id,
                     "cycle_id": str(cycle_id or ""),
                     "cycle_round": cycle_round,
