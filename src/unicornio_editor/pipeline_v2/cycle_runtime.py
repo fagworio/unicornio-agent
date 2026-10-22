@@ -575,7 +575,25 @@ def run_v2_cycle(
     root = Path(root)
     lock = RunSessionLock(root / "work" / "v2-run.lock")
     if not lock.acquire():
-        return {"selected": 0, "locked": True, "stop_reason": "locked"}
+        try:
+            from ..observability import append_telemetry
+
+            append_telemetry(
+                root,
+                "v2_cycle_skipped_locked",
+                status="skipped",
+                stop_reason="skipped_locked",
+                reason="v2_run_lock_busy",
+            )
+        except Exception:
+            pass
+        return {
+            "selected": 0,
+            "locked": True,
+            "status": "skipped",
+            "stop_reason": "skipped_locked",
+            "reason": "v2_run_lock_busy",
+        }
 
     store = CycleStateStore(root)
 
@@ -615,6 +633,7 @@ def run_v2_cycle(
                 "attempt_budget_violation",
                 "unique_post_budget_violation",
                 "recovery_uncertain",
+                "skipped_locked",
             }:
                 current.status = "running"
                 current.active_started_at = None
@@ -936,7 +955,12 @@ def run_v2_cycle(
 
             append_telemetry(
                 root,
-                "v2_cycle",
+                (
+                    "v2_cycle_skipped_locked"
+                    if report.stop_reason == "skipped_locked"
+                    else "v2_cycle"
+                ),
+                status=("skipped" if report.stop_reason == "skipped_locked" else "completed"),
                 cycle_id=state.cycle_id,
                 stop_reason=report.stop_reason,
                 ready=report.ready_count,

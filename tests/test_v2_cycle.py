@@ -131,6 +131,24 @@ def test_cycle_counts_reconciled_execution_without_counting_historical_no_write(
     assert events == ["round_reconciled", "cycle_finished"]
 
 
+def test_cycle_classifies_busy_lock_as_skipped_and_resumable():
+    report = run_cycle(
+        lambda _request: CycleRoundResult(locked=True),
+        config=CycleConfig(ready_target=1),
+    )
+
+    assert report.stop_reason == "skipped_locked"
+    assert report.phase == "ADMISSION"
+    assert report.round_reports == [{
+        "event": "cycle_skipped_locked",
+        "round": 1,
+        "phase": "ADMISSION",
+        "preview_selected_ids": [],
+        "executed_ids": [],
+        "reason": "v2_run_lock_busy",
+    }]
+
+
 def test_cycle_excludes_posts_that_reached_attempt_budget():
     requests = []
 

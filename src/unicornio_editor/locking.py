@@ -24,6 +24,8 @@ class LockHandle:
 
     def refresh(self) -> bool:
         """Renew only if this handle still owns the lock."""
+        if self._released or self._stop.is_set():
+            return False
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if data.get("token") != self.token:

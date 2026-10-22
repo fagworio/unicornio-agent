@@ -285,7 +285,15 @@ def run_cycle(
             break
 
         if result.locked:
-            report.stop_reason = "locked"
+            report.stop_reason = "skipped_locked"
+            report.round_reports.append({
+                "event": "cycle_skipped_locked",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": [],
+                "reason": "v2_run_lock_busy",
+            })
             break
         if result.authorization_invalidated:
             invalidation = dict(result.authorization_invalidation or {})
@@ -533,7 +541,6 @@ def run_cycle(
             "attempt_budget",
             "no_eligible_work",
             "drain_limit",
-            "locked",
         }
         else phase
     )

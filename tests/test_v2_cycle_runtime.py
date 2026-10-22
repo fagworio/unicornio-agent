@@ -490,7 +490,36 @@ def test_cycle_does_not_touch_checkpoint_when_lock_is_busy(tmp_path):
     finally:
         lock.release()
     assert result["locked"] is True
+    assert result["status"] == "skipped"
+    assert result["stop_reason"] == "skipped_locked"
+    telemetry = (tmp_path / "work" / "telemetry.jsonl").read_text().splitlines()
+    assert json.loads(telemetry[-1])["event"] == "v2_cycle_skipped_locked"
     assert not (tmp_path / "work" / "v2-cycle" / "state.json").exists()
+
+
+def test_cycle_executor_lock_skip_preserves_resumable_checkpoint(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="executor-locked")
+    store.save(state, event="seed")
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "run_v2",
+        lambda *_args, **kwargs: (
+            {"preview": True, "queue": {"selected_ids": [101]}}
+            if kwargs.get("preview")
+            else {"locked": True}
+        ),
+    )
+    report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+
+    assert report.stop_reason == "skipped_locked"
+    assert report.phase == "ADMISSION"
+    persisted = store.load()
+    assert persisted.status == "running"
+    assert persisted.pending_round is not None
+    assert persisted.pending_round["preview_selected_ids"] == [101]
+    assert persisted.round_reports[0]["event"] == "cycle_skipped_locked"
 
 
 def test_cycle_blocks_write_when_incomplete_journal_is_detected(tmp_path, monkeypatch):

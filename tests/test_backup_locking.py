@@ -43,6 +43,14 @@ class SnapshotAndLockTests(unittest.TestCase):
             replacement = manager.acquire(42)
             replacement.release()
 
+    def test_lock_handle_does_not_refresh_after_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = LockManager(Path(directory), ttl=60)
+            handle = manager.acquire(42)
+            with handle:
+                self.assertTrue(handle.refresh())
+            self.assertFalse(handle.refresh())
+
 
 if __name__ == "__main__":
     unittest.main()
