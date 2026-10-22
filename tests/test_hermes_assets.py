@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,7 @@ class HermesAssetsTests(unittest.TestCase):
             target_dir.mkdir(parents=True)
             target = target_dir / "unicornio-editor-monitor.sh"
             target.write_text("old monitor\n", encoding="utf-8")
+            target.chmod(0o755)
             jobs_file = hermes_home / "cron" / "jobs.json"
             jobs_file.parent.mkdir()
             jobs_file.write_text('{"jobs": []}\n', encoding="utf-8")
@@ -91,6 +93,36 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "old monitor\n")
             self.assertEqual(jobs_file.read_text(encoding="utf-8"), jobs_before)
+
+    def test_monitor_sync_rejects_invalid_rendered_bash_before_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            hermes_dir = project / "hermes"
+            target_dir = Path(directory) / "hermes-home" / "scripts"
+            hermes_dir.mkdir(parents=True)
+            target_dir.mkdir(parents=True)
+            shutil.copy2(ROOT / "hermes" / "sync-monitor.sh", hermes_dir / "sync-monitor.sh")
+            shutil.copy2(ROOT / "hermes" / "validate-monitor.sh", hermes_dir / "validate-monitor.sh")
+            (hermes_dir / "monitor.sh").write_text(
+                'ROOT="@PROJECT_ROOT@"\n'
+                'if then\n'
+                '  queue --monitor --root "$ROOT"\n'
+                'fi\n',
+                encoding="utf-8",
+            )
+            target = target_dir / "unicornio-editor-monitor.sh"
+            target.write_text("old monitor\n", encoding="utf-8")
+            target.chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(hermes_dir / "sync-monitor.sh")],
+                env={**os.environ, "HERMES_HOME": str(target_dir.parents[1])},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old monitor\n")
+            self.assertEqual(list(target_dir.glob("unicornio-editor-monitor.sh.bak.*")), [])
 
     def test_rendered_monitor_validator_rejects_unresolved_placeholder(self):
         validator = ROOT / "hermes" / "validate-monitor.sh"

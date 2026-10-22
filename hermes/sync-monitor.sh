@@ -18,6 +18,7 @@ trap 'rm -f "$RENDERED"' EXIT
 mkdir -p "$TARGET_DIR"
 sed "s|@PROJECT_ROOT@|$ROOT|g" "$ROOT/hermes/monitor.sh" > "$RENDERED"
 "$ROOT/hermes/validate-monitor.sh" "$RENDERED" "$ROOT"
+bash -n "$RENDERED"
 
 if [ -f "$TARGET" ]; then
   BACKUP="$TARGET.bak.$(date -u +%Y%m%dT%H%M%SZ).$$"
@@ -27,11 +28,20 @@ else
   BACKUP=""
   chmod 0755 "$RENDERED"
 fi
+if [ ! -x "$RENDERED" ]; then
+  echo "monitor sync: rendered monitor is not executable" >&2
+  exit 1
+fi
 
 # O temporário está no mesmo diretório do destino: mv preserva a substituição
 # atômica do arquivo que o Hermes executa.
 mv -f "$RENDERED" "$TARGET"
 "$ROOT/hermes/validate-monitor.sh" "$TARGET" "$ROOT"
+bash -n "$TARGET"
+if [ ! -x "$TARGET" ]; then
+  echo "monitor sync: installed monitor is not executable" >&2
+  exit 1
+fi
 
 echo "monitor sincronizado: $TARGET"
 if [ -n "$BACKUP" ]; then
