@@ -430,7 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     media_search_web_parser.add_argument(
         "--engine", default="auto",
-        help="buscador: auto (Google Browser->Bing/Yandex), google_browser, bing, google, yandex "
+        help="buscador: auto (EDITOR_MEDIA_SEARCH_PROVIDERS), google_browser, bing, google, yandex "
         "(default: auto)",
     )
     media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
@@ -1354,6 +1354,7 @@ def _resolve_media_batch(
         http_request_count,
         reset_http_request_count,
         search_web_images_batch,
+        search_engine_strategy,
         summarize_engine_reports,
     )
     from .observability import append_telemetry
@@ -1508,22 +1509,10 @@ def _resolve_media_batch(
         search_row = found_row_by_query.get(str(item["query"])) or {}
         engine_reports = search_row.get("engine_reports") or {}
         requested_engine = str(item.get("engine") or first.get("engine") or "auto")
-        engines_disabled: list[str] = []
-        if requested_engine == "auto":
-            expected_engines = ["google_browser", "bing", "yandex", "google"]
-            google_browser_enabled = os.environ.get(
-                "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
-            ).strip().lower() not in {"0", "false", "no", "off"}
-            if not google_browser_enabled:
-                expected_engines.remove("google_browser")
-                engines_disabled.append("google_browser")
-        elif requested_engine == "google_browser" and os.environ.get(
-            "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
-        ).strip().lower() in {"0", "false", "no", "off"}:
-            expected_engines = []
-            engines_disabled.append("google_browser")
-        else:
-            expected_engines = [requested_engine]
+        engine_strategy = search_engine_strategy(requested_engine)
+        expected_engines = list(engine_strategy["expected_engines"])
+        engines_disabled = list(engine_strategy["disabled_engines"])
+        provider_config_valid = bool(engine_strategy["valid"])
         if needed_web <= 0:
             expected_engines = []
         if needed_web > 0:
@@ -1579,7 +1568,7 @@ def _resolve_media_batch(
         next_fallback_engines = [
             name for name in expected_engines if name not in engine_reports
         ]
-        technical_engine_failure = bool(
+        technical_engine_failure = not provider_config_valid or bool(
             non_verified_engine_failures.intersection(technical_failure_kinds)
         ) or bool(
             non_verified_engine_failures - technical_failure_kinds - FAILURE_KINDS_TRANSITORIOS
@@ -1642,6 +1631,8 @@ def _resolve_media_batch(
                 "engine_reports": engine_diagnostics,
                 "provider_health": provider_health,
                 "provider_stop_reason": provider_stop_reason,
+                "provider_config_valid": provider_config_valid,
+                "invalid_engines": list(engine_strategy["invalid_engines"]),
                 "capacity_reached": completion_reason == "TARGET_REACHED",
                 "provider_strategy_complete": bool(
                     expected_engines

@@ -163,17 +163,17 @@ Config em `.env`: `EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`,
 cd /opt/unicorniohater-editorial-agent
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[browser]'
-PLAYWRIGHT_BROWSERS_PATH="$PWD/.playwright-browsers" \
-  python -m playwright install chromium
+python -m pip install -e .
 cp .env.example .env
 ```
 
-O extra `browser` instala o provider Google Browser. O Chromium do Playwright
-fica em `.playwright-browsers/` dentro do projeto e o provider usa esse
-diretorio automaticamente, sem depender do cache do usuario que executa o
-Hermes/cron. Se o runtime reclamar de bibliotecas do sistema, execute
-`python -m playwright install-deps chromium` com privilegios de root.
+O modo `auto` usa `EDITOR_MEDIA_SEARCH_PROVIDERS` (por padrão, `bing,yandex`).
+Google HTML não participa da exaustão por padrão porque pode responder
+`js_required`; quando explicitamente incluído e falha, a busca permanece
+incompleta. Produção não instala Playwright/Chromium. O provider Google Browser
+é opcional e só deve ser incluído em ambientes que o suportem, habilitando-o
+explicitamente em `EDITOR_MEDIA_SEARCH_PROVIDERS` e
+`EDITOR_GOOGLE_BROWSER_ENABLED=true`.
 
 Preencha `.env` com um usuario WordPress de automacao e Application Password.
 

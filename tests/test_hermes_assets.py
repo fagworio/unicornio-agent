@@ -341,6 +341,8 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
         content = (ROOT / ".env.example").read_text()
         self.assertIn("HERMES_EDITORIAL_WINDOW_PROMPT_TOKEN_LIMIT", content)
         self.assertIn("EDITOR_AUTO_SCORE_MARGIN", content)
+        self.assertIn("EDITOR_MEDIA_SEARCH_PROVIDERS=bing,yandex", content)
+        self.assertIn("EDITOR_GOOGLE_BROWSER_ENABLED=false", content)
 
     def test_monitor_template_is_valid_shell(self):
         script = ROOT / "hermes" / "monitor.sh"

@@ -84,6 +84,8 @@ def _media_audit_summary(media: MediaProgress, write: dict[str, Any]) -> dict[st
         "applied_media_ids": list(write.get("applied_media_ids") or []),
         "applied_inline_ids": list(write.get("applied_inline_ids") or []),
         "media_readback_status": str(write.get("media_readback_status") or "not_attempted"),
+        "media_application_status": str(write.get("media_application_status") or "not_attempted"),
+        "html_readback_status": str(write.get("html_readback_status") or "not_attempted"),
     }
 
 
@@ -2213,7 +2215,10 @@ class ProductionMediaResolver:
                     self.root,
                     "media_source_summary",
                     post_id=int(context["post_id"]),
-                    source_page=source_url[:500],
+                    source_domain=(urlsplit(source_url).hostname or "").casefold(),
+                    source_page_url_sha256=(
+                        hashlib.sha256(source_url.encode()).hexdigest() if source_url else ""
+                    ),
                     source_raw_found=int(source_stats.get("raw_assets") or 0),
                     source_after_dom_filter=int(source_stats.get("editorial_assets") or 0),
                     source_filtered=int(source_stats.get("filtered_assets") or 0),
@@ -2875,6 +2880,8 @@ class WordPressWriterV2:
             "apply_media_records": apply_media_records,
             "media_state": media_state,
             "media_readback_status": media_readback_status,
+            "media_application_status": "not_attempted",
+            "html_readback_status": "not_attempted",
         }
         if not candidate_fresh and outcome.type.value == "ready":
             raise RuntimeError("stale editorial candidate cannot produce READY")
@@ -2983,17 +2990,32 @@ class WordPressWriterV2:
             if outcome.type.value == "ready":
                 media_update["featured_media"] = candidate.get("featured_media")
             intent["media_state"] = "apply_started"
+            intent["media_application_status"] = "started"
             _write_v2_journal_payload(
                 journal,
                 {**intent, "status": "media_committing"},
             )
+            media_update_returned = False
+            html_readback_received = False
             try:
                 self.client.update_post(post_id, media_update)
+                media_update_returned = True
+                intent["media_application_status"] = "submitted"
+                intent["html_readback_status"] = "attempted"
                 media_readback_post = self.client.get_post(post_id)
                 if not isinstance(media_readback_post, dict):
                     raise RuntimeError("WordPress media read-back missing")
+                html_readback_received = True
                 assert_media_readback(media_readback_post)
+                intent["media_application_status"] = "confirmed"
+                intent["html_readback_status"] = "confirmed"
             except Exception as exc:
+                intent["media_application_status"] = (
+                    "submitted" if media_update_returned else "uncertain"
+                )
+                intent["html_readback_status"] = (
+                    "failed" if html_readback_received else "unavailable"
+                )
                 persist_media_readback_failure(exc)
                 raise
             destinations = {
@@ -3146,6 +3168,8 @@ class WordPressWriterV2:
             "state_readback": True,
             "media_readback": media_readback,
             "media_readback_status": media_readback_status,
+            "media_application_status": str(intent.get("media_application_status") or "not_attempted"),
+            "html_readback_status": str(intent.get("html_readback_status") or "not_attempted"),
             "media_state": media_state,
             "media_ids": media_ids,
             "applied_media_ids": sorted(applied_media_ids) if media_readback else [],

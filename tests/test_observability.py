@@ -193,6 +193,8 @@ class ObservabilityTests(unittest.TestCase):
             )
             append_telemetry(
                 root, "media_source_summary", post_id=1,
+                source_domain="source.example",
+                source_page_url_sha256="a" * 64,
                 source_raw_found=5, source_after_dom_filter=3,
                 source_filtered=2, source_attempted=3, source_accepted=2,
                 reused=1, uploaded=1,
@@ -222,6 +224,8 @@ class ObservabilityTests(unittest.TestCase):
             )
             self.assertEqual(summary["media_source_summary"][0]["source_accepted"], 2)
             self.assertEqual(summary["media_source_summary"][0]["reused"], 1)
+            self.assertEqual(summary["media_source_summary"][0]["source_domain"], "source.example")
+            self.assertNotIn("source_page", summary["media_source_summary"][0])
             self.assertEqual(summary["media_apply_readback"][0]["inline_readback"], 2)
             self.assertEqual(
                 summary["funnel"],

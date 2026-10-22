@@ -1133,7 +1133,29 @@ class ChecklistTests(unittest.TestCase):
             editorial=editorial_payload(media_exhausted=True),
             content=content,
             media_context={
-                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"}
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "completion_reason": "EXHAUSTED_VERIFIED",
+                    "coverage": {
+                        "version": 1,
+                        "verified": True,
+                        "active_coverage": {
+                            "verified": True,
+                            "strategy_complete": True,
+                            "expected_engines": ["bing"],
+                            "reported_engines": ["bing"],
+                            "engine_results": {
+                                "film query": {"bing": "no_results_legitimate"},
+                            },
+                            "queries": ["film query"],
+                            "technical_failures": [],
+                            "planned_queries": 1,
+                            "completed_queries": 1,
+                        },
+                        "attempt_history": [],
+                    },
+                }
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")

@@ -381,6 +381,8 @@ def _reconciled_detail(
     post_id: int,
     journal: dict[str, Any],
     state,
+    *,
+    wordpress_status: str = "",
 ) -> dict[str, Any] | None:
     if state is None or state.state not in {
         LifecycleState.READY,
@@ -404,11 +406,35 @@ def _reconciled_detail(
         and journal.get("status") == "committed"
         and journal.get("readback") is True
     )
+    apply_records = journal.get("apply_media_records")
+    apply_statuses = [
+        str(record.get("readback_status") or "")
+        for record in apply_records
+        if isinstance(record, Mapping)
+    ] if isinstance(apply_records, list) else []
+    media_application_status = str(journal.get("media_application_status") or "")
+    if not media_application_status:
+        if media_readback or (apply_statuses and all(value == "confirmed" for value in apply_statuses)):
+            media_application_status = "confirmed_legacy"
+        elif "failed" in apply_statuses or journal.get("media_readback_status") == "failed":
+            media_application_status = "failed"
+        elif any(value in {"not_attempted", "pending"} for value in apply_statuses):
+            media_application_status = "not_attempted"
+        else:
+            media_application_status = "not_recorded"
+    html_readback_status = str(journal.get("html_readback_status") or "")
+    if not html_readback_status:
+        html_readback_status = "confirmed_legacy" if media_readback else "not_recorded"
     return {
         "post_id": int(post_id),
         "initial_state": "pending",
         "outcome": outcome,
         "ready_verified": state.state is LifecycleState.READY,
+        "journal_status": str(journal.get("status") or "unknown"),
+        "journal_transaction_readback": journal.get("readback") is True,
+        "wordpress_post_status": str(wordpress_status or "unknown"),
+        "wordpress_v2_state": state.state.value,
+        "wordpress_v2_phase": state.phase.value,
         # ``readback`` is retained as the historical compatibility flag.  The
         # explicit fields below distinguish reading current WordPress state
         # from proving a write/readback for this transaction.
@@ -420,6 +446,8 @@ def _reconciled_detail(
         "state": state.to_dict(),
         "media_readback": media_readback,
         "media_readback_status": journal.get("media_readback_status"),
+        "media_application_status": media_application_status,
+        "html_readback_status": html_readback_status,
         "progress": bool(
             media_readback
             or state.state is not LifecycleState.PENDING
@@ -616,7 +644,12 @@ def _reconcile_completed_round(
                     })
                     continue
                 journal = json.loads(journal_path.read_text(encoding="utf-8"))
-                detail = _reconciled_detail(int(post_id), journal, state)
+                wp_post = context.get("post") if isinstance(context, Mapping) else None
+                detail = _reconciled_detail(
+                    int(post_id), journal, state,
+                    wordpress_status=str(wp_post.get("status") or "")
+                    if isinstance(wp_post, Mapping) else "",
+                )
                 if detail is None:
                     unresolved.append({
                         "post_id": int(post_id),
@@ -649,7 +682,12 @@ def _reconcile_completed_round(
                     "media_effect_evidence": media_evidence,
                 })
                 continue
-            detail = _reconciled_detail(int(post_id), journal, state)
+            wp_post = context.get("post") if isinstance(context, Mapping) else None
+            detail = _reconciled_detail(
+                int(post_id), journal, state,
+                wordpress_status=str(wp_post.get("status") or "")
+                if isinstance(wp_post, Mapping) else "",
+            )
             if detail is None:
                 unresolved.append({"post_id": int(post_id), "reason": "state_readback_invalid"})
                 continue
@@ -672,7 +710,12 @@ def _reconcile_completed_round(
                 "journal_status": journal.get("status"),
             })
             continue
-        detail = _reconciled_detail(int(post_id), journal, state)
+        wp_post = context.get("post") if isinstance(context, Mapping) else None
+        detail = _reconciled_detail(
+            int(post_id), journal, state,
+            wordpress_status=str(wp_post.get("status") or "")
+            if isinstance(wp_post, Mapping) else "",
+        )
         if detail is None:
             unresolved.append({"post_id": int(post_id), "reason": "state_readback_invalid"})
             continue

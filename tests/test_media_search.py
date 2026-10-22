@@ -111,7 +111,7 @@ class SearchWebImagesTests(unittest.TestCase):
             "unicornio_editor.media.search.urlopen",
             return_value=FakeResp(),
         ):
-            results = search_web_images("redfall xbox", limit=10)
+            results = search_web_images("redfall xbox", limit=10, engine="google")
         # Apenas o candidato com URL de imagem real; o preview do Google e
         # descartado (lh3/encrypted-tbn/gstatic nao sao fonte).
         self.assertEqual(len(results), 1)
@@ -373,7 +373,9 @@ class CapacidadePorAceitosTests(unittest.TestCase):
             return [{"direct_image_url": "https://cdn.google/boa.jpg",
                      "source_page_url": "https://page.google/boa", "usable": True}]
 
-        with mock.patch.object(search, "search_bing_images", bing), \
+        with mock.patch.dict(
+            "os.environ", {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,google,yandex"}
+        ), mock.patch.object(search, "search_bing_images", bing), \
              mock.patch.object(search, "search_google_images", google), \
              mock.patch.object(search, "search_yandex_images", lambda q, **kw: []):
             # sem accept: comportamento antigo (encerra no "usable" do 1o engine)

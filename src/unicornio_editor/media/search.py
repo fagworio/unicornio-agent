@@ -13,15 +13,13 @@ correto para páginas de resultado; o que mudou é o que o servidor manda. Por i
 a falha é CLASSIFICADA (``failure_kind``) antes de alimentar o circuit breaker:
 ``parser_schema_drift``/``js_required``/``captcha`` NÃO são indisponibilidade
 transitória e não podem renovar cooldown (era o que deixava o Google fora do ar
-para sempre, contado como 18 "falhas" seguidas). O Google permanece na ordem
-(último), é sempre tentado e sempre deixa telemetria do motivo.
+para sempre, contado como 18 "falhas" seguidas). Google HTML é opt-in e uma
+resposta ``js_required`` permanece uma falha técnica, nunca exaustão verificada.
 
-``search_web_images`` tenta primeiro o Google via navegador real. Se o browser
-estiver indisponível, usa Bing e depois Yandex em ordem fixa:
-
-  1. Google Browser (discovery + página exibida, nunca a fonte)
-  2. Bing Images then Yandex Images (bounded fallback order)
-  3. the other of the two
+O modo ``auto`` usa Bing e Yandex por padrão. A estratégia completa pode ser
+configurada em ``EDITOR_MEDIA_SEARCH_PROVIDERS``; Google Browser também exige
+``EDITOR_GOOGLE_BROWSER_ENABLED=true``. Todos os providers configurados devem
+ser realmente executados e verificados antes de ``EXHAUSTED_VERIFIED``.
 
 IMPORTANT policy: the search engine is only a DISCOVERY INDEX, never the source.
 The direct_image_url returned is the real image URL found in the result
@@ -65,8 +63,70 @@ _UA = (
 _MAX_BYTES = 3 * 1024 * 1024
 _MAX_BATCH_QUERIES = 20
 _BATCH_WORKERS = 4
+_SEARCH_ENGINES = ("google_browser", "bing", "yandex", "google")
+_DEFAULT_AUTO_ENGINES = ("bing", "yandex")
 _HTTP_REQUESTS = 0
 _HTTP_REQUESTS_LOCK = Lock()
+
+
+def search_engine_strategy(engine: str = "auto") -> dict[str, Any]:
+    """Return the executable and required providers for one search strategy.
+
+    Production does not install Playwright/Chromium and the Google HTML parser
+    often receives a JavaScript interstitial.  Auto mode therefore defaults to
+    the providers currently supported without a browser.  Additional engines
+    can be explicitly configured with ``EDITOR_MEDIA_SEARCH_PROVIDERS``; a
+    Google Browser entry still requires ``EDITOR_GOOGLE_BROWSER_ENABLED=true``.
+    A configured provider that reports ``js_required`` remains a failed
+    provider and cannot prove exhaustion.
+    """
+    requested_engine = str(engine or "auto").strip().casefold()
+    if requested_engine != "auto":
+        if requested_engine not in _SEARCH_ENGINES:
+            return {
+                "expected_engines": [], "disabled_engines": [],
+                "invalid_engines": [requested_engine], "valid": False,
+            }
+        if (
+            requested_engine == "google_browser"
+            and os.environ.get("EDITOR_GOOGLE_BROWSER_ENABLED", "false")
+            .strip().casefold() in {"0", "false", "no", "off", ""}
+        ):
+            return {
+                "expected_engines": [], "disabled_engines": [requested_engine],
+                "invalid_engines": [], "valid": False,
+            }
+        return {
+            "expected_engines": [requested_engine], "disabled_engines": [],
+            "invalid_engines": [], "valid": True,
+        }
+
+    raw = os.environ.get("EDITOR_MEDIA_SEARCH_PROVIDERS", ",".join(_DEFAULT_AUTO_ENGINES))
+    requested = [part.strip().casefold() for part in raw.split(",") if part.strip()]
+    invalid = sorted(set(requested) - set(_SEARCH_ENGINES))
+    # An unknown provider makes the configured strategy unverifiable. Do not
+    # silently drop it and issue a smaller, falsely complete coverage proof.
+    if not requested or invalid:
+        return {
+            "expected_engines": [],
+            "disabled_engines": list(_SEARCH_ENGINES),
+            "invalid_engines": invalid or ["empty_strategy"],
+            "valid": False,
+        }
+    requested = list(dict.fromkeys(requested))
+    browser_enabled = os.environ.get(
+        "EDITOR_GOOGLE_BROWSER_ENABLED", "false"
+    ).strip().casefold() not in {"0", "false", "no", "off", ""}
+    active = [
+        name for name in requested
+        if name != "google_browser" or browser_enabled
+    ]
+    return {
+        "expected_engines": active,
+        "disabled_engines": [name for name in _SEARCH_ENGINES if name not in active],
+        "invalid_engines": [],
+        "valid": bool(active),
+    }
 
 
 def reset_http_request_count() -> None:
@@ -1037,15 +1097,7 @@ def search_web_images(
     query = (query or "").strip()
     if not query:
         return []
-    if engine == "auto":
-        # Google browser is attempted first. When Playwright/Chromium is not
-        # installed or Google blocks the session, the existing deterministic
-        # Bing/Yandex fallback remains active.
-        # Keep the legacy HTML parser as a last-resort compatibility path for
-        # environments where browser installation is still rolling out.
-        order = ["google_browser", "bing", "yandex", "google"]
-    else:
-        order = [engine]
+    order = search_engine_strategy(engine)["expected_engines"]
     from .google_browser import search_google_browser_images
 
     _fns = {
@@ -1188,13 +1240,8 @@ def search_web_images_batch(
     if budget_seconds is not None and float(budget_seconds) > 0:
         deadline = time.monotonic() + float(budget_seconds)
 
-    expected_engines = [engine] if engine != "auto" else [
-        "google_browser", "bing", "yandex", "google"
-    ]
-    if engine == "auto" and os.environ.get(
-        "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
-    ).strip().lower() in {"0", "false", "no", "off"}:
-        expected_engines.remove("google_browser")
+    strategy = search_engine_strategy(engine)
+    expected_engines = list(strategy["expected_engines"])
 
     def _search(
         query: str,
@@ -1235,7 +1282,8 @@ def search_web_images_batch(
             ):
                 stop_reason = "STOPPED_BY_BUDGET"
             elif (
-                expected_engines
+                strategy["valid"]
+                and expected_engines
                 and all(name in relatorios for name in expected_engines)
                 and not any(
                     str((relatorios.get(name) or {}).get("failure_kind") or "")
@@ -1270,12 +1318,18 @@ def search_web_images_batch(
             # Por que cada engine entregou (ou não entregou): sem isso uma engine
             # podia sumir do resultado sem deixar rastro na telemetria.
             "engine_reports": relatorios_por_query.get(query, {}),
-            "engine_summary": summarize_engine_reports(
-                relatorios_por_query.get(query, {}),
-                expected_engines=expected_engines,
-                completion_reason=motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
-            ),
+            "engine_summary": {
+                **summarize_engine_reports(
+                    relatorios_por_query.get(query, {}),
+                    expected_engines=expected_engines,
+                    completion_reason=motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
+                ),
+                "disabled_engines": list(strategy["disabled_engines"]),
+                "invalid_engines": list(strategy["invalid_engines"]),
+                "provider_config_valid": bool(strategy["valid"]),
+            },
             "completion_reason": motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
+            "provider_config_valid": bool(strategy["valid"]),
             "budget_exhausted": any(
                 str(report.get("failure_kind") or "") == "budget_exhausted"
                 for report in (relatorios_por_query.get(query, {}) or {}).values()
@@ -1295,5 +1349,5 @@ __all__ = [
     "PARSER_VERSION", "FAILURE_KINDS", "FAILURE_KINDS_TRANSITORIOS",
     "FAILURE_KINDS_VERIFICADOS", "classify_failure", "provider_key",
     "engine_degradada", "engine_last_report", "engines_status",
-    "summarize_engine_reports",
+    "summarize_engine_reports", "search_engine_strategy",
 ]

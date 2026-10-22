@@ -114,6 +114,31 @@ class WordPressClientTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 503)
         self.assertEqual(len(ApiHandler.requests), 1)
 
+    def test_list_pending_treats_only_later_invalid_page_as_end_of_collection(self):
+        client = WordPressClient(self.config)
+        with mock.patch.object(
+            client,
+            "_request",
+            side_effect=WordPressError(
+                "WordPress HTTP 400: page beyond max_pages",
+                status_code=400,
+                api_code="rest_post_invalid_page_number",
+            ),
+        ) as request:
+            self.assertEqual(client.list_pending(page=2, per_page=5), [])
+        request.assert_called_once()
+
+    def test_list_pending_does_not_hide_invalid_first_or_included_page(self):
+        client = WordPressClient(self.config)
+        error = WordPressError(
+            "invalid page", status_code=400, api_code="rest_post_invalid_page_number"
+        )
+        with mock.patch.object(client, "_request", side_effect=error):
+            with self.assertRaises(WordPressError):
+                client.list_pending(page=1)
+            with self.assertRaises(WordPressError):
+                client.list_pending(page=2, include=[42])
+
     def test_get_post(self):
         self.assertEqual(WordPressClient(self.config).get_post(42)["status"], "pending")
 

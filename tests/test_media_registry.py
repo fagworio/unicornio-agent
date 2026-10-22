@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,14 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
             "source_page_url": source_url, "direct_image_url": direct_url,
             "evidence": {
                 "verdict": "deterministic_match",
+                "score": 9,
+                "local_score": 5,
+                "gate": "relevance",
+                "matched": ["page_title", "query", "private matching text"],
+                "penalties": ["not_in_source", "private detail"],
+                "reason": "private source text must not be persisted",
+                "source_comparison_proved": True,
+                "evidence": {"page_title": "private title"},
                 "vision_policy_version": "featured-editorial-v3-multidimensional",
                 "vision_decision": {
                     "status": "MATCH", "confidence": 0.91, "visual_type": "key_art",
@@ -126,7 +135,15 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
     assert reference["source_page_url_sha256"] == hashlib.sha256(source_url.encode()).hexdigest()
     assert "private" not in row[0]
     assert reference["source_domain"] == "source.test"
+    assert reference["score"] == 9
+    assert reference["local_score"] == 5
+    assert reference["gate"] == "relevance"
+    assert reference["matched"] == ["page_title", "query"]
+    assert reference["penalties"] == ["not_in_source"]
+    assert reference["source_comparison_proved"] is True
     assert "must not persist" not in row[0]
+    assert "private title" not in row[0]
+    assert "private matching text" not in row[0]
     assert reference["vision_decision"]["confidence"] == 0.91
     assert reference["vision_decision"]["image_sha256"] == "a" * 64
     assert reference["vision_decision"]["context_key"] == "game"
@@ -167,6 +184,37 @@ def test_preflight_vision_evidence_stays_correlated_to_candidate_run(tmp_path):
     assert reference["vision_decision"]["image_sha256"] == "b" * 64
     assert reference["vision_decision"]["confidence"] == 0.80
     assert "private" not in row["evidence_reference"]
+
+
+def test_candidate_diagnostics_preserve_safe_source_decision_reason(tmp_path):
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=12,
+        run_id="run-source-reason",
+        candidate={
+            "candidate_id": "candidate-source-reason",
+            "subject": "Game",
+            "source_page_url": "https://source.example/article?token=private",
+            "direct_image_url": "https://cdn.example/image.webp?sig=private",
+            "evidence": {
+                "verdict": "unresolved_source",
+                "score": 0,
+                "gate": "provenance",
+                "matched": [],
+            },
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="unresolved_source",
+    )
+    with connect(tmp_path) as db:
+        row = db.execute(
+            "SELECT reason_code, evidence_reference FROM media_decisions WHERE run_id=?",
+            ("run-source-reason",),
+        ).fetchone()
+    assert row[0] == "unresolved_source"
+    assert json.loads(row[1])["verdict"] == "unresolved_source"
+    assert "private" not in row[1]
 
 
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
@@ -238,6 +286,34 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
     by_role = {row["role"]: row for row in reused}
     assert by_role["inline"]["visual_verification"] == {"decision": "DIFFERENT", "method": "test"}
     assert by_role["featured"]["visual_verification"] == {"decision": "INITIAL", "method": "test"}
+
+
+def test_media_run_persists_query_attempt_delta_not_cumulative_count(tmp_path):
+    initial_media = MediaProgress(search=MediaSearchProgress(queries_attempted=4))
+    initial_state = SimpleNamespace(media=initial_media)
+    record_v2_observation(
+        tmp_path, post_id=11, run_id="run-query-delta", state=initial_state,
+        phase="media", outcome="started",
+    )
+
+    final_media = replace(
+        initial_media,
+        search=MediaSearchProgress(queries_attempted=6),
+    )
+    record_v2_observation(
+        tmp_path, post_id=11, run_id="run-query-delta",
+        state=SimpleNamespace(media=final_media), phase="media", outcome="retry",
+    )
+
+    with connect(tmp_path) as db:
+        row = db.execute(
+            "SELECT queries_attempted, planned_deficits FROM media_runs WHERE run_id=?",
+            ("run-query-delta",),
+        ).fetchone()
+    assert row[0] == 2
+    history = json.loads(row[1])
+    assert history["initial"]["queries_attempted"] == 4
+    assert history["final"]["queries_attempted"] == 6
 
 
 def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):

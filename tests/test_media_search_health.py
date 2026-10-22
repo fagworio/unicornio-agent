@@ -15,8 +15,8 @@ Cobre:
 3. motivo permanente NÃO abre cooldown e zera o contador transitório;
 4. falha transitória continua abrindo o circuito (compatível com
    tests/test_media_engines.py);
-5. o Google continua sendo tentado (arquitetura intacta) e o motivo aparece na
-   telemetria com status/bytes/objetos/parser_version.
+5. Google HTML e Google Browser só entram na estratégia quando configurados;
+   falhas técnicas continuam impedindo a prova de exaustão.
 """
 
 import json
@@ -186,7 +186,7 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
         self.assertFalse(search.engine_disponivel("bing_images"))
         self.assertEqual(search.engines_status()["bing_images"]["failures"], 3)
 
-    def test_agregador_mantem_o_google_na_arquitetura(self):
+    def test_google_html_js_required_permanece_falha_quando_opt_in(self):
         def _vazio_transitorio(query, **kwargs):
             return []
 
@@ -200,16 +200,18 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
             return []
 
         relatorios: dict = {}
-        with mock.patch.object(search, "search_bing_images", _vazio_transitorio), \
+        with mock.patch.dict(os.environ, {
+            "EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google",
+            "EDITOR_GOOGLE_BROWSER_ENABLED": "false",
+        }), \
+             mock.patch.object(search, "search_bing_images", _vazio_transitorio), \
              mock.patch.object(search, "search_yandex_images", _vazio_transitorio), \
              mock.patch.object(search, "search_google_images", _vazio_js), \
              mock.patch.object(search.time, "sleep", lambda *_: None):
             resultado = search.search_web_images("qualquer coisa", limit=3, reports=relatorios)
 
         self.assertEqual(resultado, [])
-        # Tentou o Google Browser e as três rotas HTTP; o Google não foi
-        # retirado da ordem quando o browser está indisponível.
-        self.assertEqual(set(relatorios), {"google_browser", "bing", "yandex", "google"})
+        self.assertEqual(set(relatorios), {"bing", "yandex", "google"})
         self.assertEqual(relatorios["google"]["failure_kind"], "js_required")
         # O motivo permanente não virou cooldown...
         self.assertTrue(search.engine_disponivel("google_images"))
@@ -219,6 +221,78 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
 
 
 class TelemetriaPorEngineTests(unittest.TestCase):
+    def test_auto_default_executa_e_exige_so_bing_yandex(self):
+        def _legitimate_empty(_query, report=None, **_kwargs):
+            if report is not None:
+                report.update({"failure_kind": "no_results_legitimate", "candidates": 0})
+            return []
+
+        with mock.patch.dict(os.environ, {
+            "EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex",
+            "EDITOR_GOOGLE_BROWSER_ENABLED": "false",
+        }), mock.patch.object(search, "search_bing_images", side_effect=_legitimate_empty) as bing, \
+             mock.patch.object(search, "search_yandex_images", side_effect=_legitimate_empty) as yandex, \
+             mock.patch.object(search, "search_google_images", side_effect=AssertionError("Google HTML executed")), \
+             mock.patch("unicornio_editor.media.google_browser.search_google_browser_images", side_effect=AssertionError("browser executed")):
+            result = search.search_web_images_batch(["verified empty"], limit=10)[0]
+
+        self.assertEqual(result["engine_reports"].keys(), {"bing", "yandex"})
+        self.assertEqual(result["engine_summary"]["expected_engines"], ["bing", "yandex"])
+        self.assertEqual(result["completion_reason"], "EXHAUSTED_VERIFIED")
+        self.assertTrue(result["provider_config_valid"])
+        bing.assert_called_once()
+        yandex.assert_called_once()
+
+    def test_browser_disabled_is_not_executed_nor_expected(self):
+        def _legitimate_empty(_query, report=None, **_kwargs):
+            if report is not None:
+                report.update({"failure_kind": "no_results_legitimate", "candidates": 0})
+            return []
+
+        with mock.patch.dict(os.environ, {
+            "EDITOR_MEDIA_SEARCH_PROVIDERS": "google_browser,bing,yandex",
+            "EDITOR_GOOGLE_BROWSER_ENABLED": "false",
+        }), mock.patch.object(search, "search_bing_images", _legitimate_empty), \
+             mock.patch.object(search, "search_yandex_images", _legitimate_empty), \
+             mock.patch("unicornio_editor.media.google_browser.search_google_browser_images", side_effect=AssertionError("browser executed")):
+            result = search.search_web_images_batch(["browser disabled"], limit=10)[0]
+
+        self.assertEqual(result["engine_summary"]["expected_engines"], ["bing", "yandex"])
+        self.assertIn("google_browser", result["engine_summary"]["disabled_engines"])
+        self.assertNotIn("google_browser", result["engine_reports"])
+        self.assertEqual(result["completion_reason"], "EXHAUSTED_VERIFIED")
+
+    def test_google_html_js_required_never_proves_exhaustion(self):
+        def _legitimate_empty(_query, report=None, **_kwargs):
+            if report is not None:
+                report.update({"failure_kind": "no_results_legitimate", "candidates": 0})
+            return []
+
+        def _requires_js(_query, report=None, **_kwargs):
+            if report is not None:
+                report.update({"failure_kind": "js_required", "candidates": 0})
+            return []
+
+        with mock.patch.dict(os.environ, {
+            "EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google",
+            "EDITOR_GOOGLE_BROWSER_ENABLED": "false",
+        }), mock.patch.object(search, "search_bing_images", _legitimate_empty), \
+             mock.patch.object(search, "search_yandex_images", _legitimate_empty), \
+             mock.patch.object(search, "search_google_images", _requires_js):
+            result = search.search_web_images_batch(["Google JS failure"], limit=10)[0]
+
+        self.assertEqual(result["engine_summary"]["expected_engines"], ["bing", "yandex", "google"])
+        self.assertEqual(result["engine_reports"]["google"]["failure_kind"], "js_required")
+        self.assertEqual(result["completion_reason"], "INCOMPLETE_PROVIDER")
+        self.assertFalse(result["engine_summary"]["provider_strategy_complete"])
+
+    def test_unknown_configured_provider_makes_strategy_unverifiable(self):
+        with mock.patch.dict(os.environ, {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,googl"}):
+            strategy = search.search_engine_strategy("auto")
+        self.assertFalse(strategy["valid"])
+        self.assertEqual(strategy["expected_engines"], [])
+        self.assertEqual(strategy["invalid_engines"], ["googl"])
+
     def test_resumo_por_consulta_preserva_denominador_e_motivos(self):
         resumo = search.summarize_engine_reports(
             {
@@ -310,7 +384,10 @@ class TelemetriaPorEngineTests(unittest.TestCase):
                 "size_filter": "1024x768|w", "discovery_only": False,
             }]
 
-        with mock.patch.object(search, "search_bing_images", _com_relatorio), \
+        with mock.patch.dict(os.environ, {
+            "EDITOR_MEDIA_SEARCH_PROVIDERS": "google_browser,bing,yandex,google",
+            "EDITOR_GOOGLE_BROWSER_ENABLED": "true",
+        }), mock.patch.object(search, "search_bing_images", _com_relatorio), \
              mock.patch.object(search, "search_yandex_images", _com_relatorio), \
              mock.patch.object(search, "search_google_images", _com_relatorio):
             linhas = search.search_web_images_batch(["obra a"], limit=1)

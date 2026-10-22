@@ -939,6 +939,7 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     import unicornio_editor.media.search as search
 
     monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "google_browser,bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
@@ -983,6 +984,7 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     import unicornio_editor.media.search as search
 
     monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "google_browser,bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     candidate = {
         "direct_image_url": "https://cdn.test/accepted.webp",
@@ -1051,6 +1053,7 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
     import unicornio_editor.media.search as search
 
     monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "google_browser,bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
@@ -1092,6 +1095,7 @@ def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path
     import unicornio_editor.media.search as search
 
     monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "google_browser,bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
     monkeypatch.setattr(
@@ -1123,6 +1127,7 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     import unicornio_editor.media.search as search
 
     monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "google_browser,bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
