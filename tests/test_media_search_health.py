@@ -263,7 +263,8 @@ class TelemetriaPorEngineTests(unittest.TestCase):
             completion_reason="TARGET_REACHED",
         )
 
-        self.assertTrue(resumo["strategy_complete"])
+        self.assertTrue(resumo["capacity_reached"])
+        self.assertFalse(resumo["provider_strategy_complete"])
         self.assertEqual(resumo["completion_reason"], "TARGET_REACHED")
         self.assertEqual(resumo["not_attempted_engines"], ["yandex", "google"])
         self.assertEqual(resumo["unresolved_engines"], [])
@@ -345,6 +346,26 @@ class TelemetriaPorEngineTests(unittest.TestCase):
                 if name not in linhas[0]["engine_reports"]
             ],
         )
+
+    def test_batch_nao_marca_target_com_candidatos_inutilizaveis(self):
+        candidatos = [
+            {"direct_image_url": "https://cdn.test/a.jpg", "usable": False},
+            {"direct_image_url": "https://cdn.test/b.jpg", "usable": False},
+        ]
+
+        def _search_without_usable(_query, reports=None, **_kwargs):
+            reports.update({"bing": {"failure_kind": "ok", "candidates": 2}})
+            return candidatos
+
+        with mock.patch.object(
+            search,
+            "search_web_images",
+            side_effect=_search_without_usable,
+        ):
+            linhas = search.search_web_images_batch(["sem origem"], limit=2)
+
+        self.assertEqual(linhas[0]["completion_reason"], "INCOMPLETE_PROVIDER")
+        self.assertFalse(linhas[0]["engine_summary"]["capacity_reached"])
 
 
 if __name__ == "__main__":

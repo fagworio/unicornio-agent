@@ -273,9 +273,8 @@ def summarize_engine_reports(
         "unresolved_engines": missing if reason == "INCOMPLETE_PROVIDER" else [],
         "provider_failures": len(non_verified),
         "transient_failures": len(transient),
-        "strategy_complete": bool(
-            reason in {"TARGET_REACHED", "EXHAUSTED_VERIFIED"}
-        ),
+        "capacity_reached": reason == "TARGET_REACHED",
+        "provider_strategy_complete": reason == "EXHAUSTED_VERIFIED",
         "failure_kinds": dict(sorted(failure_kinds.items())),
         "failure_engines": non_verified,
         "candidates_discovered": sum(
@@ -1199,7 +1198,11 @@ def search_web_images_batch(
             deadline=deadline,
             reports=relatorios,
         )
-        if not stop_reason and accept is None and len(candidatos) >= max(1, int(limit or 1)):
+        if not stop_reason and accept is None and sum(
+            bool(candidate.get("usable"))
+            for candidate in candidatos
+            if isinstance(candidate, dict)
+        ) >= max(1, int(limit or 1)):
             stop_reason = "TARGET_REACHED"
         if not stop_reason:
             if any(

@@ -1522,6 +1522,8 @@ def _resolve_media_batch(
             engines_disabled.append("google_browser")
         else:
             expected_engines = [requested_engine]
+        if needed_web <= 0:
+            expected_engines = []
         if needed_web > 0:
             provider_health = search_row.get("engine_summary") or summarize_engine_reports(
                 engine_reports,
@@ -1590,7 +1592,10 @@ def _resolve_media_batch(
             == "budget_exhausted"
             for name in expected_engines
         )
-        if needed_web > 0 and accepted_count >= needed_web:
+        if needed_web <= 0:
+            completion_reason = "NOT_REQUIRED"
+            search_completed = True
+        elif accepted_count >= needed_web:
             completion_reason = "TARGET_REACHED"
             search_completed = True
         elif budget_exhausted:
@@ -1635,6 +1640,12 @@ def _resolve_media_batch(
                 "engine_reports": engine_diagnostics,
                 "provider_health": provider_health,
                 "provider_stop_reason": provider_stop_reason,
+                "capacity_reached": completion_reason == "TARGET_REACHED",
+                "provider_strategy_complete": bool(
+                    expected_engines
+                    and all_engines_verified
+                    and search_completed
+                ),
                 "engine_results": {
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
@@ -1643,12 +1654,7 @@ def _resolve_media_batch(
                 "fallback_available": bool(next_fallback_engines),
                 "technical_failures": sorted(non_verified_engine_failures),
                 "planned_queries": 1 if needed_web > 0 else 0,
-                "completed_queries": 1 if search_completed else 0,
-                "strategy_complete": bool(
-                    expected_engines
-                    and all_engines_verified
-                    and search_completed
-                ),
+                "completed_queries": 1 if needed_web > 0 and search_completed else 0,
                 "verified": completion_reason == "EXHAUSTED_VERIFIED",
                 "accepted_visual_representatives": accepted_count,
             },
@@ -3363,7 +3369,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     query=query[:200],
                     batch=True,
                     results_found=len(candidates),
-                    completed=bool(provider_health.get("strategy_complete")),
+                    completed=bool(
+                        provider_health.get("capacity_reached")
+                        or provider_health.get("provider_strategy_complete")
+                    ),
                     provider_stop_reason=str(
                         provider_health.get("completion_reason") or "INCOMPLETE_PROVIDER"
                     ),

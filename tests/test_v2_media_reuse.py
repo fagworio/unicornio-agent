@@ -629,6 +629,48 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
     assert result.accepted == 1
 
 
+def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+
+    monkeypatch.setattr(
+        cli,
+        "_reuse_from_library",
+        lambda *_args, **_kwargs: [{
+            "url": "https://cdn.test/reused.webp",
+            "source": "https://source.test/reused",
+            "media_id": 77,
+        }],
+    )
+
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "local-reuse-only",
+            "posts": [{
+                "post_id": 115234,
+                "subject": "Test",
+                "query": "test query",
+                "needed": 1,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+    )
+
+    progress = result["posts"][0]["search"]
+    assert progress["completed"] is True
+    assert progress["completion_reason"] == "NOT_REQUIRED"
+    assert progress["queries_attempted"] == 0
+    assert progress["coverage"]["provider_stop_reason"] == "NOT_REQUIRED"
+    assert progress["coverage"]["expected_engines"] == []
+    assert progress["coverage"]["planned_queries"] == 0
+    assert progress["coverage"]["completed_queries"] == 0
+
+
 def test_media_resolver_restores_visual_verification_from_registry(monkeypatch, tmp_path):
     import unicornio_editor.media.registry as registry
     import unicornio_editor.pipeline_v2.runtime as runtime
@@ -994,7 +1036,8 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     assert progress["completed"] is True
     assert progress["completion_reason"] == "TARGET_REACHED"
     assert progress["coverage"]["verified"] is False
-    assert progress["coverage"]["strategy_complete"] is False
+    assert progress["coverage"]["capacity_reached"] is True
+    assert progress["coverage"]["provider_strategy_complete"] is False
 
 
 def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
