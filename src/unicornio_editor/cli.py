@@ -1354,6 +1354,7 @@ def _resolve_media_batch(
         http_request_count,
         reset_http_request_count,
         search_web_images_batch,
+        summarize_engine_reports,
     )
     from .observability import append_telemetry
 
@@ -1521,6 +1522,10 @@ def _resolve_media_batch(
             engines_disabled.append("google_browser")
         else:
             expected_engines = [requested_engine]
+        provider_health = search_row.get("engine_summary") or summarize_engine_reports(
+            engine_reports,
+            expected_engines=expected_engines,
+        )
         engines_attempted = tuple(
             name for name in expected_engines if name in engine_reports
         )
@@ -1619,6 +1624,7 @@ def _resolve_media_batch(
                 "attempted_engines": list(engines_attempted),
                 "reported_engines": sorted(engine_reports),
                 "engine_reports": engine_diagnostics,
+                "provider_health": provider_health,
                 "engine_results": {
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
@@ -1648,6 +1654,12 @@ def _resolve_media_batch(
             accepted=accepted_count,
             completion_reason=completion_reason,
             completed=search_completed,
+            providers_reported=len(provider_health.get("reported_engines") or []),
+            providers_completed=len(provider_health.get("completed_engines") or []),
+            provider_failures=int(provider_health.get("provider_failures") or 0),
+            transient_provider_failures=int(provider_health.get("transient_failures") or 0),
+            provider_failure_kinds=provider_health.get("failure_kinds") or {},
+            providers_missing=provider_health.get("missing_engines") or [],
         )
         append_telemetry(
             root,
@@ -3330,8 +3342,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             for row in rows:
                 query = str(row["query"])
                 candidates = list(row.get("candidates") or [])
+                provider_health = row.get("engine_summary") or {}
                 _emit_engine_health(
                     args.root, row.get("engine_reports") or {}, query=query
+                )
+                append_telemetry(
+                    args.root,
+                    "media_search_query_summary",
+                    query=query[:200],
+                    batch=True,
+                    results_found=len(candidates),
+                    completed=bool(provider_health.get("strategy_complete")),
+                    providers_reported=len(provider_health.get("reported_engines") or []),
+                    providers_completed=len(provider_health.get("completed_engines") or []),
+                    provider_failures=int(provider_health.get("provider_failures") or 0),
+                    transient_provider_failures=int(
+                        provider_health.get("transient_failures") or 0
+                    ),
+                    provider_failure_kinds=provider_health.get("failure_kinds") or {},
+                    providers_missing=provider_health.get("missing_engines") or [],
                 )
                 decisao_item: dict = {}
                 decision_id_item = ""
@@ -3432,7 +3461,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 audit_items.append(
                     {"query": query, "candidates": candidates,
                      "rejected": rejeitados_por_query.get(query, []),
-                     "deferred": deferidos_por_query.get(query, [])}
+                     "deferred": deferidos_por_query.get(query, []),
+                     "provider_health": provider_health}
                 )
                 compact = [
                     {
@@ -3458,6 +3488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "decision_id": decision_id_item,
                     "decision": str(decisao_item.get("decision") or ""),
                     "coverage": str(decisao_item.get("coverage") or ""),
+                    "provider_health": provider_health,
                     "select": decisao_item.get("select"),
                     "options": decisao_item.get("options") or [],
                     "candidates": compact,

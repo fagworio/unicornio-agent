@@ -40,6 +40,7 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 from threading import Lock
 from pathlib import Path
 import re
@@ -117,8 +118,16 @@ FAILURE_KINDS = (
     "js_required",            # página exige JavaScript: sem resultados no HTML
     "parser_schema_drift",    # página de resultados com schema novo (nossas chaves sumiram)
     "no_results_legitimate",  # página de resultados, realmente sem resultado para a query
+    # Diagnósticos específicos do navegador Google, mantidos separados para
+    # não colapsar indisponibilidade, captcha e pareamento em um só motivo.
+    "google_browser_unavailable",
+    "google_captcha",
+    "google_unusual_traffic",
+    "google_consent_required",
+    "google_pair_unresolved",
 )
 FAILURE_KINDS_TRANSITORIOS = frozenset({"network_error", "rate_limited", "http_error"})
+FAILURE_KINDS_VERIFICADOS = frozenset({"ok", "no_results_legitimate"})
 
 _MARKERS_CAPTCHA = ("unusual traffic", "/sorry/", "sorry/index", "recaptcha", "captcha")
 _MARKERS_JS = ("/httpservice/retry/enablejs", "enablejs")
@@ -209,6 +218,73 @@ def _finalizar_relatorio(
 def engine_last_report(engine: str) -> dict[str, Any]:
     """Relatório da última tentativa da engine (vazio quando nunca foi tentada)."""
     return dict(_ULTIMO_RELATORIO.get(engine) or {})
+
+
+def summarize_engine_reports(
+    reports: dict[str, dict[str, Any]] | None,
+    *,
+    expected_engines: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Resume a saúde dos providers de uma consulta sem perder os detalhes.
+
+    O relatório por engine continua sendo a evidência primária. Este resumo
+    explicita o denominador de providers reportados, as falhas por tipo e as
+    engines esperadas que não chegaram a ser observadas. Assim, a telemetria
+    não confunde consultas completas com engines que retornaram candidatos.
+    """
+    normalized = reports if isinstance(reports, dict) else {}
+    expected = [str(name) for name in (expected_engines or ()) if str(name)]
+    reported = [str(name) for name in normalized if str(name)]
+    def _report_for(name: str) -> dict[str, Any]:
+        value = normalized.get(name)
+        return value if isinstance(value, dict) else {}
+
+    failure_kinds = Counter(
+        str((report or {}).get("failure_kind") or "unknown")
+        for report in normalized.values()
+        if isinstance(report, dict)
+    )
+    completed = [
+        name for name in reported
+        if str(_report_for(name).get("failure_kind") or "unknown")
+        in FAILURE_KINDS_VERIFICADOS
+    ]
+    transient = [
+        name for name in reported
+        if str(_report_for(name).get("failure_kind") or "")
+        in FAILURE_KINDS_TRANSITORIOS
+    ]
+    non_verified = [
+        name for name in reported
+        if str(_report_for(name).get("failure_kind") or "unknown")
+        not in FAILURE_KINDS_VERIFICADOS
+    ]
+    return {
+        "version": 1,
+        "expected_engines": expected,
+        "reported_engines": reported,
+        "completed_engines": completed,
+        "missing_engines": [name for name in expected if name not in normalized],
+        "provider_failures": len(non_verified),
+        "transient_failures": len(transient),
+        "strategy_complete": bool(
+            expected
+            and not any(name not in normalized for name in expected)
+            and not non_verified
+        ),
+        "failure_kinds": dict(sorted(failure_kinds.items())),
+        "failure_engines": non_verified,
+        "candidates_discovered": sum(
+            int((report or {}).get("candidates") or 0)
+            for report in normalized.values()
+            if isinstance(report, dict)
+        ),
+        "objects_parsed": sum(
+            int((report or {}).get("objects_parsed") or 0)
+            for report in normalized.values()
+            if isinstance(report, dict)
+        ),
+    }
 
 
 def _fetch_report(url: str, timeout: float) -> tuple[str | None, dict[str, Any]]:
@@ -1105,6 +1181,14 @@ def search_web_images_batch(
         )
         return candidatos, relatorios
 
+    expected_engines = [engine] if engine != "auto" else [
+        "google_browser", "bing", "yandex", "google"
+    ]
+    if engine == "auto" and os.environ.get(
+        "EDITOR_GOOGLE_BROWSER_ENABLED", "true"
+    ).strip().lower() in {"0", "false", "no", "off"}:
+        expected_engines.remove("google_browser")
+
     found: dict[str, list[dict[str, Any]]] = {}
     relatorios_por_query: dict[str, dict[str, dict[str, Any]]] = {}
     workers = min(_BATCH_WORKERS, len(unique))
@@ -1125,6 +1209,10 @@ def search_web_images_batch(
             # Por que cada engine entregou (ou não entregou): sem isso uma engine
             # podia sumir do resultado sem deixar rastro na telemetria.
             "engine_reports": relatorios_por_query.get(query, {}),
+            "engine_summary": summarize_engine_reports(
+                relatorios_por_query.get(query, {}),
+                expected_engines=expected_engines,
+            ),
             "budget_exhausted": any(
                 str(report.get("failure_kind") or "") == "budget_exhausted"
                 for report in (relatorios_por_query.get(query, {}) or {}).values()
@@ -1142,5 +1230,7 @@ __all__ = [
     "reset_http_request_count", "http_request_count",
     # Saúde por engine (classificação da falha + relatório da tentativa)
     "PARSER_VERSION", "FAILURE_KINDS", "FAILURE_KINDS_TRANSITORIOS",
-    "classify_failure", "provider_key", "engine_degradada", "engine_last_report", "engines_status",
+    "FAILURE_KINDS_VERIFICADOS", "classify_failure", "provider_key",
+    "engine_degradada", "engine_last_report", "engines_status",
+    "summarize_engine_reports",
 ]

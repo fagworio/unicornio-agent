@@ -219,6 +219,40 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
 
 
 class TelemetriaPorEngineTests(unittest.TestCase):
+    def test_resumo_por_consulta_preserva_denominador_e_motivos(self):
+        resumo = search.summarize_engine_reports(
+            {
+                "google_browser": {
+                    "failure_kind": "google_captcha",
+                    "candidates": 0,
+                    "objects_parsed": 0,
+                },
+                "bing": {
+                    "failure_kind": "no_results_legitimate",
+                    "candidates": 0,
+                    "objects_parsed": 0,
+                },
+                "yandex": {
+                    "failure_kind": "js_required",
+                    "candidates": 2,
+                    "objects_parsed": 3,
+                },
+            },
+            expected_engines=["google_browser", "bing", "yandex", "google"],
+        )
+
+        self.assertEqual(resumo["reported_engines"], ["google_browser", "bing", "yandex"])
+        self.assertEqual(resumo["completed_engines"], ["bing"])
+        self.assertEqual(resumo["missing_engines"], ["google"])
+        self.assertEqual(resumo["provider_failures"], 2)
+        self.assertEqual(resumo["transient_failures"], 0)
+        self.assertEqual(
+            resumo["failure_kinds"],
+            {"google_captcha": 1, "js_required": 1, "no_results_legitimate": 1},
+        )
+        self.assertEqual(resumo["candidates_discovered"], 2)
+        self.assertEqual(resumo["objects_parsed"], 3)
+
     def test_media_engine_health_registra_os_campos_pedidos(self):
         from unicornio_editor import cli
 
@@ -282,6 +316,9 @@ class TelemetriaPorEngineTests(unittest.TestCase):
         self.assertEqual(
             linhas_duas[0]["engine_reports"]["bing"]["objects_parsed"], 1
         )
+        self.assertIn("engine_summary", linhas_duas[0])
+        self.assertEqual(linhas_duas[0]["engine_summary"]["provider_failures"], 1)
+        self.assertEqual(linhas_duas[0]["engine_summary"]["failure_kinds"].get("ok"), 3)
 
 
 if __name__ == "__main__":
