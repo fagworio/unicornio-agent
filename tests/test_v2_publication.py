@@ -391,6 +391,36 @@ def test_publish_intent_is_durable_before_remote_write_and_recovers_process_cras
     assert not marker.exists()
 
 
+def test_persisted_uncertain_read_telemetry_failure_does_not_abort_reconciliation(tmp_path):
+    class ReadFailClient(FakePublicationClient):
+        def get_post(self, post_id):
+            raise RuntimeError("read unavailable")
+
+    client = ReadFailClient(_ready_post())
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    with mock.patch("unicornio_editor.workflow.append_telemetry", side_effect=OSError("disk full")):
+        outcomes = _reconcile_persisted_uncertain_publications(client, _config(), tmp_path)
+
+    assert outcomes[0]["status"] == "retry"
+    assert outcomes[0]["uncertain"] is True
+
+
+def test_persisted_uncertain_clear_telemetry_failure_does_not_abort_reconciliation(tmp_path):
+    client = FakePublicationClient(_ready_post())
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{client.post['id']}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"post_id": client.post["id"], "status": "uncertain"}), encoding="utf-8")
+
+    with mock.patch("unicornio_editor.workflow._reconcile_uncertain_publication", return_value=None), \
+         mock.patch("unicornio_editor.workflow.append_telemetry", side_effect=OSError("disk full")):
+        outcomes = _reconcile_persisted_uncertain_publications(client, _config(), tmp_path)
+
+    assert outcomes == []
+
+
 def test_publish_is_not_sent_when_intent_cannot_be_persisted(tmp_path):
     client = FakePublicationClient(_pending_ready_post())
     post = client.post

@@ -4423,7 +4423,7 @@ def _reconcile_persisted_uncertain_publications(
                     else None,
                 )
         except Exception as exc:  # noqa: BLE001 - keep fence for next window
-            append_telemetry(
+            _append_publish_telemetry(
                 root,
                 "publish_uncertain_read_failed",
                 post_id=post_id,
@@ -4441,7 +4441,7 @@ def _reconcile_persisted_uncertain_publications(
         if outcome is not None:
             outcomes.append(outcome)
         else:
-            append_telemetry(
+            _append_publish_telemetry(
                 root,
                 "publish_uncertain_cleared_pending",
                 post_id=post_id,
