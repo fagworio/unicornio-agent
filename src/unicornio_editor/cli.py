@@ -128,6 +128,19 @@ def build_parser() -> argparse.ArgumentParser:
     v2_cycle_parser.add_argument("--max-drain-rounds", type=int, default=None)
     v2_cycle_parser.add_argument("--max-duration-seconds", type=float, default=None)
 
+    v2_abandon_parser = subparsers.add_parser(
+        "v2-cycle-abandon",
+        help="arquiva administrativamente um ciclo V2 interrompido; preview por padrão",
+    )
+    v2_abandon_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_abandon_parser.add_argument("--cycle-id", required=True)
+    v2_abandon_parser.add_argument("--authorization-id", required=True)
+    v2_abandon_parser.add_argument("--pending-round", type=int, required=True)
+    v2_abandon_parser.add_argument("--selected-ids", required=True, help="IDs históricos separados por vírgula")
+    v2_abandon_parser.add_argument("--new-cycle-id", default=None)
+    v2_abandon_parser.add_argument("--exclude-post-id", type=int, default=None)
+    v2_abandon_parser.add_argument("--apply", action="store_true", help="aplica a transição após as validações")
+
     v2_recover_media_parser = subparsers.add_parser(
         "v2-recover-media",
         help="revalida e reconcilia um attachment V2 já existente; somente leitura por padrão",
@@ -2592,6 +2605,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.root,
                 cycle_config=cycle_config,
                 fresh=bool(args.fresh),
+            )
+        elif args.command == "v2-cycle-abandon":
+            from .pipeline_v2.cycle_admin import abandon_cycle
+
+            result = abandon_cycle(
+                args.root,
+                cycle_id=args.cycle_id,
+                authorization_id=args.authorization_id,
+                pending_round=int(args.pending_round),
+                selected_ids=[int(item.strip()) for item in args.selected_ids.split(",") if item.strip()],
+                new_cycle_id=args.new_cycle_id,
+                exclude_post_id=args.exclude_post_id,
+                apply=bool(args.apply),
             )
         elif args.command == "v2-recover-media":
             from .pipeline_v2.media_recovery import recover_historical_attachment
