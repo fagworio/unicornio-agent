@@ -233,15 +233,20 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
     journal_dir.mkdir(parents=True)
     for post_id in post_ids:
         kind, failure_class = states[post_id]
+        journal_state = WorkState(
+            state=(
+                LifecycleState.HUMAN_REQUIRED
+                if post_id == 115598
+                else LifecycleState.PENDING
+            ),
+            phase=Phase.MEDIA,
+            relevance_approved=True,
+        )
         payload = {
             "cycle_id": "old-cycle" if post_id in {115631, 115633} else "929621ed4ea945ed9ecc560d3efb9b90",
             "cycle_round": 1,
             "authorization_id": "old-auth" if post_id in {115631, 115633} else "auth-929621",
-            "state": WorkState(
-                state=LifecycleState.PENDING,
-                phase=Phase.MEDIA,
-                relevance_approved=True,
-            ).to_dict(),
+            "state": journal_state.to_dict(),
         }
         if post_id == 115676:
             payload.update({
@@ -256,10 +261,23 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
 
     class Client:
         def list_pending(self, *, page, per_page, status):
-            return [{"id": post_id, "status": "pending"} for post_id in post_ids] if page == 1 else []
+            return [self.get_post(post_id) for post_id in post_ids] if page == 1 else []
 
         def get_post(self, post_id):
-            return {"id": post_id, "status": "pending"}
+            state = WorkState(
+                state=(
+                    LifecycleState.HUMAN_REQUIRED
+                    if post_id == 115598
+                    else LifecycleState.PENDING
+                ),
+                phase=Phase.MEDIA,
+                relevance_approved=True,
+            )
+            return {
+                "id": post_id,
+                "status": "pending",
+                "meta": {"_hermes_work_state": json.dumps(state.to_dict())},
+            }
 
     monkeypatch.setattr(
         cycle_runtime,
@@ -279,8 +297,154 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
     assert detail[115676]["outcome"] == "retry"
     assert detail[115676]["write_replayed"] is False
     assert detail[115676]["recovery_status"] == "interrupted_pre_writer"
+    assert detail[115676]["wordpress_state_readback"] is True
+    assert detail[115676]["write_started"] is False
+    assert detail[115676]["transaction_readback"] is False
+    assert detail[115676]["write_readback_confirmed"] is False
+    assert detail[115598]["outcome"] == "human_required"
     assert 115676 in result.executed_ids
     assert len(result.details) == len(post_ids)
+
+
+def test_resume_five_post_round_through_cycle_updates_checkpoint_without_writes(
+    tmp_path, monkeypatch
+):
+    cycle_id = "resume-five-post-cycle"
+    post_ids = [115641, 115598, 115676, 115631, 115633]
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    cycle_config = cycle_runtime.CycleConfig(
+        ready_target=5,
+        new_batch_size=5,
+        max_unique_posts=5,
+        max_total_attempts=20,
+        max_attempts_per_post_per_cycle=2,
+        max_stagnant_rounds=2,
+        max_drain_rounds=2,
+        max_duration_seconds=60,
+    )
+    state = store.create(cycle_config.__dict__, cycle_id=cycle_id)
+    state.phase = "DRAINING"
+    state.rounds = 3
+    state.seen_post_ids = [1, 2, 3, *post_ids]
+    state.attempts_by_post = {1: 1, 2: 1, 3: 1}
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    store.start_round(
+        state,
+        round_number=4,
+        request={
+            "round_number": 4,
+            "batch_size": 5,
+            "max_new_posts": 0,
+            "seen_post_ids": [1, 2, 3, *post_ids],
+            "excluded_post_ids": [],
+            "attempts_by_post": {1: 1, 2: 1, 3: 1},
+        },
+    )
+    store.authorize_round(state, post_ids)
+    authorization_id = state.pending_round["authorization_id"]
+
+    states = {
+        115641: WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA, relevance_approved=True),
+        115598: WorkState(state=LifecycleState.HUMAN_REQUIRED, phase=Phase.MEDIA, relevance_approved=True),
+        115676: WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA, relevance_approved=True),
+        115631: WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA, relevance_approved=True),
+        115633: WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA, relevance_approved=True),
+    }
+    posts = {
+        post_id: {
+            "id": post_id,
+            "status": "pending",
+            "title": {"raw": str(post_id)},
+            "content": {"raw": "<p>conteudo</p>"},
+            "meta": {"_hermes_work_state": json.dumps(work_state.to_dict())},
+        }
+        for post_id, work_state in states.items()
+    }
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    for post_id in post_ids:
+        work_state = states[post_id]
+        current = post_id not in {115631, 115633}
+        payload = {
+            "status": "committed" if current else "historical",
+            "readback": current,
+            "cycle_id": cycle_id if current else "old-cycle",
+            "cycle_round": 4 if current else 2,
+            "authorization_id": authorization_id if current else "old-auth",
+            "state": work_state.to_dict(),
+        }
+        if post_id == 115676:
+            payload.update({
+                "status": "interrupted_pre_writer",
+                "resumable": True,
+                "writer_started": False,
+                "readback": False,
+                "failure_class": "process_interrupted",
+            })
+        (journal_dir / f"{post_id}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return list(posts.values()) if page == 1 else []
+
+        def get_post(self, post_id):
+            return posts[post_id]
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_post_no_write_evidence",
+        lambda _client, _root, post_id, **_kwargs: {
+            "post_id": int(post_id),
+            "media_registry_current_round_rows": 0,
+        },
+    )
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("expected_selected_ids"):
+            return {
+                "preview": True,
+                "selection_mismatch": False,
+                "queue": {"selected_ids": list(post_ids)},
+            }
+        return {"preview": True, "queue": {"selected_ids": []}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(
+        Client(), SimpleNamespace(), tmp_path, cycle_config=cycle_config
+    )
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 4
+    assert report.ready_count == 0
+    assert report.attempts_by_post == {1: 1, 2: 1, 3: 1, 115641: 1, 115598: 1, 115676: 1}
+    assert all(call["preview"] is True for call in calls)
+    assert len(calls) == 2
+
+    reconciled = next(
+        item for item in report.round_reports
+        if item.get("event") == "round_reconciled_without_replay"
+    )
+    assert [detail["outcome"] for detail in reconciled["post_results"]] == [
+        "retry", "human_required", "retry", "not_executed", "not_executed"
+    ]
+    assert reconciled["transaction_readback_post_ids"] == [115641, 115598]
+    assert reconciled["state_readback_only_post_ids"] == [115676, 115631, 115633]
+    recovered = {
+        detail["post_id"]: detail for detail in reconciled["post_results"]
+    }[115676]
+    assert recovered["wordpress_state_readback"] is True
+    assert recovered["write_started"] is False
+    assert recovered["transaction_readback"] is False
+
+    persisted = store.load()
+    assert persisted.status == "completed"
+    assert persisted.pending_round is None
+    assert persisted.rounds == 4
 
 
 def test_reconcile_completed_round_rejects_matching_authorization_with_wrong_round(

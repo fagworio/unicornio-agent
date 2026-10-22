@@ -314,12 +314,28 @@ def _reconciled_detail(
         LifecycleState.SKIPPED: "skipped",
     }.get(state.state, "retry")
     media_readback = journal.get("media_readback_status") == "confirmed"
+    pre_writer_recovery = (
+        journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}
+        and journal.get("writer_started") is False
+    )
+    transaction_readback = bool(
+        not pre_writer_recovery
+        and journal.get("status") == "committed"
+        and journal.get("readback") is True
+    )
     return {
         "post_id": int(post_id),
         "initial_state": "pending",
         "outcome": outcome,
         "ready_verified": state.state is LifecycleState.READY,
+        # ``readback`` is retained as the historical compatibility flag.  The
+        # explicit fields below distinguish reading current WordPress state
+        # from proving a write/readback for this transaction.
         "readback": True,
+        "wordpress_state_readback": True,
+        "write_started": not pre_writer_recovery,
+        "transaction_readback": transaction_readback,
+        "write_readback_confirmed": transaction_readback,
         "state": state.to_dict(),
         "media_readback": media_readback,
         "media_readback_status": journal.get("media_readback_status"),
@@ -381,6 +397,10 @@ def _reconcile_completed_round(
                     "initial_state": "pending",
                     "outcome": "not_executed",
                     "readback": True,
+                    "wordpress_state_readback": True,
+                    "write_started": False,
+                    "transaction_readback": False,
+                    "write_readback_confirmed": False,
                     "progress": False,
                     "reconciled": True,
                     "no_write_evidence": no_write,
@@ -418,6 +438,10 @@ def _reconcile_completed_round(
                     "initial_state": "pending",
                     "outcome": "not_executed",
                     "readback": True,
+                    "wordpress_state_readback": True,
+                    "write_started": False,
+                    "transaction_readback": False,
+                    "write_readback_confirmed": False,
                     "progress": False,
                     "reconciled": True,
                     "historical_journal": True,
@@ -502,6 +526,17 @@ def _reconcile_completed_round(
             "write_replayed": False,
             "reconciled_post_ids": [int(detail["post_id"]) for detail in details],
             "counted_post_ids": [int(post_id) for post_id in executed_ids],
+            "transaction_readback_post_ids": [
+                int(detail["post_id"])
+                for detail in details
+                if detail.get("transaction_readback") is True
+            ],
+            "state_readback_only_post_ids": [
+                int(detail["post_id"])
+                for detail in details
+                if detail.get("wordpress_state_readback") is True
+                and detail.get("transaction_readback") is not True
+            ],
             "not_executed_post_ids": [
                 int(detail["post_id"])
                 for detail in details
