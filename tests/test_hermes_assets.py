@@ -227,6 +227,13 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
         self.assertNotIn("date +%s", content)
         self.assertIn("cost_guard.py", content)
 
+    def test_monitor_resolves_stale_budget_job_id_from_hermes_catalog(self):
+        content = (ROOT / "hermes" / "monitor.sh").read_text()
+        self.assertIn('EDITORIAL_JOB_NAME="UnicornioHater editorial pending"', content)
+        self.assertIn('jobs_file="${HERMES_HOME:-$HOME/.hermes}/cron/jobs.json"', content)
+        self.assertIn("elif len(ids) == 1:", content)
+        self.assertIn('--job-id "$EDITORIAL_JOB_ID"', content)
+
     def test_cost_guard_is_valid_python(self):
         script = ROOT / "hermes" / "cost_guard.py"
         result = subprocess.run(["python3", "-m", "py_compile", str(script)], capture_output=True, text=True)

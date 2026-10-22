@@ -32,6 +32,54 @@ set +a
 EFFECTIVE_FILE="$ROOT/work/monitor_effective_output"
 BUDGET_LOG="$ROOT/work/monitor-budget.log"
 BUDGET_STATE_FILE="$ROOT/work/monitor-budget-state"
+EDITORIAL_JOB_NAME="UnicornioHater editorial pending"
+
+# O .env e a fonte persistente do ID, mas uma instalação antiga pode ter
+# guardado um placeholder ou o ID de um job removido. Quando o catálogo local
+# do Hermes estiver disponível, prefira exatamente um job com o nome editorial
+# canônico. Isso corrige a atribuição do budget guard sem alterar o catálogo,
+# o .env ou a assinatura do monitor.
+resolver_id_editorial() {
+  local configurado="${HERMES_EDITORIAL_CRON_JOB_ID:-}"
+  local jobs_file="${HERMES_HOME:-$HOME/.hermes}/cron/jobs.json"
+  local resolvido
+  if [ ! -s "$jobs_file" ]; then
+    printf '%s' "$configurado"
+    return 0
+  fi
+  resolvido="$($ROOT/.venv/bin/python - "$jobs_file" "$EDITORIAL_JOB_NAME" "$configurado" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, TypeError, ValueError):
+    print(sys.argv[3])
+    raise SystemExit(0)
+
+name = sys.argv[2]
+configured = sys.argv[3]
+ids = [
+    str(job.get("id") or "")
+    for job in (data.get("jobs") or [])
+    if str(job.get("name") or "") == name and str(job.get("id") or "")
+]
+if configured and configured in ids:
+    print(configured)
+elif len(ids) == 1:
+    print(ids[0])
+elif not ids:
+    print(configured)
+else:
+    # Ambiguidade não pode escolher um job arbitrário para atribuir custo.
+    print("")
+PYEOF
+  )"
+  printf '%s' "$resolvido"
+}
+
+EDITORIAL_JOB_ID="$(resolver_id_editorial)"
 
 # Estado separado para detectar blocked -> allowed sem imprimir o JSON mutável
 # do guard. O primeiro tick liberado muda a época e acorda o Hermes; depois a
@@ -74,7 +122,7 @@ if [ "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" != "0" ] \
   || [ "${HERMES_EDITORIAL_WINDOW_CONTEXT_BYTES_LIMIT:-0}" != "0" ]; then
   guard_out="$("$ROOT/.venv/bin/python" "$ROOT/hermes/cost_guard.py" \
     --state-db "${HERMES_STATE_DB:-$HOME/.hermes/state.db}" \
-    --job-id "${HERMES_EDITORIAL_CRON_JOB_ID:-}" \
+    --job-id "$EDITORIAL_JOB_ID" \
     --project-root "$ROOT" \
     --limit "${HERMES_EDITORIAL_DAILY_COST_LIMIT_USD:-0}" \
     --limit-requests "${HERMES_EDITORIAL_WINDOW_REQUEST_LIMIT:-0}" \
