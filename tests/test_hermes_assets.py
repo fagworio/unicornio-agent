@@ -61,6 +61,37 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("references", content)
         self.assertIn("validate-monitor.sh", content)
 
+    def test_monitor_sync_updates_only_installed_script_with_backup(self):
+        script = ROOT / "hermes" / "sync-monitor.sh"
+        result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            hermes_home = Path(directory) / "hermes"
+            target_dir = hermes_home / "scripts"
+            target_dir.mkdir(parents=True)
+            target = target_dir / "unicornio-editor-monitor.sh"
+            target.write_text("old monitor\n", encoding="utf-8")
+            jobs_file = hermes_home / "cron" / "jobs.json"
+            jobs_file.parent.mkdir()
+            jobs_file.write_text('{"jobs": []}\n', encoding="utf-8")
+            jobs_before = jobs_file.read_text(encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", str(script)],
+                cwd=ROOT,
+                env={**os.environ, "HERMES_HOME": str(hermes_home)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(f'ROOT="{ROOT}"', target.read_text(encoding="utf-8"))
+            self.assertNotIn("old monitor", target.read_text(encoding="utf-8"))
+            backups = list(target_dir.glob("unicornio-editor-monitor.sh.bak.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), "old monitor\n")
+            self.assertEqual(jobs_file.read_text(encoding="utf-8"), jobs_before)
+
     def test_rendered_monitor_validator_rejects_unresolved_placeholder(self):
         validator = ROOT / "hermes" / "validate-monitor.sh"
         with tempfile.TemporaryDirectory() as directory:
