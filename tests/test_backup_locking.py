@@ -1,7 +1,9 @@
 import json
+import threading
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from unicornio_editor.backup import SnapshotError, SnapshotStore
@@ -50,6 +52,41 @@ class SnapshotAndLockTests(unittest.TestCase):
             with handle:
                 self.assertTrue(handle.refresh())
             self.assertFalse(handle.refresh())
+
+    def test_refresh_and_release_are_serialized_during_file_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = LockManager(Path(directory), ttl=60)
+            handle = manager.acquire(42)
+            lock_path = Path(directory) / "42.lock"
+            write_started = threading.Event()
+            continue_write = threading.Event()
+            release_done = threading.Event()
+            original_write_text = Path.write_text
+
+            def blocking_write_text(path, data, *args, **kwargs):
+                if path == lock_path:
+                    write_started.set()
+                    assert continue_write.wait(timeout=2)
+                return original_write_text(path, data, *args, **kwargs)
+
+            with mock.patch.object(Path, "write_text", blocking_write_text):
+                refresh_thread = threading.Thread(target=handle.refresh)
+                refresh_thread.start()
+                self.assertTrue(write_started.wait(timeout=2))
+
+                release_thread = threading.Thread(
+                    target=lambda: (handle.release(), release_done.set())
+                )
+                release_thread.start()
+                self.assertFalse(release_done.wait(timeout=0.05))
+
+                continue_write.set()
+                refresh_thread.join(timeout=2)
+                release_thread.join(timeout=2)
+
+            self.assertFalse(refresh_thread.is_alive())
+            self.assertFalse(release_thread.is_alive())
+            self.assertFalse(lock_path.exists())
 
 
 if __name__ == "__main__":

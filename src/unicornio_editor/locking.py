@@ -20,33 +20,36 @@ class LockHandle:
         self.ttl = ttl
         self._released = False
         self._stop = threading.Event()
+        self._io_lock = threading.Lock()
         self._heartbeat: threading.Thread | None = None
 
     def refresh(self) -> bool:
         """Renew only if this handle still owns the lock."""
-        if self._released or self._stop.is_set():
-            return False
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if data.get("token") != self.token:
+        with self._io_lock:
+            if self._released or self._stop.is_set():
                 return False
-            data["created_at"] = time.time()
-            self.path.write_text(json.dumps(data), encoding="utf-8")
-            return True
-        except (OSError, ValueError, json.JSONDecodeError):
-            return False
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if data.get("token") != self.token:
+                    return False
+                data["created_at"] = time.time()
+                self.path.write_text(json.dumps(data), encoding="utf-8")
+                return True
+            except (OSError, ValueError, json.JSONDecodeError):
+                return False
 
     def release(self) -> None:
-        if self._released:
-            return
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        with self._io_lock:
+            if self._released:
+                return
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                self._released = True
+                return
+            if data.get("token") == self.token:
+                self.path.unlink(missing_ok=True)
             self._released = True
-            return
-        if data.get("token") == self.token:
-            self.path.unlink(missing_ok=True)
-        self._released = True
 
     def __enter__(self) -> "LockHandle":
         interval = max(1.0, self.ttl / 3)
