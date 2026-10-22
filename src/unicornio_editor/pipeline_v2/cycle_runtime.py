@@ -12,7 +12,7 @@ from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
 from .model import LifecycleState
 from .production import ProductionCandidateReader
-from .runtime import _media_effect_evidence, run_v2
+from .runtime import _media_effect_evidence, recover_interrupted_journal, run_v2
 
 
 def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
@@ -264,6 +264,52 @@ def _post_no_write_evidence(
     }
 
 
+def _historical_journal_evidence(
+    root: Path,
+    post_id: int,
+    journal: dict[str, Any],
+    *,
+    authorized_at: str | None,
+) -> dict[str, Any] | None:
+    """Prove that an identity-less journal predates the current authorization."""
+    if not str(journal.get("run_id") or "").strip() or not authorized_at:
+        return None
+    if any(str(journal.get(key) or "").strip() for key in ("cycle_id", "cycle_round", "authorization_id")):
+        return None
+    path = Path(root) / "work" / "media_registry.sqlite"
+    if not path.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            tables = {
+                str(row[0])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if {"media_runs", "media_decisions", "media_usage"} - tables:
+                return None
+            row = db.execute(
+                """SELECT post_id, created_at FROM media_runs
+                   WHERE run_id = ? AND post_id = ?""",
+                (str(journal["run_id"]), int(post_id)),
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    if not row or not row[1]:
+        return None
+    run_created_at = str(row[1]).replace("T", " ")[:19]
+    current_authorized_at = str(authorized_at).replace("T", " ")[:19]
+    if run_created_at >= current_authorized_at:
+        return None
+    return {
+        "historical_run_id": str(journal["run_id"]),
+        "historical_run_created_at": run_created_at,
+        "current_authorized_at": current_authorized_at,
+        "post_id": int(post_id),
+    }
+
+
 def _journal_correlation(
     journal: dict[str, Any],
     *,
@@ -422,7 +468,46 @@ def _reconcile_completed_round(
             expected_authorization_id=expected_authorization_id,
         )
         if correlation == "uncertain":
-            unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+            historical = _historical_journal_evidence(
+                root,
+                int(post_id),
+                journal,
+                authorized_at=_round_authorized_at(
+                    root, expected_cycle_id, expected_cycle_round
+                ),
+            )
+            if historical is None:
+                unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+                continue
+            no_write = _post_no_write_evidence(
+                client,
+                root,
+                int(post_id),
+                cycle_id=expected_cycle_id,
+                round_number=expected_cycle_round,
+            )
+            if no_write is None:
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "historical_effect_uncertain",
+                    "historical_journal_evidence": historical,
+                })
+                continue
+            details.append({
+                "post_id": int(post_id),
+                "initial_state": "pending",
+                "outcome": "not_executed",
+                "readback": True,
+                "wordpress_state_readback": True,
+                "write_started": False,
+                "transaction_readback": False,
+                "write_readback_confirmed": False,
+                "progress": False,
+                "reconciled": True,
+                "historical_journal": True,
+                "historical_journal_evidence": historical,
+                "no_write_evidence": no_write,
+            })
             continue
         if correlation == "historical":
             no_write = _post_no_write_evidence(
@@ -462,10 +547,35 @@ def _reconcile_completed_round(
                     "media_effect_evidence": media_evidence,
                 })
             else:
-                # The protocol journal is still live.  Let write-mode perform
-                # the normal stale-journal transition after this safety check;
-                # do not count an unfinished transaction as reconciled.
-                return None
+                recovery = recover_interrupted_journal(
+                    root, int(post_id), apply=True
+                )
+                if not recovery.get("recovered"):
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "journal_not_recoverable",
+                        "recovery": recovery,
+                    })
+                    continue
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                detail = _reconciled_detail(int(post_id), journal, state)
+                if detail is None:
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "state_readback_invalid",
+                    })
+                    continue
+                detail.update({
+                    "outcome": "retry",
+                    "ready_verified": False,
+                    "progress": True,
+                    "write_replayed": False,
+                    "recovery_status": "interrupted_pre_writer",
+                    "recovery_classification": "INTERRUPTED_PRE_WRITER",
+                    "failure_class": "process_interrupted",
+                })
+                details.append(detail)
+                executed_ids.append(int(post_id))
             continue
         if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"} and (
             journal.get("resumable") is True

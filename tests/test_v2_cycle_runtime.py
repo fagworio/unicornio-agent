@@ -315,13 +315,27 @@ def test_historical_journals_reconcile_only_with_complete_no_effect_evidence(tmp
     _empty_media_registry(tmp_path)
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True, exist_ok=True)
+    cycle_journal = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    cycle_journal.parent.mkdir(parents=True, exist_ok=True)
+    cycle_journal.write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "current-cycle",
+        "round_number": 4,
+        "at": "2026-10-22T10:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.executemany(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            [
+                ("historical-run-115668", 115668, "2026-10-21 10:00:00"),
+                ("historical-run-115666", 115666, "2026-10-21 11:00:00"),
+            ],
+        )
     for post_id in (115668, 115666):
         (journal_dir / f"{post_id}.json").write_text(json.dumps({
             "status": "committed",
             "readback": True,
-            "cycle_id": "historical-cycle",
-            "cycle_round": 2,
-            "authorization_id": "old-authorization",
+            "run_id": f"historical-run-{post_id}",
             "state": WorkState(
                 state=LifecycleState.PENDING,
                 phase=Phase.MEDIA,
@@ -348,6 +362,72 @@ def test_historical_journals_reconcile_only_with_complete_no_effect_evidence(tmp
     assert result.executed_ids == ()
     assert [item["post_id"] for item in result.details] == [115668, 115666]
     assert all(item["outcome"] == "not_executed" for item in result.details)
+
+
+def test_mixed_round_reconciles_committed_posts_before_live_pre_writer_journal(
+    tmp_path,
+):
+    _empty_media_registry(tmp_path)
+    ready_state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    )
+    pending_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    (journal_dir / "101.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "cycle_id": "current-cycle",
+        "cycle_round": 4,
+        "authorization_id": "current-auth",
+        "state": ready_state.to_dict(),
+    }), encoding="utf-8")
+    (journal_dir / "102.json").write_text(json.dumps({
+        "status": "running",
+        "post_id": 102,
+        "run_id": "live-run",
+        "cycle_id": "current-cycle",
+        "cycle_round": 4,
+        "authorization_id": "current-auth",
+        "protocol_version": 2,
+        "writer_started": False,
+        "state": pending_state.to_dict(),
+    }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [self.get_post(101), self.get_post(102)] if page == 1 else []
+
+        def get_post(self, post_id):
+            state = ready_state if int(post_id) == 101 else pending_state
+            return {
+                "id": int(post_id),
+                "status": "pending",
+                "meta": {"_hermes_work_state": json.dumps(state.to_dict())},
+            }
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [101, 102],
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=4,
+        expected_authorization_id="current-auth",
+    )
+
+    assert result is not None
+    assert result.reconciliation_blocked is False
+    assert result.reconciled_without_replay is True
+    assert result.executed_ids == (101, 102)
+    details = {item["post_id"]: item for item in result.details}
+    assert details[101]["outcome"] == "ready"
+    assert details[102]["outcome"] == "retry"
+    assert details[102]["recovery_status"] == "interrupted_pre_writer"
+    assert json.loads((journal_dir / "102.json").read_text())["status"] == "interrupted_pre_writer"
 
 
 def test_resume_five_post_authorized_round_reconciles_recovered_post_without_replay(tmp_path, monkeypatch):
