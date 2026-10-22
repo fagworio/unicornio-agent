@@ -12,7 +12,7 @@ from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
 from .model import LifecycleState
 from .production import ProductionCandidateReader
-from .runtime import run_v2
+from .runtime import _media_effect_evidence, run_v2
 
 
 def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
@@ -450,11 +450,37 @@ def _reconcile_completed_round(
             else:
                 unresolved.append({"post_id": int(post_id), "reason": "historical_effect_uncertain"})
             continue
+        if journal.get("status") in {"running", "validated"} and (
+            journal.get("writer_started") is False
+        ):
+            media_evidence = _media_effect_evidence(root, int(post_id), journal)
+            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "media_effects_pre_writer",
+                    "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                    "media_effect_evidence": media_evidence,
+                })
+            else:
+                # The protocol journal is still live.  Let write-mode perform
+                # the normal stale-journal transition after this safety check;
+                # do not count an unfinished transaction as reconciled.
+                return None
+            continue
         if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"} and (
             journal.get("resumable") is True
             and journal.get("writer_started") is False
             and journal.get("readback") is not True
         ):
+            media_evidence = _media_effect_evidence(root, int(post_id), journal)
+            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "media_effects_pre_writer",
+                    "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                    "media_effect_evidence": media_evidence,
+                })
+                continue
             detail = _reconciled_detail(int(post_id), journal, state)
             if detail is None:
                 unresolved.append({"post_id": int(post_id), "reason": "state_readback_invalid"})

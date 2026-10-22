@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.runtime import (
@@ -40,6 +41,43 @@ def test_recovery_refuses_ambiguous_running_journal(tmp_path):
     result = recover_interrupted_journal(tmp_path, 115676, apply=False)
     assert result["recovered"] is False
     assert result["reason"] == "insufficient_protocol_evidence"
+    assert json.loads(path.read_text())["status"] == "running"
+
+
+def test_recovery_blocks_pre_writer_journal_with_accepted_media_effect(tmp_path):
+    path = tmp_path / "work" / "v2-journal" / "115633.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "status": "running", "post_id": 115633, "run_id": "run-media",
+        "cycle_id": "cycle-a", "cycle_round": 4,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False,
+        "state": {"state": "pending", "phase": "media", "media": {
+            "inline": {"required": 3, "accepted": []},
+            "featured": {"status": "missing"},
+        }},
+    }), encoding="utf-8")
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(registry) as db:
+        db.execute(
+            """CREATE TABLE media_decisions (
+                run_id TEXT, candidate_id TEXT, disposition TEXT,
+                reason_code TEXT, scope TEXT
+            )"""
+        )
+        db.execute(
+            """INSERT INTO media_decisions
+               (run_id, candidate_id, disposition, reason_code, scope)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("run-media", "candidate-1", "accepted", "candidate_accepted", "candidate"),
+        )
+
+    result = recover_interrupted_journal(tmp_path, 115633, apply=True)
+
+    assert result["recovered"] is False
+    assert result["reason"] == "media_effects_pre_writer"
+    assert result["recovery_classification"] == "MEDIA_EFFECTS_PRE_WRITER"
+    assert "accepted_media_decision" in result["media_effect_evidence"]["reasons"]
     assert json.loads(path.read_text())["status"] == "running"
 
 

@@ -189,6 +189,73 @@ def test_reconcile_interrupted_pre_writer_as_retry_without_replay(tmp_path):
     assert result.details[0]["recovery_status"] == "interrupted_pre_writer"
 
 
+def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_path):
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{
+                "id": 115633,
+                "status": "pending",
+                "title": {"raw": "A"},
+                "content": {"raw": "<p>a</p>"},
+                "meta": {"_hermes_work_state": json.dumps(state.to_dict())},
+            }] if page == 1 else []
+
+        def get_post(self, post_id):
+            return self.list_pending(page=1, per_page=1, status="pending")[0]
+
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "115633.json").write_text(json.dumps({
+        "status": "interrupted_pre_writer", "resumable": True,
+        "readback": False, "writer_started": False,
+        "run_id": "run-media", "cycle_id": "cycle-test", "cycle_round": 4,
+        "authorization_id": "auth-test", "state": state.to_dict(),
+    }), encoding="utf-8")
+    registry_path = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(registry_path) as db:
+        db.execute(
+            """CREATE TABLE media_decisions (
+                run_id TEXT, candidate_id TEXT, disposition TEXT,
+                reason_code TEXT, scope TEXT
+            )"""
+        )
+        db.execute(
+            """INSERT INTO media_decisions
+               (run_id, candidate_id, disposition, reason_code, scope)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("run-media", "candidate-1", "accepted", "candidate_accepted", "candidate"),
+        )
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [115633], expected_cycle_id="cycle-test",
+        expected_cycle_round=4, expected_authorization_id="auth-test",
+    )
+
+    assert result is not None
+    assert result.reconciliation_blocked is True
+    assert result.executed_ids == ()
+    assert result.reconciliation_blocking_info["unresolved_posts"] == [{
+        "post_id": 115633,
+        "reason": "media_effects_pre_writer",
+        "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+        "media_effect_evidence": {
+            "media_registry_checked": True,
+            "effects_detected": True,
+            "evidence_status": "effects_detected",
+            "reasons": ["accepted_media_decision"],
+            "accepted_media_ids": [],
+            "applied_media_ids": [],
+            "accepted_decision_count": 1,
+        },
+    }]
+
+
 
 def test_reconcile_completed_round_separates_journal_from_another_cycle(tmp_path):
     journal_dir = tmp_path / "work" / "v2-journal"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -779,6 +780,164 @@ def _write_v2_journal_checkpoint(
     _write_v2_journal_payload(target, payload)
 
 
+def _media_effect_evidence(
+    root: Path,
+    post_id: int,
+    journal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Detect media effects that make pre-writer recovery unsafe.
+
+    ``writer_started=false`` only describes the WordPress writer.  Media
+    acquisition can already have accepted assets and persisted them in the
+    partial checkpoint or registry.  Recovery must surface that state instead
+    of converting it into a normal retry and risking a second upload.
+    """
+    initial_state = journal.get("state") if isinstance(journal.get("state"), Mapping) else {}
+    initial_media = initial_state.get("media") if isinstance(initial_state, Mapping) else {}
+    initial_inline = initial_media.get("inline") if isinstance(initial_media, Mapping) else []
+    initial_assets = (
+        initial_inline.get("accepted", [])
+        if isinstance(initial_inline, Mapping)
+        else initial_inline
+    )
+    initial_ids = {
+        int(item.get("media_id"))
+        for item in (initial_assets if isinstance(initial_assets, list) else [])
+        if isinstance(item, Mapping) and str(item.get("media_id") or "").isdigit()
+    }
+    initial_featured = initial_media.get("featured") if isinstance(initial_media, Mapping) else {}
+    if isinstance(initial_featured, Mapping) and str(initial_featured.get("media_id") or "").isdigit():
+        initial_ids.add(int(initial_featured["media_id"]))
+
+    reasons: list[str] = []
+    accepted_media_ids: set[int] = set()
+    applied_media_ids: set[int] = set()
+    accepted_decision_count = 0
+    partial_path = Path(root) / "backups" / str(int(post_id)) / "editorial.partial.json"
+    if partial_path.is_file():
+        try:
+            partial = json.loads(partial_path.read_text(encoding="utf-8"))
+            partial_inline = partial.get("inline") if isinstance(partial, Mapping) else []
+            partial_assets = (
+                partial_inline.get("accepted", [])
+                if isinstance(partial_inline, Mapping)
+                else partial_inline
+            )
+            partial_ids = {
+                int(item.get("media_id"))
+                for item in (partial_assets if isinstance(partial_assets, list) else [])
+                if isinstance(item, Mapping) and str(item.get("media_id") or "").isdigit()
+            }
+            partial_featured = partial.get("featured") if isinstance(partial, Mapping) else {}
+            if isinstance(partial_featured, Mapping) and str(partial_featured.get("media_id") or "").isdigit():
+                partial_ids.add(int(partial_featured["media_id"]))
+            new_partial_ids = partial_ids - initial_ids
+            if new_partial_ids:
+                accepted_media_ids.update(new_partial_ids)
+                reasons.append("partial_media_checkpoint")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            reasons.append("partial_media_checkpoint_unreadable")
+
+    registry_path = Path(root) / "work" / "media_registry.sqlite"
+    if not registry_path.is_file():
+        return {
+            "media_registry_checked": False,
+            "effects_detected": bool(reasons),
+            "evidence_status": "effects_detected" if reasons else "not_available",
+            "reasons": reasons,
+            "accepted_media_ids": sorted(accepted_media_ids),
+            "applied_media_ids": sorted(applied_media_ids),
+            "accepted_decision_count": accepted_decision_count,
+        }
+
+    run_id = str(journal.get("run_id") or "")
+    try:
+        with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as db:
+            table_names = {
+                str(row[0])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "media_decisions" in table_names and run_id:
+                rows = db.execute(
+                    """SELECT candidate_id, disposition, reason_code, scope
+                       FROM media_decisions WHERE run_id = ?""",
+                    (run_id,),
+                ).fetchall()
+                accepted_rows = [
+                    row for row in rows
+                    if str(row[1] or "") == "accepted"
+                    or str(row[2] or "") == "candidate_accepted"
+                ]
+                if accepted_rows:
+                    accepted_decision_count = len(accepted_rows)
+                    reasons.append("accepted_media_decision")
+            if "media_usage" in table_names:
+                rows = db.execute(
+                    """SELECT wordpress_media_id, status
+                       FROM media_usage WHERE post_id = ?""",
+                    (int(post_id),),
+                ).fetchall()
+                for media_id, status in rows:
+                    if media_id is None:
+                        continue
+                    try:
+                        media_id = int(media_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if media_id not in initial_ids:
+                        accepted_media_ids.add(media_id)
+                        if str(status or "") == "applied":
+                            applied_media_ids.add(media_id)
+                        reasons.append("media_usage_outside_initial_state")
+            if "media_runs" in table_names and run_id:
+                row = db.execute(
+                    """SELECT planned_deficits, acquisition_outcome
+                       FROM media_runs WHERE run_id = ?""",
+                    (run_id,),
+                ).fetchone()
+                if row:
+                    try:
+                        planned = json.loads(row[0] or "{}")
+                    except (TypeError, ValueError):
+                        planned = {}
+                    initial = planned.get("initial") if isinstance(planned, Mapping) else {}
+                    final = planned.get("final") if isinstance(planned, Mapping) else {}
+                    if isinstance(initial, Mapping) and isinstance(final, Mapping):
+                        try:
+                            progressed = (
+                                int(final.get("accepted", 0) or 0)
+                                > int(initial.get("accepted", 0) or 0)
+                                or int(final.get("missing", 0) or 0)
+                                < int(initial.get("missing", 0) or 0)
+                            )
+                        except (TypeError, ValueError):
+                            progressed = True
+                        if progressed:
+                            reasons.append("media_run_progress")
+    except (OSError, sqlite3.Error):
+        return {
+            "media_registry_checked": False,
+            "effects_detected": True,
+            "evidence_status": "evidence_unavailable",
+            "reasons": [*reasons, "media_registry_unreadable"],
+            "accepted_media_ids": sorted(accepted_media_ids),
+            "applied_media_ids": sorted(applied_media_ids),
+            "accepted_decision_count": accepted_decision_count,
+        }
+
+    return {
+        "media_registry_checked": True,
+        "effects_detected": bool(reasons),
+        "evidence_status": "effects_detected" if reasons else "no_effects_detected",
+        "reasons": reasons,
+        "accepted_media_ids": sorted(accepted_media_ids),
+        "applied_media_ids": sorted(applied_media_ids),
+        "accepted_decision_count": accepted_decision_count,
+    }
+
+
 def recover_interrupted_journal(
     root: Path,
     post_id: int,
@@ -803,6 +962,17 @@ def recover_interrupted_journal(
         return {"post_id": int(post_id), "recovered": False, "reason": "already_recovered"}
     if journal.get("status") != "running":
         return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
+    media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
+    if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+        return {
+            "post_id": int(post_id),
+            "recovered": False,
+            "reason": "media_effects_pre_writer",
+            "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+            "write_started": False,
+            "recovered_from_run_id": str(journal.get("run_id") or ""),
+            "media_effect_evidence": media_evidence,
+        }
     protocol_evidence = journal.get("protocol_version") == 2 and journal.get("writer_started") is False
     legacy_evidence_ok = bool(
         isinstance(legacy_evidence, Mapping)
@@ -890,6 +1060,20 @@ def _incomplete_v2_journal_conflicts(
             or journal.get("readback") is True
         ):
             continue
+        if journal.get("status") in {"running", "validated"} and (
+            journal.get("writer_started") is False
+        ):
+            media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
+            if media_evidence.get("effects_detected") or media_evidence.get("evidence_status") == "evidence_unavailable":
+                conflicts.append({
+                    "post_id": int(post_id),
+                    "reason": "media_effects_pre_writer",
+                    "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                    "status": str(journal.get("status") or "unknown"),
+                    "run_id": str(journal.get("run_id") or "") or None,
+                    "media_effect_evidence": media_evidence,
+                })
+                continue
         conflicts.append({
             "post_id": int(post_id),
             "reason": "incomplete_journal",
