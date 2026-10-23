@@ -195,7 +195,6 @@ def _prepare_editorial_media_structure(
         normalization = normalize_normal_article_paragraphs(
             body,
             required_paragraphs=target_paragraphs,
-            max_words=max(1000, len(body)),
         )
         body = str(normalization["html"])
         normalization_audit = dict(normalization["audit"])

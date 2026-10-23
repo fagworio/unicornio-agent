@@ -25,6 +25,7 @@ _EMPTY_PARAGRAPH_BODY_RE = re.compile(
     r"(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*",
     re.IGNORECASE,
 )
+MAX_NORMAL_ARTICLE_NORMALIZATION_WORDS = 2000
 
 
 class _BalancedMediaHtmlParser(HTMLParser):
@@ -582,7 +583,7 @@ def normalize_normal_article_paragraphs(
     html: str,
     *,
     required_paragraphs: int,
-    max_words: int = 1000,
+    max_words: int = MAX_NORMAL_ARTICLE_NORMALIZATION_WORDS,
 ) -> dict[str, Any]:
     """Safely increase paragraph capacity without changing editorial text."""
     if not isinstance(html, str) or required_paragraphs < 1:

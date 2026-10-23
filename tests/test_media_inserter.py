@@ -153,6 +153,33 @@ class MediaInserterTests(unittest.TestCase):
         assert normalized["audit"]["changed"] is True
         assert "<a href" not in normalized["html"]
 
+    def test_normalizer_keeps_structural_recovery_enabled_at_1001_words(self):
+        sentence = "A equipe confirmou detalhes importantes sobre o jogo e explicou as mudanças previstas para os jogadores. "
+        paragraphs = [sentence * 50, sentence * 50] + [
+            f"O parágrafo {index} preserva os detalhes desta atualização editorial."
+            for index in range(1, 8)
+        ]
+        body = "".join(f"<p>{text}</p>" for text in paragraphs)
+        original_words = len(re.findall(r"\b[\wÀ-ÿ]+\b", body))
+        assert original_words > 1000
+        normalized = normalize_normal_article_paragraphs(body, required_paragraphs=11)
+        assert normalized["audit"]["reason"] != "editorial_restructure_required: word_count_limit"
+        assert normalized["audit"]["changed"] is True
+        assert normalized["audit"]["final_paragraphs"] == 11
+        assert normalized["audit"]["original_words"] == normalized["audit"]["final_words"]
+
+    def test_normalizer_bounds_work_for_abnormally_large_editorial_body(self):
+        sentence = "A equipe confirmou detalhes importantes sobre o jogo e explicou as mudanças previstas para os jogadores. "
+        body = f"<p>{sentence * 200}</p>" + "".join(
+            f"<p>O parágrafo {index} preserva os detalhes desta atualização editorial.</p>"
+            for index in range(1, 8)
+        )
+        assert len(re.findall(r"\b[\wÀ-ÿ]+\b", body)) > 2000
+        normalized = normalize_normal_article_paragraphs(body, required_paragraphs=11)
+        assert normalized["audit"]["reason"] == "editorial_restructure_required: word_count_limit"
+        assert normalized["html"] == body
+        assert normalized["audit"]["changed"] is False
+
     def test_normalizer_preserves_inline_links_and_refuses_shortcodes(self):
         linked = (
             "<p>Uma notícia importante foi confirmada pela "
