@@ -69,15 +69,29 @@ def _normalized_url(value: str, base_url: str = "") -> str:
     return urlunparse((parsed.scheme.casefold(), host, parsed.path or "/", "", parsed.query, ""))
 
 
-def _jsonld_nodes(value: Any):
+def _schema_context(context: Any) -> bool:
+    if isinstance(context, str):
+        return context.rstrip("/").casefold() in {
+            "https://schema.org", "http://schema.org"
+        }
+    if isinstance(context, list):
+        return any(_schema_context(item) for item in context)
+    if isinstance(context, dict):
+        vocab = str(context.get("@vocab") or "").rstrip("/").casefold()
+        return vocab in {"https://schema.org", "http://schema.org"}
+    return False
+
+
+def _jsonld_nodes(value: Any, inherited_schema_context: bool = False):
     if isinstance(value, dict):
-        yield value
+        has_schema_context = inherited_schema_context or _schema_context(value.get("@context"))
+        yield value, has_schema_context
         for child in value.values():
             if isinstance(child, (dict, list)):
-                yield from _jsonld_nodes(child)
+                yield from _jsonld_nodes(child, has_schema_context)
     elif isinstance(value, list):
         for child in value:
-            yield from _jsonld_nodes(child)
+            yield from _jsonld_nodes(child, inherited_schema_context)
 
 
 def _schema_values(value: Any, keys: tuple[str, ...]) -> list[str]:
@@ -108,12 +122,16 @@ def _image_object_proves_license(
     declared_license = _normalized_url(license_url, source_page_url)
     if not image_url or not declared_license:
         return False
-    for node in _jsonld_nodes(document):
+    for node, has_schema_context in _jsonld_nodes(document):
         raw_types = node.get("@type")
         types = raw_types if isinstance(raw_types, list) else [raw_types]
         if not any(
-            str(value or "").rstrip("/#").casefold()
-            in {"imageobject", "https://schema.org/imageobject", "http://schema.org/imageobject"}
+            (
+                str(value or "").rstrip("/#").casefold() == "imageobject"
+                and has_schema_context
+            )
+            or str(value or "").rstrip("/#").casefold()
+            in {"https://schema.org/imageobject", "http://schema.org/imageobject"}
             for value in types
         ):
             continue

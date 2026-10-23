@@ -200,6 +200,17 @@ class LicenseTests(unittest.TestCase):
         )
         self.assertIsNone(attest_source_rights(value, html))
 
+    def test_rejects_compact_image_object_without_schema_context(self):
+        value = candidate()
+        html = (
+            '<script type="application/ld+json">'
+            '{"@context":"https://attacker.example/vocab","@type":"ImageObject",'
+            '"contentUrl":"https://upload.wikimedia.org/game.jpg",'
+            '"license":"https://creativecommons.org/licenses/by-sa/4.0/"}'
+            "</script>"
+        )
+        self.assertIsNone(attest_source_rights(value, html))
+
     def test_invalid_image_url_in_structured_evidence_fails_closed(self):
         value = candidate()
         value["direct_image_url"] = "https://upload.wikimedia.org:invalid/game.jpg"
