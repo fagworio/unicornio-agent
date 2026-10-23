@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ssl
 import sys
 import types
 
@@ -325,3 +326,51 @@ def test_ddg_http_202_isolated_and_bing_fallback_can_reach_capacity(monkeypatch,
     assert result["completion_reason"] == "TARGET_REACHED"
     assert result["candidates"][0]["engine"] == "bing"
     assert calls == ["bing"]
+
+
+def test_ddg_tls_failure_is_isolated_and_bing_fallback_can_reach_capacity(monkeypatch, tmp_path):
+    class TLSFailure(_DuckduckgoImages):
+        def _request(self, _method, _url, **_kwargs):
+            raise ssl.SSLError("certificate verification failed")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ddgs.engines.duckduckgo_images",
+        types.SimpleNamespace(DuckduckgoImages=TLSFailure),
+    )
+    ca_bundle = tmp_path / "ca.pem"
+    ca_bundle.write_text("test CA bundle", encoding="utf-8")
+    monkeypatch.setenv("EDITOR_DDGS_CA_BUNDLE", str(ca_bundle))
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "duckduckgo,bing,yandex")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_REQUIRED_PROVIDERS", "bing,yandex")
+
+    def bing_candidate(query, report=None, **_kwargs):
+        report.update({"failure_kind": "ok", "candidates": 1})
+        return [{
+            "query": query,
+            "direct_image_url": "https://cdn.example/approved.jpg",
+            "source_page_url": "https://publisher.example/game",
+            "usable": True,
+            "engine": "bing",
+        }]
+
+    monkeypatch.setattr(search, "search_bing_images", bing_candidate)
+    monkeypatch.setattr(
+        search,
+        "search_yandex_images",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("capacity should stop before Yandex")
+        ),
+    )
+    result = search.search_web_images_batch(
+        ["query"],
+        limit=1,
+        accept=lambda candidates, _query: sum(
+            bool(item.get("usable")) for item in candidates
+        ),
+    )[0]
+
+    assert result["engine_reports"]["duckduckgo"]["failure_kind"] == "provider_error"
+    assert result["engine_reports"]["duckduckgo"]["error"] == "SSLError"
+    assert result["completion_reason"] == "TARGET_REACHED"
+    assert result["candidates"][0]["engine"] == "bing"
