@@ -1003,15 +1003,16 @@ class ProductionComposeStage:
                     "subject": item.subject,
                 })
             closing_repeat_record: dict[str, Any] = {}
+            candidate_inline = eligible_inline
             if not is_listicle:
                 if source_layout_policy:
                     planned_positions = list(source_layout_policy.get("placement_plan") or [])
-                    if len(placements) > len(planned_positions):
-                        raise MediaInsertionError(
-                            "composed media exceeds the verified layout placement capacity: "
-                            f"requested={len(placements)}, available={len(planned_positions)}",
-                            code="insufficient_paragraph_slots",
-                        )
+                    layout_quota_reduced = (
+                        source_layout_policy.get("reduction_reason") == "layout_limited"
+                        and int(source_layout_policy.get("target_effective") or 0)
+                        < int(source_layout_policy.get("target_ideal") or 0)
+                        and accounting.valid_distinct_inline_count <= ideal_required
+                    )
                     body_hash = str(source_layout_policy.get("body_sha256") or "")
                     if editorial_body_sha256(existing_html) != body_hash:
                         raise MediaInsertionError(
@@ -1072,11 +1073,17 @@ class ProductionComposeStage:
                             use_closing_repeat = False
                             available_positions = planned_positions
                         if len(placements) > len(available_positions):
-                            raise MediaInsertionError(
-                                "composed media exceeds the verified layout placement capacity: "
-                                f"requested={len(placements)}, available={len(available_positions)}",
-                                code="insufficient_paragraph_slots",
-                            )
+                            if not layout_quota_reduced:
+                                raise MediaInsertionError(
+                                    "composed media exceeds the verified layout placement capacity: "
+                                    f"requested={len(placements)}, available={len(available_positions)}",
+                                    code="insufficient_paragraph_slots",
+                                )
+                            # When the verified policy already reduced the quota,
+                            # retain only the deterministic first-fit set in this
+                            # candidate. The writer preserves valid excess media
+                            # as accepted-but-not-applied working state.
+                            placements = placements[:len(available_positions)]
                     selected_slots = select_normal_media_slots(
                         [int(row["paragraph_index"]) for row in available_positions],
                         len(placements),
@@ -1116,6 +1123,21 @@ class ProductionComposeStage:
                             "paragraph_index": repeat_slot,
                             "placement": "after_editorial_body",
                         }
+                    already_embedded_urls = {
+                        _canonical_media_ref(str(image.get("src") or ""))
+                        for image in iter_content_images(existing_html)
+                        if str(image.get("src") or "").strip()
+                    }
+                    placed_urls = {
+                        _canonical_media_ref(str(item.get("media_url") or ""))
+                        for item in placements
+                        if item.get("role") != "closing_featured_repeat"
+                    }
+                    candidate_urls = already_embedded_urls | placed_urls
+                    candidate_inline = tuple(
+                        item for item in eligible_inline
+                        if _canonical_media_ref(str(item.media_url or "")) in candidate_urls
+                    )
                 else:
                     if placements:
                         placements = plan_normal_media_insertions(existing_html, placements)
@@ -1166,7 +1188,7 @@ class ProductionComposeStage:
             candidate_editorial["cleaned_html"] = prepared_body
             candidate_media = replace(
                 media,
-                inline=eligible_inline,
+                inline=candidate_inline,
                 accepted_count=None,
                 layout_policy=source_layout_policy,
                 closing_featured_repeat=closing_repeat_record,

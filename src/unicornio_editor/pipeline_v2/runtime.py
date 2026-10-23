@@ -750,6 +750,23 @@ def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -
     temporary.replace(target)
 
 
+def _v2_inline_media_ids_to_invalidate(
+    previous: MediaProgress, retained: MediaProgress,
+) -> list[int]:
+    """Invalidate only prior inline assets omitted from the retained V2 state."""
+    previous_ids = {
+        int(item.media_id)
+        for item in getattr(previous, "inline", ())
+        if getattr(item, "media_id", None)
+    }
+    retained_ids = {
+        int(item.media_id)
+        for item in getattr(retained, "inline", ())
+        if getattr(item, "media_id", None)
+    }
+    return sorted(previous_ids - retained_ids)
+
+
 def _write_v2_journal_payload(
     target: Path,
     payload: Mapping[str, Any],
@@ -2843,6 +2860,7 @@ class WordPressWriterV2:
             if str(item.media_url or "").strip()
         ]
         proposed_media = getattr(proposed_state, "media", None)
+        layout_target_reduced = False
         candidate_media = (
             MediaProgress.from_dict(candidate.get("media"))
             if outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
@@ -2879,6 +2897,9 @@ class WordPressWriterV2:
                         "approved candidate has invalid media layout evidence: "
                         + str(layout_result.get("reason") or "required_count_mismatch")
                     )
+                layout_target_reduced = (
+                    int(layout_result.get("target_effective") or 0) < layout_ideal
+                )
             _assert_candidate_media_contract(
                 content,
                 candidate_media if candidate_media_present else proposed_media,
@@ -2942,6 +2963,18 @@ class WordPressWriterV2:
                 or getattr(candidate_featured, "media_id", None) != candidate.get("featured_media")
             ):
                 raise RuntimeError("approved candidate featured media diverges from validated V2 state")
+        accepted_working_not_applied_ids: set[int] = set()
+        if layout_target_reduced and candidate_media_present:
+            proposed_accounting = account_visual_media(proposed_media)
+            valid_not_applied_ids = (
+                set(proposed_accounting.valid_inline_ids) - set(candidate_inline_ids)
+            )
+            effective_target = int(getattr(candidate_media, "required", 0) or 0)
+            if (
+                proposed_accounting.valid_distinct_inline_count <= layout_ideal
+                and len(valid_not_applied_ids) <= max(0, layout_ideal - effective_target)
+            ):
+                accepted_working_not_applied_ids = valid_not_applied_ids
         media_ids = {
             int(item.media_id)
             for item in getattr(proposed_media, "inline", ())
@@ -3013,6 +3046,8 @@ class WordPressWriterV2:
                 "SAME_IMAGE", "SAME_ART_CROP",
             }:
                 record["destination"] = "rejected_duplicate"
+            elif int(record.get("media_id") or 0) in accepted_working_not_applied_ids:
+                record["destination"] = "accepted_working_not_applied"
         media_state = "accepted_working" if media_ids else "apply_not_attempted"
         media_readback_status = "not_attempted"
         journal = journal_dir / f"{post_id}.json"
@@ -3181,11 +3216,15 @@ class WordPressWriterV2:
                 if destination:
                     record["destination"] = destination
             if candidate_media_present:
+                retained_inline_ids = set(candidate_inline_ids) | accepted_working_not_applied_ids
                 final_state = replace(
                     proposed_state,
                     media=replace(
                         proposed_media,
-                        inline=tuple(candidate_media.inline),
+                        inline=tuple(
+                            item for item in getattr(proposed_media, "inline", ())
+                            if int(getattr(item, "media_id", 0) or 0) in retained_inline_ids
+                        ),
                         featured=candidate_media.featured,
                         accepted_count=None,
                         layout_policy=dict(candidate_media.layout_policy),
@@ -3856,12 +3895,13 @@ def run_v2(
                         candidate_path = root / "backups" / str(post_id) / "editorial.candidate.json"
                         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
                         applied_media = MediaProgress.from_dict(candidate_payload.get("media"))
-                        previous_ids = {item.media_id for item in initial.media.inline}
-                        applied_inline_ids = {item.media_id for item in applied_media.inline}
                         invalidate_v2_media(
                             root,
                             post_id=int(post_id),
-                            media_ids=sorted(previous_ids - applied_inline_ids),
+                            media_ids=_v2_inline_media_ids_to_invalidate(
+                                initial.media,
+                                buffered.state.media,
+                            ),
                             role="inline",
                         )
                         observed_state = replace(

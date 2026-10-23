@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,11 @@ from unicornio_editor.pipeline_v2.production_stages import (
     _repair_focus_keyword_draft,
 )
 from unicornio_editor.pipeline_v2.production import ProductionContextLoader
-from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, _embedded_media_urls
+from unicornio_editor.pipeline_v2.runtime import (
+    WordPressWriterV2,
+    _embedded_media_urls,
+    _v2_inline_media_ids_to_invalidate,
+)
 from unicornio_editor.media.registry import (
     connect as connect_media_registry,
     invalidate_v2_media,
@@ -454,6 +459,152 @@ def test_compose_keeps_quota_body_separate_from_composed_media_html(tmp_path, mo
     assert candidate["content"].count("<img") == 3
     assert candidate["media"]["inline"]["required"] == 3
     assert candidate["media"]["layout_policy"] == audit["media_layout_policy"]
+
+
+def test_layout_capacity_caps_candidate_and_preserves_excess_working_media(tmp_path, monkeypatch):
+    post_id = 115790
+    run_id = "run-layout-capacity-115790"
+    title = "Notícia sobre videogame"
+    body = _long_single_sentence_body(10)
+    description = (
+        "A atualização explica os detalhes confirmados sobre videogame, os impactos para os jogadores "
+        "e o contexto necessário para acompanhar esta notícia."
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.runtime.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        399,
+        "https://media.example/featured-399.webp",
+        "f" * 64,
+        "f" * 16,
+        "visual:" + "f" * 24,
+        {"decision": "INITIAL"},
+        "Arte de capa do videogame",
+        "Crédito da imagem: Fonte oficial",
+        1280,
+        720,
+    )
+    editorial = {
+        "title": title,
+        "cleaned_html": body,
+        "seo": {
+            "title": title,
+            "meta_description": description,
+            "focus_keyword": "videogame",
+        },
+        "site_relevance": {"decision": "process"},
+    }
+    prepared, audit, error = _prepare_editorial_media_structure(
+        editorial,
+        WorkState(phase=Phase.EDITORIAL, media=MediaProgress(required=4, featured=featured)),
+        title=title,
+    )
+    assert error is None
+    policy = audit["media_layout_policy"]
+    assert audit["target_ideal"] == 4
+    assert audit["target_effective"] == 3
+    directory = tmp_path / "backups" / str(post_id)
+    directory.mkdir(parents=True)
+    (directory / "editorial.structure.json").write_text(json.dumps(audit), encoding="utf-8")
+    (directory / "editorial.draft.json").write_text(json.dumps(prepared), encoding="utf-8")
+    accepted = tuple(
+        _verified_inline(media_id, f"https://media.example/inline-{media_id}.webp", slot)
+        for slot, media_id in enumerate((301, 302, 303, 304))
+    )
+    working_media = MediaProgress(
+        required=4,
+        inline=accepted,
+        featured=featured,
+        layout_policy=policy,
+    )
+    context = {
+        "post_id": post_id,
+        "title": title,
+        "original_link": None,
+        "v2_run_id": run_id,
+    }
+
+    candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
+        context, prepared, working_media,
+    )
+
+    candidate_media = MediaProgress.from_dict(candidate["media"])
+    assert [item.media_id for item in candidate_media.inline] == [301, 302, 303]
+    assert [item.media_id for item in working_media.inline] == [301, 302, 303, 304]
+    assert len(_embedded_media_urls(candidate["content"])) == 3
+    assert "https://media.example/inline-304.webp" not in candidate["content"]
+
+    candidate_hash = hashlib.sha256(candidate["content"].encode()).hexdigest()
+    (directory / "editorial.validation.json").write_text(json.dumps({
+        "_v2_run_id": run_id,
+        "candidate_run_id": run_id,
+        "candidate_hash": candidate_hash,
+    }), encoding="utf-8")
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": post_id,
+                "status": "pending",
+                "title": {"raw": title},
+                "content": {"raw": "<p>Conteúdo anterior.</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.updates = []
+            self.uploads = []
+            self.deletes = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            for key, value in update.items():
+                if key == "meta":
+                    self.post.setdefault("meta", {}).update(value)
+                else:
+                    self.post[key] = value
+
+    client = Client()
+    proposed = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+        media=MediaProgress(
+            required=3,
+            inline=accepted,
+            featured=featured,
+            layout_policy=policy,
+        ),
+    )
+    result = WordPressWriterV2(client, tmp_path).commit(
+        post_id,
+        {**context, "candidate_must_be_fresh": True},
+        proposed,
+        Outcome.ready(),
+    )
+
+    persisted = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+    assert [item.media_id for item in persisted.media.inline] == [301, 302, 303, 304]
+    assert result["applied_inline_ids"] == [301, 302, 303]
+    assert len(_embedded_media_urls(client.post["content"]["raw"])) == 3
+    assert not client.uploads and not client.deletes
+    journal = json.loads((tmp_path / "work/v2-journal" / f"{post_id}.json").read_text())
+    excess_record = next(
+        row for row in journal["media_records"]
+        if row["role"] == "inline" and row["media_id"] == 304
+    )
+    assert excess_record["destination"] == "accepted_working_not_applied"
+    assert 304 not in {row["media_id"] for row in journal["apply_media_records"]}
+    assert _v2_inline_media_ids_to_invalidate(working_media, persisted.media) == []
 
 
 def test_compose_adds_non_distinct_featured_only_at_verified_exhausted_closure(tmp_path, monkeypatch):
