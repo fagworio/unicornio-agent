@@ -36,7 +36,10 @@ _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
 _HEADING_RE = re.compile(r"<h([1-4])\b[^>]*>", re.IGNORECASE)
-_EMPTY_PARAGRAPH_RE = re.compile(r"<p\b[^>]*>\s*(?:&nbsp;)?\s*</p>", re.IGNORECASE)
+_EMPTY_PARAGRAPH_RE = re.compile(
+    r"<p\b[^>]*>(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*</p>",
+    re.IGNORECASE,
+)
 
 
 def _canonical_image_url(value: str) -> str:

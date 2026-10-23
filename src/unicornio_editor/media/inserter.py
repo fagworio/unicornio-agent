@@ -18,6 +18,62 @@ class MediaInsertionError(ValueError):
         self.code = code
 
 
+_EMPTY_PARAGRAPH_RE = re.compile(r"<p>(?P<body>[\s\S]*?)</p>", re.IGNORECASE)
+_EMPTY_PARAGRAPH_BODY_RE = re.compile(
+    r"(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*",
+    re.IGNORECASE,
+)
+
+
+def remove_empty_paragraphs(html: str) -> dict[str, Any]:
+    """Remove only attribute-free paragraphs containing no visible content.
+
+    Anchored or otherwise attributed paragraphs are preserved because their
+    attributes may carry navigation or presentation semantics. Images, links,
+    comments, shortcodes, and all non-empty text are left untouched.
+    """
+    if not isinstance(html, str):
+        raise MediaInsertionError("HTML must be a string")
+    removed = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal removed
+        if not _EMPTY_PARAGRAPH_BODY_RE.fullmatch(match.group("body")):
+            return match.group(0)
+        removed += 1
+        return ""
+
+    cleaned = _EMPTY_PARAGRAPH_RE.sub(replace, html)
+    return {
+        "html": cleaned,
+        "audit": {"removed": removed, "changed": cleaned != html},
+    }
+
+
+def minimum_normal_article_paragraphs(
+    image_count: int,
+    *,
+    minimum_spacing: int = 3,
+    allow_after_body: bool = True,
+) -> int:
+    """Paragraph target for media slots including the explicit body-end slot.
+
+    Normal articles reserve the first image until after two substantive lead
+    paragraphs. Each further image needs ``minimum_spacing`` more paragraphs.
+    The final image may follow the last paragraph when that paragraph ends the
+    editorial body; generated trailer/footer blocks are appended afterwards.
+    When the input has meaningful tail markup after its last paragraph, callers
+    must set ``allow_after_body=False`` and retain the prior internal boundary.
+    """
+    if isinstance(image_count, bool) or image_count < 0:
+        raise MediaInsertionError("image_count must be non-negative")
+    if isinstance(minimum_spacing, bool) or minimum_spacing < 1:
+        raise MediaInsertionError("minimum_spacing must be positive")
+    if image_count == 0:
+        return 0
+    return (2 if allow_after_body else 3) + minimum_spacing * (image_count - 1)
+
+
 def append_featured_credit(html: str, credit_text: str) -> str:
     """Add one visible featured-image credit without duplicating it.
 
@@ -176,9 +232,18 @@ def plan_normal_media_insertions(
         raise MediaInsertionError("minimum_spacing must be positive")
     paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>\s*", html, flags=re.IGNORECASE | re.DOTALL)
     paragraph_count = len(paragraphs)
-    # ``insert_media`` only accepts a boundary before the final paragraph;
-    # the last valid index is therefore N-2, not N-1.
-    last_slot = max(0, paragraph_count - 2)
+    paragraph_ends = list(re.finditer(r"</p>\s*", html, flags=re.IGNORECASE))
+    has_body_end_slot = bool(
+        paragraph_ends
+        and not html[paragraph_ends[-1].end():].strip()
+    )
+    # The last boundary is safe only when the final closed paragraph also ends
+    # the editorial body. Non-paragraph tail markup keeps the older boundary.
+    last_slot = (
+        paragraph_count - 1
+        if has_body_end_slot
+        else max(0, paragraph_count - 2)
+    )
     count = len(plan)
     if count == 0:
         return []
@@ -216,7 +281,11 @@ def plan_normal_media_insertions(
         ]
     planned: list[dict[str, Any]] = []
     for item, slot in zip(plan, slots):
-        planned.append({**dict(item), "paragraph_index": int(slot)})
+        placement = dict(item)
+        placement["paragraph_index"] = int(slot)
+        if has_body_end_slot and slot == last_slot:
+            placement["placement"] = "after_editorial_body"
+        planned.append(placement)
     return planned
 
 
@@ -311,7 +380,16 @@ def normalize_normal_article_paragraphs(
     candidates: list[tuple[int, int, str, str]] = []
     for index, match in enumerate(matches):
         body = match.group("body")
-        if _plain_word_count(body) < 36 or "<h" in body.casefold() or "[" in body or "]" in body:
+        # Splitting duplicates the opening <p> tag. Only plain paragraphs are
+        # eligible so IDs, classes, styling, and accessibility attributes are
+        # never duplicated or moved to a different text fragment.
+        if (
+            not re.fullmatch(r"<p\s*>", match.group("open"), re.IGNORECASE)
+            or _plain_word_count(body) < 36
+            or "<h" in body.casefold()
+            or "[" in body
+            or "]" in body
+        ):
             continue
         if _safe_sentence_boundaries(body):
             candidates.append((index, _plain_word_count(body), match.group("open"), body))
@@ -372,15 +450,28 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         required = {"paragraph_index", "media_url", "alt_text", "credit_text", "width", "height"}
         allowed = required | {
             "item_identity", "item_title", "item_group", "html_position",
-            "item_number", "section_heading", "section_slot", "subject",
+            "item_number", "section_heading", "section_slot", "subject", "placement",
         }
         if not required.issubset(item) or set(item) - allowed:
             raise MediaInsertionError("media placement has missing or unknown fields")
         index = item["paragraph_index"]
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise MediaInsertionError("paragraph_index must be non-negative")
-        if index >= len(paragraph_ends) - (1 if not listicle else 0):
+        placement_kind = item.get("placement")
+        after_editorial_body = placement_kind == "after_editorial_body"
+        if placement_kind is not None and not after_editorial_body:
+            raise MediaInsertionError("unsupported media placement")
+        if after_editorial_body and (
+            listicle
+            or not paragraph_ends
+            or index != len(paragraph_ends) - 1
+            or html[paragraph_ends[-1]:].strip()
+        ):
+            raise MediaInsertionError("after_editorial_body requires the final paragraph boundary")
+        if not after_editorial_body and index >= len(paragraph_ends) - (1 if not listicle else 0):
             raise MediaInsertionError("media must be inserted between paragraphs")
+        if listicle and after_editorial_body:
+            raise MediaInsertionError("listicle media must remain attached to its numbered item")
         if not listicle:
             if index in indexes or any(abs(index - other) < 3 for other in indexes):
                 raise MediaInsertionError("images must be at least three paragraphs apart")
@@ -463,8 +554,8 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             position = start + heading.end()
             html = html[:position] + figure + html[position:]
         return html
-    for index, figure, _item in sorted(placements, key=lambda value: value[0], reverse=True):
-        position = paragraph_ends[index]
+    for index, figure, item in sorted(placements, key=lambda value: value[0], reverse=True):
+        position = len(html.rstrip()) if item.get("placement") == "after_editorial_body" else paragraph_ends[index]
         html = html[:position] + figure + html[position:]
     return html
 

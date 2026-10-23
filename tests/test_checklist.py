@@ -336,6 +336,14 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertIn("H1 interno", item["detail"])
 
+    def test_html_semantics_rejects_empty_paragraph_variants(self):
+        for empty in ("<p><br></p>", "<p> &nbsp; <br /></p>", "<p>&#160;</p>"):
+            with self.subTest(empty=empty):
+                result = self._run_checklist(content=f"<p>Texto.</p>{empty}")
+                item = next(row for row in result["items"] if row["name"] == "html_semantics")
+                self.assertEqual(item["status"], "fail")
+                self.assertIn("parágrafo vazio", item["detail"])
+
     def test_body_images_fail_below_word_count_rule(self):
         # Short content requires 2 images; only 1 present.
         content = (

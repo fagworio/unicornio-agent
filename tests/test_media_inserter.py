@@ -4,8 +4,10 @@ from unicornio_editor.media.inserter import (
     MediaInsertionError,
     append_featured_credit,
     insert_media,
+    minimum_normal_article_paragraphs,
     normalize_normal_article_paragraphs,
     plan_normal_media_insertions,
+    remove_empty_paragraphs,
 )
 
 
@@ -34,7 +36,7 @@ class MediaInserterTests(unittest.TestCase):
         plan = [_item(index=99, url=f"https://media.example/{index}.webp") for index in range(4)]
         planned = plan_normal_media_insertions(html, plan)
         slots = [item["paragraph_index"] for item in planned]
-        self.assertEqual(slots, [1, 4, 8, 11])
+        self.assertEqual(slots, [1, 5, 8, 12])
         self.assertGreaterEqual(slots[0], 1)
         self.assertTrue(all(b - a >= 3 for a, b in zip(slots, slots[1:])))
 
@@ -46,14 +48,30 @@ class MediaInserterTests(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, "insufficient_paragraph_slots")
 
-    def test_planner_never_targets_after_final_valid_boundary(self):
-        html = self._paragraphs(12)
+    def test_planner_marks_final_body_boundary_explicitly(self):
+        html = self._paragraphs(11)
         planned = plan_normal_media_insertions(
             html,
             [_item(index=index, url=f"https://media.example/{index}.webp") for index in range(4)],
         )
         assert [item["paragraph_index"] for item in planned] == [1, 4, 7, 10]
-        assert insert_media(html, planned).count("[caption id=\"\" align=\"aligncenter\"") == 4
+        assert planned[-1]["placement"] == "after_editorial_body"
+        inserted = insert_media(html, planned)
+        assert inserted.count('[caption id="" align="aligncenter"') == 4
+        assert inserted.endswith("[/caption]")
+
+    def test_final_body_slot_rejects_tail_markup_and_unmarked_final_index(self):
+        html = self._paragraphs(11) + "<h2>Fonte final</h2>"
+        with self.assertRaises(MediaInsertionError):
+            plan_normal_media_insertions(
+                html,
+                [_item(index=index, url=f"https://media.example/tail-{index}.webp") for index in range(4)],
+            )
+        with self.assertRaises(MediaInsertionError):
+            insert_media(
+                self._paragraphs(5),
+                [_item(index=4)],
+            )
 
     def test_planner_requires_two_substantive_lead_paragraphs(self):
         html = "".join("<p>Curto.</p>" for _ in range(10)) + self._paragraphs(1)
@@ -63,13 +81,33 @@ class MediaInserterTests(unittest.TestCase):
 
     def test_planner_distributes_two_four_and_six_images_after_the_lead(self):
         for image_count, paragraph_count, expected in (
-            (2, 6, [1, 4]),
-            (4, 12, [1, 4, 7, 10]),
-            (6, 18, [1, 4, 7, 10, 13, 16]),
+            (2, 5, [1, 4]),
+            (4, 11, [1, 4, 7, 10]),
+            (6, 17, [1, 4, 7, 10, 13, 16]),
         ):
             plan = [_item(index=index, url=f"https://media.example/{image_count}-{index}.webp") for index in range(image_count)]
             planned = plan_normal_media_insertions(self._paragraphs(paragraph_count), plan)
             self.assertEqual([item["paragraph_index"] for item in planned], expected)
+
+    def test_paragraph_target_aligns_two_four_six_images_with_explicit_end_slot(self):
+        assert [minimum_normal_article_paragraphs(count) for count in (2, 4, 6)] == [5, 11, 17]
+        assert [
+            minimum_normal_article_paragraphs(count, allow_after_body=False)
+            for count in (2, 4, 6)
+        ] == [6, 12, 18]
+
+    def test_empty_paragraph_cleanup_only_removes_attribute_free_blank_nodes(self):
+        html = (
+            "<p>Texto mantido.</p><p> &nbsp; </p><p><br /></p>"
+            '<p id="anchor"><br></p><p><a href="https://example.test"></a></p>'
+            "<p>[shortcode]</p>"
+        )
+        result = remove_empty_paragraphs(html)
+        assert result["audit"] == {"removed": 2, "changed": True}
+        assert result["html"] == (
+            '<p>Texto mantido.</p><p id="anchor"><br></p>'
+            '<p><a href="https://example.test"></a></p><p>[shortcode]</p>'
+        )
 
     def test_normalizer_turns_nine_paragraphs_into_eleven_without_text_changes(self):
         long_body = (
@@ -106,6 +144,19 @@ class MediaInserterTests(unittest.TestCase):
         refused = normalize_normal_article_paragraphs(shortcode_html, required_paragraphs=10)
         assert refused["audit"]["final_paragraphs"] == 9
         assert refused["audit"]["reason"].startswith("editorial_restructure_required")
+
+    def test_normalizer_does_not_duplicate_paragraph_attributes(self):
+        body = (
+            "A equipe confirmou uma atualização importante para o jogo nesta semana, "
+            "com detalhes sobre personagens, sistemas e conteúdo adicional para os jogadores. "
+            "O anúncio também informa que o lançamento seguirá o calendário divulgado anteriormente, "
+            "sem alterar os recursos já apresentados pela desenvolvedora."
+        )
+        html = f'<p id="opening">{body}</p>' + self._paragraphs(5)
+        result = normalize_normal_article_paragraphs(html, required_paragraphs=8)
+        assert result["audit"]["final_paragraphs"] == 6
+        assert result["audit"]["reason"].startswith("editorial_restructure_required")
+        assert result["html"].count('id="opening"') == 1
 
     def test_adds_one_visible_featured_credit(self):
         credit = "Crédito da imagem: Omelete. Imagem promocional do trailer. Direitos autorais dos detentores."

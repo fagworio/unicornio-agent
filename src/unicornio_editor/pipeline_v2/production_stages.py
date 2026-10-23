@@ -14,6 +14,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from ..batch import BatchError, load_editorial_batch, prepare_batch, wordpress_text
+from ..builder import strip_canonical_footer
 from ..checklist import run_pre_publish_checklist
 # Preserve the module-level seam used by older integrations while all stage
 # calculations use the canonical HTML-aware helper.
@@ -25,7 +26,16 @@ from ..language import editorial_language_report
 from ..html_cleaner import normalize_h1_headings
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
-from ..media.inserter import MediaInsertionError, insert_media, normal_media_urls_to_insert, plan_normal_media_insertions, remove_media_urls
+from ..media.inserter import (
+    MediaInsertionError,
+    insert_media,
+    minimum_normal_article_paragraphs,
+    normal_media_urls_to_insert,
+    normalize_normal_article_paragraphs,
+    plan_normal_media_insertions,
+    remove_empty_paragraphs,
+    remove_media_urls,
+)
 from ..media.vision_gate import VisionGateError
 from ..wordpress import WordPressError
 from ..workflow import (
@@ -48,6 +58,110 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
+
+
+def _prepare_editorial_media_structure(
+    editorial: dict[str, Any],
+    state: Any,
+    *,
+    title: str,
+    categories: Any = (),
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Prepare the exact editorial body used by media preflight and compose.
+
+    Listicle item structure is preserved. Normal articles may be split only at
+    safe sentence boundaries; the helper's text-preservation assertion remains
+    authoritative. A failed capacity check is returned to the caller as an
+    editorial rework reason before any media provider or upload is invoked.
+    """
+    working = dict(editorial)
+    original_html = str(working.get("cleaned_html") or "")
+    body_without_footer = strip_canonical_footer(original_html)
+    empty_result = remove_empty_paragraphs(body_without_footer)
+    body = str(empty_result["html"])
+    audit: dict[str, Any] = {
+        "version": 1,
+        "status": "prepared",
+        "canonical_footer_stripped": body_without_footer != original_html,
+        "empty_paragraphs_removed": int(empty_result["audit"]["removed"]),
+        "paragraphs_before": len(re.findall(r"<p\b[^>]*>.*?</p>", original_html, re.IGNORECASE | re.DOTALL)),
+        "paragraphs_after_cleanup": len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL)),
+    }
+    categories = working.get("categories") or categories or ()
+    listicle_subjects = post_subjects(
+        title=title,
+        content_html=body,
+        focus_keyword=str((working.get("seo") or {}).get("focus_keyword") or ""),
+        game_name=working.get("game_name"),
+        categories=categories,
+    )
+    if detect_list_format(title, body, categories) is not None or len(listicle_subjects) > 1:
+        working["cleaned_html"] = body
+        audit["layout"] = "listicle_preserved"
+        audit["paragraphs_after"] = audit["paragraphs_after_cleanup"]
+        return working, audit, None
+
+    audit["layout"] = "normal_article"
+    required = required_image_count_for_content(body, title=title)
+    state_media = getattr(state, "media", None)
+    reconciliation = reconcile_working_visual_media(
+        state_media,
+        required_inline=required,
+        featured=getattr(state_media, "featured", None),
+    )
+    featured = getattr(state_media, "featured", None)
+    featured_url = (
+        str(getattr(featured, "media_url", "") or "")
+        if getattr(featured, "status", None) is FeaturedStatus.VALID
+        else ""
+    )
+    future_urls = [
+        str(getattr(item, "media_url", "") or "")
+        for item in reconciliation.eligible_inline
+    ]
+    future_urls.extend(
+        f"__v2_pending_media_{index}__"
+        for index in range(reconciliation.accounting.effective_missing)
+    )
+    insertions = normal_media_urls_to_insert(body, future_urls, featured_url)
+    audit["required_inline"] = required
+    audit["valid_existing_inline"] = reconciliation.accounting.valid_distinct_inline_count
+    audit["media_positions_needed"] = len(insertions)
+
+    if insertions:
+        allow_after_body = bool(re.search(r"</p>\s*$", body, re.IGNORECASE))
+        target = minimum_normal_article_paragraphs(
+            len(insertions),
+            allow_after_body=allow_after_body,
+        )
+        audit["after_editorial_body_slot_available"] = allow_after_body
+        audit["target_paragraphs"] = target
+        result = normalize_normal_article_paragraphs(
+            body,
+            required_paragraphs=target,
+            # The old 1,000-word cap remains the migration default. V2 also
+            # allows longer bodies because this operation only splits existing
+            # text and independently verifies byte-visible text preservation.
+            max_words=max(1000, len(body)),
+        )
+        body = str(result["html"])
+        audit["paragraph_normalization"] = result["audit"]
+        try:
+            plan_normal_media_insertions(
+                body,
+                [{"media_url": url} for url in insertions],
+            )
+        except MediaInsertionError as exc:
+            audit["status"] = "rework_required"
+            audit["failure_code"] = exc.code
+            audit["failure"] = str(exc)
+            audit["paragraphs_after"] = result["audit"].get("final_paragraphs", 0)
+            working["cleaned_html"] = body
+            return working, audit, str(exc)
+
+    working["cleaned_html"] = body
+    audit["paragraphs_after"] = len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL))
+    return working, audit, None
 
 
 def _canonical_media_ref(value: str) -> str:
@@ -202,6 +316,7 @@ class ProductionEditorialStage:
             )
             if not input_post:
                 raise BatchError(f"post_id {post_id} ausente em {input_path}")
+            post_title = wordpress_text(input_post.get("title"), field="title")
             localization = input_post.get("localization") if isinstance(input_post, dict) else {}
             must_localize = bool(isinstance(localization, dict) and localization.get("required"))
             draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
@@ -215,14 +330,43 @@ class ProductionEditorialStage:
             ):
                 repaired = _repair_focus_keyword_draft(previous_editorial, _post(context))
                 if repaired is not None:
+                    repaired["cleaned_html"] = normalize_h1_headings(
+                        normalize_editorial_dashes(repaired.get("cleaned_html", "")),
+                        post_title=post_title,
+                    )
+                    repaired, structure_audit, structure_error = _prepare_editorial_media_structure(
+                        repaired,
+                        state,
+                        title=post_title,
+                        categories=context.get("categories") or (),
+                    )
+                    _write_json(self.root, post_id, "editorial.structure.json", structure_audit)
+                    if structure_error:
+                        _write_json(self.root, post_id, "editorial.draft.json", repaired)
+                        raise StageError(
+                            BlockerCode.STRUCTURE,
+                            Phase.EDITORIAL,
+                            f"media_structure:insufficient_paragraph_slots: {structure_error}",
+                        )
                     _write_json(self.root, post_id, "editorial.draft.json", repaired)
                     return repaired
             validation_path = self.root / "backups" / str(post_id) / "editorial.validation.json"
-            if state.phase is Phase.EDITORIAL and validation_path.is_file():
-                validation = _json_object(validation_path)
+            structure_path = self.root / "backups" / str(post_id) / "editorial.structure.json"
+            structure_audit = _json_object(structure_path) if structure_path.is_file() else {}
+            has_structure_failure = (
+                state.blocker is BlockerCode.STRUCTURE
+                and structure_audit.get("status") == "rework_required"
+            )
+            if state.phase is Phase.EDITORIAL and (validation_path.is_file() or has_structure_failure):
+                validation = _json_object(validation_path) if validation_path.is_file() else {}
                 editorial_gates = {"qualidade_texto", "seo", "estrutura", "fonte", "schema_editorial", "conteudo_nao_vazio", "conteudo_sem_metadados_operacionais", "estrutura_lista", "cta_canonico"}
                 failures = [failure for failure in validation.get("failures", []) if failure.get("gate") in editorial_gates]
-                input_payload["posts"][0]["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": failures, "previous_editorial": previous_editorial or {}}
+                if has_structure_failure:
+                    failures.append({
+                        "gate": "estrutura",
+                        "detail": str(structure_audit.get("failure") or "paragraph capacity is insufficient"),
+                    })
+                input_post["rework"] = {"blocker": state.blocker.value if state.blocker else "editorial", "failed_gates": failures, "previous_editorial": previous_editorial or {}}
                 input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
             generated = generate_editorial_batch(
                 prepared["editorial_input"],
@@ -298,7 +442,7 @@ class ProductionEditorialStage:
                 editorial = repaired
             editorial["cleaned_html"] = normalize_h1_headings(
                 normalize_editorial_dashes(editorial.get("cleaned_html", "")),
-                post_title=wordpress_text(input_post.get("title"), field="title"),
+                post_title=post_title,
             )
             editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
@@ -308,6 +452,20 @@ class ProductionEditorialStage:
                     "reason": str(localization.get("reason") or ""),
                     "source_language": input_post.get("source_language") or {},
                 })
+            editorial, structure_audit, structure_error = _prepare_editorial_media_structure(
+                editorial,
+                state,
+                title=post_title,
+                categories=context.get("categories") or (),
+            )
+            _write_json(self.root, post_id, "editorial.structure.json", structure_audit)
+            if structure_error:
+                _write_json(self.root, post_id, "editorial.draft.json", editorial)
+                raise StageError(
+                    BlockerCode.STRUCTURE,
+                    Phase.EDITORIAL,
+                    f"media_structure:insufficient_paragraph_slots: {structure_error}",
+                )
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
             return editorial
         except StageError:
@@ -490,6 +648,7 @@ class ProductionComposeStage:
                 content_html=str(editorial.get("cleaned_html") or ""),
                 categories=editorial.get("categories") or context.get("categories") or (),
             )
+            is_listicle = is_listicle or len(subject_rows) > 1
             reconciliation = reconcile_working_visual_media(
                 media,
                 listicle_items=subject_rows if is_listicle else (),
@@ -567,6 +726,11 @@ class ProductionComposeStage:
                 {
                     "media_url": str(item.get("media_url") or ""),
                     "paragraph_index": int(item.get("paragraph_index", 0)),
+                    **(
+                        {"placement": str(item["placement"])}
+                        if item.get("placement")
+                        else {}
+                    ),
                 }
                 for item in placements
             ]
