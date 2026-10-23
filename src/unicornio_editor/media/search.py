@@ -239,6 +239,7 @@ FAILURE_KINDS = (
     "no_results_legitimate",  # página de resultados, realmente sem resultado para a query
     "provider_unavailable",   # dependência opcional não instalada
     "provider_error",         # erro não classificado por provider externo
+    "bot_challenge_suspected", # HTTP 202 no bootstrap VQD do DDG; causa não confirmada
 )
 FAILURE_KINDS_TRANSITORIOS = frozenset({"network_error", "rate_limited", "http_error"})
 FAILURE_KINDS_VERIFICADOS = frozenset({"ok", "no_results_legitimate"})
@@ -1009,6 +1010,7 @@ def _engine_state_path() -> Path:
     return Path(tempfile.gettempdir()) / f"unicornio_media_engines_{project_key}.json"
 _COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
 _BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
+_DDG_BOT_CHALLENGE_COOLDOWN_SEGUNDOS = 60 * 60
 
 
 def _em_teste() -> bool:
@@ -1046,7 +1048,7 @@ def _ler_estado_engines() -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
+def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> bool:
     try:
         caminho = _engine_state_path()
         caminho.parent.mkdir(parents=True, exist_ok=True)
@@ -1056,8 +1058,9 @@ def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporario, caminho)
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 @contextmanager
@@ -1069,12 +1072,12 @@ def _engine_state_update():
     except OSError:
         # Provider health is operational telemetry; inability to persist it
         # must not abort a media search.
-        yield
+        yield False
         return
     with lock_context as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            yield True
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -1136,6 +1139,56 @@ def engine_degradada(nome: str, kind: str) -> None:
             "non_transient": True,
         }
         _gravar_estado_engines(dados)
+
+
+def engine_cooldown(nome: str, kind: str, seconds: float) -> float:
+    """Pause one provider for a bounded interval, preserving the reason."""
+    if not _breaker_ativo():
+        return 0.0
+    duration = max(0.0, float(seconds))
+    if duration <= 0:
+        engine_degradada(nome, kind)
+        return 0.0
+    now = time.time()
+    with _engine_state_update():
+        dados = _ler_estado_engines()
+        dados[nome] = {
+            "failures": 0,
+            "blocked_until": now + duration,
+            "last_failure": now,
+            "failure_kind": kind,
+            "non_transient": True,
+        }
+        _gravar_estado_engines(dados)
+    return duration
+
+
+def engine_reservar_recuperacao_ddg(nome: str, lease_seconds: float) -> str:
+    """Atomically allow only one probe after a DDG challenge cooldown expires."""
+    if not _breaker_ativo():
+        return "not_recovery"
+    try:
+        duration = max(30.0, min(900.0, float(lease_seconds)))
+    except (TypeError, ValueError, OverflowError):
+        return "state_unavailable"
+    now = time.time()
+    with _engine_state_update() as locked:
+        if not locked:
+            return "state_unavailable"
+        dados = _ler_estado_engines()
+        atual = dados.get(nome) or {}
+        if atual.get("failure_kind") != "bot_challenge_suspected":
+            return "not_recovery"
+        if float(atual.get("blocked_until") or 0) > now:
+            return "cooldown"
+        if float(atual.get("attempt_until") or 0) > now:
+            return "attempt_in_progress"
+        atual["attempt_until"] = now + duration
+        atual["last_recovery_attempt"] = now
+        dados[nome] = atual
+        if not _gravar_estado_engines(dados):
+            return "state_unavailable"
+    return "reserved"
 
 
 def engine_ok(nome: str) -> None:
@@ -1213,10 +1266,18 @@ def search_web_images(
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
         if not engine_disponivel(breaker_name):
+            previous_state = engines_status().get(breaker_name) or {}
             relatorio = {
                 "http_status": 0, "html_bytes": 0, "objects_parsed": 0, "candidates": 0,
                 "failure_kind": "cooldown_skip", "parser_version": PARSER_VERSION,
             }
+            if previous_state.get("failure_kind") == "bot_challenge_suspected":
+                relatorio["cooldown_reason"] = "bot_challenge_suspected"
+                try:
+                    remaining = float(previous_state.get("blocked_until") or 0) - time.time()
+                except (TypeError, ValueError, OverflowError):
+                    remaining = 0
+                relatorio["cooldown_remaining_seconds"] = max(0, min(86400, int(remaining)))
             if reports is not None:
                 reports[name] = dict(relatorio)
             continue
@@ -1231,6 +1292,46 @@ def search_web_images(
                 "timeout": effective_timeout,
                 "report": relatorio,
             }
+            if name == "duckduckgo":
+                recovery_status = engine_reservar_recuperacao_ddg(
+                    breaker_name, effective_timeout * 2 + 30
+                )
+                if recovery_status not in {"not_recovery", "reserved"}:
+                    previous_state = engines_status().get(breaker_name) or {}
+                    relatorio.update({
+                        "http_status": 0,
+                        "html_bytes": 0,
+                        "objects_parsed": 0,
+                        "candidates": 0,
+                        "failure_kind": (
+                            "provider_unavailable"
+                            if recovery_status == "state_unavailable"
+                            else "cooldown_skip"
+                        ),
+                        "skip_reason": recovery_status,
+                        "parser_version": PARSER_VERSION,
+                    })
+                    if recovery_status in {"cooldown", "attempt_in_progress"}:
+                        relatorio["cooldown_reason"] = "bot_challenge_suspected"
+                    if recovery_status == "cooldown":
+                        try:
+                            remaining = float(previous_state.get("blocked_until") or 0) - time.time()
+                        except (TypeError, ValueError, OverflowError):
+                            remaining = 0
+                        relatorio["cooldown_remaining_seconds"] = max(
+                            0, min(86400, int(remaining))
+                        )
+                    elif recovery_status == "attempt_in_progress":
+                        try:
+                            remaining = float(previous_state.get("attempt_until") or 0) - time.time()
+                        except (TypeError, ValueError, OverflowError):
+                            remaining = 0
+                        relatorio["recovery_probe_remaining_seconds"] = max(
+                            0, min(900, int(remaining))
+                        )
+                    if reports is not None:
+                        reports[name] = dict(relatorio)
+                    continue
             lote = _fns[name](query, **kwargs)
         except Exception:  # noqa: BLE001 - rotate on any failure
             lote = []
@@ -1238,27 +1339,33 @@ def search_web_images(
         if not lote:
             relatorio.setdefault("unique_image_urls", 0)
             relatorio.setdefault("duplicate_image_urls", 0)
-            if reports is not None:
-                reports[name] = dict(relatorio)
             kind = str(relatorio.get("failure_kind") or "network_error")
-            if kind not in FAILURE_KINDS_TRANSITORIOS:
+            if name == "duckduckgo" and kind == "bot_challenge_suspected":
+                duration = engine_cooldown(
+                    breaker_name, kind, _DDG_BOT_CHALLENGE_COOLDOWN_SEGUNDOS
+                )
+                relatorio["cooldown_seconds"] = int(duration)
+                relatorio["cooldown_reason"] = kind
+            elif kind not in FAILURE_KINDS_TRANSITORIOS:
                 # Motivo PERMANENTE (schema mudou, página exige JS, captcha):
                 # cooldown de 12 min aqui só esconderia a engine para sempre.
                 # Registra o motivo e segue — ela continua na arquitetura.
                 engine_degradada(breaker_name, kind)
-                continue
-            # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
-            # cooldown da engine (Bing degradado não deve segurar o ciclo).
-            espera = engine_falhou(breaker_name)
-            if espera:
-                try:
-                    pausa = min(float(espera), 8.0)
-                    if deadline is not None:
-                        pausa = min(pausa, max(0.0, float(deadline) - time.monotonic()))
-                    if pausa > 0:
-                        time.sleep(pausa)
-                except Exception:  # noqa: BLE001 - sleep interrompido não quebra
-                    pass
+            else:
+                # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
+                # cooldown da engine (Bing degradado não deve segurar o ciclo).
+                espera = engine_falhou(breaker_name)
+                if espera:
+                    try:
+                        pausa = min(float(espera), 8.0)
+                        if deadline is not None:
+                            pausa = min(pausa, max(0.0, float(deadline) - time.monotonic()))
+                        if pausa > 0:
+                            time.sleep(pausa)
+                    except Exception:  # noqa: BLE001 - sleep interrompido não quebra
+                        pass
+            if reports is not None:
+                reports[name] = dict(relatorio)
             continue
         engine_ok(breaker_name)
         novos: list[dict[str, Any]] = []

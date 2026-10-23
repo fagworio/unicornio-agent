@@ -1332,12 +1332,43 @@ def _safe_provider_stage_details(report: dict[str, Any]) -> dict[str, Any]:
                 status = max(0, min(599, int(row.get("http_status") or 0)))
             except (TypeError, ValueError, OverflowError):
                 status = 0
-            observations.append({"stage": row["stage"], "http_status": status})
+            observation = {"stage": row["stage"], "http_status": status}
+            content_type = str(row.get("content_type") or "").split(";", 1)[0].lower()
+            if re.fullmatch(r"[a-z0-9.+-]{1,40}/[a-z0-9.+-]{1,40}", content_type):
+                observation["content_type"] = content_type
+            try:
+                body_bytes = max(0, min(10_000_000, int(row.get("body_bytes"))))
+            except (TypeError, ValueError, OverflowError):
+                body_bytes = None
+            if body_bytes is not None:
+                observation["body_bytes"] = body_bytes
+            if isinstance(row.get("challenge_marker_present"), bool):
+                observation["challenge_marker_present"] = row["challenge_marker_present"]
+            observations.append(observation)
+    cooldown_reason = str(report.get("cooldown_reason") or "")
+    if cooldown_reason != "bot_challenge_suspected":
+        cooldown_reason = ""
+    skip_reason = str(report.get("skip_reason") or "")
+    if skip_reason not in {"cooldown", "attempt_in_progress", "state_unavailable"}:
+        skip_reason = ""
+
+    def _bounded_seconds(key: str) -> int:
+        try:
+            return max(0, min(86400, int(report.get(key) or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
     return {
         "failure_stage": failure_stage if failure_stage in stages else "",
         "outcome": outcome if outcome in outcomes else "",
         "results_verified": bool(report.get("results_verified")),
         "request_observations": observations,
+        "cooldown_reason": cooldown_reason,
+        "cooldown_seconds": _bounded_seconds("cooldown_seconds"),
+        "cooldown_remaining_seconds": _bounded_seconds("cooldown_remaining_seconds"),
+        "skip_reason": skip_reason,
+        "recovery_probe_remaining_seconds": max(
+            0, min(900, _bounded_seconds("recovery_probe_remaining_seconds"))
+        ),
     }
 
 
@@ -1644,6 +1675,7 @@ def _resolve_media_batch(
         verified_result_kinds = {"ok", "no_results_legitimate"}
         technical_failure_kinds = {
             "captcha", "js_required", "parser_schema_drift", "cooldown_skip",
+            "bot_challenge_suspected",
         }
         non_verified_engine_failures = {
             str((engine_reports.get(name) or {}).get("failure_kind") or "")

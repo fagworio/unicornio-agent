@@ -54,6 +54,44 @@ def _failure_kind(exc: Exception) -> str:
     return "provider_error"
 
 
+_BOT_CHALLENGE_MARKERS = (
+    b"captcha",
+    b"challenge",
+    b"unusual traffic",
+    b"automated requests",
+    b"bot detection",
+    b"/sorry/",
+)
+
+
+def _safe_response_observation(stage: str, status: int, response: Any) -> dict[str, Any]:
+    """Summarize a response without retaining headers beyond MIME or its body."""
+    observation: dict[str, Any] = {"stage": stage, "http_status": status}
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            content_type = str(headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        except Exception:  # noqa: BLE001 - third-party response objects vary
+            content_type = ""
+        if content_type and len(content_type) <= 80 and all(
+            char.isalnum() or char in "/.+-" for char in content_type
+        ):
+            observation["content_type"] = content_type
+    try:
+        body = getattr(response, "content", b"")
+    except Exception:  # noqa: BLE001 - telemetry must not break provider execution
+        body = b""
+    if isinstance(body, str):
+        body = body.encode("utf-8", errors="replace")
+    if isinstance(body, bytes):
+        observation["body_bytes"] = len(body)
+        inspected = body[:65536].lower()
+        observation["challenge_marker_present"] = any(
+            marker in inspected for marker in _BOT_CHALLENGE_MARKERS
+        )
+    return observation
+
+
 def search_duckduckgo_images(
     query: str,
     *,
@@ -150,9 +188,9 @@ def search_duckduckgo_images(
                 engine.request_observations.append({"stage": stage, "http_status": 0})
                 raise
             engine.last_http_status = int(getattr(response, "status_code", 0) or 0)
-            engine.request_observations.append(
-                {"stage": stage, "http_status": engine.last_http_status}
-            )
+            engine.request_observations.append(_safe_response_observation(
+                stage, engine.last_http_status, response
+            ))
             if engine.last_http_status != 200:
                 # In particular, stop after a non-200 VQD bootstrap rather
                 # than issuing i.js with a challenge/error response's content.
@@ -182,6 +220,10 @@ def search_duckduckgo_images(
             failure_kind = "rate_limited"
         elif status >= 400:
             failure_kind = "http_error"
+        elif status == 202 and stage == "vqd_bootstrap":
+            # 202 is consistent with an anti-automation challenge, but status
+            # alone cannot prove why DDG returned it; keep the name cautious.
+            failure_kind = "bot_challenge_suspected"
         elif status and status != 200:
             failure_kind = "provider_error"
         else:

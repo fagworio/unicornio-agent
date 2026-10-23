@@ -501,12 +501,16 @@ class TelemetriaPorEngineTests(unittest.TestCase):
             cli._emit_engine_health(root, {
                 "duckduckgo": {
                     "backend": "duckduckgo", "upstream_provider": "bing",
-                    "http_status": 202, "failure_kind": "provider_error",
+                    "http_status": 202, "failure_kind": "bot_challenge_suspected",
                     "failure_stage": "vqd_bootstrap", "outcome": "provider_unavailable",
                     "results_verified": False,
+                    "cooldown_reason": "bot_challenge_suspected",
+                    "cooldown_seconds": 3600,
                     "request_observations": [
                         {
                             "stage": "vqd_bootstrap", "http_status": 202,
+                            "content_type": "text/html; charset=utf-8",
+                            "body_bytes": 18983, "challenge_marker_present": True,
                             "url": "https://duckduckgo.com/?vqd=signed-secret",
                             "body": "captcha token secret",
                         },
@@ -521,8 +525,14 @@ class TelemetriaPorEngineTests(unittest.TestCase):
         self.assertEqual(evento["failure_stage"], "vqd_bootstrap")
         self.assertEqual(evento["outcome"], "provider_unavailable")
         self.assertFalse(evento["results_verified"])
+        self.assertEqual(evento["cooldown_reason"], "bot_challenge_suspected")
+        self.assertEqual(evento["cooldown_seconds"], 3600)
         self.assertEqual(evento["request_observations"], [
-            {"stage": "vqd_bootstrap", "http_status": 202},
+            {
+                "stage": "vqd_bootstrap", "http_status": 202,
+                "content_type": "text/html", "body_bytes": 18983,
+                "challenge_marker_present": True,
+            },
         ])
         self.assertNotIn("duckduckgo.com", json.dumps(evento))
         self.assertNotIn("signed-secret", json.dumps(evento))
