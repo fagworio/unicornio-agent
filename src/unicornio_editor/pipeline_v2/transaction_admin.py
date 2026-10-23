@@ -17,6 +17,12 @@ from typing import Any, Mapping
 
 from ..backup import atomic_write_text
 from .cycle_state import CycleStateStore
+from .cycle_runtime import (
+    _historical_journal_evidence,
+    _journal_correlation,
+    _post_no_write_evidence,
+    _round_authorized_at,
+)
 from .lock import RunSessionLock
 
 
@@ -113,6 +119,47 @@ def _linked_evidence(journal: Mapping[str, Any], evidence: Mapping[str, Any] | N
         if str(evidence.get(key)) != str(journal.get(key)):
             return False
     return True
+
+
+def _journal_matches_authorized_round(
+    journal: Mapping[str, Any],
+    *,
+    post_id: int,
+    cycle_id: str,
+    authorization_id: str,
+    pending_round: int,
+) -> bool:
+    try:
+        round_number = journal.get("cycle_round")
+        if isinstance(round_number, bool):
+            return False
+        round_number = int(round_number)
+    except (TypeError, ValueError):
+        return False
+    run_id = str(journal.get("run_id") or "").strip()
+    return bool(
+        run_id
+        and str(journal.get("post_id") or "") == str(int(post_id))
+        and str(journal.get("cycle_id") or "") == str(cycle_id)
+        and round_number == int(pending_round)
+        and str(journal.get("authorization_id") or "") == str(authorization_id)
+    )
+
+
+def _registry_has_operation_run(
+    registry: Mapping[str, Any], *, post_id: int, run_id: str
+) -> bool:
+    runs = registry.get("run")
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], Mapping):
+        return False
+    run = runs[0]
+    try:
+        return (
+            str(run.get("run_id") or "") == str(run_id)
+            and int(run.get("post_id")) == int(post_id)
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def classify_transaction(
@@ -367,8 +414,9 @@ def _round_post_evidence(
         if target_journal is not None
         else _read_json(journal_path) if journal_path.is_file() else None
     )
-    journal_identity_matches = journal is not None and str(journal.get("post_id") or "") == str(post_id)
-    if journal is not None and str(journal.get("post_id") or "") not in {str(post_id), ""}:
+    journal_post_id = str((journal or {}).get("post_id") or "")
+    journal_identity_matches = journal is not None and journal_post_id == str(int(post_id))
+    if journal is not None and journal_post_id not in {str(int(post_id)), ""}:
         raise TransactionIsolationError(f"post journal identity diverged for {post_id}")
     run_id = str((journal or {}).get("run_id") or "") or None
     registry = _registry_snapshot(root, post_id=post_id, run_id=run_id)
@@ -378,7 +426,42 @@ def _round_post_evidence(
 
     classification = "UNCERTAIN_ISOLATED"
     reason = "journal_missing_or_evidence_incomplete"
-    if journal is not None and journal_identity_matches:
+    no_write_evidence: dict[str, Any] | None = None
+    historical_journal_evidence: dict[str, Any] | None = None
+    current_identity = bool(
+        journal is not None
+        and journal_identity_matches
+        and _journal_matches_authorized_round(
+            journal,
+            post_id=int(post_id),
+            cycle_id=cycle_id,
+            authorization_id=authorization_id,
+            pending_round=int(pending_round),
+        )
+    )
+    expected_identity = {
+        "run_id": run_id or "",
+        "cycle_id": str(cycle_id),
+        "cycle_round": int(pending_round),
+        "authorization_id": str(authorization_id),
+        "post_id": int(post_id),
+    }
+
+    if journal is None:
+        no_write_evidence = _post_no_write_evidence(
+            client,
+            root,
+            int(post_id),
+            cycle_id=cycle_id,
+            round_number=int(pending_round),
+            authorization_id=authorization_id,
+        )
+        if no_write_evidence is not None:
+            classification = "NOT_EXECUTED"
+            reason = "no_journal_and_current_authorization_no_write_proven"
+    elif not journal_identity_matches:
+        reason = "journal_post_identity_missing"
+    elif current_identity:
         current_state = _wp_state(post)
         journal_state = journal.get("state")
         state_matches = (
@@ -386,29 +469,25 @@ def _round_post_evidence(
             and isinstance(journal_state, Mapping)
             and _hash_value(current_state) == _hash_value(dict(journal_state))
         )
-        linked = {
-            key: journal.get(key)
-            for key in ("run_id", "cycle_id", "cycle_round", "authorization_id", "post_id")
-        }
         if registry.get("present") is True and state_matches:
             if (
                 journal.get("status") == "committed"
                 and journal.get("readback") is True
                 and run_id
+                and _registry_has_operation_run(
+                    registry, post_id=int(post_id), run_id=run_id
+                )
             ):
                 classification = classify_transaction(
                     journal,
-                    external_evidence={**linked, "readback_confirmed": True},
+                    external_evidence={**expected_identity, "readback_confirmed": True},
                 )
-                reason = "committed_journal_and_wordpress_state_match"
+                reason = "current_authorization_commit_registry_run_and_wordpress_state_match"
             elif (
                 journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}
                 and journal.get("writer_started") is False
                 and journal.get("resumable") is True
                 and run_id
-                and str(journal.get("cycle_id") or "") == cycle_id
-                and str(journal.get("authorization_id") or "") == authorization_id
-                and str(journal.get("cycle_round") or "") == str(int(pending_round))
                 and not registry.get("run")
                 and not registry.get("decisions")
                 and not registry.get("usages")
@@ -421,9 +500,60 @@ def _round_post_evidence(
             ):
                 classification = classify_transaction(
                     journal,
-                    external_evidence={**linked, "effects_absent": True},
+                    external_evidence={**expected_identity, "effects_absent": True},
                 )
-                reason = "pre_writer_journal_registry_and_wordpress_state_match"
+                reason = "current_authorization_pre_writer_registry_and_wordpress_state_match"
+            elif classification == "UNCERTAIN_ISOLATED":
+                reason = "current_authorization_operation_identity_or_effect_evidence_incomplete"
+        else:
+            reason = "current_authorization_journal_effects_or_readback_unresolved"
+    else:
+        correlation = _journal_correlation(
+            journal,
+            expected_cycle_id=cycle_id,
+            expected_cycle_round=int(pending_round),
+            expected_authorization_id=authorization_id,
+        )
+        if correlation == "historical":
+            historical_journal_evidence = {
+                "correlation": "historical",
+                "run_id": run_id or "",
+                "journal_cycle_id": journal.get("cycle_id"),
+                "journal_cycle_round": journal.get("cycle_round"),
+                "journal_authorization_id": journal.get("authorization_id"),
+                "post_id": int(post_id),
+            }
+        elif correlation == "uncertain":
+            authorization_at = _round_authorized_at(
+                root,
+                cycle_id,
+                int(pending_round),
+                authorization_id=authorization_id,
+            )
+            historical_journal_evidence = _historical_journal_evidence(
+                root,
+                int(post_id),
+                journal,
+                authorized_at=authorization_at,
+            )
+        if historical_journal_evidence is not None:
+            no_write_evidence = _post_no_write_evidence(
+                client,
+                root,
+                int(post_id),
+                cycle_id=cycle_id,
+                round_number=int(pending_round),
+                authorization_id=authorization_id,
+            )
+            if no_write_evidence is not None:
+                classification = "NOT_EXECUTED"
+                reason = "historical_journal_and_current_authorization_no_write_proven"
+            else:
+                reason = "historical_journal_but_current_authorization_effects_unresolved"
+        elif correlation == "current":
+            reason = "legacy_current_round_journal_lacks_authorization_identity"
+        else:
+            reason = "journal_identity_uncertain"
 
     return {
         "post_id": int(post_id),
@@ -442,6 +572,8 @@ def _round_post_evidence(
             "readback": (journal or {}).get("readback"),
             "media_state": (journal or {}).get("media_state"),
         },
+        "historical_journal_evidence": historical_journal_evidence,
+        "no_write_evidence": no_write_evidence,
         "wordpress": _wp_summary(post),
         "registry": _registry_summary(registry),
     }

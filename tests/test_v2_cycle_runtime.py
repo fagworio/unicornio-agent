@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.pipeline_v2 import cycle_runtime
+from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
 from unicornio_editor.pipeline_v2.lock import RunSessionLock
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
 from unicornio_editor.locking import LockError, LockManager
@@ -374,6 +375,7 @@ def test_historical_journals_reconcile_only_with_complete_no_effect_evidence(tmp
         "event": "round_authorized",
         "cycle_id": "current-cycle",
         "round_number": 4,
+        "authorization_id": "current-authorization",
         "at": "2026-10-22T10:00:00+00:00",
     }) + "\n", encoding="utf-8")
     with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
@@ -1138,6 +1140,13 @@ def test_selection_mismatch_invalidates_unexecuted_authorization_with_per_post_r
 
 def test_no_write_confirmation_ignores_journal_from_different_authorization(tmp_path):
     _empty_media_registry(tmp_path)
+    CycleStateStore(tmp_path).save(
+        CycleState(cycle_id="cycle"),
+        event="round_authorized",
+        round_number=4,
+        authorization_id="new-authorization",
+        selected_ids=[101],
+    )
     journal_dir = tmp_path / "work" / "v2-journal"
     journal_dir.mkdir(parents=True)
     (journal_dir / "101.json").write_text(json.dumps({
@@ -1162,6 +1171,80 @@ def test_no_write_confirmation_ignores_journal_from_different_authorization(tmp_
     )
     assert evidence is not None
     assert evidence["historical_journal_ids"] == [101]
+
+
+def test_no_write_proof_uses_exact_authorization_timestamp(tmp_path):
+    _empty_media_registry(tmp_path)
+    store = CycleStateStore(tmp_path)
+    store.save(
+        CycleState(cycle_id="cycle"),
+        event="round_authorized",
+        round_number=4,
+        authorization_id="current-auth",
+        selected_ids=[101],
+        at="2026-10-23T11:00:00+00:00",
+    )
+    store.save(
+        CycleState(cycle_id="cycle"),
+        event="round_authorized",
+        round_number=4,
+        authorization_id="other-auth",
+        selected_ids=[101],
+        at="2026-10-23T12:00:00+00:00",
+    )
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            ("run-after-current-auth", 101, "2026-10-23 11:30:00"),
+        )
+
+    class Client:
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    assert cycle_runtime._round_authorized_at(
+        tmp_path,
+        "cycle",
+        4,
+        authorization_id="current-auth",
+    ) == "2026-10-23T11:00:00+00:00"
+    assert cycle_runtime._post_no_write_evidence(
+        Client(),
+        tmp_path,
+        101,
+        cycle_id="cycle",
+        round_number=4,
+        authorization_id="current-auth",
+    ) is None
+
+
+def test_no_write_proof_blocks_registry_rows_without_timestamps(tmp_path):
+    _empty_media_registry(tmp_path)
+    CycleStateStore(tmp_path).save(
+        CycleState(cycle_id="cycle"),
+        event="round_authorized",
+        round_number=4,
+        authorization_id="current-auth",
+        selected_ids=[101],
+    )
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_usage(post_id, status, applied_at) VALUES (?, ?, NULL)",
+            (101, "accepted"),
+        )
+
+    class Client:
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    assert cycle_runtime._post_no_write_evidence(
+        Client(),
+        tmp_path,
+        101,
+        cycle_id="cycle",
+        round_number=4,
+        authorization_id="current-auth",
+    ) is None
 
 
 def test_legacy_round_reconciles_per_post_and_blocks_uncorrelated_running_journal(

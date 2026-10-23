@@ -38,6 +38,21 @@ def test_round4_mixed_journals_reconcile_without_replay_or_fake_correlation(tmp_
             );
             """
         )
+    cycle_journal = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    cycle_journal.parent.mkdir(parents=True, exist_ok=True)
+    cycle_journal.write_text(
+        json.dumps(
+            {
+                "event": "round_authorized",
+                "cycle_id": CYCLE_ID,
+                "round_number": 4,
+                "authorization_id": AUTHORIZATION_ID,
+                "selected_ids": SELECTED,
+                "at": "2026-10-22T10:00:00+00:00",
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
     posts = {}
 
     # Current authorization: committed evidence is reconciled, never replayed.
