@@ -11,7 +11,11 @@ from unicornio_editor.pipeline_v2.cycle_admin import (
     isolate_uncertain_transaction,
 )
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
-from unicornio_editor.pipeline_v2.cycle_runtime import _parse_registry_timestamp, _registry_timestamp_audit
+from unicornio_editor.pipeline_v2.cycle_runtime import (
+    _historical_journal_evidence,
+    _parse_registry_timestamp,
+    _registry_timestamp_audit,
+)
 from unicornio_editor.workflow import publish_ready_posts
 from unicornio_editor.backup import atomic_write_text
 
@@ -305,6 +309,46 @@ def test_registry_timestamp_audit_normalizes_iso_offsets_and_rejects_unknowns():
     assert audit["missing_or_invalid_timestamps"]
     assert audit["proof_of_absence"] is False
 
+
+
+@pytest.mark.parametrize(
+    ("run_created_at", "authorized_at", "is_historical"),
+    [
+        # 10:30 at -03:00 is 13:30 UTC, after the 12:00 UTC authorization.
+        ("2026-10-23T10:30:00-03:00", "2026-10-23T12:00:00Z", False),
+        # 08:30 at -03:00 is 11:30 UTC, before the 12:00 UTC authorization.
+        ("2026-10-23T08:30:00-03:00", "2026-10-23T12:00:00Z", True),
+        ("invalid-timestamp", "2026-10-23T12:00:00Z", False),
+    ],
+)
+def test_historical_journal_evidence_compares_normalized_utc_instants(
+    tmp_path, run_created_at, authorized_at, is_historical
+):
+    registry_path = tmp_path / "work" / "media_registry.sqlite"
+    registry_path.parent.mkdir(parents=True)
+    with sqlite3.connect(registry_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (run_id TEXT, post_id INTEGER, created_at TEXT);
+            CREATE TABLE media_decisions (run_id TEXT, post_id INTEGER, created_at TEXT);
+            CREATE TABLE media_usage (post_id INTEGER, applied_at TEXT);
+            """
+        )
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            ("historical-run", 115215, run_created_at),
+        )
+
+    evidence = _historical_journal_evidence(
+        tmp_path,
+        115215,
+        {"run_id": "historical-run"},
+        authorized_at=authorized_at,
+    )
+    assert (evidence is not None) is is_historical
+    if is_historical:
+        assert evidence["historical_run_created_at_utc"] == "2026-10-23T11:30:00+00:00"
+        assert evidence["current_authorized_at_utc"] == "2026-10-23T12:00:00+00:00"
 
 
 def test_multi_post_isolation_closes_round_with_exact_accounting(tmp_path):
@@ -670,7 +714,7 @@ def test_crash_after_prepared_transition_is_recovered(monkeypatch, tmp_path):
     preview = isolate_uncertain_transaction(**args, apply=False)
     original_apply = transaction_admin._apply_transition
 
-    def crash_after_prepare(root, transition):
+    def crash_after_prepare(root, transition, client):
         raise RuntimeError("crash after prepared transition")
 
     monkeypatch.setattr(transaction_admin, "_apply_transition", crash_after_prepare)
@@ -685,6 +729,115 @@ def test_crash_after_prepared_transition_is_recovered(monkeypatch, tmp_path):
         **args, apply=True, preview=preview, operator_authorization="joao"
     )
     assert resumed["status"] == "applied"
+
+
+def test_resume_rejects_changed_additional_isolated_journal(monkeypatch, tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_apply = transaction_admin._apply_transition
+
+    def crash_after_prepare(root, transition, client):
+        raise RuntimeError("crash after prepared transition")
+
+    monkeypatch.setattr(transaction_admin, "_apply_transition", crash_after_prepare)
+    with pytest.raises(RuntimeError, match="after prepared transition"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    monkeypatch.setattr(transaction_admin, "_apply_transition", original_apply)
+
+    journal_path = tmp_path / "work" / "v2-journal" / "115215.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["mutated_during_recovery"] = True
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    with pytest.raises(TransactionIsolationError, match="isolated journal changed"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+
+@pytest.mark.parametrize("changed_evidence", ["wordpress", "media_registry"])
+def test_resume_revalidates_live_wordpress_and_registry_evidence(
+    monkeypatch, tmp_path, changed_evidence
+):
+    _fixture(tmp_path)
+    args = _args(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_apply = transaction_admin._apply_transition
+
+    def crash_after_prepare(root, transition, client):
+        raise RuntimeError("crash after prepared transition")
+
+    monkeypatch.setattr(transaction_admin, "_apply_transition", crash_after_prepare)
+    with pytest.raises(RuntimeError, match="after prepared transition"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    monkeypatch.setattr(transaction_admin, "_apply_transition", original_apply)
+
+    if changed_evidence == "wordpress":
+        args["client"].post["modified"] = "2026-10-23T15:00:00Z"
+    else:
+        with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+            db.execute(
+                "INSERT INTO media_usage(post_id, status, applied_at) VALUES (?, ?, ?)",
+                (115524, "accepted", "2026-10-23T15:00:00Z"),
+            )
+
+    with pytest.raises(TransactionIsolationError, match="live WordPress, MediaRegistry"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+
+@pytest.mark.parametrize("tamper", ["duplicate_attempt", "round_report_identity"])
+def test_resume_rejects_non_exact_attempts_or_round_report_identity(
+    monkeypatch, tmp_path, tamper
+):
+    _fixture(tmp_path)
+    args = _args(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_save = CycleStateStore.save
+
+    def crash_after_checkpoint_before_event(self, state, *, event, **fields):
+        if event == transaction_admin.ISOLATION_EVENT:
+            state.touch()
+            self.directory.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(
+                self.state_path,
+                json.dumps(state.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            )
+            raise RuntimeError("crash after checkpoint before event")
+        return original_save(self, state, event=event, **fields)
+
+    monkeypatch.setattr(CycleStateStore, "save", crash_after_checkpoint_before_event)
+    with pytest.raises(RuntimeError, match="checkpoint before event"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    monkeypatch.setattr(CycleStateStore, "save", original_save)
+
+    state_path = tmp_path / "work" / "v2-cycle" / "state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    if tamper == "duplicate_attempt":
+        payload["attempts_by_post"]["115524"] = 2
+    else:
+        payload["round_reports"][-1]["isolation_id"] = "different-isolation"
+    atomic_write_text(
+        state_path,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
+
+    with pytest.raises(TransactionIsolationError, match="checkpoint no longer matches"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview, operator_authorization="joao"
+        )
+    assert args["client"].write_calls == 0
 
 
 def test_crash_after_quarantine_write_before_phase_marker_is_recovered(monkeypatch, tmp_path):

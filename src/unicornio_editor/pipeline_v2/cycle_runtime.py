@@ -413,14 +413,18 @@ def _historical_journal_evidence(
         return None
     if not row or not row[1]:
         return None
-    run_created_at = str(row[1]).replace("T", " ")[:19]
-    current_authorized_at = str(authorized_at).replace("T", " ")[:19]
-    if run_created_at >= current_authorized_at:
+    run_created_at = _parse_registry_timestamp(row[1])
+    current_authorized_at = _parse_registry_timestamp(authorized_at)
+    if (
+        run_created_at is None
+        or current_authorized_at is None
+        or run_created_at >= current_authorized_at
+    ):
         return None
     return {
         "historical_run_id": str(journal["run_id"]),
-        "historical_run_created_at": run_created_at,
-        "current_authorized_at": current_authorized_at,
+        "historical_run_created_at_utc": run_created_at.isoformat(),
+        "current_authorized_at_utc": current_authorized_at.isoformat(),
         "post_id": int(post_id),
     }
 

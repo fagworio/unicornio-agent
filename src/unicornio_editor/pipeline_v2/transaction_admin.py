@@ -717,7 +717,9 @@ def _validate_transition_archive(
     ):
         raise TransactionIsolationError("transition record identity diverged")
     for field in (
-        "reconciled_post_ids", "not_executed_post_ids", "executed_ids", "round_post_evidence",
+        "reconciled_post_ids", "not_executed_post_ids", "executed_ids",
+        "round_post_evidence", "pre_rounds", "pre_attempts_by_post",
+        "pre_seen_post_ids",
     ):
         if transition.get(field) != record.get(field):
             raise TransactionIsolationError(f"transition {field} diverged from its archive record")
@@ -749,6 +751,20 @@ def _validate_transition_archive(
         != [int(value) for value in selected]
     ):
         raise TransactionIsolationError("archived checkpoint identity diverges from transition")
+    archived_attempts = {
+        str(key): int(value)
+        for key, value in (archived_state.get("attempts_by_post") or {}).items()
+    }
+    recorded_attempts = {
+        str(key): int(value)
+        for key, value in (transition.get("pre_attempts_by_post") or {}).items()
+    }
+    if (
+        int(transition.get("pre_rounds", -1)) != int(archived_state.get("rounds") or 0)
+        or recorded_attempts != archived_attempts
+        or transition.get("pre_seen_post_ids") != archived_state.get("seen_post_ids")
+    ):
+        raise TransactionIsolationError("prepared round accounting diverges from archived checkpoint")
     archived_journal = _read_json(archive / f"journal-{int(transition['post_id'])}.json")
     if (
         str(archived_journal.get("post_id") or "") != str(transition["post_id"])
@@ -826,14 +842,41 @@ def _validate_recovery_checkpoint(
     expected_attempts = dict(pre_attempts)
     for post_id in transition["executed_ids"]:
         expected_attempts[str(post_id)] = expected_attempts.get(str(post_id), 0) + 1
-    accounted = attempts == expected_attempts or all(
-        attempts.get(str(post_id), 0) >= expected_attempts.get(str(post_id), 0)
-        for post_id in transition["executed_ids"]
-    )
-    expected_seen = set(int(value) for value in (transition.get("pre_seen_post_ids") or [])) | {
-        int(value) for value in transition["executed_ids"]
+    accounted = attempts == expected_attempts
+    expected_seen = [int(value) for value in (transition.get("pre_seen_post_ids") or [])]
+    for post_id in transition["executed_ids"]:
+        if int(post_id) not in expected_seen:
+            expected_seen.append(int(post_id))
+    current_seen = [int(value) for value in (comparable_current.get("seen_post_ids") or [])]
+    original_reports = original_pending.get("round_reports") or []
+    current_reports = comparable_current.get("round_reports") or []
+    expected_report = {
+        "event": ISOLATION_EVENT,
+        "isolation_id": transition["isolation_id"],
+        "round": int(transition["pending_round"]),
+        "next_round_number": max(
+            int(transition.get("pre_rounds") or 0), int(transition["pending_round"])
+        ) + 1,
+        "phase": archived_state.get("phase"),
+        "preview_selected_ids": transition["selected_ids"],
+        "executed_ids": transition["executed_ids"],
+        "reconciled_post_ids": transition["reconciled_post_ids"],
+        "not_executed_post_ids": transition["not_executed_post_ids"],
+        "unresolved_post_ids": transition["isolated_post_ids"],
+        "round_post_evidence": transition["round_post_evidence"],
+        "isolated_post_ids": transition["isolated_post_ids"],
+        "write_replayed": False,
+        "operator_authorization": transition["operator_authorization"],
+        "archive_dir": transition["archive_dir"],
     }
-    current_seen = {int(value) for value in (comparable_current.get("seen_post_ids") or [])}
+    report_matches = (
+        isinstance(original_reports, list)
+        and isinstance(current_reports, list)
+        and len(current_reports) == len(original_reports) + 1
+        and current_reports[:-1] == original_reports
+        and isinstance(current_reports[-1], Mapping)
+        and all(current_reports[-1].get(key) == value for key, value in expected_report.items())
+    )
     is_cleared = (
         comparable_current.get("pending_round") is None
         and int(comparable_current.get("rounds") or 0) == max(
@@ -841,17 +884,26 @@ def _validate_recovery_checkpoint(
         )
         and accounted
         and current_seen == expected_seen
-        and len(comparable_current.get("round_reports") or [])
-        == len(original_pending.get("round_reports") or []) + 1
+        and report_matches
     )
     if not (is_original or is_cleared):
         raise TransactionIsolationError("checkpoint no longer matches the prepared isolation transition")
     if is_original and transition.get("phase") == "checkpoint_applied":
         raise TransactionIsolationError("checkpoint phase claims apply but pending authorization remains")
-    target_path = Path(root) / "work" / "v2-journal" / f"{int(transition['post_id'])}.json"
-    archived_target = archive / f"journal-{int(transition['post_id'])}.json"
-    if not target_path.is_file() or _hash_file(target_path) != _hash_file(archived_target):
-        raise TransactionIsolationError("target journal changed during isolation recovery")
+    isolated_post_ids = transition.get("isolated_post_ids")
+    if not isinstance(isolated_post_ids, list) or not isolated_post_ids:
+        raise TransactionIsolationError("isolated journal identities are missing")
+    for isolated_id in isolated_post_ids:
+        target_path = Path(root) / "work" / "v2-journal" / f"{int(isolated_id)}.json"
+        archived_target = archive / f"journal-{int(isolated_id)}.json"
+        if (
+            not target_path.is_file()
+            or not archived_target.is_file()
+            or _hash_file(target_path) != _hash_file(archived_target)
+        ):
+            raise TransactionIsolationError(
+                f"isolated journal changed during recovery: {int(isolated_id)}"
+            )
     events = _event_records(root, str(transition["isolation_id"]))
     if len(events) > 1:
         raise TransactionIsolationError("duplicate isolation events already exist")
@@ -860,6 +912,47 @@ def _validate_recovery_checkpoint(
     if transition.get("phase") == "checkpoint_applied" and not events:
         raise TransactionIsolationError("checkpoint phase claims apply but journal event is absent")
     return store, state, events
+
+
+def _validate_live_round_evidence(
+    root: Path, client, transition: Mapping[str, Any]
+) -> None:
+    """Re-read all selected journals, WordPress states, and Registry evidence."""
+    selected_ids = [int(value) for value in transition.get("selected_ids", [])]
+    expected = transition.get("round_post_evidence")
+    if (
+        not selected_ids
+        or not isinstance(expected, list)
+        or [int(item.get("post_id") or 0) for item in expected if isinstance(item, Mapping)]
+        != selected_ids
+    ):
+        raise TransactionIsolationError("prepared round evidence does not match the selected IDs")
+    actual = [
+        _round_post_evidence(
+            root,
+            client,
+            post_id=post_id,
+            cycle_id=str(transition["cycle_id"]),
+            authorization_id=str(transition["authorization_id"]),
+            pending_round=int(transition["pending_round"]),
+        )
+        for post_id in selected_ids
+    ]
+    primary_id = int(transition["post_id"])
+    primary = next((item for item in expected if int(item.get("post_id") or 0) == primary_id), None)
+    if (
+        not isinstance(primary, Mapping)
+        or not isinstance(primary.get("journal"), Mapping)
+        or str(primary["journal"].get("sha256") or "")
+    ):
+        raise TransactionIsolationError("prepared primary journal evidence is invalid")
+    for item in actual:
+        if int(item["post_id"]) == primary_id:
+            item["journal"]["sha256"] = ""
+    if _hash_value(actual) != _hash_value(expected):
+        raise TransactionIsolationError(
+            "live WordPress, MediaRegistry, or selected journal evidence changed since preparation"
+        )
 
 
 def _match_preview_evidence(
@@ -1065,7 +1158,7 @@ def _prepare_transition(
     return transition
 
 
-def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
+def _apply_transition(root: Path, transition: dict[str, Any], client) -> dict[str, Any]:
     root = Path(root)
     path = _transition_path(root, str(transition["isolation_id"]))
     if path.is_symlink():
@@ -1075,6 +1168,7 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
     archive, _record = _validate_transition_archive(root, transition)
     baseline = _read_json(archive / "quarantine-before.json")
     store, state, events = _validate_recovery_checkpoint(root, transition, archive)
+    _validate_live_round_evidence(root, client, transition)
     _write_quarantine_additively(
         root,
         baseline=baseline,
@@ -1256,9 +1350,7 @@ def isolate_uncertain_transaction(
             }
             if any(transition.get(key) != value for key, value in expected_inputs.items()):
                 raise TransactionIsolationError("pending transition does not match the requested authorization")
-            archive, _record = _validate_transition_archive(root, transition)
-            _validate_recovery_checkpoint(root, transition, archive)
-            return _apply_transition(root, transition)
+            return _apply_transition(root, transition, client)
 
         checkpoint = _validate_checkpoint(root, cycle_id=cycle_id, authorization_id=authorization_id, selected_ids=selected_ids, pending_round=pending_round)
         journal = checkpoint["journal"]
@@ -1347,7 +1439,7 @@ def isolate_uncertain_transaction(
                 round_post_evidence=round_post_evidence,
                 classifications=classifications,
             )
-            return _apply_transition(root, transition)
+            return _apply_transition(root, transition, client)
         classifications = _derive_round_classifications(
             round_post_evidence,
             isolated_post_ids=isolated_ids,
