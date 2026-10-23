@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -55,27 +57,45 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _copy_verified(source: Path, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
     digest = _hash_file(source)
+    if destination.is_symlink():
+        raise TransactionIsolationError(f"archive path must not be a symlink: {destination.name}")
+    if destination.exists():
+        if not destination.is_file() or _hash_file(destination) != digest:
+            raise TransactionIsolationError(f"archive evidence conflict: {destination}")
+        return digest
+    shutil.copy2(source, destination)
     if _hash_file(destination) != digest:
         raise TransactionIsolationError(f"archive hash mismatch: {source}")
     return digest
 
 
-def _registry_snapshot(root: Path, *, post_id: int, run_id: str) -> dict[str, Any]:
+def _registry_snapshot(
+    root: Path, *, post_id: int, run_id: str | None = None
+) -> dict[str, Any]:
     path = Path(root) / "work" / "media_registry.sqlite"
     if not path.is_file():
         return {"present": False, "run": [], "decisions": [], "usages": []}
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
             db.row_factory = sqlite3.Row
+            if run_id:
+                run_query = "SELECT * FROM media_runs WHERE run_id=? AND post_id=? ORDER BY rowid"
+                run_args: tuple[Any, ...] = (run_id, int(post_id))
+                decision_query = "SELECT * FROM media_decisions WHERE run_id=? AND post_id=? ORDER BY rowid"
+                decision_args: tuple[Any, ...] = (run_id, int(post_id))
+            else:
+                run_query = "SELECT * FROM media_runs WHERE post_id=? ORDER BY rowid"
+                run_args = (int(post_id),)
+                decision_query = "SELECT * FROM media_decisions WHERE post_id=? ORDER BY rowid"
+                decision_args = (int(post_id),)
             run = [dict(row) for row in db.execute(
-                "SELECT * FROM media_runs WHERE run_id=? AND post_id=? ORDER BY rowid",
-                (run_id, int(post_id)),
+                run_query,
+                run_args,
             )]
             decisions = [dict(row) for row in db.execute(
-                "SELECT * FROM media_decisions WHERE run_id=? AND post_id=? ORDER BY rowid",
-                (run_id, int(post_id)),
+                decision_query,
+                decision_args,
             )]
             usages = [dict(row) for row in db.execute(
                 "SELECT * FROM media_usage WHERE post_id=? ORDER BY rowid",
@@ -172,6 +192,300 @@ def _validate_checkpoint(
     }
 
 
+def _validate_quarantine_payload(payload: Mapping[str, Any]) -> None:
+    if (
+        payload.get("version") != 1
+        or not isinstance(payload.get("posts"), list)
+        or not isinstance(payload.get("release_history"), list)
+    ):
+        raise TransactionIsolationError("quarantine schema is invalid")
+    post_ids: set[int] = set()
+    for row in payload["posts"]:
+        if not isinstance(row, Mapping) or type(row.get("post_id")) is not int:
+            raise TransactionIsolationError("quarantine contains an invalid post entry")
+        if row["post_id"] < 1 or row["post_id"] in post_ids:
+            raise TransactionIsolationError("quarantine contains duplicate post entries")
+        if (
+            not isinstance(row.get("reason_code"), str)
+            or not row.get("reason_code", "").strip()
+            or not isinstance(row.get("reason"), str)
+            or not row.get("reason", "").strip()
+        ):
+            raise TransactionIsolationError("quarantine contains an invalid reason")
+        post_ids.add(row["post_id"])
+
+
+def _assert_quarantine_additions_only(
+    before: Mapping[str, Any], current: Mapping[str, Any]
+) -> None:
+    """Allow append-only additions while rejecting edits/removals of policy evidence."""
+    _validate_quarantine_payload(before)
+    _validate_quarantine_payload(current)
+    for key, value in before.items():
+        if key in {"posts", "release_history"}:
+            continue
+        if current.get(key) != value:
+            raise TransactionIsolationError(f"quarantine policy changed existing field: {key}")
+    if current["posts"][: len(before["posts"])] != before["posts"]:
+        raise TransactionIsolationError("quarantine post entries were reordered, changed, or truncated")
+    if current["release_history"][: len(before["release_history"])] != before["release_history"]:
+        raise TransactionIsolationError("quarantine release history was changed or truncated")
+
+
+def _quarantine_with_target(
+    payload: dict[str, Any], *, post_id: int, reason: str
+) -> dict[str, Any]:
+    _validate_quarantine_payload(payload)
+    result = deepcopy(payload)
+    existing = next((row for row in result["posts"] if row["post_id"] == post_id), None)
+    if existing is None:
+        result["posts"].append({
+            "post_id": post_id,
+            "reason_code": ISOLATION_REASON,
+            "reason": reason,
+        })
+    elif existing.get("reason_code") != ISOLATION_REASON:
+        raise TransactionIsolationError("post already has a different quarantine reason")
+    return result
+
+
+def _write_quarantine_additively(
+    root: Path,
+    *,
+    baseline: Mapping[str, Any],
+    post_id: int,
+    reason: str,
+) -> None:
+    """Apply only the target entry, preserving additions made after preparation."""
+    path = Path(root) / "config" / "v2-quarantine.json"
+    if path.is_symlink():
+        raise TransactionIsolationError("quarantine policy path must not be a symlink")
+    for _attempt in range(3):
+        current = _read_json(path)
+        _assert_quarantine_additions_only(baseline, current)
+        merged = _quarantine_with_target(current, post_id=post_id, reason=reason)
+        if merged == current:
+            return
+        before_write = _hash_file(path)
+        latest = _read_json(path)
+        if _hash_value(latest) != _hash_value(current) or _hash_file(path) != before_write:
+            continue
+        atomic_write_text(path, _json(merged))
+        written = _read_json(path)
+        _assert_quarantine_additions_only(baseline, written)
+        if written.get("posts") != merged.get("posts") or written.get("release_history") != merged.get("release_history"):
+            raise TransactionIsolationError("quarantine changed concurrently during isolation")
+        return
+    raise TransactionIsolationError("quarantine changed concurrently during isolation")
+
+
+def _event_records(root: Path, isolation_id: str) -> list[dict[str, Any]]:
+    path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
+    if not path.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(value, dict)
+            and value.get("event") == ISOLATION_EVENT
+            and value.get("isolation_id") == isolation_id
+        ):
+            records.append(value)
+    return records
+
+
+def _ensure_journal_append_boundary(path: Path) -> None:
+    """Keep a torn final JSONL record from absorbing the recovery event."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        last_byte = handle.read(1)
+    if last_byte != b"\n":
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _wp_state(post: Mapping[str, Any]) -> dict[str, Any] | None:
+    value = (post.get("meta") or {}).get("_hermes_work_state")
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return dict(parsed) if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _wp_summary(post: Mapping[str, Any]) -> dict[str, Any]:
+    state = _wp_state(post)
+    content = post.get("content") or {}
+    title = post.get("title") or {}
+    return {
+        "id": int(post.get("id") or 0),
+        "status": post.get("status"),
+        "modified": post.get("modified"),
+        "featured_media": post.get("featured_media"),
+        "work_state_sha256": _hash_value(state) if state is not None else "",
+        "ready_hash": str((post.get("meta") or {}).get("_hermes_ready_hash") or ""),
+        "content_sha256": _hash_value(str(content.get("raw") or "")),
+        "title_sha256": _hash_value(str(title.get("raw") or "")),
+    }
+
+
+def _registry_summary(registry: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "present": registry.get("present") is True,
+        "run_count": len(registry.get("run") or []),
+        "decision_count": len(registry.get("decisions") or []),
+        "usage_count": len(registry.get("usages") or []),
+        "snapshot_sha256": _hash_value(dict(registry)),
+    }
+
+
+def _round_post_evidence(
+    root: Path,
+    client,
+    *,
+    post_id: int,
+    cycle_id: str,
+    authorization_id: str,
+    pending_round: int,
+    target_journal: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
+    journal = (
+        dict(target_journal)
+        if target_journal is not None
+        else _read_json(journal_path) if journal_path.is_file() else None
+    )
+    journal_identity_matches = journal is not None and str(journal.get("post_id") or "") == str(post_id)
+    if journal is not None and str(journal.get("post_id") or "") not in {str(post_id), ""}:
+        raise TransactionIsolationError(f"post journal identity diverged for {post_id}")
+    run_id = str((journal or {}).get("run_id") or "") or None
+    registry = _registry_snapshot(root, post_id=post_id, run_id=run_id)
+    post = client.get_post(int(post_id))
+    if not isinstance(post, dict) or int(post.get("id") or 0) != int(post_id):
+        raise TransactionIsolationError(f"WordPress post identity diverged for {post_id}")
+
+    classification = "UNCERTAIN_ISOLATED"
+    reason = "journal_missing_or_evidence_incomplete"
+    if journal is not None and journal_identity_matches:
+        current_state = _wp_state(post)
+        journal_state = journal.get("state")
+        state_matches = (
+            isinstance(current_state, Mapping)
+            and isinstance(journal_state, Mapping)
+            and _hash_value(current_state) == _hash_value(dict(journal_state))
+        )
+        linked = {
+            key: journal.get(key)
+            for key in ("run_id", "cycle_id", "cycle_round", "authorization_id", "post_id")
+        }
+        if registry.get("present") is True and state_matches:
+            if (
+                journal.get("status") == "committed"
+                and journal.get("readback") is True
+                and run_id
+            ):
+                classification = classify_transaction(
+                    journal,
+                    external_evidence={**linked, "readback_confirmed": True},
+                )
+                reason = "committed_journal_and_wordpress_state_match"
+            elif (
+                journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}
+                and journal.get("writer_started") is False
+                and journal.get("resumable") is True
+                and run_id
+                and str(journal.get("cycle_id") or "") == cycle_id
+                and str(journal.get("authorization_id") or "") == authorization_id
+                and str(journal.get("cycle_round") or "") == str(int(pending_round))
+                and not registry.get("run")
+                and not registry.get("decisions")
+                and not registry.get("usages")
+                and not journal.get("media_ids")
+                and not journal.get("media_records")
+                and not journal.get("apply_media_records")
+                and journal.get("media_state") == "apply_not_attempted"
+                and journal.get("media_application_status") == "not_attempted"
+                and journal.get("html_readback_status") == "not_attempted"
+            ):
+                classification = classify_transaction(
+                    journal,
+                    external_evidence={**linked, "effects_absent": True},
+                )
+                reason = "pre_writer_journal_registry_and_wordpress_state_match"
+
+    return {
+        "post_id": int(post_id),
+        "classification": classification,
+        "reason": reason,
+        "journal": {
+            "present": journal is not None,
+            "sha256": _hash_file(journal_path) if journal is not None and target_journal is None else "",
+            "status": (journal or {}).get("status"),
+            "run_id": str((journal or {}).get("run_id") or ""),
+            "cycle_id": (journal or {}).get("cycle_id"),
+            "cycle_round": (journal or {}).get("cycle_round"),
+            "authorization_id": (journal or {}).get("authorization_id"),
+            "writer_started": (journal or {}).get("writer_started"),
+            "resumable": (journal or {}).get("resumable"),
+            "readback": (journal or {}).get("readback"),
+            "media_state": (journal or {}).get("media_state"),
+        },
+        "wordpress": _wp_summary(post),
+        "registry": _registry_summary(registry),
+    }
+
+
+def _derive_round_classifications(
+    round_posts: list[Mapping[str, Any]],
+    *,
+    isolated_post_id: int,
+    require_resolved: bool = True,
+) -> dict[str, list[int]]:
+    others = [
+        item for item in round_posts
+        if int(item.get("post_id") or 0) != int(isolated_post_id)
+    ]
+    unresolved = [
+        int(item["post_id"])
+        for item in others
+        if item.get("classification") not in {
+            "COMMITTED_NO_REPLAY", "PRE_WRITER_RECOVERABLE", "NOT_EXECUTED",
+        }
+    ]
+    if unresolved and require_resolved:
+        raise TransactionIsolationError(
+            "other authorized posts have unresolved execution evidence: "
+            + ",".join(str(value) for value in unresolved)
+        )
+    resolved = [item for item in others if int(item["post_id"]) not in set(unresolved)]
+    return {
+        "reconciled_post_ids": sorted(int(item["post_id"]) for item in resolved),
+        "not_executed_post_ids": sorted(
+            int(item["post_id"])
+            for item in resolved
+            if item.get("classification") in {"PRE_WRITER_RECOVERABLE", "NOT_EXECUTED"}
+        ),
+        "executed_ids": sorted(
+            int(item["post_id"])
+            for item in resolved
+            if item.get("classification") == "COMMITTED_NO_REPLAY"
+        ),
+        "unresolved_post_ids": sorted(unresolved),
+    }
+
+
 def _validate_uncertain(journal: Mapping[str, Any], *, run_id: str) -> None:
     if str(journal.get("run_id") or "") != run_id:
         raise TransactionIsolationError("run_id diverged")
@@ -189,50 +503,372 @@ def _transition_path(root: Path, isolation_id: str) -> Path:
     return Path(root) / "work" / "v2-cycle" / "transaction-isolations" / f"{isolation_id}.json"
 
 
-def _event_exists(root: Path, isolation_id: str) -> bool:
-    path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
-    if not path.is_file():
-        return False
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            value = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if value.get("event") == ISOLATION_EVENT and value.get("isolation_id") == isolation_id:
-            return True
-    return False
+def _validate_archive_scope(root: Path, archive: Path) -> Path:
+    cycle_root = (Path(root) / "work" / "v2-cycle").resolve()
+    archives_root = (cycle_root / "archives").resolve()
+    try:
+        archives_root.relative_to(cycle_root)
+        archive.resolve().relative_to(archives_root)
+    except ValueError as exc:
+        raise TransactionIsolationError("archive path escapes the V2 cycle directory") from exc
+    return archives_root
 
 
-def _add_quarantine(payload: dict[str, Any], *, post_id: int, reason: str) -> dict[str, Any]:
-    if payload.get("version") != 1 or not isinstance(payload.get("posts"), list) or not isinstance(payload.get("release_history"), list):
-        raise TransactionIsolationError("quarantine schema is invalid")
-    result = json.loads(json.dumps(payload))
-    rows = [row for row in result["posts"] if isinstance(row, dict)]
-    existing = {int(row["post_id"]) for row in rows if isinstance(row.get("post_id"), int)}
-    if post_id not in existing:
-        result["posts"].append({"post_id": post_id, "reason_code": ISOLATION_REASON, "reason": reason})
+def _write_json_once(path: Path, payload: Mapping[str, Any]) -> None:
+    rendered = _json(dict(payload))
+    if path.is_symlink():
+        raise TransactionIsolationError(f"prepared archive path must not be a symlink: {path.name}")
+    if path.exists():
+        if not path.is_file() or path.read_text(encoding="utf-8") != rendered:
+            raise TransactionIsolationError(f"prepared archive evidence conflicts: {path.name}")
+        return
+    atomic_write_text(path, rendered)
+
+
+def _event_matches_transition(event: Mapping[str, Any], transition: Mapping[str, Any]) -> bool:
+    expected = {
+        "cycle_id": transition["cycle_id"],
+        "isolation_id": transition["isolation_id"],
+        "authorization_id": transition["authorization_id"],
+        "round_number": transition["pending_round"],
+        "selected_ids": transition["selected_ids"],
+        "isolated_post_id": transition["post_id"],
+        "classification": transition["classification"],
+        "reconciled_post_ids": transition["reconciled_post_ids"],
+        "not_executed_post_ids": transition["not_executed_post_ids"],
+        "executed_ids": transition["executed_ids"],
+        "round_post_evidence": transition["round_post_evidence"],
+        "write_replayed": False,
+    }
+    return all(event.get(key) == value for key, value in expected.items())
+
+
+def _validate_transition_archive(
+    root: Path, transition: Mapping[str, Any]
+) -> tuple[Path, dict[str, Any]]:
+    archive = Path(str(transition.get("archive_dir") or ""))
+    _validate_archive_scope(root, archive)
+    if transition.get("version") != ISOLATION_VERSION or transition.get("phase") not in {
+        "prepared", "quarantine_applied", "checkpoint_applied", "completed",
+    }:
+        raise TransactionIsolationError("transition version or phase is invalid")
+    selected = transition.get("selected_ids")
+    if (
+        not isinstance(selected, list)
+        or len(selected) != len(set(selected))
+        or int(transition.get("post_id") or 0) not in [int(value) for value in selected]
+    ):
+        raise TransactionIsolationError("transition selection is invalid")
+    record = _read_json(archive / "isolation-record.json")
+    if (
+        record.get("version") != ISOLATION_VERSION
+        or record.get("isolation_id") != transition.get("isolation_id")
+        or record.get("cycle_id") != transition.get("cycle_id")
+        or record.get("authorization_id") != transition.get("authorization_id")
+        or record.get("pending_round") != transition.get("pending_round")
+        or record.get("selected_ids") != transition.get("selected_ids")
+        or record.get("post_id") != transition.get("post_id")
+        or record.get("run_id") != transition.get("run_id")
+        or record.get("snapshot_hash") != transition.get("snapshot_hash")
+        or _hash_value(record.get("evidence") or {}) != record.get("snapshot_hash")
+    ):
+        raise TransactionIsolationError("transition record identity diverged")
+    for field in (
+        "reconciled_post_ids", "not_executed_post_ids", "executed_ids", "round_post_evidence",
+    ):
+        if transition.get(field) != record.get(field):
+            raise TransactionIsolationError(f"transition {field} diverged from its archive record")
+    hashes = record.get("archive_hashes")
+    if not isinstance(hashes, Mapping):
+        raise TransactionIsolationError("archive hash manifest is missing")
+    files = {
+        "state": archive / "state.json",
+        "journal": archive / "journal.jsonl",
+        "target_journal": archive / f"journal-{int(transition['post_id'])}.json",
+        "quarantine_before": archive / "quarantine-before.json",
+    }
+    for key, snapshot in files.items():
+        if not snapshot.is_file() or _hash_file(snapshot) != hashes.get(key):
+            raise TransactionIsolationError(f"archived snapshot is incomplete or changed: {key}")
+    archived_state = _read_json(archive / "state.json")
+    pending = archived_state.get("pending_round")
+    if (
+        archived_state.get("cycle_id") != transition.get("cycle_id")
+        or archived_state.get("status") != "running"
+        or archived_state.get("phase") != "ADMISSION"
+        or not isinstance(pending, Mapping)
+        or int(pending.get("round_number", -1)) != int(transition.get("pending_round", -2))
+        or str(pending.get("authorization_id") or "") != str(transition.get("authorization_id") or "")
+        or [int(value) for value in (pending.get("preview_selected_ids") or [])]
+        != [int(value) for value in selected]
+    ):
+        raise TransactionIsolationError("archived checkpoint identity diverges from transition")
+    archived_journal = _read_json(archive / f"journal-{int(transition['post_id'])}.json")
+    if (
+        str(archived_journal.get("post_id") or "") != str(transition["post_id"])
+        or str(archived_journal.get("cycle_id") or "") != str(transition["cycle_id"])
+        or str(archived_journal.get("authorization_id") or "") != str(transition["authorization_id"])
+        or str(archived_journal.get("cycle_round") or "") != str(transition["pending_round"])
+    ):
+        raise TransactionIsolationError("archived target journal identity diverges from transition")
+    _validate_uncertain(archived_journal, run_id=str(transition.get("run_id") or ""))
+    derived = _derive_round_classifications(
+        record.get("round_post_evidence") or [],
+        isolated_post_id=int(transition["post_id"]),
+        require_resolved=True,
+    )
+    if any(record.get(field) != derived[field] for field in (
+        "reconciled_post_ids", "not_executed_post_ids", "executed_ids",
+    )):
+        raise TransactionIsolationError("archived post classifications do not match their evidence")
+    baseline = _read_json(archive / "quarantine-before.json")
+    _validate_quarantine_payload(baseline)
+    after = _read_json(archive / "quarantine-after.json")
+    _assert_quarantine_additions_only(baseline, after)
+    expected_after = _quarantine_with_target(
+        deepcopy(baseline),
+        post_id=int(transition["post_id"]),
+        reason=f"UNCERTAIN_ISOLATED {transition['isolation_id']}; no replay until independently resolved",
+    )
+    if after != expected_after:
+        raise TransactionIsolationError("archived quarantine differs from the prepared isolation change")
+    return archive, record
+
+
+def _validate_recovery_checkpoint(
+    root: Path, transition: Mapping[str, Any], archive: Path
+) -> tuple[CycleStateStore, Any, list[dict[str, Any]]]:
+    store = CycleStateStore(root)
+    state = store.load()
+    if state is None or state.cycle_id != transition.get("cycle_id"):
+        raise TransactionIsolationError("checkpoint changed during isolation")
+    try:
+        archived_state = json.loads((archive / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise TransactionIsolationError("archived checkpoint is invalid") from exc
+    if not isinstance(archived_state, dict):
+        raise TransactionIsolationError("archived checkpoint is invalid")
+    current_state = state.to_dict()
+    original_pending = deepcopy(archived_state)
+    cleared_pending = deepcopy(archived_state)
+    original_pending.pop("updated_at", None)
+    cleared_pending.pop("updated_at", None)
+    cleared_pending["pending_round"] = None
+    comparable_current = deepcopy(current_state)
+    comparable_current.pop("updated_at", None)
+    is_original = comparable_current == original_pending
+    is_cleared = comparable_current == cleared_pending
+    if not (is_original or is_cleared):
+        raise TransactionIsolationError("checkpoint no longer matches the prepared isolation transition")
+    if is_original and transition.get("phase") == "checkpoint_applied":
+        raise TransactionIsolationError("checkpoint phase claims apply but pending authorization remains")
+    target_path = Path(root) / "work" / "v2-journal" / f"{int(transition['post_id'])}.json"
+    archived_target = archive / f"journal-{int(transition['post_id'])}.json"
+    if not target_path.is_file() or _hash_file(target_path) != _hash_file(archived_target):
+        raise TransactionIsolationError("target journal changed during isolation recovery")
+    events = _event_records(root, str(transition["isolation_id"]))
+    if len(events) > 1:
+        raise TransactionIsolationError("duplicate isolation events already exist")
+    if events and (not _event_matches_transition(events[0], transition) or not is_cleared):
+        raise TransactionIsolationError("existing isolation event conflicts with checkpoint")
+    if transition.get("phase") == "checkpoint_applied" and not events:
+        raise TransactionIsolationError("checkpoint phase claims apply but journal event is absent")
+    return store, state, events
+
+
+def _match_preview_evidence(
+    root: Path,
+    evidence: Mapping[str, Any],
+    preview: Mapping[str, Any] | None,
+    *,
+    isolation_id: str,
+    allow_quarantine_additions: bool,
+    archive: Path,
+) -> dict[str, Any]:
+    if (
+        not isinstance(preview, Mapping)
+        or preview.get("isolation_id") != isolation_id
+        or not isinstance(preview.get("evidence"), Mapping)
+    ):
+        raise TransactionIsolationError("apply requires the exact preview evidence")
+    expected_evidence = deepcopy(dict(preview["evidence"]))
+    current_evidence = deepcopy(dict(evidence))
+    if allow_quarantine_additions:
+        baseline_path = archive / "quarantine-before.json"
+        expected_hash = str(
+            ((expected_evidence.get("checkpoint") or {}).get("quarantine_sha256")) or ""
+        )
+        current_policy = _read_json(Path(root) / "config" / "v2-quarantine.json")
+        if baseline_path.is_file():
+            baseline = _read_json(baseline_path)
+            if not expected_hash or _hash_file(baseline_path) != expected_hash:
+                raise TransactionIsolationError("partial archive quarantine does not match the preview")
+            _assert_quarantine_additions_only(baseline, current_policy)
+        elif not expected_hash or _hash_file(Path(root) / "config" / "v2-quarantine.json") != expected_hash:
+            raise TransactionIsolationError("partial archive lacks the original quarantine snapshot")
+        current_evidence["checkpoint"]["quarantine_sha256"] = expected_hash
+    if _hash_value(current_evidence) != str(preview.get("snapshot_hash") or ""):
+        raise TransactionIsolationError("checkpoint, journals, WordPress, Registry, or quarantine changed since preview")
+    return expected_evidence
+
+
+def _ensure_snapshot(source: Path, destination: Path, expected_hash: str) -> str:
+    if destination.is_symlink():
+        raise TransactionIsolationError(f"partial archive snapshot is a symlink: {destination.name}")
+    if destination.exists():
+        if not destination.is_file() or _hash_file(destination) != expected_hash:
+            raise TransactionIsolationError(f"partial archive snapshot conflicts: {destination.name}")
+        return expected_hash
+    if not source.is_file() or _hash_file(source) != expected_hash:
+        raise TransactionIsolationError(f"source changed before archive preparation: {source.name}")
+    return _copy_verified(source, destination)
+
+
+def _prepare_transition(
+    root: Path,
+    *,
+    archive: Path,
+    transition_path: Path,
+    checkpoint: Mapping[str, Any],
+    preview_evidence: Mapping[str, Any],
+    snapshot_hash: str,
+    isolation_id: str,
+    cycle_id: str,
+    authorization_id: str,
+    selected_ids: list[int],
+    pending_round: int,
+    post_id: int,
+    run_id: str,
+    operator_authorization: str,
+    round_post_evidence: list[dict[str, Any]],
+    classifications: Mapping[str, Any],
+) -> dict[str, Any]:
+    _validate_archive_scope(root, archive)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if archive.exists() and not archive.is_dir():
+        raise TransactionIsolationError("archive destination is not a directory")
+    archive.mkdir(exist_ok=True)
+    sources = {
+        "state": Path(checkpoint["paths"]["state"]),
+        "journal": Path(checkpoint["paths"]["journal"]),
+        "target_journal": Path(checkpoint["paths"]["target_journal"]),
+        "quarantine_before": Path(root) / "config" / "v2-quarantine.json",
+    }
+    destinations = {
+        "state": archive / "state.json",
+        "journal": archive / "journal.jsonl",
+        "target_journal": archive / f"journal-{post_id}.json",
+        "quarantine_before": archive / "quarantine-before.json",
+    }
+    preview_checkpoint = preview_evidence["checkpoint"]
+    hashes = {
+        "state": str(preview_checkpoint["state_sha256"]),
+        "journal": str(preview_checkpoint["journal_sha256"]),
+        "target_journal": str(preview_checkpoint["target_journal_sha256"]),
+        "quarantine_before": str(preview_checkpoint["quarantine_sha256"]),
+    }
+    archived = {
+        key: _ensure_snapshot(sources[key], destinations[key], hashes[key])
+        for key in sources
+    }
+    baseline = _read_json(destinations["quarantine_before"])
+    _validate_quarantine_payload(baseline)
+    current_policy = _read_json(sources["quarantine_before"])
+    _assert_quarantine_additions_only(baseline, current_policy)
+    reason = f"UNCERTAIN_ISOLATED {isolation_id}; no replay until independently resolved"
+    after_path = archive / "quarantine-after.json"
+    if after_path.exists():
+        after = _read_json(after_path)
+        _assert_quarantine_additions_only(baseline, after)
+        expected_after = _quarantine_with_target(
+            deepcopy(baseline), post_id=post_id, reason=reason
+        )
+        if after != expected_after:
+            raise TransactionIsolationError("prepared quarantine snapshot conflicts with original policy")
     else:
-        row = next(row for row in result["posts"] if row.get("post_id") == post_id)
-        if row.get("reason_code") != ISOLATION_REASON:
-            raise TransactionIsolationError("post already has a different quarantine reason")
-    return result
+        _write_json_once(
+            after_path,
+            _quarantine_with_target(deepcopy(baseline), post_id=post_id, reason=reason),
+        )
+
+    record = {
+        "version": ISOLATION_VERSION,
+        "isolation_id": isolation_id,
+        "classification": "UNCERTAIN_ISOLATED",
+        "cycle_id": cycle_id,
+        "authorization_id": authorization_id,
+        "pending_round": pending_round,
+        "selected_ids": selected_ids,
+        "post_id": post_id,
+        "run_id": run_id,
+        "snapshot_hash": snapshot_hash,
+        "evidence": dict(preview_evidence),
+        "round_post_evidence": round_post_evidence,
+        "reconciled_post_ids": classifications["reconciled_post_ids"],
+        "not_executed_post_ids": classifications["not_executed_post_ids"],
+        "executed_ids": classifications["executed_ids"],
+        "archive_hashes": archived,
+        "reason": "single writer transaction remains uncertain; isolate without replay or commit claim",
+        "operator_authorization": operator_authorization,
+    }
+    record_path = archive / "isolation-record.json"
+    if record_path.exists():
+        existing = _read_json(record_path)
+        if existing != record:
+            raise TransactionIsolationError("prepared isolation record conflicts with preview evidence")
+    else:
+        _write_json_once(record_path, record)
+
+    transition = {
+        "version": ISOLATION_VERSION,
+        "phase": "prepared",
+        "isolation_id": isolation_id,
+        "archive_dir": str(archive),
+        "cycle_id": cycle_id,
+        "authorization_id": authorization_id,
+        "pending_round": pending_round,
+        "selected_ids": selected_ids,
+        "post_id": post_id,
+        "run_id": run_id,
+        "snapshot_hash": snapshot_hash,
+        "classification": "UNCERTAIN_ISOLATED",
+        "round_post_evidence": round_post_evidence,
+        "reconciled_post_ids": classifications["reconciled_post_ids"],
+        "not_executed_post_ids": classifications["not_executed_post_ids"],
+        "executed_ids": classifications["executed_ids"],
+        "operator_authorization": operator_authorization,
+    }
+    if transition_path.exists():
+        existing_transition = _read_json(transition_path)
+        if existing_transition != transition:
+            raise TransactionIsolationError("isolation transition conflicts with prepared archive")
+        transition = existing_transition
+    else:
+        transition_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_once(transition_path, transition)
+    return transition
 
 
 def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
     root = Path(root)
     path = _transition_path(root, str(transition["isolation_id"]))
+    if path.is_symlink():
+        raise TransactionIsolationError("transition record path must not be a symlink")
     if transition.get("phase") == "completed":
         return {"status": "already_applied", **{k: transition[k] for k in ("isolation_id", "archive_dir", "classification")}}
-    archive = Path(transition["archive_dir"])
-    quarantine_after = _read_json(archive / "quarantine-after.json")
-    atomic_write_text(root / "config" / "v2-quarantine.json", _json(quarantine_after))
-    transition["phase"] = "quarantine_applied"
-    atomic_write_text(path, _json(transition))
+    archive, _record = _validate_transition_archive(root, transition)
+    baseline = _read_json(archive / "quarantine-before.json")
+    store, state, events = _validate_recovery_checkpoint(root, transition, archive)
+    _write_quarantine_additively(
+        root,
+        baseline=baseline,
+        post_id=int(transition["post_id"]),
+        reason=f"UNCERTAIN_ISOLATED {transition['isolation_id']}; no replay until independently resolved",
+    )
+    if transition.get("phase") == "prepared":
+        transition["phase"] = "quarantine_applied"
+        atomic_write_text(path, _json(transition))
 
-    store = CycleStateStore(root)
-    state = store.load()
-    if state is None or state.cycle_id != transition["cycle_id"]:
-        raise TransactionIsolationError("checkpoint changed during isolation")
     pending = state.pending_round
     expected = transition["selected_ids"]
     fields = {
@@ -245,6 +881,7 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
         "reconciled_post_ids": transition["reconciled_post_ids"],
         "not_executed_post_ids": transition["not_executed_post_ids"],
         "executed_ids": transition["executed_ids"],
+        "round_post_evidence": transition["round_post_evidence"],
         "write_replayed": False,
         "operator_authorization": transition["operator_authorization"],
         "archive_dir": transition["archive_dir"],
@@ -252,13 +889,19 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
     if pending is not None:
         if str(pending.get("authorization_id") or "") != transition["authorization_id"] or [int(v) for v in (pending.get("preview_selected_ids") or [])] != expected:
             raise TransactionIsolationError("checkpoint changed before isolation apply")
+        if events:
+            raise TransactionIsolationError("isolation event exists before checkpoint transition")
         state.pending_round = None
+        _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
-    elif not _event_exists(root, str(transition["isolation_id"])):
-        # CycleStateStore writes the checkpoint before its append-only event.
-        # A crash in that gap is repaired by appending the same idempotent
-        # administrative event; the state is already safely out of admission.
+    elif not events:
+        # CycleStateStore writes the checkpoint before appending its event.
+        # Re-saving the already-cleared state repairs that exact gap.
+        _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
+    events = _event_records(root, str(transition["isolation_id"]))
+    if len(events) != 1 or not _event_matches_transition(events[0], transition):
+        raise TransactionIsolationError("isolation journal event could not be verified")
     transition["phase"] = "checkpoint_applied"
     atomic_write_text(path, _json(transition))
     transition["phase"] = "completed"
@@ -290,106 +933,134 @@ def isolate_uncertain_transaction(
     if not lock.acquire():
         return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
     try:
-        isolation_id = _hash_value({"cycle_id": cycle_id, "authorization_id": authorization_id, "round": pending_round, "post_id": post_id, "run_id": run_id})[:24]
+        if len(selected_ids) != len(set(selected_ids)) or int(post_id) not in selected_ids:
+            raise TransactionIsolationError("selected IDs must be unique and include the isolated post")
+        isolation_id = _hash_value({
+            "cycle_id": cycle_id,
+            "authorization_id": authorization_id,
+            "round": pending_round,
+            "post_id": post_id,
+            "run_id": run_id,
+        })[:24]
         transition_path = _transition_path(root, isolation_id)
+        if transition_path.is_symlink():
+            raise TransactionIsolationError("transition record path must not be a symlink")
         if transition_path.is_file():
             transition = _read_json(transition_path)
             if transition.get("phase") == "completed":
-                return {"status": "already_applied", "isolation_id": isolation_id, "archive_dir": transition["archive_dir"], "classification": transition["classification"], "wordpress_writes": 0}
+                return {
+                    "status": "already_applied",
+                    "isolation_id": isolation_id,
+                    "archive_dir": transition["archive_dir"],
+                    "classification": transition["classification"],
+                    "wordpress_writes": 0,
+                }
+            if not apply:
+                return {
+                    "status": "pending_transition",
+                    "phase": transition.get("phase"),
+                    "isolation_id": isolation_id,
+                    "archive_dir": transition.get("archive_dir"),
+                    "wordpress_writes": 0,
+                }
+            if not operator_authorization or not str(operator_authorization).strip():
+                raise TransactionIsolationError("explicit operator authorization is required")
+            expected_inputs = {
+                "isolation_id": isolation_id,
+                "cycle_id": cycle_id,
+                "authorization_id": authorization_id,
+                "pending_round": int(pending_round),
+                "selected_ids": selected_ids,
+                "post_id": int(post_id),
+                "run_id": run_id,
+                "operator_authorization": str(operator_authorization),
+            }
+            if any(transition.get(key) != value for key, value in expected_inputs.items()):
+                raise TransactionIsolationError("pending transition does not match the requested authorization")
+            archive, _record = _validate_transition_archive(root, transition)
+            _validate_recovery_checkpoint(root, transition, archive)
+            return _apply_transition(root, transition)
+
         checkpoint = _validate_checkpoint(root, cycle_id=cycle_id, authorization_id=authorization_id, selected_ids=selected_ids, pending_round=pending_round)
         journal = checkpoint["journal"]
         if str(journal.get("post_id") or "") not in {str(post_id), ""}:
             raise TransactionIsolationError("post_id diverged")
         _validate_uncertain(journal, run_id=run_id)
-        post = client.get_post(int(post_id))
-        if not isinstance(post, dict) or int(post.get("id") or post_id) != post_id:
-            raise TransactionIsolationError("WordPress post identity diverged")
-        registry = _registry_snapshot(root, post_id=post_id, run_id=run_id)
+        round_post_evidence = [
+            _round_post_evidence(
+                root,
+                client,
+                post_id=selected_id,
+                cycle_id=cycle_id,
+                authorization_id=authorization_id,
+                pending_round=int(pending_round),
+                target_journal=journal if selected_id == int(post_id) else None,
+            )
+            for selected_id in selected_ids
+        ]
+        target_evidence = next(
+            item for item in round_post_evidence if int(item["post_id"]) == int(post_id)
+        )
+        checkpoint_summary = {
+            "cycle_id": cycle_id,
+            "status": checkpoint["state"].get("status"),
+            "phase": checkpoint["state"].get("phase"),
+            "pending_round": int(pending_round),
+            "authorization_id": authorization_id,
+            "selected_ids": selected_ids,
+            "state_sha256": checkpoint["state_sha256"],
+            "journal_sha256": checkpoint["journal_sha256"],
+            "target_journal_sha256": checkpoint["target_journal_sha256"],
+            "quarantine_sha256": checkpoint["quarantine_sha256"],
+        }
         evidence = {
-            "classification": classify_transaction(journal),
-            "checkpoint": checkpoint,
-            "wordpress": {"status": post.get("status"), "modified": post.get("modified"), "featured_media": post.get("featured_media"), "meta": post.get("meta") or {}},
-            "registry": registry,
+            "classification": target_evidence["classification"],
+            "checkpoint": checkpoint_summary,
+            "isolated_post": target_evidence,
+            "round_post_evidence": round_post_evidence,
         }
         snapshot_hash = _hash_value(evidence)
         if apply:
             if not operator_authorization or not str(operator_authorization).strip():
                 raise TransactionIsolationError("explicit operator authorization is required")
-            existing_transition = _read_json(transition_path) if transition_path.is_file() else None
-            if existing_transition is None:
-                if not isinstance(preview, Mapping) or preview.get("snapshot_hash") != snapshot_hash or preview.get("isolation_id") != isolation_id:
-                    raise TransactionIsolationError("checkpoint, journal, WordPress, or Registry changed since preview")
-            else:
-                record_path = Path(existing_transition["archive_dir"]) / "isolation-record.json"
-                record = _read_json(record_path)
-                expected = record["evidence"]
-                current = json.loads(json.dumps(evidence))
-                previous = json.loads(json.dumps(expected))
-                # Quarantine and the append-only checkpoint journal are the
-                # expected local mutations of a resumable transition.  The
-                # target journal, WordPress and Registry evidence may not move.
-                current["checkpoint"].pop("quarantine_sha256", None)
-                previous["checkpoint"].pop("quarantine_sha256", None)
-                if _hash_value(current["checkpoint"]["target_journal_sha256"]) != _hash_value(previous["checkpoint"]["target_journal_sha256"]):
-                    raise TransactionIsolationError("target journal changed during isolation recovery")
-                if current["wordpress"] != previous["wordpress"] or current["registry"] != previous["registry"]:
-                    raise TransactionIsolationError("WordPress or MediaRegistry changed during isolation recovery")
-                if existing_transition.get("phase") == "prepared" and current["checkpoint"]["state_sha256"] != previous["checkpoint"]["state_sha256"]:
-                    raise TransactionIsolationError("checkpoint changed before quarantine was applied")
             archive = root / "work" / "v2-cycle" / "archives" / f"uncertain-{isolation_id}"
-            if not archive.exists():
-                archive.mkdir(parents=True)
-                archived = {
-                    "state": _copy_verified(Path(checkpoint["paths"]["state"]), archive / "state.json"),
-                    "journal": _copy_verified(Path(checkpoint["paths"]["journal"]), archive / "journal.jsonl"),
-                    "target_journal": _copy_verified(Path(checkpoint["paths"]["target_journal"]), archive / f"journal-{post_id}.json"),
-                    "quarantine_before": _copy_verified(root / "config" / "v2-quarantine.json", archive / "quarantine-before.json"),
-                }
-                quarantine_after = _add_quarantine(
-                    _read_json(root / "config" / "v2-quarantine.json"),
-                    post_id=post_id,
-                    reason=f"UNCERTAIN_ISOLATED {isolation_id}; no replay until independently resolved",
-                )
-                atomic_write_text(archive / "quarantine-after.json", _json(quarantine_after))
-                record = {
-                    "version": ISOLATION_VERSION,
-                    "isolation_id": isolation_id,
-                    "classification": "UNCERTAIN_ISOLATED",
-                    "cycle_id": cycle_id,
-                    "authorization_id": authorization_id,
-                    "pending_round": pending_round,
-                    "selected_ids": selected_ids,
-                    "post_id": post_id,
-                    "run_id": run_id,
-                    "snapshot_hash": snapshot_hash,
-                    "evidence": evidence,
-                    "archive_hashes": archived,
-                    "reason": "single writer transaction remains uncertain; isolate without replay or commit claim",
-                    "operator_authorization": str(operator_authorization),
-                }
-                atomic_write_text(archive / "isolation-record.json", _json(record))
-                transition_path.parent.mkdir(parents=True, exist_ok=True)
-                transition = {
-                    "version": ISOLATION_VERSION,
-                    "phase": "prepared",
-                    "isolation_id": isolation_id,
-                    "archive_dir": str(archive),
-                    "cycle_id": cycle_id,
-                    "authorization_id": authorization_id,
-                    "pending_round": pending_round,
-                    "selected_ids": selected_ids,
-                    "post_id": post_id,
-                    "run_id": run_id,
-                    "classification": "UNCERTAIN_ISOLATED",
-                    "reconciled_post_ids": [115524, 115215, 115512, 115338],
-                    "not_executed_post_ids": [115215, 115512, 115338],
-                    "executed_ids": [115524],
-                    "operator_authorization": str(operator_authorization),
-                }
-                atomic_write_text(transition_path, _json(transition))
-            else:
-                transition = _read_json(transition_path)
+            expected_evidence = _match_preview_evidence(
+                root,
+                evidence,
+                preview,
+                isolation_id=isolation_id,
+                allow_quarantine_additions=archive.exists(),
+                archive=archive,
+            )
+            classifications = _derive_round_classifications(
+                round_post_evidence,
+                isolated_post_id=int(post_id),
+                require_resolved=True,
+            )
+            transition = _prepare_transition(
+                root,
+                archive=archive,
+                transition_path=transition_path,
+                checkpoint=checkpoint,
+                preview_evidence=expected_evidence,
+                snapshot_hash=str(preview["snapshot_hash"]),
+                isolation_id=isolation_id,
+                cycle_id=cycle_id,
+                authorization_id=authorization_id,
+                selected_ids=selected_ids,
+                pending_round=int(pending_round),
+                post_id=int(post_id),
+                run_id=run_id,
+                operator_authorization=str(operator_authorization),
+                round_post_evidence=round_post_evidence,
+                classifications=classifications,
+            )
             return _apply_transition(root, transition)
+        classifications = _derive_round_classifications(
+            round_post_evidence,
+            isolated_post_id=int(post_id),
+            require_resolved=False,
+        )
         return {
             "status": "preview",
             "classification": evidence["classification"],
@@ -397,6 +1068,7 @@ def isolate_uncertain_transaction(
             "snapshot_hash": snapshot_hash,
             "evidence": evidence,
             "selected_ids": selected_ids,
+            "round_classifications": classifications,
             "wordpress_writes": 0,
         }
     finally:
