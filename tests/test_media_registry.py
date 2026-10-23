@@ -217,6 +217,30 @@ def test_candidate_diagnostics_preserve_safe_source_decision_reason(tmp_path):
     assert "private" not in row[1]
 
 
+def test_registry_preserves_recoverable_source_verification_reason(tmp_path):
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=13,
+        run_id="run-source-inconclusive",
+        candidate={
+            "candidate_id": "candidate-source-inconclusive",
+            "subject": "Game",
+            "source_page_url": "https://source.example/article",
+            "direct_image_url": "https://cdn.example/image.webp",
+            "evidence": {"verdict": "unresolved_source", "score": 1},
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="source_verification_inconclusive",
+    )
+    with connect(tmp_path) as db:
+        reason = db.execute(
+            "SELECT reason_code FROM media_decisions WHERE run_id=?",
+            ("run-source-inconclusive",),
+        ).fetchone()[0]
+    assert reason == "source_verification_inconclusive"
+
+
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
     path = registry_path(tmp_path)
     path.parent.mkdir(parents=True)

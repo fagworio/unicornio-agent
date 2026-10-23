@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import tempfile
 import time
 import uuid
@@ -45,11 +44,16 @@ from .media.converter import (
     prepare_featured_webp,
 )
 from .media.downloader import download_image
+from .media.diagnostics import diagnostic_url_domain
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
 from .media.text import sanitize_title
-from .media.source_verify import verification_result, verify_downloaded_against_source
+from .media.source_verify import (
+    source_page_html,
+    verification_result,
+    verify_downloaded_against_source,
+)
 from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
 from .media.vision_gate import (
     VisionGateError,
@@ -100,6 +104,15 @@ from .pipeline_v2.quarantine import (
 from .pipeline_v2.lock import RunSessionLock
 
 META_PUBLISH_OPERATION_ID = "_ai_editor_publish_operation_id"
+
+_DIAGNOSTIC_MEDIA_ENGINES = frozenset({
+    "duckduckgo", "bing", "yandex", "google", "article_source", "library_reuse",
+})
+
+
+def _diagnostic_media_engine(item: dict[str, Any]) -> str:
+    engine = str(item.get("engine") or "").casefold()
+    return engine if engine in _DIAGNOSTIC_MEDIA_ENGINES else "unknown"
 
 
 # Media plan: download/upload/verificacao sao I/O-bound (rede); threads
@@ -1441,6 +1454,31 @@ def _item_evidence_relevant(
     Compartilhada entre ``_execute_media_plan`` (apply) e ``validate_media_plan``
     (media-validate): uma única política de imagem para o pipeline inteiro.
     """
+    from .media.evidence_attestation import verify_deterministic_media
+
+    if verify_deterministic_media(item):
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        fields = evidence.get("evidence") if isinstance(evidence.get("evidence"), dict) else {}
+        signed_subject = str(evidence.get("subject") or "").strip()
+        target_entities = _item_entities(item, entities, editorial)
+        if signed_subject and any(
+            signed_subject.casefold() == str(entity).strip().casefold()
+            for entity in target_entities if entity
+        ):
+            # Re-run the common relevance predicate over origin-sourced fields
+            # sealed by the runtime. Search query, generated ALT and credit are
+            # deliberately excluded; the byte/source gate still runs at apply.
+            return image_is_relevant(
+                alt_text=" ".join(str(fields.get(key) or "") for key in (
+                    "alt_original", "figcaption", "heading", "og_title", "page_title",
+                )),
+                credit_text="",
+                source_url=" ".join(str(fields.get(key) or "") for key in (
+                    "filename", "page_url",
+                )) + " " + str(item.get("direct_image_url") or ""),
+                search_query="",
+                entities=target_entities,
+            )
     # A evidência é o que a ORIGEM diz (arquivo + página). O subject NÃO entra
     # aqui: ele é o alvo da checagem (entra como entities), e incluí-lo na
     # própria evidência o faria casar consigo mesmo — qualquer item passaria.
@@ -1663,6 +1701,24 @@ def _media_item_rejection(
     return None
 
 
+def _media_license_rejection(item: dict[str, Any]) -> str | None:
+    """Reject missing/unsupported rights before network or WordPress writes."""
+    from .media.license import LicenseError, validate_candidate
+
+    rights = {
+        key: item.get(key)
+        for key in (
+            "source_page_url", "direct_image_url", "author", "license",
+            "license_url", "captured_at", "credit_text", "alt_text",
+        )
+    }
+    try:
+        validate_candidate(rights)
+    except LicenseError as exc:
+        return f"metadados de licença inválidos ou incompletos: {exc}"
+    return None
+
+
 def _plan_source_key(item: dict[str, Any]) -> str:
     """Chave de fonte de um item do media_plan para deteccao de duplicatas.
 
@@ -1734,12 +1790,15 @@ def validate_media_plan(
                 query=str(item.get("search_query") or item.get("query") or ""),
                 subject=str(item.get("subject") or ""),
                 role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                engine=_diagnostic_media_engine(item),
                 candidate_id=str(item.get("candidate_id") or ""),
                 source_domain=(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
+        reason = _media_license_rejection(item)
+        if reason is None:
+            reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
@@ -1798,6 +1857,7 @@ def validate_media_plan(
                 query=str(item.get("search_query") or item.get("query") or ""),
                 subject=str(item.get("subject") or ""),
                 role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+                engine=_diagnostic_media_engine(item),
                 candidate_id=str(item.get("candidate_id") or ""),
                 source_domain=(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
@@ -2263,8 +2323,9 @@ def _execute_media_plan(
             query=str(item.get("search_query") or item.get("query") or ""),
             subject=str(item.get("subject") or ""),
             role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
+            engine=_diagnostic_media_engine(item),
             candidate_id=str(item.get("candidate_id") or ""),
-            source_domain=(urlparse(source).hostname or "").lower(),
+            source_domain=diagnostic_url_domain(source),
             detail=detail[:160],
         )
         if stage == "source_verify":
@@ -2287,7 +2348,7 @@ def _execute_media_plan(
                 subject=str(item.get("subject") or ""),
                 role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
                 candidate_id=str(item.get("candidate_id") or ""),
-                source_domain=(urlparse(source).hostname or "").lower(),
+                source_domain=diagnostic_url_domain(source),
                 detail=detail[:160],
             )
 
@@ -2331,6 +2392,7 @@ def _execute_media_plan(
     # Compartilhado entre threads; o lock elimina buscas duplicadas da mesma
     # pagina de origem e conserva a verificacao byte-a-byte por imagem.
     page_cache: dict[str, list[str] | None] = {}
+    page_html_cache: dict[str, str | None] = {}
     page_cache_lock = Lock()
     seen_sources: set[str] = set()
     accepted_final_phashes = {str(value) for value in previous_inline_phashes if str(value).strip()}
@@ -2424,27 +2486,29 @@ def _execute_media_plan(
                         "alt_text",
                     )
                 }
+                license_error = _media_license_rejection(evidence)
+                if license_error:
+                    _funnel("license", "rejected", item, position, license_error)
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": license_error[:200],
+                    }
                 suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
                 attachment = _attachment_evidence(item)
                 download_url = (
                     attachment.get("source_url") if attachment is not None else item["direct_image_url"]
                 )
-                browser_path = Path(str(item.get("local_image_path") or ""))
-                if browser_path.is_file() and browser_path.stat().st_size <= 8 * 1024 * 1024:
-                    source = tmp / f"source_{position}{suffix}"
-                    shutil.copyfile(browser_path, source)
-                    _funnel("download", "passed", item, position, "google_browser_local_bytes")
-                else:
-                    source = download_image(
-                        str(download_url),
-                        tmp / f"source_{position}{suffix}",
-                        max_attempts=config.max_source_retries + 1,
-                        url_policy=config.remote_url_policy,
-                        audit=lambda finding: append_telemetry(
-                            root, "remote_url_audit", url=finding.url, reason=finding.reason
-                        ),
-                    )
-                    _funnel("download", "passed", item, position)
+                source = download_image(
+                    str(download_url),
+                    tmp / f"source_{position}{suffix}",
+                    max_attempts=config.max_source_retries + 1,
+                    url_policy=config.remote_url_policy,
+                    audit=lambda finding: append_telemetry(
+                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
+                    ),
+                )
+                _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
                 if (
@@ -2464,10 +2528,11 @@ def _execute_media_plan(
                         downloaded=source,
                         direct_image_url=str(download_url),
                         cache=page_cache,
+                        cache_html=page_html_cache,
                         cache_lock=page_cache_lock,
                         url_policy=config.remote_url_policy,
                         audit=lambda finding: append_telemetry(
-                            root, "remote_url_audit", url=finding.url, reason=finding.reason
+                            root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
                         ),
                     )
                 if not ok:
@@ -2484,6 +2549,33 @@ def _execute_media_plan(
                         ],
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
+                from .media.license import attest_source_rights
+
+                page_html = source_page_html(
+                    str(evidence.get("source_page_url") or ""),
+                    cache=page_html_cache,
+                    cache_lock=page_cache_lock,
+                    url_policy=config.remote_url_policy,
+                    audit=lambda finding: append_telemetry(
+                        root,
+                        "remote_url_audit",
+                        url_domain=diagnostic_url_domain(finding.url),
+                        reason=finding.reason,
+                    ),
+                )
+                rights_attestation = attest_source_rights(evidence, page_html or "")
+                if rights_attestation is None:
+                    detail = "a origem não comprova licença compatível vinculada a esta imagem"
+                    _funnel("license_source_proof", "rejected", item, position, detail)
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected",
+                        "detail": detail,
+                        "reason_code": "image_rights_unproven",
+                        "recoverable": page_html is None,
+                    }
+                evidence["source_rights_attestation"] = rights_attestation
+                _funnel("license_source_proof", "passed", item, position, "image_object_license_match")
                 is_featured = bool(item.get("is_featured"))
                 if (
                     not is_featured
@@ -2729,11 +2821,15 @@ def _execute_media_plan(
                         article_id=int(post_id) if post_id else None,
                         sha256=identity.sha256,
                         visual_group_id=identity.visual_group_id,
+                        author=str(item.get("author") or ""),
+                        license=str(item.get("license") or ""),
+                        license_url=str(item.get("license_url") or ""),
+                        captured_at=str(item.get("captured_at") or ""),
+                        credit_text=str(item.get("credit_text") or ""),
+                        alt_text=str(item.get("alt_text") or ""),
                     )
                 except (OSError, ValueError) as exc:
                     try:
-                        from .observability import append_telemetry
-
                         append_telemetry(root, "media_index_write_failed",
                                          post_id=post_id, error=str(exc)[:200])
                     except Exception:  # noqa: BLE001
@@ -2916,7 +3012,7 @@ def _normalize_existing_featured(
                 url_policy=config.remote_url_policy,
                 audit=(
                     lambda finding: append_telemetry(
-                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
                     )
                     if root is not None
                     else None

@@ -58,6 +58,18 @@ class PageAssetTests(unittest.TestCase):
         assert is_noise_image_url("https://secure.gravatar.com/avatar/abc?s=512")
         assert not is_noise_image_url("https://images.nintendolife.com/news/star-fox.jpg")
 
+    def test_preserves_duplicate_url_occurrences_with_distinct_context(self):
+        html = (
+            '<meta property="og:image" content="/opaque.jpg">'
+            '<article><h2>Metroid Prime 4</h2><figure>'
+            '<img src="/opaque.jpg" alt="Metroid Prime 4 key art">'
+            '<figcaption>Arte oficial</figcaption></figure></article>'
+        )
+        assets = extract_page_assets(html, "https://source.test/story")
+        matching = [asset for asset in assets if asset.url.endswith("/opaque.jpg")]
+        assert len(matching) == 2
+        assert any(asset.context_kind == "article_body" and asset.alt for asset in matching)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -220,6 +220,19 @@ def extract_entities(
         head = re.sub(r"^\s*\d+[.)]?\s*", "", head).strip()
         if head:
             raw_phrases.append(head)
+    # Reuse the same list parser as discovery and placement. Grouped listicles
+    # name their works in numbered H3s below a descriptive H2, so those work
+    # identities must be visible to the final checklist too.
+    if content_html:
+        from ..list_quality import extract_list_items
+
+        for item in extract_list_items(title, content_html):
+            if item.tag.casefold() != "h3":
+                continue
+            raw_phrases.append(item.heading)
+            concise_name = re.split(r"[:—–|]", item.heading, maxsplit=1)[0].strip()
+            if concise_name:
+                raw_phrases.append(concise_name)
 
     for phrase in raw_phrases:
         normalized = normalize(phrase)

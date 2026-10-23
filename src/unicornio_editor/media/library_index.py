@@ -84,6 +84,12 @@ def register(
     article_id: int | None = None,
     sha256: str = "",
     visual_group_id: str = "",
+    author: str = "",
+    license: str = "",
+    license_url: str = "",
+    captured_at: str = "",
+    credit_text: str = "",
+    alt_text: str = "",
 ) -> None:
     """Registra um upload (ou reaproveitamento) no índice."""
     if not (phash or source_url or subject):
@@ -98,7 +104,10 @@ def register(
                     _registrar_sem_lock(root, phash=phash, source_url=source_url,
                                         source_page=source_page, subject=subject,
                                         media_id=media_id, article_id=article_id,
-                                        sha256=sha256, visual_group_id=visual_group_id)
+                                        sha256=sha256, visual_group_id=visual_group_id,
+                                        author=author, license=license,
+                                        license_url=license_url, captured_at=captured_at,
+                                        credit_text=credit_text, alt_text=alt_text)
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         except OSError:
@@ -117,6 +126,12 @@ def _registrar_sem_lock(
     article_id: int | None = None,
     sha256: str = "",
     visual_group_id: str = "",
+    author: str = "",
+    license: str = "",
+    license_url: str = "",
+    captured_at: str = "",
+    credit_text: str = "",
+    alt_text: str = "",
 ) -> None:
     dados = load_index(root)
     entradas = dados["entries"]
@@ -129,6 +144,13 @@ def _registrar_sem_lock(
                 entrada["sha256"] = sha256
             if visual_group_id:
                 entrada["visual_group_id"] = visual_group_id
+            for field, value in (
+                ("author", author), ("license", license),
+                ("license_url", license_url), ("captured_at", captured_at),
+                ("credit_text", credit_text), ("alt_text", alt_text),
+            ):
+                if value:
+                    entrada[field] = value
             if media_id:
                 entrada["media_id"] = media_id
             _salvar(root, dados)
@@ -143,6 +165,12 @@ def _registrar_sem_lock(
         "uses": 1,
         "sha256": sha256,
         "visual_group_id": visual_group_id,
+        "author": author,
+        "license": license,
+        "license_url": license_url,
+        "captured_at": captured_at,
+        "credit_text": credit_text,
+        "alt_text": alt_text,
     })
     _salvar(root, dados)
 

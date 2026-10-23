@@ -409,29 +409,37 @@ def source_context(
     if og:
         contexto["og_title"] = og.group(1).strip()
 
-    alvo = normalize(unquote(str(image_url or "").split("?")[0].rsplit("/", 1)[-1]))
-    for asset in extract_page_assets(html, base_url):
-        asset_name = normalize(unquote(asset.url.split("?")[0].rsplit("/", 1)[-1]))
-        if alvo and (asset.url == image_url or asset_name == alvo):
-            if asset.alt:
-                contexto["alt_original"] = asset.alt
-            break
-    for tag in _IMG_TAG_RE.findall(html):
-        attrs = dict(_ATTR_RE.findall(tag))
-        fonte = attrs.get("src") or attrs.get("data-src") or ""
-        if alvo and normalize(unquote(fonte.split("/")[-1])) != alvo:
-            continue
-        alt = (attrs.get("alt") or "").strip()
-        if alt:
-            contexto["alt_original"] = alt
-        break
-
-    # P1 (auditoria): figcaption e heading têm de vir da REGIÃO da imagem alvo.
-    # Antes pegava-se o PRIMEIRO <figcaption> e o PRIMEIRO <h1-4> da página: numa
-    # matéria "Metroid Prime 4 ... <figure>key art</figure> <img avatar-do-autor>"
-    # o avatar do autor herdava a legenda E o heading da key art — local_score 6
-    # sem nada local de verdade, furando o requisito local_score >= 4.
-    contexto.update(_image_local_context(html, image_url))
+    target = str(image_url or "").split("?", 1)[0]
+    target_path = unquote(urlparse(target).path).casefold()
+    target_name = target_path.rsplit("/", 1)[-1]
+    assets = extract_page_assets(html, base_url)
+    exact = [asset for asset in assets if unquote(urlparse(asset.url).path).casefold() == target_path]
+    matches = exact or [
+        asset for asset in assets
+        if unquote(urlparse(asset.url).path).rsplit("/", 1)[-1].casefold() == target_name
+    ]
+    if not exact and len({asset.url for asset in matches}) != 1:
+        matches = []
+    if matches:
+        context_priority = {"article_body": 3, "article_header": 2, "metadata": 1}
+        asset = max(
+            matches,
+            key=lambda row: (
+                context_priority.get(row.context_kind, 0),
+                sum(bool(value) for value in (row.alt, row.figcaption, row.heading)),
+                len(row.alt) + len(row.figcaption) + len(row.heading),
+            ),
+        )
+        if asset.alt:
+            contexto["alt_original"] = asset.alt
+        if asset.figcaption:
+            contexto["figcaption"] = asset.figcaption
+        if asset.heading:
+            contexto["heading"] = asset.heading
+    else:
+        # The basename fallback is used only when the shared parser cannot
+        # identify the asset; it requires a unique occurrence.
+        contexto.update(_image_local_context(html, image_url))
 
     if base_url:
         contexto["page_url"] = base_url
@@ -470,6 +478,7 @@ def evidence_score(
     image_in_source: bool = True,
     source_verification_reason: str = "",
     source_verification_recoverable: bool = False,
+    source_comparison_proved: bool = False,
     duplicate_frame: bool = False,
 ) -> dict[str, Any]:
     """Score determinístico de evidência (Fase 11).
@@ -514,7 +523,11 @@ def evidence_score(
                 "needs_vision": False,
                 "reason": "sem página de origem: proveniência não resolvida"}
     if not image_in_source:
-        if source_verification_recoverable:
+        definitive_mismatch = (
+            source_verification_reason in {"source_mismatch", "source_bytes_mismatch"}
+            and source_comparison_proved
+        )
+        if source_verification_recoverable or not definitive_mismatch:
             return {
                 **base,
                 "score": 0,
@@ -530,7 +543,7 @@ def evidence_score(
                 "verdict": "source_mismatch", "penalties": ["not_in_source"],
                 "needs_vision": False,
                 "reason_code": "source_mismatch",
-                "source_comparison_proved": False,
+                "source_comparison_proved": True,
                 "reason": "imagem não consta na página de origem (bytes/link divergem)"}
 
     # GATE C — DIVERSIDADE: frame repetido nunca entra, mesmo com score alto.

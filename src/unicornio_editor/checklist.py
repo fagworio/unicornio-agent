@@ -1101,6 +1101,10 @@ def run_pre_publish_checklist(
     active_queries = active_coverage.get("queries") if isinstance(active_coverage, Mapping) else None
     active_results = active_coverage.get("engine_results") if isinstance(active_coverage, Mapping) else None
     expected_engines = active_coverage.get("expected_engines") if isinstance(active_coverage, Mapping) else None
+    configured_engines = active_coverage.get("configured_engines", expected_engines) if isinstance(active_coverage, Mapping) else None
+    optional_engines = active_coverage.get("optional_engines", []) if isinstance(active_coverage, Mapping) else None
+    provider_results = active_coverage.get("provider_results") if isinstance(active_coverage, Mapping) else None
+    optional_engine_failures = active_coverage.get("optional_engine_failures") if isinstance(active_coverage, Mapping) else None
     planned_coverage_queries = active_coverage.get("planned_queries") if isinstance(active_coverage, Mapping) else None
     completed_coverage_queries = active_coverage.get("completed_queries") if isinstance(active_coverage, Mapping) else None
     coverage_valid = bool(
@@ -1113,6 +1117,13 @@ def run_pre_publish_checklist(
         and isinstance(expected_engines, list)
         and bool(expected_engines)
         and all(isinstance(engine, str) and engine for engine in expected_engines)
+        and len(set(expected_engines)) == len(expected_engines)
+        and isinstance(configured_engines, list)
+        and all(isinstance(engine, str) and engine for engine in configured_engines)
+        and set(expected_engines) <= set(configured_engines)
+        and isinstance(optional_engines, list)
+        and all(isinstance(engine, str) and engine for engine in optional_engines)
+        and set(optional_engines) == set(configured_engines) - set(expected_engines)
         and isinstance(active_queries, list)
         and bool(active_queries)
         and all(isinstance(query, str) and query for query in active_queries)
@@ -1133,6 +1144,35 @@ def run_pre_publish_checklist(
         and all(isinstance(engine, str) and engine for engine in active_coverage.get("reported_engines"))
         and set(expected_engines) <= set(active_coverage.get("reported_engines"))
         and not (active_coverage.get("technical_failures") or ())
+        and (
+            provider_results is None
+            or (
+                isinstance(provider_results, Mapping)
+                and set(provider_results) == set(active_queries)
+                and all(
+                    isinstance(provider_results.get(query), Mapping)
+                    and all(
+                        provider_results[query].get(engine) == active_results[query].get(engine)
+                        for engine in expected_engines
+                    )
+                    for query in active_queries
+                )
+            )
+        )
+        # Optional fallback failures stay visible, but do not invalidate a
+        # verified proof for the required provider plan.
+        and (
+            optional_engine_failures is None
+            or (
+                isinstance(optional_engine_failures, Mapping)
+                and set(optional_engine_failures) <= set(active_queries)
+                and all(
+                    isinstance(failures, Mapping)
+                    and set(failures) <= set(optional_engines)
+                    for failures in optional_engine_failures.values()
+                )
+            )
+        )
         and isinstance(planned_coverage_queries, int)
         and not isinstance(planned_coverage_queries, bool)
         and planned_coverage_queries == len(active_queries)

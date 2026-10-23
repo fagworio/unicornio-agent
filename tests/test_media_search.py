@@ -333,8 +333,7 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertEqual(results[0]["thumbnail_url"], "https://thumb.example/bleach.jpg")
 
     def test_search_web_images_uses_fixed_bing_then_yandex_fallback(self):
-        # Google Browser é tentado antes; com Playwright ausente, Bing é sempre
-        # o primeiro fallback e Yandex fica reservado para recall.
+        # O modo auto consulta Bing primeiro; Yandex fica como fallback para recall.
         html = (
             '&quot;murl&quot;:&quot;https://cdn.example/bing.jpg&quot;,'
             '&quot;turl&quot;:&quot;https://t.example/bing_t.jpg&quot;,'

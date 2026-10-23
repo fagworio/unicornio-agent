@@ -137,6 +137,16 @@ class RelevanceTests(unittest.TestCase):
         self.assertIn("Autor", images[0]["caption"])
         self.assertEqual(images[1]["alt"], "Solto")
 
+    def test_extract_entities_includes_grouped_numbered_h3_works(self):
+        html = (
+            "<h2>Recomendações</h2>"
+            "<h3>1. Metroid Prime 4: Beyond</h3><p>Descrição.</p>"
+            "<h3>2. Halo Infinite: campanha</h3><p>Descrição.</p>"
+        )
+        entities = extract_entities(title="2 recomendações de jogos", content_html=html)
+        self.assertIn("metroid prime 4", entities)
+        self.assertIn("halo infinite", entities)
+
 
 if __name__ == "__main__":
     unittest.main()

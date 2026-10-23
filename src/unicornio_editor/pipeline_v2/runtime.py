@@ -98,6 +98,30 @@ def _coverage_run_is_valid(run: dict[str, Any], planned_query: str) -> bool:
     planned = run.get("planned_queries")
     completed = run.get("completed_queries")
     failures = run.get("technical_failures")
+    configured = run.get("configured_engines", expected)
+    optional = run.get("optional_engines", [])
+    provider_results = run.get("provider_results")
+    required_set = set(expected) if isinstance(expected, list) else set()
+    plan_valid = (
+        isinstance(configured, list)
+        and bool(configured)
+        and all(isinstance(engine, str) and engine for engine in configured)
+        and len(set(configured)) == len(configured)
+        and required_set <= set(configured)
+        and isinstance(optional, list)
+        and all(isinstance(engine, str) and engine for engine in optional)
+        and len(set(optional)) == len(optional)
+        and optional == [engine for engine in configured if engine not in set(expected or ())]
+    )
+    if provider_results is not None:
+        plan_valid = plan_valid and isinstance(results, dict) and isinstance(provider_results, dict) and (
+            set(provider_results) <= set(configured)
+            and required_set <= set(provider_results)
+            and all(
+                provider_results.get(engine) == results.get(engine)
+                for engine in required_set
+            )
+        )
     return bool(
         type(run.get("version")) is int
         and run.get("version") == 1
@@ -108,6 +132,8 @@ def _coverage_run_is_valid(run: dict[str, Any], planned_query: str) -> bool:
         and isinstance(expected, list)
         and expected
         and all(isinstance(engine, str) and engine for engine in expected)
+        and len(set(expected)) == len(expected)
+        and plan_valid
         and isinstance(reported, list)
         and all(isinstance(engine, str) and engine for engine in reported)
         and set(expected) <= set(reported)
@@ -176,6 +202,16 @@ def _aggregate_active_coverage(
         })
 
     engine_names = engine_names_for("expected_engines")
+    configured_names = engine_names_for("configured_engines")
+    optional_names = engine_names_for("optional_engines")
+    plans_consistent = all(
+        proof.get("expected_engines") == (proofs[0].get("expected_engines") if proofs else None)
+        and proof.get("configured_engines", proof.get("expected_engines"))
+        == (proofs[0].get("configured_engines", proofs[0].get("expected_engines")) if proofs else None)
+        and proof.get("optional_engines", []) == (proofs[0].get("optional_engines", []) if proofs else [])
+        for proof in proofs
+    )
+    valid = valid and plans_consistent
     if valid:
         active = {
             "version": 1,
@@ -183,9 +219,22 @@ def _aggregate_active_coverage(
             "strategy_complete": True,
             "queries": queries,
             "expected_engines": engine_names,
+            "required_engines": engine_names,
+            "configured_engines": configured_names or engine_names,
+            "optional_engines": optional_names,
             "reported_engines": engine_names_for("reported_engines"),
             "engine_results": {
                 str(proof["query"]): dict(proof["engine_results"])
+                for proof in proofs
+            },
+            "provider_results": {
+                str(proof["query"]): dict(
+                    proof.get("provider_results") or proof.get("engine_results") or {}
+                )
+                for proof in proofs
+            },
+            "optional_engine_failures": {
+                str(proof["query"]): dict(proof.get("optional_engine_failures") or {})
                 for proof in proofs
             },
             "technical_failures": [],
@@ -1264,19 +1313,6 @@ def _incomplete_v2_journal_conflicts(
     return conflicts
 
 
-def _normalize_executable_candidate(candidate: dict[str, Any], subject: str) -> dict[str, Any]:
-    result = dict(candidate)
-    source = str(result.get("source_page_url") or "").strip()
-    host = (urlparse(source).hostname or "").strip()
-    result["author"] = result.get("author") or result.get("publisher") or host or "Fonte original"
-    result["license"] = result.get("license") or "Uso com crédito"
-    result["license_url"] = result.get("license_url") or source
-    result["captured_at"] = result.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    result["credit_text"] = result.get("credit_text") or f"Crédito da imagem: {host or 'fonte original'}"
-    result["alt_text"] = result.get("alt_text") or subject
-    return result
-
-
 class ProductionMediaResolver:
     """Reuse the existing media-resolve core and execute only the deficit."""
     def __init__(self, client, config, root: Path):
@@ -1699,19 +1735,13 @@ class ProductionMediaResolver:
                     },
                 }],
             }
-            try:
-                blocked_urls = {int(context["post_id"]): set(rejection_history["urls"])}
-                blocked_fingerprints = {int(context["post_id"]): set(rejection_history["fingerprints"])}
-                resolved = _resolve_media_batch(
-                    self.client, self.config, self.root, batch, full=True, allow_reuse=True,
-                    excluded_urls=blocked_urls,
-                    excluded_fingerprints=blocked_fingerprints,
-                )
-            except Exception:
-                from ..media.google_browser import cleanup_browser_artifacts
-
-                cleanup_browser_artifacts()
-                raise
+            blocked_urls = {int(context["post_id"]): set(rejection_history["urls"])}
+            blocked_fingerprints = {int(context["post_id"]): set(rejection_history["fingerprints"])}
+            resolved = _resolve_media_batch(
+                self.client, self.config, self.root, batch, full=True, allow_reuse=True,
+                excluded_urls=blocked_urls,
+                excluded_fingerprints=blocked_fingerprints,
+            )
             row = (resolved.get("posts") or [{}])[0]
             if role == "inline":
                 search_run = row.get("search")
@@ -1734,7 +1764,9 @@ class ProductionMediaResolver:
                     "news_context": str(identity.get("news_context") or ""),
                     "search_query": query,
                     "role": role,
-                    "evidence": reused.get("evidence") or {"verdict": "deterministic_match"},
+                    # A library hit is historical reuse, not proof of current
+                    # subject relevance. Never synthesize a positive verdict.
+                    "evidence": reused.get("evidence") or {},
                     "item_number": (subject_meta.get(subject) or {}).get("item"),
                     "item_identity": (subject_meta.get(subject) or {}).get("item_identity"),
                     "item_title": (subject_meta.get(subject) or {}).get("item_title") or subject,
@@ -1797,66 +1829,53 @@ class ProductionMediaResolver:
             nonlocal current_featured, current_inline
             if not plan:
                 return []
-            try:
-                checked = validate_media_plan(
-                    self.client,
-                    {**editorial, "media_plan": plan},
-                    config=self.config,
-                    root=self.root,
-                    post_title=title,
-                    post_id=int(context["post_id"]),
-                    existing_featured_id=(
-                        current_featured.media_id
-                        if current_featured.status is FeaturedStatus.VALID
-                        else None
-                    ),
-                )
-            except Exception:
-                from ..media.google_browser import cleanup_browser_artifacts
-
-                cleanup_browser_artifacts()
-                raise
+            checked = validate_media_plan(
+                self.client,
+                {**editorial, "media_plan": plan},
+                config=self.config,
+                root=self.root,
+                post_title=title,
+                post_id=int(context["post_id"]),
+                existing_featured_id=(
+                    current_featured.media_id
+                    if current_featured.status is FeaturedStatus.VALID
+                    else None
+                ),
+            )
             vision_errors = [
                 row for row in checked.get("featured_vision", [])
                 if isinstance(row, dict) and row.get("technical")
             ]
             if vision_errors:
                 from ..media.vision_gate import VisionGateError
-                from ..media.google_browser import cleanup_browser_artifacts
 
-                cleanup_browser_artifacts()
                 raise VisionGateError(
                     str(vision_errors[0].get("reason") or "vision provider error")
                 )
-            try:
-                baseline_inline_assets = [item.to_dict() for item in current_inline]
-                baseline_featured_asset = (
-                    current_featured.to_dict()
-                    if current_featured.status is FeaturedStatus.VALID
-                    and current_featured.media_id
-                    and current_featured.media_url
-                    else None
-                )
-                results, _featured_id, _featured_credit = _execute_media_plan(
-                    {**editorial, "media_plan": plan},
-                    self.config,
-                    self.client,
-                    self.root,
-                    preflight=checked,
-                    post_id=int(context["post_id"]),
-                    post_title=title,
-                    previous_inline_phashes=tuple(
-                        item.phash for item in current_inline if item.phash
-                    ),
-                    previous_inline_visual_assets=baseline_inline_assets,
-                    featured_visual_asset=baseline_featured_asset,
-                    visual_comparison_budget=visual_comparison_budget,
-                    on_accepted=lambda result: accept_result(result, plan[0]),
-                )
-            finally:
-                from ..media.google_browser import cleanup_browser_artifacts
-
-                cleanup_browser_artifacts()
+            baseline_inline_assets = [item.to_dict() for item in current_inline]
+            baseline_featured_asset = (
+                current_featured.to_dict()
+                if current_featured.status is FeaturedStatus.VALID
+                and current_featured.media_id
+                and current_featured.media_url
+                else None
+            )
+            results, _featured_id, _featured_credit = _execute_media_plan(
+                {**editorial, "media_plan": plan},
+                self.config,
+                self.client,
+                self.root,
+                preflight=checked,
+                post_id=int(context["post_id"]),
+                post_title=title,
+                previous_inline_phashes=tuple(
+                    item.phash for item in current_inline if item.phash
+                ),
+                previous_inline_visual_assets=baseline_inline_assets,
+                featured_visual_asset=baseline_featured_asset,
+                visual_comparison_budget=visual_comparison_budget,
+                on_accepted=lambda result: accept_result(result, plan[0]),
+            )
             for result in results:
                 accept_result(result, plan[0])
             try:
@@ -2025,6 +2044,7 @@ class ProductionMediaResolver:
                     limit=max(8, max(inline_needed, featured_needed) * 4),
                     stats=source_stats,
                     url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
+                    is_listicle=is_listicle,
                 )
             except Exception as exc:
                 from ..observability import record_unexpected_error, append_telemetry
@@ -2185,6 +2205,10 @@ class ProductionMediaResolver:
                         # The library index is an optimization; source
                         # acquisition remains correct when it is unavailable.
                         pass
+                    self._resolve_ambiguous_vision(
+                        [candidate], post_id=int(context["post_id"]),
+                        context_key=vision_context_key,
+                    )
                     approved = self._approved_unique([candidate])
                     for source_candidate in approved:
                         if inline_remaining() <= 0:
@@ -2353,6 +2377,15 @@ class ProductionMediaResolver:
                 # but incomplete coverage still cannot authorize a waiver.
                 search_completed = True
                 completion_reason = "TARGET_REACHED"
+            elif completion_reason == "TARGET_REACHED":
+                # Discovery/enrichment can find enough approved candidates,
+                # but preflight, conversion, upload, or final visual identity
+                # may still reject them. Only the final applied-media quota
+                # can confirm target attainment. Since TARGET_REACHED stopped
+                # provider traversal early, it is not exhaustion evidence and
+                # must not authorize a waiver when application falls short.
+                search_completed = False
+                completion_reason = "SEARCH_INCOMPLETE"
             if not coverage_complete and search_runs and completion_reason != "TARGET_REACHED":
                 search_completed = False
                 completion_reason = "SEARCH_INCOMPLETE"
@@ -2432,17 +2465,31 @@ class ProductionMediaResolver:
 
     @classmethod
     def _is_approved(cls, candidate: dict[str, Any]) -> bool:
-        return (
-            (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and cls._has_provenance(candidate)
-        )
+        if (
+            (candidate.get("evidence") or {}).get("verdict") != "deterministic_match"
+            or candidate.get("valid") is not True
+            or not cls._has_provenance(candidate)
+        ):
+            return False
+        from ..media.license import LicenseError, validate_candidate
+
+        try:
+            validate_candidate({
+                key: candidate.get(key)
+                for key in (
+                    "source_page_url", "direct_image_url", "author", "license",
+                    "license_url", "captured_at", "credit_text", "alt_text",
+                )
+            })
+        except LicenseError:
+            return False
+        return True
 
     @classmethod
     def _approved_unique(cls, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
         for candidate in candidates:
-            candidate = _normalize_executable_candidate(candidate, str(candidate.get("subject") or ""))
             key = str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
             if key and key not in seen and cls._is_approved(candidate):
                 seen.add(key)
@@ -2643,19 +2690,26 @@ class ProductionMediaResolver:
 
     @staticmethod
     def _plan_item(candidate: dict[str, Any], subject: str, slot: int, featured: bool) -> dict[str, Any]:
-        return {
+        item = {
             **candidate,
             "paragraph_index": slot,
             "is_featured": featured,
             "alt_text": candidate.get("alt_text") or subject,
-            "credit_text": candidate.get("credit_text") or f"Crédito da imagem: {subject}",
+            "credit_text": candidate.get("credit_text") or "",
             "width": 1200,
             "height": 800,
             "item_identity": candidate.get("item_identity") or "",
             "item_title": candidate.get("item_title") or subject,
             "item_group": candidate.get("item_group") or candidate.get("group_heading") or "",
             "html_position": candidate.get("html_position"),
+            "role": "featured" if featured else "inline",
         }
+        from ..media.evidence_attestation import attest_deterministic_media
+
+        seal = attest_deterministic_media(item)
+        if seal:
+            item["source_evidence_attestation"] = seal
+        return item
 
 
 class WordPressWriterV2:

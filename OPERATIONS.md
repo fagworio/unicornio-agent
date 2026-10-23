@@ -9,7 +9,7 @@ cp -a . /opt/unicorniohater-editorial-agent/
 cd /opt/unicorniohater-editorial-agent
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e '.[media-search]'
 cp .env.example .env
 ```
 
@@ -44,7 +44,7 @@ unicornio-editor prepare ID
 ```
 
 ## Teste de mídia licenciada
-A pesquisa parte do Google Images, mas a aprovação depende da página original e da licença verificável. Baixe somente para área temporária, converta para WebP e envie pela Media Library local; não use bucket/CDN externo. Confirme no attachment o crédito e os metadados de licença.
+A pesquisa usa o plano de providers configurado, mas o upload só ocorre quando a página original declara um Schema.org `ImageObject` com o `contentUrl` exato e a licença compatível. Páginas sem essa evidência são rejeitadas, mesmo que o plano do agente declare CC. Baixe somente para área temporária, converta para WebP e envie pela Media Library local; não use bucket/CDN externo. Confirme no attachment o crédito e os metadados de licença.
 
 ```bash
 unicornio-editor upload-image "URL_DA_IMAGEM" \
@@ -124,30 +124,28 @@ em fonte independente; os campos do arquivo são trilha declarativa, não prova
 criptográfica de identidade. Não edite a política diretamente em produção nem
 reative crons antes de verificar o preview individual e a aprovação humana.
 
-## Discovery de mídia via navegador
+## Estratégia de busca de mídia
 
-O `media-search-web --engine auto` tenta Google Images em Chromium real antes de
-Bing/Yandex. O Google é somente índice: `source_page_url` continua obrigatório
-e todos os gates determinísticos permanecem ativos. Para instalar o provider em
-um host de produção:
-
-```bash
-pip install -e '.[browser]'
-playwright install chromium
-```
-
-Se Playwright/Chromium estiver ausente, houver CAPTCHA, consentimento ou
-mudança de DOM, o provider registra `google_browser_unavailable` e o fallback
-continua sem tentar contornar o bloqueio. Para um POC somente leitura:
-
-```bash
-EDITOR_GOOGLE_BROWSER_ENABLED=true \
-unicornio-editor media-search-web "SUBJECT REAL" --engine=google_browser --full
-```
-
-Os bytes carregados pelo browser são mantidos localmente durante o fluxo e
-reutilizados no download quando disponíveis; a telemetria registra apenas
-metadados e `sha256`, nunca Base64.
+O modo `auto` tenta `duckduckgo,bing,yandex,google` nessa ordem. O pacote
+opcional `ddgs` é instalado por `pip install -e '.[media-search]'`; se estiver
+ausente, o relatório registra `provider_unavailable` e continua nos fallbacks.
+Por padrão, `EDITOR_MEDIA_SEARCH_REQUIRED_PROVIDERS=bing,yandex`: somente esses
+providers obrigatórios, quando executados e verificados, comprovam
+`EXHAUSTED_VERIFIED`. Falhas em DuckDuckGo ou Google HTML ficam visíveis, mas
+não invalidam o plano obrigatório. Uma falha em Bing/Yandex, inclusive
+`js_required`, CAPTCHA, cooldown ou erro técnico, impede essa prova. Não há
+tentativa de contornar desafios ou política de acesso. Google Browser/Playwright
+não é suportado. DDGS é um adapter não oficial sujeito a mudanças; não se deve
+tratar suas respostas como fonte independente do Bing sem medir a sobreposição
+e o ganho de imagens distintas aprovadas.
+O adapter usa o bundle PEM legível do OpenSSL por padrão; para uma CA específica,
+defina `EDITOR_DDGS_CA_BUNDLE` para um arquivo legível. Não altere permissões
+globais de certificados nem desative a verificação TLS. Respostas não-200, como
+`202`, são falhas técnicas e não justificam `EXHAUSTED_VERIFIED`.
+O diagnóstico DDGS distingue `vqd_bootstrap` de `image_search` e registra
+somente o rótulo do estágio e o status HTTP (sem URL, token ou corpo). Um `202`
+isolado não confirma CAPTCHA/proteção antibot; não há retry imediato nem
+cooldown automático baseado apenas nesse status.
 
 ## Instalar cron Hermes
 Copie/linke `hermes/SKILL.md` para a pasta de skills do Hermes com o nome `unicorniohater-editor` e rode:
