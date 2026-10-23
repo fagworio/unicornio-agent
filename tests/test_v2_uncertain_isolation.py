@@ -11,6 +11,7 @@ from unicornio_editor.pipeline_v2.cycle_admin import (
     isolate_uncertain_transaction,
 )
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
+from unicornio_editor.pipeline_v2.cycle_runtime import _parse_registry_timestamp, _registry_timestamp_audit
 from unicornio_editor.workflow import publish_ready_posts
 from unicornio_editor.backup import atomic_write_text
 
@@ -250,6 +251,26 @@ def _args(root):
     )
 
 
+
+
+def _multi_isolation_args(root):
+    args = _args(root)
+    args.update(
+        isolated_post_ids=[115331, 115215, 115512],
+        run_ids={
+            115331: RUN,
+            115215: "historical-run-115215",
+            115512: "historical-run-115512",
+        },
+    )
+    with sqlite3.connect(root / "work" / "media_registry.sqlite") as con:
+        con.executemany(
+            "INSERT INTO media_usage VALUES (?, ?, ?)",
+            [(115215, "accepted", None), (115512, "accepted", None)],
+        )
+    return args
+
+
 def test_preview_classifies_uncertain_without_writing(tmp_path):
     _fixture(tmp_path)
     result = isolate_uncertain_transaction(**_args(tmp_path), apply=False)
@@ -258,6 +279,81 @@ def test_preview_classifies_uncertain_without_writing(tmp_path):
     assert result["wordpress_writes"] == 0
     assert not (tmp_path / "work" / "v2-cycle" / "transaction-isolations").exists()
     assert CycleStateStore(tmp_path).load().pending_round["preview_selected_ids"] == SELECTED
+
+
+
+def test_missing_usage_timestamps_keep_historical_posts_uncertain(tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    result = isolate_uncertain_transaction(**args, apply=False)
+    by_id = {item["post_id"]: item for item in result["evidence"]["round_post_evidence"]}
+    assert by_id[115215]["classification"] == "UNCERTAIN_ISOLATED"
+    assert by_id[115512]["classification"] == "UNCERTAIN_ISOLATED"
+    assert by_id[115215]["reason"] == "historical_journal_but_current_authorization_effects_unresolved"
+    assert by_id[115512]["reason"] == "historical_journal_but_current_authorization_effects_unresolved"
+
+
+def test_registry_timestamp_audit_normalizes_iso_offsets_and_rejects_unknowns():
+    parsed = _parse_registry_timestamp("2026-10-23T01:00:00-03:00")
+    assert parsed is not None
+    assert parsed.isoformat() == "2026-10-23T04:00:00+00:00"
+    audit = _registry_timestamp_audit(
+        [("media_runs", 115215, "2026-10-23 03:30:00"), ("media_usage", 115215, None)],
+        authorized_at="2026-10-23T03:00:00+00:00",
+    )
+    assert audit["current_round_rows"]
+    assert audit["missing_or_invalid_timestamps"]
+    assert audit["proof_of_absence"] is False
+
+
+
+def test_multi_post_isolation_closes_round_with_exact_accounting(tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    assert preview["round_classifications"] == {
+        "reconciled_post_ids": [115338, 115524],
+        "not_executed_post_ids": [115338],
+        "executed_ids": [115524],
+        "unresolved_post_ids": [],
+    }
+    result = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="operator-round-close-v1",
+    )
+    assert result["status"] == "applied"
+    state = CycleStateStore(tmp_path).load()
+    assert state.pending_round is None
+    assert state.rounds == 1
+    assert state.attempts_by_post == {115524: 1}
+    assert state.seen_post_ids == [115524]
+    assert state.attempts_total == 1
+    assert state.round_reports[-1]["event"] == "transaction_uncertain_isolated"
+    assert state.round_reports[-1]["next_round_number"] == 2
+    quarantine = json.loads((tmp_path / "config/v2-quarantine.json").read_text())
+    assert {row["post_id"] for row in quarantine["posts"]} == {115282, 115331, 115215, 115512}
+    archive = Path(result["archive_dir"])
+    for post_id in (115331, 115215, 115512):
+        assert (archive / f"journal-{post_id}.json").is_file()
+        assert json.loads((tmp_path / "work/v2-journal" / f"{post_id}.json").read_text())["status"] in {"committing", "committed", "failed_pre_writer"}
+    assert not any(row.get("post_id") == 115524 for row in quarantine["posts"])
+
+
+def test_multi_post_isolation_is_idempotent_after_apply(tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    first = isolate_uncertain_transaction(**args, apply=True, preview=preview, operator_authorization="operator-round-close-v1")
+    second = isolate_uncertain_transaction(**args, apply=True, preview=preview, operator_authorization="operator-round-close-v1")
+    assert first["status"] == "applied"
+    assert second["status"] == "already_applied"
+    state = CycleStateStore(tmp_path).load()
+    assert state.rounds == 1
+    assert state.attempts_by_post == {115524: 1}
+    events = [json.loads(line) for line in (tmp_path / "work/v2-cycle/journal.jsonl").read_text().splitlines()]
+    assert sum(item.get("event") == "transaction_uncertain_isolated" for item in events) == 1
 
 
 def test_preview_reconciles_audit_shaped_historical_posts_without_inventing_attempts(tmp_path):
@@ -342,8 +438,8 @@ def test_apply_isolates_post_preserves_journal_and_releases_other_selection(tmp_
     state = CycleStateStore(tmp_path).load()
     assert state.pending_round is None
     assert state.status == "running"
-    assert state.rounds == 0
-    assert state.attempts_total == 0
+    assert state.rounds == 1
+    assert state.attempts_total == 1
     original = json.loads((tmp_path / "work" / "v2-journal" / f"{POST}.json").read_text())
     assert original["status"] == "committing"
     policy = json.loads((tmp_path / "config" / "v2-quarantine.json").read_text())
@@ -445,7 +541,7 @@ def test_crash_after_checkpoint_before_event_resumes_idempotently(monkeypatch, t
         if json.loads(line).get("event") == "transaction_uncertain_isolated"
     ]
     assert len(events) == 1
-    assert CycleStateStore(tmp_path).load().attempts_total == 0
+    assert CycleStateStore(tmp_path).load().attempts_total == 1
     assert json.loads((tmp_path / "work/v2-journal" / f"{POST}.json").read_text())["status"] == "committing"
 
 

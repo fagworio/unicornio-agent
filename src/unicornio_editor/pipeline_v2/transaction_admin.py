@@ -300,17 +300,23 @@ def _write_quarantine_additively(
     root: Path,
     *,
     baseline: Mapping[str, Any],
-    post_id: int,
+    post_id: int | None = None,
+    post_ids: list[int] | None = None,
     reason: str,
 ) -> None:
-    """Apply only the target entry, preserving additions made after preparation."""
+    """Apply only target entries, preserving additions made after preparation."""
+    targets = [int(value) for value in (post_ids or ([post_id] if post_id is not None else []))]
+    if not targets:
+        raise TransactionIsolationError("quarantine target is missing")
     path = Path(root) / "config" / "v2-quarantine.json"
     if path.is_symlink():
         raise TransactionIsolationError("quarantine policy path must not be a symlink")
     for _attempt in range(3):
         current = _read_json(path)
         _assert_quarantine_additions_only(baseline, current)
-        merged = _quarantine_with_target(current, post_id=post_id, reason=reason)
+        merged = current
+        for target in targets:
+            merged = _quarantine_with_target(merged, post_id=target, reason=reason)
         if merged == current:
             return
         before_write = _hash_file(path)
@@ -582,12 +588,13 @@ def _round_post_evidence(
 def _derive_round_classifications(
     round_posts: list[Mapping[str, Any]],
     *,
-    isolated_post_id: int,
+    isolated_post_ids: list[int] | set[int] | tuple[int, ...],
     require_resolved: bool = True,
 ) -> dict[str, list[int]]:
+    isolated = {int(value) for value in isolated_post_ids}
     others = [
         item for item in round_posts
-        if int(item.get("post_id") or 0) != int(isolated_post_id)
+        if int(item.get("post_id") or 0) not in isolated
     ]
     unresolved = [
         int(item["post_id"])
@@ -664,6 +671,8 @@ def _event_matches_transition(event: Mapping[str, Any], transition: Mapping[str,
         "authorization_id": transition["authorization_id"],
         "round_number": transition["pending_round"],
         "selected_ids": transition["selected_ids"],
+        "isolated_post_ids": transition["isolated_post_ids"],
+        "run_ids": transition["run_ids"],
         "isolated_post_id": transition["post_id"],
         "classification": transition["classification"],
         "reconciled_post_ids": transition["reconciled_post_ids"],
@@ -701,6 +710,8 @@ def _validate_transition_archive(
         or record.get("selected_ids") != transition.get("selected_ids")
         or record.get("post_id") != transition.get("post_id")
         or record.get("run_id") != transition.get("run_id")
+        or record.get("isolated_post_ids") != transition.get("isolated_post_ids")
+        or record.get("run_ids") != transition.get("run_ids")
         or record.get("snapshot_hash") != transition.get("snapshot_hash")
         or _hash_value(record.get("evidence") or {}) != record.get("snapshot_hash")
     ):
@@ -719,6 +730,9 @@ def _validate_transition_archive(
         "target_journal": archive / f"journal-{int(transition['post_id'])}.json",
         "quarantine_before": archive / "quarantine-before.json",
     }
+    for isolated_id in transition["isolated_post_ids"]:
+        if int(isolated_id) != int(transition["post_id"]):
+            files[f"target_journal_{int(isolated_id)}"] = archive / f"journal-{int(isolated_id)}.json"
     for key, snapshot in files.items():
         if not snapshot.is_file() or _hash_file(snapshot) != hashes.get(key):
             raise TransactionIsolationError(f"archived snapshot is incomplete or changed: {key}")
@@ -744,9 +758,20 @@ def _validate_transition_archive(
     ):
         raise TransactionIsolationError("archived target journal identity diverges from transition")
     _validate_uncertain(archived_journal, run_id=str(transition.get("run_id") or ""))
+    for isolated_id in transition["isolated_post_ids"]:
+        if int(isolated_id) == int(transition["post_id"]):
+            continue
+        extra_path = archive / f"journal-{int(isolated_id)}.json"
+        extra = _read_json(extra_path)
+        if str(extra.get("post_id") or "") != str(int(isolated_id)):
+            raise TransactionIsolationError(f"archived journal identity diverges for {isolated_id}")
+        if str(extra.get("run_id") or "") != str(transition["run_ids"][str(int(isolated_id))]):
+            raise TransactionIsolationError(f"archived run identity diverges for {isolated_id}")
+        if extra.get("status") not in {"committing", "committed", "failed_pre_writer", "interrupted_pre_writer"}:
+            raise TransactionIsolationError(f"archived journal status is unsafe for {isolated_id}")
     derived = _derive_round_classifications(
         record.get("round_post_evidence") or [],
-        isolated_post_id=int(transition["post_id"]),
+        isolated_post_ids=transition["isolated_post_ids"],
         require_resolved=True,
     )
     if any(record.get(field) != derived[field] for field in (
@@ -757,11 +782,13 @@ def _validate_transition_archive(
     _validate_quarantine_payload(baseline)
     after = _read_json(archive / "quarantine-after.json")
     _assert_quarantine_additions_only(baseline, after)
-    expected_after = _quarantine_with_target(
-        deepcopy(baseline),
-        post_id=int(transition["post_id"]),
-        reason=f"UNCERTAIN_ISOLATED {transition['isolation_id']}; no replay until independently resolved",
-    )
+    expected_after = deepcopy(baseline)
+    for isolated_id in transition["isolated_post_ids"]:
+        expected_after = _quarantine_with_target(
+            expected_after,
+            post_id=int(isolated_id),
+            reason=f"UNCERTAIN_ISOLATED {transition['isolation_id']}; no replay until independently resolved",
+        )
     if after != expected_after:
         raise TransactionIsolationError("archived quarantine differs from the prepared isolation change")
     return archive, record
@@ -782,14 +809,41 @@ def _validate_recovery_checkpoint(
         raise TransactionIsolationError("archived checkpoint is invalid")
     current_state = state.to_dict()
     original_pending = deepcopy(archived_state)
-    cleared_pending = deepcopy(archived_state)
     original_pending.pop("updated_at", None)
-    cleared_pending.pop("updated_at", None)
-    cleared_pending["pending_round"] = None
     comparable_current = deepcopy(current_state)
     comparable_current.pop("updated_at", None)
-    is_original = comparable_current == original_pending
-    is_cleared = comparable_current == cleared_pending
+    mutable = {"pending_round", "rounds", "attempts_by_post", "seen_post_ids", "round_reports"}
+    for key in set(original_pending) | set(comparable_current):
+        if key not in mutable and comparable_current.get(key) != original_pending.get(key):
+            raise TransactionIsolationError("checkpoint changed outside the isolated round accounting")
+    original_mutable_equal = all(
+        comparable_current.get(key) == original_pending.get(key)
+        for key in mutable
+    )
+    is_original = original_mutable_equal
+    attempts = {str(key): int(value) for key, value in (comparable_current.get("attempts_by_post") or {}).items()}
+    pre_attempts = {str(key): int(value) for key, value in (transition.get("pre_attempts_by_post") or {}).items()}
+    expected_attempts = dict(pre_attempts)
+    for post_id in transition["executed_ids"]:
+        expected_attempts[str(post_id)] = expected_attempts.get(str(post_id), 0) + 1
+    accounted = attempts == expected_attempts or all(
+        attempts.get(str(post_id), 0) >= expected_attempts.get(str(post_id), 0)
+        for post_id in transition["executed_ids"]
+    )
+    expected_seen = set(int(value) for value in (transition.get("pre_seen_post_ids") or [])) | {
+        int(value) for value in transition["executed_ids"]
+    }
+    current_seen = {int(value) for value in (comparable_current.get("seen_post_ids") or [])}
+    is_cleared = (
+        comparable_current.get("pending_round") is None
+        and int(comparable_current.get("rounds") or 0) == max(
+            int(transition.get("pre_rounds") or 0), int(transition["pending_round"])
+        )
+        and accounted
+        and current_seen == expected_seen
+        and len(comparable_current.get("round_reports") or [])
+        == len(original_pending.get("round_reports") or []) + 1
+    )
     if not (is_original or is_cleared):
         raise TransactionIsolationError("checkpoint no longer matches the prepared isolation transition")
     if is_original and transition.get("phase") == "checkpoint_applied":
@@ -871,6 +925,8 @@ def _prepare_transition(
     pending_round: int,
     post_id: int,
     run_id: str,
+    isolated_post_ids: list[int],
+    run_ids: Mapping[int, str],
     operator_authorization: str,
     round_post_evidence: list[dict[str, Any]],
     classifications: Mapping[str, Any],
@@ -899,6 +955,14 @@ def _prepare_transition(
         "target_journal": str(preview_checkpoint["target_journal_sha256"]),
         "quarantine_before": str(preview_checkpoint["quarantine_sha256"]),
     }
+    for isolated_id in isolated_post_ids:
+        if int(isolated_id) == int(post_id):
+            continue
+        detail = next(item for item in round_post_evidence if int(item["post_id"]) == int(isolated_id))
+        key = f"target_journal_{int(isolated_id)}"
+        sources[key] = Path(root) / "work" / "v2-journal" / f"{int(isolated_id)}.json"
+        destinations[key] = archive / f"journal-{int(isolated_id)}.json"
+        hashes[key] = str(detail["journal"]["sha256"])
     archived = {
         key: _ensure_snapshot(sources[key], destinations[key], hashes[key])
         for key in sources
@@ -912,16 +976,20 @@ def _prepare_transition(
     if after_path.exists():
         after = _read_json(after_path)
         _assert_quarantine_additions_only(baseline, after)
-        expected_after = _quarantine_with_target(
-            deepcopy(baseline), post_id=post_id, reason=reason
-        )
+        expected_after = deepcopy(baseline)
+        for isolated_id in isolated_post_ids:
+            expected_after = _quarantine_with_target(
+                expected_after, post_id=int(isolated_id), reason=reason
+            )
         if after != expected_after:
             raise TransactionIsolationError("prepared quarantine snapshot conflicts with original policy")
     else:
-        _write_json_once(
-            after_path,
-            _quarantine_with_target(deepcopy(baseline), post_id=post_id, reason=reason),
-        )
+        prepared_after = deepcopy(baseline)
+        for isolated_id in isolated_post_ids:
+            prepared_after = _quarantine_with_target(
+                prepared_after, post_id=int(isolated_id), reason=reason
+            )
+        _write_json_once(after_path, prepared_after)
 
     record = {
         "version": ISOLATION_VERSION,
@@ -933,6 +1001,14 @@ def _prepare_transition(
         "selected_ids": selected_ids,
         "post_id": post_id,
         "run_id": run_id,
+        "isolated_post_ids": isolated_post_ids,
+        "run_ids": {str(key): value for key, value in run_ids.items()},
+        "pre_rounds": int(checkpoint["state"].get("rounds") or 0),
+        "pre_attempts_by_post": {
+            str(key): int(value)
+            for key, value in (checkpoint["state"].get("attempts_by_post") or {}).items()
+        },
+        "pre_seen_post_ids": [int(value) for value in (checkpoint["state"].get("seen_post_ids") or [])],
         "snapshot_hash": snapshot_hash,
         "evidence": dict(preview_evidence),
         "round_post_evidence": round_post_evidence,
@@ -962,6 +1038,14 @@ def _prepare_transition(
         "selected_ids": selected_ids,
         "post_id": post_id,
         "run_id": run_id,
+        "isolated_post_ids": isolated_post_ids,
+        "run_ids": {str(key): value for key, value in run_ids.items()},
+        "pre_rounds": int(checkpoint["state"].get("rounds") or 0),
+        "pre_attempts_by_post": {
+            str(key): int(value)
+            for key, value in (checkpoint["state"].get("attempts_by_post") or {}).items()
+        },
+        "pre_seen_post_ids": [int(value) for value in (checkpoint["state"].get("seen_post_ids") or [])],
         "snapshot_hash": snapshot_hash,
         "classification": "UNCERTAIN_ISOLATED",
         "round_post_evidence": round_post_evidence,
@@ -994,7 +1078,7 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
     _write_quarantine_additively(
         root,
         baseline=baseline,
-        post_id=int(transition["post_id"]),
+        post_ids=[int(value) for value in transition["isolated_post_ids"]],
         reason=f"UNCERTAIN_ISOLATED {transition['isolation_id']}; no replay until independently resolved",
     )
     if transition.get("phase") == "prepared":
@@ -1008,6 +1092,8 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
         "authorization_id": transition["authorization_id"],
         "round_number": transition["pending_round"],
         "selected_ids": expected,
+        "isolated_post_ids": transition["isolated_post_ids"],
+        "run_ids": transition["run_ids"],
         "isolated_post_id": transition["post_id"],
         "classification": transition["classification"],
         "reconciled_post_ids": transition["reconciled_post_ids"],
@@ -1023,12 +1109,60 @@ def _apply_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:
             raise TransactionIsolationError("checkpoint changed before isolation apply")
         if events:
             raise TransactionIsolationError("isolation event exists before checkpoint transition")
+        pre_attempts = {
+            int(key): int(value)
+            for key, value in (transition.get("pre_attempts_by_post") or {}).items()
+        }
+        for executed_id in transition["executed_ids"]:
+            current = int(state.attempts_by_post.get(int(executed_id), 0))
+            state.attempts_by_post[int(executed_id)] = max(current, pre_attempts.get(int(executed_id), 0) + 1)
+            if int(executed_id) not in state.seen_post_ids:
+                state.seen_post_ids.append(int(executed_id))
+        state.rounds = max(int(state.rounds), int(transition["pending_round"]))
         state.pending_round = None
+        report = {
+            "event": ISOLATION_EVENT,
+            "isolation_id": transition["isolation_id"],
+            "round": int(transition["pending_round"]),
+            "next_round_number": int(state.rounds) + 1,
+            "phase": state.phase,
+            "preview_selected_ids": expected,
+            "executed_ids": transition["executed_ids"],
+            "reconciled_post_ids": transition["reconciled_post_ids"],
+            "not_executed_post_ids": transition["not_executed_post_ids"],
+            "unresolved_post_ids": transition["isolated_post_ids"],
+            "round_post_evidence": transition["round_post_evidence"],
+            "isolated_post_ids": transition["isolated_post_ids"],
+            "write_replayed": False,
+            "operator_authorization": transition["operator_authorization"],
+            "archive_dir": transition["archive_dir"],
+        }
+        state.round_reports.append(report)
         _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
     elif not events:
         # CycleStateStore writes the checkpoint before appending its event.
-        # Re-saving the already-cleared state repairs that exact gap.
+        # Re-saving the already-cleared state repairs that exact gap without
+        # incrementing attempts a second time.
+        if not any(item.get("event") == ISOLATION_EVENT and item.get("isolation_id") == transition["isolation_id"] for item in state.round_reports):
+            report = {
+                "event": ISOLATION_EVENT,
+                "isolation_id": transition["isolation_id"],
+                "round": int(transition["pending_round"]),
+                "next_round_number": max(int(state.rounds), int(transition["pending_round"])) + 1,
+                "phase": state.phase,
+                "preview_selected_ids": expected,
+                "executed_ids": transition["executed_ids"],
+                "reconciled_post_ids": transition["reconciled_post_ids"],
+                "not_executed_post_ids": transition["not_executed_post_ids"],
+                "unresolved_post_ids": transition["isolated_post_ids"],
+                "round_post_evidence": transition["round_post_evidence"],
+                "isolated_post_ids": transition["isolated_post_ids"],
+                "write_replayed": False,
+                "operator_authorization": transition["operator_authorization"],
+                "archive_dir": transition["archive_dir"],
+            }
+            state.round_reports.append(report)
         _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
     events = _event_records(root, str(transition["isolation_id"]))
@@ -1051,16 +1185,25 @@ def isolate_uncertain_transaction(
     selected_ids: list[int],
     pending_round: int,
     post_id: int,
-    run_id: str,
+    run_id: str | None,
     apply: bool = False,
     preview: Mapping[str, Any] | None = None,
     operator_authorization: str | None = None,
+    isolated_post_ids: list[int] | None = None,
+    run_ids: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Preview/apply an idempotent, no-WordPress-write isolation transition."""
     root = Path(root)
-    if int(post_id) != 115331:
-        raise TransactionIsolationError("only the known uncertain post is supported by this transition")
-    selected_ids = [int(value) for value in selected_ids]
+    isolated_ids = sorted({int(value) for value in (isolated_post_ids or [post_id])})
+    if int(post_id) not in isolated_ids or len(isolated_ids) == 0:
+        raise TransactionIsolationError("isolated post IDs must include the primary post")
+    run_map = {
+        int(value): str((run_ids or {}).get(int(value)) or (run_id if int(value) == int(post_id) else ""))
+        for value in isolated_ids
+    }
+    if any(not value for value in run_map.values()):
+        raise TransactionIsolationError("every isolated post requires its exact run_id")
+    run_id = run_map[int(post_id)]
     lock = RunSessionLock(root / "work" / "v2-run.lock")
     if not lock.acquire():
         return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
@@ -1073,6 +1216,8 @@ def isolate_uncertain_transaction(
             "round": pending_round,
             "post_id": post_id,
             "run_id": run_id,
+            "isolated_post_ids": isolated_ids,
+            "run_ids": run_map,
         })[:24]
         transition_path = _transition_path(root, isolation_id)
         if transition_path.is_symlink():
@@ -1105,6 +1250,8 @@ def isolate_uncertain_transaction(
                 "selected_ids": selected_ids,
                 "post_id": int(post_id),
                 "run_id": run_id,
+                "isolated_post_ids": isolated_ids,
+                "run_ids": {str(key): value for key, value in run_map.items()},
                 "operator_authorization": str(operator_authorization),
             }
             if any(transition.get(key) != value for key, value in expected_inputs.items()):
@@ -1130,6 +1277,15 @@ def isolate_uncertain_transaction(
             )
             for selected_id in selected_ids
         ]
+        evidence_by_post = {int(item["post_id"]): item for item in round_post_evidence}
+        for isolated_id in isolated_ids:
+            detail = evidence_by_post[isolated_id]
+            if str(detail["journal"].get("run_id") or "") != run_map[isolated_id]:
+                raise TransactionIsolationError(f"run_id diverged for isolated post {isolated_id}")
+            if detail["classification"] != "UNCERTAIN_ISOLATED":
+                raise TransactionIsolationError(
+                    f"isolated post {isolated_id} is not uncertain: {detail['classification']}"
+                )
         target_evidence = next(
             item for item in round_post_evidence if int(item["post_id"]) == int(post_id)
         )
@@ -1148,6 +1304,8 @@ def isolate_uncertain_transaction(
         evidence = {
             "classification": target_evidence["classification"],
             "checkpoint": checkpoint_summary,
+            "isolated_post_ids": isolated_ids,
+            "run_ids": run_map,
             "isolated_post": target_evidence,
             "round_post_evidence": round_post_evidence,
         }
@@ -1166,7 +1324,7 @@ def isolate_uncertain_transaction(
             )
             classifications = _derive_round_classifications(
                 round_post_evidence,
-                isolated_post_id=int(post_id),
+                isolated_post_ids=isolated_ids,
                 require_resolved=True,
             )
             transition = _prepare_transition(
@@ -1183,6 +1341,8 @@ def isolate_uncertain_transaction(
                 pending_round=int(pending_round),
                 post_id=int(post_id),
                 run_id=run_id,
+                isolated_post_ids=isolated_ids,
+                run_ids=run_map,
                 operator_authorization=str(operator_authorization),
                 round_post_evidence=round_post_evidence,
                 classifications=classifications,
@@ -1190,7 +1350,7 @@ def isolate_uncertain_transaction(
             return _apply_transition(root, transition)
         classifications = _derive_round_classifications(
             round_post_evidence,
-            isolated_post_id=int(post_id),
+            isolated_post_ids=isolated_ids,
             require_resolved=False,
         )
         return {
