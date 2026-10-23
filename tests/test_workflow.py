@@ -9,6 +9,7 @@ from unittest import mock
 from unicornio_editor.config import Config
 from unicornio_editor.manifest import manifest_matches, parse_manifest
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
+from unicornio_editor.media.license import attest_source_rights as _attest_source_rights
 from unicornio_editor.pipeline_v2.model import (
     BlockerCode,
     FeaturedProgress,
@@ -70,6 +71,23 @@ def _vision_result(*, accepted, status="MATCH", confidence=0.91, visual_type="ke
         "reason": "modelo confirmou" if accepted else "imagem e share card",
         "detail_used": "low",
     }
+
+
+def _mock_source_rights():
+    """Keep executor unit tests offline; source-rights behavior has focused tests."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(mock.patch(
+        "unicornio_editor.workflow.source_page_html", return_value="<html></html>"
+    ))
+    stack.enter_context(mock.patch(
+        "unicornio_editor.media.license.attest_source_rights",
+        return_value={"version": 1, "signature": "0" * 64},
+    ))
+    return stack
+
+
 def editorial_payload(decision="process"):
     # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
     # editorial valido — 2 imagens reais com credito + keyword no corpo.
@@ -162,6 +180,33 @@ class FakeClient:
 
 
 class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        def attest_test_source(candidate, _html):
+            image_object = {
+                "@context": "https://schema.org",
+                "@type": "ImageObject",
+                "contentUrl": candidate.get("direct_image_url"),
+                "license": candidate.get("license_url"),
+            }
+            return _attest_source_rights(
+                candidate,
+                '<script type="application/ld+json">'
+                + json.dumps(image_object)
+                + "</script>",
+            )
+
+        self._source_html_patcher = mock.patch(
+            "unicornio_editor.workflow.source_page_html", return_value="<html></html>"
+        )
+        self._source_html_patcher.start()
+        self.addCleanup(self._source_html_patcher.stop)
+        self._rights_attestation_patcher = mock.patch(
+            "unicornio_editor.media.license.attest_source_rights",
+            side_effect=attest_test_source,
+        )
+        self._rights_attestation_patcher.start()
+        self.addCleanup(self._rights_attestation_patcher.stop)
+
     def config(self, dry_run):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=dry_run)
 
@@ -814,6 +859,7 @@ class WorkflowTests(unittest.TestCase):
             **self.media_item(),
             "subject": "videogame",
             "search_query": "videogame lançamento",
+            "engine": "duckduckgo",
             "candidate_id": "42-candidate-1",
         }]
         with tempfile.TemporaryDirectory() as directory:
@@ -828,6 +874,8 @@ class WorkflowTests(unittest.TestCase):
         assert all(event["post_id"] == 42 for event in events)
         assert all(event["query"] == "videogame lançamento" for event in events)
         assert all(event["subject"] == "videogame" for event in events)
+        assert all(event["engine"] == "duckduckgo" for event in events)
+        assert all("direct_image_url" not in event for event in events)
 
     def test_media_validate_reports_listicle_capacity_without_counting_featured(self):
         payload = editorial_payload()
@@ -1183,6 +1231,74 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["featured_media"], 52)
         self.assertEqual(len(report["media_plan_results"]), 3)
         self.assertTrue(report["media_plan_results"][2]["featured"])
+
+    def test_unproven_image_rights_reject_candidate_before_upload(self):
+        payload = editorial_payload()
+        payload["cleaned_html"] = (
+            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
+            "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
+        )
+        payload["media_plan"] = [
+            {**self.media_item(paragraph_index=0), "direct_image_url": "https://source.example/a.jpg"},
+        ]
+        with mock.patch(
+            "unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")
+        ), mock.patch(
+            "unicornio_editor.workflow.verify_downloaded_against_source",
+            return_value=(True, "source_reference_found: test"),
+        ), mock.patch(
+            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
+        ), mock.patch(
+            "unicornio_editor.media.license.attest_source_rights", return_value=None
+        ), mock.patch("unicornio_editor.workflow.upload_image") as upload:
+            with tempfile.TemporaryDirectory() as directory:
+                report = apply_editorial(
+                    FakeClient(self.post()), self.config(False), Path(directory), 42, payload
+                )
+        upload.assert_not_called()
+        results = report["media_plan_results"]
+        self.assertEqual(results[0]["reason_code"], "image_rights_unproven")
+
+    def test_unproven_candidate_does_not_block_later_licensed_candidate(self):
+        items = [
+            {
+                **self.media_item(paragraph_index=index * 3),
+                "direct_image_url": f"https://source.example/{name}.jpg",
+                "alt_text": f"Wolverine {name}",
+            }
+            for index, name in enumerate(("unproven", "licensed"))
+        ]
+        editorial = {
+            "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+            "cleaned_html": "<p>Wolverine videogame.</p>",
+            "media_plan": items,
+        }
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+        with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+             mock.patch("unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")), \
+             mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=Path("/tmp/inline.webp")), \
+             mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+             mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+             mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+             mock.patch("unicornio_editor.workflow.image_is_mostly_flat", return_value=False), \
+             mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+             mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
+             mock.patch(
+                 "unicornio_editor.media.license.attest_source_rights",
+                 side_effect=[None, {"version": 1, "signature": "0" * 64}],
+             ), \
+             mock.patch(
+                 "unicornio_editor.workflow.upload_image",
+                 return_value={"id": 77, "source_url": "https://wp.test/77.webp"},
+             ) as upload:
+            with tempfile.TemporaryDirectory() as directory:
+                results, _, _ = _execute_media_plan(
+                    editorial, config, object(), Path(directory),
+                    preflight={"rejected": [], "featured_vision": []}, post_id=42,
+                )
+        self.assertEqual(results[0]["reason_code"], "image_rights_unproven")
+        self.assertEqual(results[1]["status"], "accepted")
+        upload.assert_called_once()
 
     def test_media_plan_falls_back_to_serial_when_pool_cannot_start(self):
         # Se o executor nem iniciar, não houve efeito colateral e é seguro
@@ -2975,7 +3091,8 @@ def test_execute_media_plan_rejects_final_duplicate_before_upload(tmp_path):
     }
     client = object()
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3208,10 +3325,13 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
         "credit_text": "Crédito da imagem: Autor.",
         "alt_text": "Wolverine novo",
         "is_featured": False,
+        "engine": "duckduckgo",
+        "candidate_id": "ddg-wolverine-1",
     }
     editorial = {"seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"}, "cleaned_html": "<p>Wolverine videogame.</p>", "media_plan": [item]}
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3227,6 +3347,18 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
     assert results[0]["media_id"] == 115094
     index = json.loads((tmp_path / "work" / "media_index.json").read_text())
     assert index["entries"][-1]["phash"] == "1111111111111111"
+    funnel = [
+        json.loads(line)
+        for line in (tmp_path / "work" / "telemetry.jsonl").read_text().splitlines()
+        if json.loads(line).get("event") == "media_funnel"
+    ]
+    upload_event = next(
+        event for event in funnel
+        if event.get("stage") == "upload" and event.get("status") == "passed"
+    )
+    assert upload_event["engine"] == "duckduckgo"
+    assert upload_event["candidate_id"] == "ddg-wolverine-1"
+    assert "direct_image_url" not in upload_event
 
 
 def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp_path):
@@ -3248,7 +3380,8 @@ def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp
         "media_plan": [item],
     }
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3277,8 +3410,8 @@ def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp
         "source_page_url": "https://source.example/xbox-live",
         "direct_image_url": "https://cdn.example/xbox-live-keyart.webp",
         "author": "Publisher",
-        "license": "Uso com crédito",
-        "license_url": "https://source.example/xbox-live",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-10-07T00:00:00Z",
         "credit_text": "Crédito da imagem: publisher",
         "alt_text": "Xbox Live key art",
@@ -3302,7 +3435,8 @@ def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp
         vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
     )
 
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
          mock.patch("unicornio_editor.workflow.prepare_featured_webp", side_effect=lambda *_args: (final_path.write_bytes(final_bytes), final_path)[1]), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3345,8 +3479,8 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
         "paragraph_index": 0,
         "source_page_url": "https://source.example/xbox-live",
         "direct_image_url": "https://cdn.example/xbox-live-keyart.webp",
-        "author": "Publisher", "license": "Uso com crédito",
-        "license_url": "https://source.example/xbox-live",
+        "author": "Publisher", "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-10-07T00:00:00Z",
         "credit_text": "Crédito da imagem: publisher",
         "alt_text": "Xbox Live key art", "subject": "Xbox Live", "is_featured": True,
@@ -3378,7 +3512,8 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
         "subject": featured_vision_subject(editorial),
     }
 
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
          mock.patch("unicornio_editor.workflow.prepare_featured_webp", return_value=final_path), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3426,8 +3561,8 @@ def test_featured_preflight_to_apply_keeps_wordpress_context_and_evidence(tmp_pa
             "alt_text": "Xbox Live key art",
             "credit_text": "Crédito da imagem: publisher",
             "author": "Publisher",
-            "license": "Uso com crédito",
-            "license_url": "https://news.test/xbox-live",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-10-15T00:00:00Z",
         }],
     }
@@ -3456,7 +3591,7 @@ def test_featured_preflight_to_apply_keeps_wordpress_context_and_evidence(tmp_pa
         }
 
     preflight_upload_evidence = []
-    with mock.patch(
+    with _mock_source_rights(), mock.patch(
         "unicornio_editor.workflow._validate_featured_candidate_vision",
         side_effect=approved_preflight,
     ) as vision_preflight, \
@@ -3533,8 +3668,8 @@ def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
         "origin_type": "article_source",
         "provenance_verified": True,
         "author": "Fonte",
-        "license": "Uso com crédito",
-        "license_url": "https://news.example/article",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-10-07T00:00:00Z",
         "credit_text": "Crédito da imagem: fonte.example",
         "alt_text": "Wolverine",
@@ -3546,7 +3681,8 @@ def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
         "media_plan": [item],
     }
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with _mock_source_rights(), \
+         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source") as verify, \

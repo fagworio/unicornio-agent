@@ -335,7 +335,12 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
             "candidate_id": item["query"],
             "direct_image_url": "https://cdn.test/" + ("featured" if "featured" in batch["batch_id"] else "inline") + ".webp",
             "source_page_url": "https://source.test/article",
-            "subject": item["subject"], "evidence": {"verdict": "deterministic_match"},
+            "subject": item["subject"], "author": "Test",
+            "license": "CC BY 4.0", "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "credit_text": "Crédito da imagem: Test. Licença CC BY 4.0.",
+            "alt_text": item["subject"], "valid": True,
+            "evidence": {"verdict": "deterministic_match", "score": 9},
         }], "reuse": []}]}
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
@@ -592,7 +597,15 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
         return original_context_key(editorial, **kwargs)
 
     def fake_resolve(*_args, **_kwargs):
-        return {"posts": [{"reuse": [{"url": "https://cdn.test/existing.webp", "source": "https://source.test/page", "media_id": 77, "author": "Test", "license": "CC BY", "license_url": "https://license.test", "captured_at": "2026-01-01T00:00:00Z", "credit_text": "Crédito", "alt_text": "Existing"}], "audit_candidates": []}]}
+        return {"posts": [{"reuse": [{
+            "url": "https://cdn.test/existing.webp", "source": "https://source.test/page",
+            "media_id": 77, "author": "Test", "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "credit_text": "Crédito da imagem: Test. Licença CC BY 4.0.",
+            "alt_text": "Existing", "valid": True,
+            "evidence": {"verdict": "deterministic_match", "score": 9},
+        }], "audit_candidates": []}]}
 
     def fake_validate(_client, editorial, **kwargs):
         seen["plans"].append(editorial["media_plan"])
@@ -631,6 +644,24 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
 
 def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    enriched = []
+    provider_queries = []
+
+    def enrich(candidates, **kwargs):
+        assert kwargs["verify"] is True
+        for candidate in candidates:
+            candidate["valid"] = True
+            candidate["evidence"] = {"verdict": "deterministic_match", "score": 9}
+            enriched.append(candidate["direct_image_url"])
+        return candidates, [], []
+
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", enrich)
+    monkeypatch.setattr(
+        search, "search_web_images_batch",
+        lambda queries, **_kwargs: provider_queries.extend(queries) or [],
+    )
 
     monkeypatch.setattr(
         cli,
@@ -639,6 +670,12 @@ def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
             "url": "https://cdn.test/reused.webp",
             "source": "https://source.test/reused",
             "media_id": 77,
+            "author": "Test Author",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "captured_at": "2026-10-01T00:00:00Z",
+            "credit_text": "Crédito da imagem: Test Author. Licença CC BY 4.0.",
+            "alt_text": "Test image",
         }],
     )
 
@@ -669,6 +706,31 @@ def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
     assert progress["coverage"]["expected_engines"] == []
     assert progress["coverage"]["planned_queries"] == 0
     assert progress["coverage"]["completed_queries"] == 0
+    assert enriched == ["https://cdn.test/reused.webp"]
+    assert provider_queries == []
+    assert result["posts"][0]["reuse"][0]["valid"] is True
+
+
+def test_legacy_library_entry_without_rights_does_not_become_reusable(tmp_path):
+    import unicornio_editor.cli as cli
+    from unicornio_editor.media.library_index import register
+
+    register(
+        tmp_path,
+        source_url="https://cdn.test/legacy.webp",
+        source_page="https://source.test/legacy",
+        subject="Test Subject",
+        media_id=77,
+    )
+
+    class Client:
+        def get_media(self, media_id):
+            return {"id": media_id}
+
+        def search_media(self, *_args, **_kwargs):
+            return []
+
+    assert cli._reuse_from_library(Client(), tmp_path, "Test Subject", limit=1) == []
 
 
 def test_media_resolver_restores_visual_verification_from_registry(monkeypatch, tmp_path):
@@ -741,10 +803,11 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
             "subject": subject,
             "author": "Test",
             "license": "CC BY",
-            "license_url": "https://license.test",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-01-01T00:00:00Z",
             "credit_text": "Crédito da imagem: Test",
             "alt_text": subject,
+            "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
         }
 
@@ -840,10 +903,11 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
         "subject": "Test",
         "author": "Test",
         "license": "CC BY",
-        "license_url": "https://license.test",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
-        "credit_text": "Crédito",
+        "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
 
@@ -890,10 +954,11 @@ def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_pa
         "subject": "Test",
         "author": "Test",
         "license": "CC BY",
-        "license_url": "https://license.test",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
-        "credit_text": "Crédito",
+        "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
 
@@ -938,7 +1003,7 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
-    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
@@ -947,7 +1012,6 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
             "query": "test query",
             "candidates": [],
             "engine_reports": {
-                "google_browser": {"failure_kind": "ok"},
                 "bing": {"failure_kind": "rate_limited"},
                 "yandex": {"failure_kind": "ok"},
                 "google": {"failure_kind": "ok"},
@@ -982,7 +1046,7 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
-    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     candidate = {
         "direct_image_url": "https://cdn.test/accepted.webp",
@@ -1004,7 +1068,6 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
             "query": "target reached query",
             "candidates": [candidate],
             "engine_reports": {
-                "google_browser": {"failure_kind": "ok"},
                 "bing": {"failure_kind": "rate_limited"},
                 "yandex": {"failure_kind": "ok"},
                 "google": {"failure_kind": "ok"},
@@ -1046,11 +1109,74 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     assert coverage_valid is False
 
 
+def test_media_search_preserves_verified_exhaustion_when_candidate_quota_is_met(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    candidate = {
+        "direct_image_url": "https://cdn.test/exhausted-approved.webp",
+        "source_page_url": "https://source.test/article",
+        "phash": "a" * 16,
+        "valid": True,
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }
+    monkeypatch.setattr(
+        cli,
+        "_enriquecer_candidatos",
+        lambda candidates, **_kwargs: (list(candidates), [], []),
+    )
+
+    def verified_search(_queries, *, accept, **_kwargs):
+        assert accept([candidate], "verified query") == 1
+        return [{
+            "query": "verified query",
+            "completion_reason": "EXHAUSTED_VERIFIED",
+            "candidates": [candidate],
+            "engine_reports": {
+                "bing": {"failure_kind": "ok"},
+                "yandex": {"failure_kind": "no_results_legitimate"},
+            },
+        }]
+
+    monkeypatch.setattr(search, "search_web_images_batch", verified_search)
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "verified-exhausted-with-candidate",
+            "posts": [{
+                "post_id": 115518,
+                "subject": "Test",
+                "query": "verified query",
+                "needed": 1,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=False,
+    )
+
+    progress = result["posts"][0]["search"]
+    assert progress["completed"] is True
+    assert progress["completion_reason"] == "EXHAUSTED_VERIFIED"
+    assert progress["coverage"]["strategy_complete"] is True
+    _active, _proofs, coverage_valid = _aggregate_active_coverage(
+        [{"_planned_query": "verified query", "coverage": progress["coverage"]}],
+        ["verified query"],
+    )
+    assert coverage_valid is True
+
+
 def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
-    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
@@ -1058,11 +1184,11 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
         return [{
             "query": "technical failure",
             "candidates": [],
+            "completion_reason": "EXHAUSTED_VERIFIED",
             "engine_reports": {
-                "google_browser": {"failure_kind": "js_required", "error": "browser unavailable"},
                 "bing": {"failure_kind": "no_results_legitimate"},
                 "yandex": {"failure_kind": "no_results_legitimate"},
-                "google": {"failure_kind": "no_results_legitimate"},
+                "google": {"failure_kind": "js_required", "error": "Google HTML requires JavaScript"},
             },
         }]
 
@@ -1076,22 +1202,23 @@ def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_pa
         full=True, allow_reuse=False,
     )
     progress = result["posts"][0]["search"]
-    assert progress["completed"] is False
-    assert progress["completion_reason"] == "SEARCH_INCOMPLETE"
-    assert progress["coverage"]["engine_reports"]["google_browser"]["error"] == "browser unavailable"
+    assert progress["completed"] is True
+    assert progress["completion_reason"] == "EXHAUSTED_VERIFIED"
+    assert progress["coverage"]["engine_reports"]["google"]["error"] == "Google HTML requires JavaScript"
     assert progress["coverage"]["fallback_available"] is False
+    assert progress["coverage"]["optional_engine_failures"] == {"google": "js_required"}
     _active, _proofs, coverage_valid = _aggregate_active_coverage(
         [{"_planned_query": "technical failure", "coverage": progress["coverage"]}],
         ["technical failure"],
     )
-    assert coverage_valid is False
+    assert coverage_valid is True
 
 
 def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
-    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
     monkeypatch.setattr(
@@ -1100,7 +1227,7 @@ def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path
         lambda *_args, **_kwargs: [{
             "query": "fallback query",
             "candidates": [],
-            "engine_reports": {"google_browser": {"failure_kind": "js_required"}},
+            "engine_reports": {"bing": {"failure_kind": "rate_limited"}},
         }],
     )
 
@@ -1115,14 +1242,14 @@ def test_media_search_reports_unattempted_fallback_engines(monkeypatch, tmp_path
 
     coverage = result["posts"][0]["search"]["coverage"]
     assert coverage["fallback_available"] is True
-    assert coverage["next_fallback_engines"] == ["bing", "yandex", "google"]
+    assert coverage["next_fallback_engines"] == ["yandex", "google"]
 
 
 def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
-    monkeypatch.setenv("EDITOR_GOOGLE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
 
@@ -1132,7 +1259,7 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
             "candidates": [],
             "engine_reports": {
                 engine: {"failure_kind": "no_results_legitimate"}
-                for engine in ("google_browser", "bing", "yandex", "google")
+                for engine in ("bing", "yandex", "google")
             },
         }]
 
@@ -1166,9 +1293,8 @@ def test_media_search_healthy_zero_results_is_exhausted(monkeypatch, tmp_path):
     assert progress["coverage"]["version"] == 1
     assert progress["coverage"]["verified"] is True
     assert progress["coverage"]["strategy_complete"] is True
-    assert progress["coverage"]["expected_engines"] == [
-        "google_browser", "bing", "yandex", "google"
-    ]
+    assert progress["coverage"]["expected_engines"] == ["bing", "yandex"]
+    assert progress["coverage"]["optional_engines"] == ["google"]
     active, _proofs, coverage_valid = _aggregate_active_coverage(
         [{"_planned_query": "empty query", "coverage": progress["coverage"]}],
         ["empty query"],
@@ -1463,10 +1589,11 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
             "subject": "Test",
             "author": "Test",
             "license": "CC BY",
-            "license_url": "https://license.test",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-01-01T00:00:00Z",
-            "credit_text": "Crédito",
+            "credit_text": "Crédito da imagem: Test",
             "alt_text": "Test",
+            "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
         }
 
@@ -1544,7 +1671,7 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.exhausted is False
 
 
-def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeypatch, tmp_path):
+def test_media_resolver_uses_approved_candidate_fallback_before_target(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
 
@@ -1555,17 +1682,23 @@ def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeyp
         "subject": "Test",
         "author": "Test",
         "license": "CC BY",
-        "license_url": "https://license.test",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
-        "credit_text": "Credit",
+        "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
 
+    backup_candidate = {
+        **candidate,
+        "candidate_id": "target-2",
+        "direct_image_url": "https://cdn.test/target-backup.webp",
+    }
     monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
         "posts": [{
             "reuse": [],
-            "audit_candidates": [candidate],
+            "audit_candidates": [candidate, backup_candidate],
             "search": {
                 "completed": True,
                 "completion_reason": "TARGET_REACHED",
@@ -1579,16 +1712,28 @@ def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeyp
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
     monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
-    monkeypatch.setattr(runtime, "_execute_media_plan", lambda editorial, *_args, **_kwargs: ([{
-        "media_id": 115568,
-        "media_url": editorial["media_plan"][0]["direct_image_url"],
-        "paragraph_index": editorial["media_plan"][0]["paragraph_index"],
-        "alt_text": "Test",
-        "credit_text": "Credit",
-        "featured": False,
-        "phash": "a" * 16,
-        "status": "accepted",
-    }], None, None))
+    attempted_urls = []
+
+    def execute_with_fallback(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        attempted_urls.append(item["direct_image_url"])
+        if item["direct_image_url"].endswith("target.webp"):
+            return ([{"paragraph_index": item["paragraph_index"], "status": "rejected", "detail": "conversion_failed"}], None, None)
+        return ([{
+            "media_id": 115568,
+            "media_url": item["direct_image_url"],
+            "paragraph_index": item["paragraph_index"],
+            "alt_text": "Test",
+            "credit_text": "Credit",
+            "featured": False,
+            "phash": "a" * 16,
+            "sha256": "b" * 64,
+            "visual_group_id": "visual:target-backup",
+            "visual_verification": {"decision": "INITIAL"},
+            "status": "accepted",
+        }], None, None)
+
+    monkeypatch.setattr(runtime, "_execute_media_plan", execute_with_fallback)
 
     previous = MediaProgress(
         required=1,
@@ -1603,6 +1748,11 @@ def test_media_resolver_preserves_target_reached_without_coverage_waiver(monkeyp
         previous,
     )
 
+    assert attempted_urls == [
+        "https://cdn.test/target.webp",
+        "https://cdn.test/target-backup.webp",
+    ]
+    assert result.accepted == 1
     assert result.search.completed is True
     assert result.search.completion_reason == "TARGET_REACHED"
     assert result.search.coverage["active_coverage"]["verified"] is False
@@ -1620,10 +1770,11 @@ def test_media_resolver_preserves_target_reached_after_mixed_completed_queries(m
         "subject": "Beta",
         "author": "Test",
         "license": "CC BY",
-        "license_url": "https://license.test",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
-        "credit_text": "Credit",
+        "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
 
@@ -1695,7 +1846,17 @@ def test_media_resolver_preserves_target_reached_after_mixed_completed_queries(m
     assert result.search.exhausted is False
 
 
-def test_media_resolver_does_not_call_rejected_target_exhaustion(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("provider_exhausted", "expected_completed", "expected_reason", "expected_exhausted"),
+    [
+        (False, False, "SEARCH_INCOMPLETE", False),
+        (True, True, "EXHAUSTED_VERIFIED", True),
+    ],
+)
+def test_media_resolver_distinguishes_discovery_target_from_verified_exhaustion(
+    monkeypatch, tmp_path, provider_exhausted, expected_completed, expected_reason,
+    expected_exhausted,
+):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
 
@@ -1706,26 +1867,34 @@ def test_media_resolver_does_not_call_rejected_target_exhaustion(monkeypatch, tm
         "subject": "Test",
         "author": "Test",
         "license": "CC BY",
-        "license_url": "https://license.test",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
-        "credit_text": "Credit",
+        "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
 
-    monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
-        "posts": [{
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        query = batch["posts"][0]["query"]
+        search_result = {
+            "completed": True,
+            "completion_reason": (
+                "EXHAUSTED_VERIFIED" if provider_exhausted else "TARGET_REACHED"
+            ),
+            "queries_attempted": 1,
+            "engines_attempted": ["bing"],
+            "candidates_seen": 1,
+        }
+        if provider_exhausted:
+            search_result["coverage"] = _verified_search_coverage(query)
+        return {"posts": [{
             "reuse": [],
             "audit_candidates": [candidate],
-            "search": {
-                "completed": True,
-                "completion_reason": "TARGET_REACHED",
-                "queries_attempted": 1,
-                "engines_attempted": ["bing"],
-                "candidates_seen": 1,
-            },
-        }],
-    })
+            "search": search_result,
+        }]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
     monkeypatch.setattr(runtime, "_required_image_count_for_editorial", lambda *_args, **_kwargs: 1)
@@ -1748,10 +1917,10 @@ def test_media_resolver_does_not_call_rejected_target_exhaustion(monkeypatch, tm
     )
 
     assert result.accepted == 0
-    assert result.search.completed is True
-    assert result.search.completion_reason == "TARGET_REACHED"
-    assert result.search.coverage["active_coverage"]["verified"] is False
-    assert result.search.exhausted is False
+    assert result.search.completed is expected_completed
+    assert result.search.completion_reason == expected_reason
+    assert result.search.coverage["active_coverage"]["verified"] is provider_exhausted
+    assert result.search.exhausted is expected_exhausted
 
 
 def test_media_resolver_varies_normal_article_queries_before_retry(monkeypatch, tmp_path):
@@ -1803,10 +1972,11 @@ def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
             "subject": "Test",
             "author": "Test",
             "license": "CC BY",
-            "license_url": "https://license.test",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-01-01T00:00:00Z",
-            "credit_text": "Crédito",
+            "credit_text": "Crédito da imagem: Test",
             "alt_text": "Test",
+            "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
         }
 
@@ -1914,10 +2084,11 @@ def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeyp
         "source_page_url": "https://source.test/xbox-live",
         "author": "Fonte Xbox",
         "license": "CC BY 4.0",
-        "license_url": "https://license.test/cc-by-4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
         "credit_text": "Crédito da imagem: Fonte Xbox",
         "alt_text": "Arte de Xbox Live",
+        "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
     }
     monkeypatch.setattr(
@@ -2111,12 +2282,13 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
         "direct_image_url": "https://cdn.test/article.webp",
         "source_page_url": "https://source.test/article",
         "author": "Source",
-        "license": "Uso com crédito",
-        "license_url": "https://source.test/article",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
         "credit_text": "Crédito da imagem: source.test",
         "alt_text": "Test",
         "evidence": {"verdict": "deterministic_match"},
+        "valid": True,
     }
 
     monkeypatch.setattr(source_verify, "discover_article_source_candidates", lambda *_args, **_kwargs: [dict(source_candidate)])
@@ -2167,12 +2339,13 @@ def test_featured_missing_searches_article_source_even_when_inline_is_complete(m
         "direct_image_url": "https://cdn.test/source-key-art.webp",
         "source_page_url": "https://source.test/article",
         "author": "Source",
-        "license": "Uso com crédito",
-        "license_url": "https://source.test/article",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "captured_at": "2026-01-01T00:00:00Z",
         "credit_text": "Crédito da imagem: source.test",
         "alt_text": "Test key art",
         "evidence": {"verdict": "deterministic_match"},
+        "valid": True,
     }
     source_calls = []
 

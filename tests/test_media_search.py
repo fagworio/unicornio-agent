@@ -111,7 +111,7 @@ class SearchWebImagesTests(unittest.TestCase):
             "unicornio_editor.media.search.urlopen",
             return_value=FakeResp(),
         ):
-            results = search_web_images("redfall xbox", limit=10)
+            results = search_web_images("redfall xbox", limit=10, engine="google")
         # Apenas o candidato com URL de imagem real; o preview do Google e
         # descartado (lh3/encrypted-tbn/gstatic nao sao fonte).
         self.assertEqual(len(results), 1)
@@ -333,8 +333,7 @@ class SearchQueryEvidenceTests(unittest.TestCase):
         self.assertEqual(results[0]["thumbnail_url"], "https://thumb.example/bleach.jpg")
 
     def test_search_web_images_uses_fixed_bing_then_yandex_fallback(self):
-        # Google Browser é tentado antes; com Playwright ausente, Bing é sempre
-        # o primeiro fallback e Yandex fica reservado para recall.
+        # O modo auto consulta Bing primeiro; Yandex fica como fallback para recall.
         html = (
             '&quot;murl&quot;:&quot;https://cdn.example/bing.jpg&quot;,'
             '&quot;turl&quot;:&quot;https://t.example/bing_t.jpg&quot;,'
@@ -373,7 +372,9 @@ class CapacidadePorAceitosTests(unittest.TestCase):
             return [{"direct_image_url": "https://cdn.google/boa.jpg",
                      "source_page_url": "https://page.google/boa", "usable": True}]
 
-        with mock.patch.object(search, "search_bing_images", bing), \
+        with mock.patch.dict(
+            "os.environ", {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,google,yandex"}
+        ), mock.patch.object(search, "search_bing_images", bing), \
              mock.patch.object(search, "search_google_images", google), \
              mock.patch.object(search, "search_yandex_images", lambda q, **kw: []):
             # sem accept: comportamento antigo (encerra no "usable" do 1o engine)

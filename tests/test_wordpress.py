@@ -17,12 +17,21 @@ class ApiHandler(BaseHTTPRequestHandler):
     # with HTTP 400 (simulates installs that refuse status in read queries).
     allow_status_query = True
     status_query_http_error = None
+    invalid_page = False
 
     def do_GET(self):
         self.__class__.requests.append(("GET", self.path, dict(self.headers)))
         if self.path.startswith("/wp-json/wp/v2/posts/42"):
             self._send(200, {"id": 42, "status": "pending", "content": {"raw": "x"}})
         elif self.path.startswith("/wp-json/wp/v2/posts"):
+            query = parse_qs(urlparse(self.path).query)
+            if self.__class__.invalid_page and query.get("page") == ["2"]:
+                self._send(400, {
+                    "code": "rest_post_invalid_page_number",
+                    "message": "The page number requested is larger than the number of pages available.",
+                    "data": {"status": 400},
+                })
+                return
             if self.__class__.status_query_http_error and "status" in parse_qs(
                 urlparse(self.path).query
             ):
@@ -74,6 +83,7 @@ class WordPressClientTests(unittest.TestCase):
         ApiHandler.requests.clear()
         ApiHandler.status_query_http_error = None
         ApiHandler.allow_status_query = True
+        ApiHandler.invalid_page = False
         self.config = Config(
             content_source="wordpress",
             wordpress_url=self.base,
@@ -113,6 +123,26 @@ class WordPressClientTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status_code, 503)
         self.assertEqual(len(ApiHandler.requests), 1)
+
+    def test_list_pending_treats_only_later_invalid_page_as_end_of_collection(self):
+        ApiHandler.invalid_page = True
+        posts = WordPressClient(self.config).list_pending(page=2, per_page=5)
+        self.assertEqual(posts, [])
+        self.assertEqual(len(ApiHandler.requests), 1)
+        query = parse_qs(urlparse(ApiHandler.requests[0][1]).query)
+        self.assertEqual(query["page"], ["2"])
+        self.assertEqual(query["status"], ["pending"])
+
+    def test_list_pending_does_not_hide_invalid_first_or_included_page(self):
+        client = WordPressClient(self.config)
+        error = WordPressError(
+            "invalid page", status_code=400, api_code="rest_post_invalid_page_number"
+        )
+        with mock.patch.object(client, "_request", side_effect=error):
+            with self.assertRaises(WordPressError):
+                client.list_pending(page=1)
+            with self.assertRaises(WordPressError):
+                client.list_pending(page=2, include=[42])
 
     def test_get_post(self):
         self.assertEqual(WordPressClient(self.config).get_post(42)["status"], "pending")

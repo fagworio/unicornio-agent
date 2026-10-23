@@ -241,6 +241,25 @@ def classify(
         return _retry(previous, Phase.VALIDATE, BlockerCode.INTERNAL_ERROR, now=now, cooldown_minutes=cooldown_minutes)
 
     blockers = [blocker for blocker, _, _, _ in failures]
+    search = getattr(media, "search", None)
+    search_reason = str(getattr(search, "completion_reason", "") or "")
+    if (
+        blockers[0] in MEDIA_BLOCKERS
+        and search is not None
+        and not bool(getattr(search, "completed", False))
+        and int(getattr(search, "queries_planned", 0) or 0)
+        > int(getattr(search, "queries_completed", 0) or 0)
+    ):
+        # Missing media after an incomplete provider/source-verification run is
+        # operationally unresolved, not proof that the article is impossible.
+        return _retry(
+            previous,
+            Phase.MEDIA,
+            BlockerCode.PROVIDER_ERROR,
+            now=now,
+            detail=f"media acquisition incomplete ({search_reason or 'unknown'})",
+            cooldown_minutes=cooldown_minutes,
+        )
     operational_failure = next(
         (
             (blocker, phase_override, failure_detail)

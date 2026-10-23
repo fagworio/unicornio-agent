@@ -521,6 +521,13 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
             payload.update({"status": "historical", "readback": False})
         else:
             payload.update({"status": "committed", "readback": True})
+            if post_id == 115641:
+                payload.update({
+                    "media_readback_status": "confirmed",
+                    "media_application_status": "confirmed",
+                    "html_readback_status": "confirmed",
+                    "apply_media_records": [{"readback_status": "confirmed"}],
+                })
         (journal_dir / f"{post_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
     class Client:
@@ -566,6 +573,12 @@ def test_resume_five_post_authorized_round_reconciles_recovered_post_without_rep
     assert detail[115676]["transaction_readback"] is False
     assert detail[115676]["write_readback_confirmed"] is False
     assert detail[115598]["outcome"] == "human_required"
+    assert detail[115641]["journal_status"] == "committed"
+    assert detail[115641]["journal_transaction_readback"] is True
+    assert detail[115641]["wordpress_post_status"] == "pending"
+    assert detail[115641]["wordpress_v2_state"] == "pending"
+    assert detail[115641]["media_application_status"] == "confirmed"
+    assert detail[115641]["html_readback_status"] == "confirmed"
     assert 115676 in result.executed_ids
     assert len(result.details) == len(post_ids)
 

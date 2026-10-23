@@ -4,7 +4,7 @@ Automacao editorial para WordPress acionada pelo cron do Hermes Agent.
 
 ## Objetivo
 
-Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, remover imagens inline importadas, descobrir imagens públicas/licenciadas via Google Images, baixar e publicar cópia local em WebP com crédito obrigatório em toda imagem, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
+Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, remover imagens inline importadas, descobrir imagens via providers configurados, baixar e publicar cópia local em WebP com direitos e crédito explícitos, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
 
 O sistema usa duas camadas:
 
@@ -163,17 +163,30 @@ Config em `.env`: `EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`,
 cd /opt/unicorniohater-editorial-agent
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[browser]'
-PLAYWRIGHT_BROWSERS_PATH="$PWD/.playwright-browsers" \
-  python -m playwright install chromium
+python -m pip install -e '.[media-search]'
 cp .env.example .env
 ```
 
-O extra `browser` instala o provider Google Browser. O Chromium do Playwright
-fica em `.playwright-browsers/` dentro do projeto e o provider usa esse
-diretorio automaticamente, sem depender do cache do usuario que executa o
-Hermes/cron. Se o runtime reclamar de bibliotecas do sistema, execute
-`python -m playwright install-deps chromium` com privilegios de root.
+O modo `auto` tenta `duckduckgo,bing,yandex,google` nessa ordem. A biblioteca
+`ddgs` é opcional e instalada pelo extra `media-search`; sem ela, o fallback
+DuckDuckGo registra `provider_unavailable` e a busca segue para os provedores
+seguintes. `EDITOR_MEDIA_SEARCH_REQUIRED_PROVIDERS` define a estratégia mínima
+que precisa ser comprovada para autorizar `EXHAUSTED_VERIFIED` (por padrão,
+`bing,yandex`). Fallbacks opcionais podem falhar sem invalidar essa prova, mas
+suas falhas permanecem na telemetria. Google HTML não contorna `js_required`,
+CAPTCHA ou políticas de acesso; tais respostas são registradas como falhas e
+nunca como resultados vazios verificados. Google Browser/Playwright não é
+suportado. O backend DDG é não oficial e pode mudar/bloquear; o campo `source`
+retornado pela biblioteca é preservado para observar sua origem aparente. Não
+se presume independência em relação ao Bing: meça ganho marginal por imagens
+distintas aprovadas, não pela quantidade bruta de URLs.
+O adapter remove apenas o cabeçalho hop-by-hop incompatível com HTTP/2 e mantém
+verificação TLS; `EDITOR_DDGS_CA_BUNDLE` pode apontar para um PEM legível, caso
+o bundle padrão do OpenSSL não esteja acessível. Respostas HTTP diferentes de
+200, inclusive `202`, são falhas técnicas, nunca prova de busca vazia.
+O health report diferencia o bootstrap `vqd` do endpoint `i.js` e guarda apenas
+estágio/status; o status `202`, sem evidência do corpo, não é classificado como
+CAPTCHA nem aciona cooldown automático.
 
 Preencha `.env` com um usuario WordPress de automacao e Application Password.
 
@@ -287,8 +300,8 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Minimo de 3 paragrafos entre imagens.
 - Converter para WebP antes do upload (normalizacao tecnica e automatica no apply).
 - Google Images é somente índice de descoberta; a fonte é a página ORIGINAL da imagem (preview do Google não é fonte).
-- Política de imagens (2026-08): qualquer imagem da web pode ser usada com CRÉDITO VISÍVEL — o crédito é a evidência. Licenças livres (CC0, CC BY, domínio público, permissão) são preferidas; para as demais, usar o marcador "Uso com crédito".
-- Não usar imagem apenas porque aparece como “pública” no Google; registrar URL da página original, autor, licença (ou "Uso com crédito"), termos e data da captura.
+- Política de imagens: crédito visível é obrigatório, mas não concede permissão. O pipeline aceita CC0, domínio público, CC BY e CC BY-SA sem variantes NC/ND, com referência oficial correspondente; não aceita alegações livres de permissão. Antes do upload, a página original precisa declarar um Schema.org `ImageObject` com `contentUrl` igual ao URL direto da imagem e a mesma licença oficial. Licença genérica da página, metadado do agente ou evidência de outro asset não basta; fontes sem essa prova estruturada falham fechadas.
+- Registrar separadamente URL da página original, autoria/crédito, licença, URL explícita dos termos e data da captura. A URL da origem não substitui a referência da licença.
 - Baixar e hospedar a cópia na Media Library do WordPress, sem bucket/CDN externo.
 - Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
 - Sem crédito visível, descartar a imagem e procurar outra.
@@ -346,8 +359,8 @@ Audita e produz relatorio/backup sem alterar WordPress.
 ### Fase 2 - Pending autonomo
 Atualiza o post, mas sempre continua `pending`.
 
-### Fase 3 - Mídia pública/licenciada
-Pesquisa candidatos via Google Images, verifica a licença na página original, baixa, converte para WebP, envia à Media Library local, registra crédito/licença e insere imagens e featured media.
+### Fase 3 - Descoberta e validação de mídia
+Pesquisa candidatos pelos providers configurados, exige proveniência e declaração de licença estruturada vinculada ao `ImageObject` exato, valida identidade/relevância visual, baixa, converte para WebP, envia à Media Library local, registra crédito/licença e insere imagens e featured media. A prova de licença é validada na página de origem antes do upload; uma declaração sem vínculo ao asset é rejeitada.
 
 ### Fase 4 - Manutencao
 Jobs separados e inicialmente somente `report` para:

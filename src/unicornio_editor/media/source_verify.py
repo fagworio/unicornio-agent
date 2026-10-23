@@ -28,6 +28,7 @@ _PAGE_MAX_BYTES = 2 * 1024 * 1024
 _IMG_MAX_BYTES = 8 * 1024 * 1024
 _VERIFY_TOTAL_MAX_BYTES = 32 * 1024 * 1024
 _MAX_DOWNLOADS = 6
+_MAX_SOURCE_ASSET_COMPARISONS = 12
 _FETCH_TIMEOUT = 15
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -80,6 +81,7 @@ def discover_article_source_candidates(
     audit=None,
     stats: dict[str, int] | None = None,
     url_policy: str = "audit",
+    is_listicle: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Extract candidates directly from the article's ``Fonte`` page.
 
@@ -93,6 +95,10 @@ def discover_article_source_candidates(
     if payload is None:
         return []
     html = payload.decode("utf-8", "ignore")
+    if is_listicle is None:
+        from ..list_quality import extract_list_items
+
+        is_listicle = len(extract_list_items("", html)) >= 2
     editorial_subjects = []
     for value in (subjects or (subject,)):
         normalized = " ".join(str(value or "").split()).strip()
@@ -102,6 +108,11 @@ def discover_article_source_candidates(
 
     def subject_for_asset(asset) -> str:
         if len(editorial_subjects) <= 1:
+            return primary_subject
+        if not is_listicle:
+            # Ordinary articles can mention secondary entities without turning
+            # each image into a list item. Keep the article's primary identity;
+            # local evidence is still scored below and the normal gates remain.
             return primary_subject
         context = " ".join((asset.heading, asset.alt, asset.figcaption)).casefold()
         context_tokens = set(re.findall(r"[a-z0-9]+", context))
@@ -143,7 +154,7 @@ def discover_article_source_candidates(
         if asset.context_kind == "excluded":
             continue
         asset_subject = subject_for_asset(asset)
-        if len(editorial_subjects) > 1 and not asset_subject:
+        if is_listicle and len(editorial_subjects) > 1 and not asset_subject:
             # An asset from a listicle source without an unambiguous local
             # heading/alt/caption must not inherit item one's identity.
             continue
@@ -161,6 +172,27 @@ def discover_article_source_candidates(
         candidate_id = hashlib.sha256(
             f"article_source|{page_url}|{url}".encode("utf-8", "ignore")
         ).hexdigest()[:20]
+        from .evidence import evidence_score, source_context
+
+        context = source_context(html, url, base_url=page_url)
+        context.update({
+            "alt_original": asset.alt,
+            "figcaption": asset.figcaption,
+            "heading": asset.heading,
+            "filename": stem,
+        })
+        evidence = evidence_score(
+            asset_subject,
+            filename=context.get("filename", ""),
+            og_title=context.get("og_title", ""),
+            page_title=context.get("page_title", ""),
+            alt_original=context.get("alt_original", ""),
+            figcaption=context.get("figcaption", ""),
+            heading=context.get("heading", ""),
+            page_url=page_url,
+            source_page_present=True,
+            image_in_source=True,
+        )
         result.append({
             "candidate_id": candidate_id,
             "discovery_image_url": url,
@@ -175,12 +207,9 @@ def discover_article_source_candidates(
             "discovery_only": False,
             "engine": "article_source",
             "query": "article_source",
-            "evidence": {
-                "verdict": "deterministic_match",
-                "gate": "article_source",
-                "reason": "asset declarado pela página Fonte da matéria",
-            },
-            "evidence_score": 100,
+            "evidence": evidence,
+            "evidence_score": int(evidence.get("score") or 0),
+            "needs_vision": bool(evidence.get("needs_vision")),
             "valid": True,
             "verification_level": "ARTICLE_SOURCE",
             "alt_text": asset.alt or asset.figcaption or asset.heading or asset_subject,
@@ -244,6 +273,34 @@ def _asset_rendition_key(url: str) -> str:
 def _image_urls_in_page(html: str, base_url: str) -> list[str]:
     """URLs de assets declarados pela página, inclusive CDNs sem extensão."""
     return [asset.url for asset in extract_page_assets(html, base_url)]
+
+
+def source_page_html(
+    page_url: str,
+    *,
+    cache: dict[str, str | None] | None = None,
+    cache_lock: Lock | None = None,
+    audit=None,
+    url_policy: str = "audit",
+) -> str | None:
+    """Fetch and cache source HTML for independent rights-evidence checks."""
+    if not _valid_http(page_url):
+        return None
+    cache = cache if cache is not None else {}
+
+    def populate() -> None:
+        if page_url in cache:
+            return
+        budget = [_VERIFY_TOTAL_MAX_BYTES]
+        payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
+        cache[page_url] = payload.decode("utf-8", "ignore") if payload is not None else None
+
+    if cache_lock is None:
+        populate()
+    else:
+        with cache_lock:
+            populate()
+    return cache[page_url]
 
 
 def _normalized_url(url: str) -> str:
@@ -342,6 +399,9 @@ def validate_discovered_candidate(
         "recoverable": False,
         "source_comparison_proved": False,
         "images_in_page": 0,
+        "verification_status": "unverified",
+        "comparisons_attempted": 0,
+        "assets_considered": 0,
     }
     if not _valid_http(page_url):
         resultado["reason_code"] = "source_page_unavailable"
@@ -395,6 +455,7 @@ def validate_discovered_candidate(
         resultado["source_verified"] = True
         resultado["matched_image_url"] = exact_match
         resultado["verification_level"] = "EXACT_URL"
+        resultado["verification_status"] = "verified"
         resultado["reason_code"] = "source_reference_found"
         resultado["reason"] = _coded_reason(
             "source_reference_found", "URL exata encontrada no HTML da pagina de origem"
@@ -410,6 +471,7 @@ def validate_discovered_candidate(
         resultado["source_verified"] = True
         resultado["matched_image_url"] = slug_match
         resultado["verification_level"] = "SLUG_MATCH"
+        resultado["verification_status"] = "verified"
         resultado["reason_code"] = "source_reference_found"
         resultado["reason"] = _coded_reason(
             "source_reference_found", "mesma imagem (slug) listada na pagina de origem"
@@ -438,35 +500,70 @@ def validate_discovered_candidate(
     else:
         ranked_urls = [*rendition_matches, *list(listadas)]
     ranked_urls = list(dict.fromkeys(ranked_urls))
+    resultado["assets_considered"] = len(ranked_urls)
+    scan_limit = max(_MAX_DOWNLOADS, _MAX_SOURCE_ASSET_COMPARISONS)
+    scan_urls = ranked_urls[:scan_limit]
+    scan_truncated = len(ranked_urls) > len(scan_urls)
     try:
-        candidate_bytes: bytes | None = None
-        local_path = str(candidate.get("local_image_path") or "")
-        if local_path:
-            try:
-                path = Path(local_path)
-                if path.is_file() and path.stat().st_size <= _IMG_MAX_BYTES:
-                    candidate_bytes = path.read_bytes()
-            except OSError:
-                candidate_bytes = None
+        candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
         if candidate_bytes is None:
-            candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
-        if candidate_bytes is not None:
-            for listed_url in ranked_urls[: max(_MAX_DOWNLOADS, 10)]:
-                asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
-                if asset_bytes is None:
-                    continue
-                same_frame, level = verify_image_identity(candidate_bytes, asset_bytes)
-                if same_frame:
-                    resultado["valid"] = True
-                    resultado["source_verified"] = True
-                    resultado["matched_image_url"] = listed_url
-                    resultado["verification_level"] = level
-                    resultado["source_comparison_proved"] = True
-                    resultado["reason"] = "asset visualmente correspondente encontrado na pagina de origem"
-                    return resultado
+            resultado.update({
+                "reason_code": "candidate_asset_unavailable",
+                "recoverable": True,
+                "reason": _coded_reason(
+                    "candidate_asset_unavailable",
+                    "bytes da candidata indisponíveis para comparação com a origem",
+                ),
+            })
+            return resultado
+        compared = 0
+        unavailable = 0
+        decode_failed = False
+        for listed_url in scan_urls:
+            asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+            if asset_bytes is None:
+                unavailable += 1
+                continue
+            same_frame, level = verify_image_identity(candidate_bytes, asset_bytes)
+            resultado["comparisons_attempted"] += 1
+            if level == "UNVERIFIED":
+                decode_failed = True
+                continue
+            compared += 1
+            if same_frame:
+                resultado["valid"] = True
+                resultado["source_verified"] = True
+                resultado["matched_image_url"] = listed_url
+                resultado["verification_level"] = level
+                resultado["verification_status"] = "verified"
+                resultado["source_comparison_proved"] = True
+                resultado["reason_code"] = "source_reference_found"
+                resultado["reason"] = "asset visualmente correspondente encontrado na pagina de origem"
+                return resultado
     except Exception:  # noqa: BLE001 - falha de rede/formato permanece fail-closed
-        pass
-    resultado["reason"] = "imagem nao listada na pagina de origem"
+        resultado.update({
+            "reason_code": "source_scan_incomplete",
+            "recoverable": True,
+            "reason": _coded_reason(
+                "source_scan_incomplete", "falha técnica durante a comparação de assets"
+            ),
+        })
+        return resultado
+    if scan_truncated:
+        code, detail = "source_scan_incomplete", "a origem excede o limite de assets comparados"
+    elif unavailable:
+        code, detail = "source_asset_unavailable", "um ou mais assets da origem não puderam ser baixados"
+    elif decode_failed:
+        code, detail = "source_decode_failed", "um ou mais assets da origem não puderam ser decodificados"
+    elif compared:
+        code, detail = "source_mismatch", "comparação completa comprovou bytes visuais incompatíveis"
+        resultado["verification_status"] = "incompatible"
+        resultado["source_comparison_proved"] = True
+    else:
+        code, detail = "source_scan_incomplete", "não foi possível comparar assets da origem"
+    resultado["reason_code"] = code
+    resultado["recoverable"] = code in SOURCE_VERIFICATION_RETRYABLE_CODES
+    resultado["reason"] = _coded_reason(code, detail)
     return resultado
 
 def verify_downloaded_against_source(
@@ -475,6 +572,7 @@ def verify_downloaded_against_source(
     downloaded: Path,
     direct_image_url: str,
     cache: dict[str, list[str] | None] | None = None,
+    cache_html: dict[str, str | None] | None = None,
     cache_lock: Lock | None = None,
     audit=None,
     url_policy: str = "audit",
@@ -495,6 +593,10 @@ def verify_downloaded_against_source(
         if source_page_url in cache:
             return
         page_html = _fetch(source_page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
+        if cache_html is not None:
+            cache_html[source_page_url] = (
+                page_html.decode("utf-8", "ignore") if page_html is not None else None
+            )
         cache[source_page_url] = (
             _image_urls_in_page(page_html.decode("utf-8", "ignore"), source_page_url)
             if page_html is not None

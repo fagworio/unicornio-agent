@@ -1,5 +1,7 @@
-from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, MediaSearchProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
+from datetime import datetime, timedelta
+from unicornio_editor.pipeline_v2.scheduler import cooldown_status
 
 
 class MemoryStore:
@@ -272,6 +274,135 @@ def test_media_no_progress_continues_only_within_media_phase():
 
     assert outcome.type is OutcomeType.HUMAN_REQUIRED
     assert store.state.retry.no_progress == 2
+
+
+def test_incomplete_media_search_does_not_exhaust_no_progress_budget():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(no_progress=2),
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            search=MediaSearchProgress(
+                completed=False,
+                queries_attempted=1,
+                queries_planned=3,
+                queries_completed=1,
+                completion_reason="SOURCE_VERIFICATION_INCOMPLETE",
+            ),
+        ),
+    )
+    store = MemoryStore(previous)
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: previous.media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+        },
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(115633, {"editorial": {"decision": "process"}})
+
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+    assert store.state.state is not LifecycleState.HUMAN_REQUIRED
+    assert store.state.retry.no_progress == 2
+    assert store.state.media.search.completion_reason == "SOURCE_VERIFICATION_INCOMPLETE"
+
+
+def test_provider_retry_preserves_three_images_and_next_run_requests_only_one():
+    existing = tuple(
+        InlineMedia(
+            media_id=index,
+            media_url=f"https://cdn.test/{index}.webp",
+            slot=(index - 1) * 3,
+            subject="Metroid Prime 4",
+            sha256=f"{index:x}" * 64,
+            phash=f"{index:016x}",
+            visual_group_id=f"visual:{index:024x}",
+            visual_verification={"decision": "INITIAL"},
+        )
+        for index in range(1, 4)
+    )
+    initial = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.PROVIDER_ERROR,
+        retry=RetryInfo(attempts=3, no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(required=4, inline=existing),
+    )
+    store = MemoryStore(initial)
+    requested_deficits = []
+    healthy = False
+
+    def media_stage(_context, state, _editorial):
+        nonlocal healthy
+        requested_deficits.append(state.media.effective_missing)
+        assert state.media.inline == existing
+        if not healthy:
+            return MediaProgress(
+                required=4,
+                inline=state.media.inline,
+                search=MediaSearchProgress(
+                    completed=False,
+                    queries_attempted=1,
+                    queries_planned=1,
+                    queries_completed=0,
+                    completion_reason="PROVIDER_ERROR",
+                ),
+            )
+        new_image = InlineMedia(
+            media_id=4,
+            media_url="https://cdn.test/4.webp",
+            slot=9,
+            subject="Metroid Prime 4",
+            sha256="4" * 64,
+            phash="0000000000000004",
+            visual_group_id="visual:000000000000000000000004",
+            visual_verification={"decision": "DIFFERENT"},
+        )
+        return MediaProgress(
+            required=4,
+            inline=(*state.media.inline, new_image),
+            search=MediaSearchProgress(
+                completed=True,
+                queries_attempted=1,
+                queries_planned=1,
+                queries_completed=1,
+                completion_reason="TARGET_REACHED",
+            ),
+        )
+
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not rerun")),
+        "media": media_stage,
+        "compose": lambda *_: {"content": "article"},
+        "validate": lambda *_: (
+            {"passed": not healthy, "failures": [{"gate": "imagens_no_corpo"}]}
+            if not healthy else {"passed": True, "failures": []}
+        ),
+    }
+    runner = PipelineRunner(store, stages)
+    first = runner.run_one(42, {"editorial": {"decision": "process"}})
+
+    assert first.type is OutcomeType.RETRY
+    assert store.state.state is LifecycleState.PENDING
+    assert [item.media_id for item in store.state.media.inline] == [1, 2, 3]
+    assert store.state.retry.no_progress == 1
+    assert store.state.retry.next_at
+    active_now = datetime.fromisoformat(store.state.retry.next_at) - timedelta(seconds=1)
+    assert cooldown_status(store.state.retry.next_at, now=active_now)["active"]
+
+    healthy = True
+    second = runner.run_one(42, {"editorial": {"decision": "process"}})
+
+    assert second.type is OutcomeType.READY
+    assert requested_deficits == [1, 1]
+    assert [item.media_id for item in store.state.media.inline] == [1, 2, 3, 4]
 
 
 def test_media_no_progress_resets_when_final_outcome_is_editorial():

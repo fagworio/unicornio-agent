@@ -7,7 +7,7 @@ from typing import Any
 import re
 import unicodedata
 
-from .license import validate_candidate
+from .license import validate_upload_candidate
 
 
 def friendly_media_filename(path: Path, candidate: dict[str, Any]) -> str:
@@ -32,7 +32,7 @@ def friendly_media_filename(path: Path, candidate: dict[str, Any]) -> str:
 
 
 def upload_image(client: Any, path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
-    evidence = validate_candidate(candidate)
+    evidence = validate_upload_candidate(candidate)
     path = Path(path)
     if path.suffix.lower() != ".webp":
         raise ValueError("only converted WebP files may be uploaded")

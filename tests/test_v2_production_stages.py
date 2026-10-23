@@ -664,11 +664,17 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
 
     persisted = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
     assert result["media_readback"] is True
+    assert result["media_application_status"] == "confirmed"
+    assert result["html_readback_status"] == "confirmed"
     assert [item.media_id for item in persisted.media.inline] == [201, 202, 203, 204]
     assert result["applied_inline_ids"] == [201, 202, 203, 204]
     assert len(_embedded_media_urls(client.post["content"]["raw"])) == 4
     assert "meta" not in client.updates[0]
     journal = json.loads((tmp_path / "work/v2-journal/132.json").read_text())
+    assert journal["status"] == "committed"
+    assert journal["readback"] is True
+    assert journal["media_application_status"] == "confirmed"
+    assert journal["html_readback_status"] == "confirmed"
     assert [row["media_id"] for row in journal["media_records"] if row["role"] == "inline"] == [200, 201, 202, 203, 204]
     assert next(row for row in journal["media_records"] if row["media_id"] == 200)["destination"] == "rejected_duplicate"
     assert all(

@@ -910,8 +910,19 @@ class ChecklistTests(unittest.TestCase):
                             "verified": True,
                             "strategy_complete": True,
                             "expected_engines": ["bing"],
-                            "reported_engines": ["bing"],
+                            "configured_engines": ["duckduckgo", "bing", "google"],
+                            "optional_engines": ["duckduckgo", "google"],
+                            "reported_engines": ["duckduckgo", "bing", "google"],
                             "engine_results": {"redfall query": {"bing": "no_results_legitimate"}},
+                            "provider_results": {"redfall query": {
+                                "duckduckgo": "provider_error",
+                                "bing": "no_results_legitimate",
+                                "google": "js_required",
+                            }},
+                            "optional_engine_failures": {"redfall query": {
+                                "duckduckgo": "provider_error",
+                                "google": "js_required",
+                            }},
                             "queries": ["redfall query"],
                             "technical_failures": [],
                             "planned_queries": 1,
@@ -1133,7 +1144,29 @@ class ChecklistTests(unittest.TestCase):
             editorial=editorial_payload(media_exhausted=True),
             content=content,
             media_context={
-                "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"}
+                "search": {
+                    "completed": True,
+                    "exhausted": True,
+                    "completion_reason": "EXHAUSTED_VERIFIED",
+                    "coverage": {
+                        "version": 1,
+                        "verified": True,
+                        "active_coverage": {
+                            "verified": True,
+                            "strategy_complete": True,
+                            "expected_engines": ["bing"],
+                            "reported_engines": ["bing"],
+                            "engine_results": {
+                                "film query": {"bing": "no_results_legitimate"},
+                            },
+                            "queries": ["film query"],
+                            "technical_failures": [],
+                            "planned_queries": 1,
+                            "completed_queries": 1,
+                        },
+                        "attempt_history": [],
+                    },
+                }
             },
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")

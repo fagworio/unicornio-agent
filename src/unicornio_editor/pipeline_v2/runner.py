@@ -166,9 +166,17 @@ class PipelineRunner:
                     except Exception:  # noqa: BLE001 - telemetry cannot change lifecycle
                         pass
                 progress = self._media_progressed(previous.media, media) if media_completed else False
+                search_incomplete = bool(
+                    media_completed
+                    and getattr(media, "search", None) is not None
+                    and not media.search.completed
+                    and int(media.search.queries_planned or 0)
+                    > int(media.search.queries_completed or 0)
+                )
                 current_no_progress = (
                     (0 if progress else media_base_no_progress + 1)
                     if media_completed
+                    and not search_incomplete
                     else media_base_no_progress
                 )
                 outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
@@ -218,7 +226,14 @@ class PipelineRunner:
             effective_media = media
         # Only a completed acquisition/validation attempt consumes this budget.
         # Operational failures retain both progress and the existing counter.
-        media_attempt = media_completed and not technical_media_error
+        search_incomplete = bool(
+            media_completed
+            and getattr(media, "search", None) is not None
+            and not media.search.completed
+            and int(media.search.queries_planned or 0)
+            > int(media.search.queries_completed or 0)
+        )
+        media_attempt = media_completed and not technical_media_error and not search_incomplete
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
         current_no_progress = (
             stage_error_no_progress

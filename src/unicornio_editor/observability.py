@@ -698,7 +698,7 @@ def read_telemetry_summary(
                 media_source_summaries.append({
                     key: record[key]
                     for key in (
-                        "post_id", "source_page", "source_raw_found",
+                        "post_id", "source_domain", "source_page_url_sha256", "source_raw_found",
                         "source_after_dom_filter", "source_filtered", "source_attempted",
                         "source_accepted", "reused", "uploaded",
                     )

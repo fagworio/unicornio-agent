@@ -80,6 +80,18 @@ class WordPressClient:
         try:
             data = self._request("GET", "/posts", query)
         except WordPressError as exc:
+            # WordPress REST uses this exact 400 when a read-only collection
+            # scan requests a page beyond its current max_pages. Treat only a
+            # later, non-include page as the natural end of pagination; never
+            # hide an invalid first page or a direct-ID lookup failure.
+            page_out_of_range = (
+                exc.status_code == 400
+                and exc.api_code == "rest_post_invalid_page_number"
+                and page > 1
+                and not include
+            )
+            if page_out_of_range:
+                return []
             # Compatibility fallback is safe only for an explicit WordPress
             # REST complaint about the `status` query parameter. Auth, rate
             # limit, server and unrelated client errors remain visible.

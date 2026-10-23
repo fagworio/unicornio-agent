@@ -310,20 +310,30 @@ def record_v2_observation(
             history = json.loads(previous[0]) if previous and previous[0] else {}
         except (TypeError, ValueError):
             history = {}
+        initial_metrics = history.get("initial") if isinstance(history, dict) else None
+        if not isinstance(initial_metrics, dict):
+            initial_metrics = current_metrics
+        try:
+            initial_queries = max(0, int(initial_metrics.get("queries_attempted") or 0))
+            current_queries = max(0, int(current_metrics.get("queries_attempted") or 0))
+        except (TypeError, ValueError):
+            initial_queries = current_queries = 0
+        queries_attempted = max(0, current_queries - initial_queries)
         planned = {
             "initial": history.get("initial", current_metrics),
             "final": current_metrics,
         }
         db.execute(
             """INSERT INTO media_runs
-            (run_id, post_id, planned_deficits, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (run_id, post_id, planned_deficits, queries_attempted, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(run_id) DO UPDATE SET
                 planned_deficits=excluded.planned_deficits,
+                queries_attempted=excluded.queries_attempted,
                 acquisition_outcome=excluded.acquisition_outcome,
                 checkpoint_reference=excluded.checkpoint_reference,
                 completion_reason=excluded.completion_reason""",
-            (run_id, int(post_id), json.dumps(planned, sort_keys=True), outcome,
+            (run_id, int(post_id), json.dumps(planned, sort_keys=True), queries_attempted, outcome,
              checkpoint_reference, "readback_confirmed" if applied else phase),
         )
         assets = []
@@ -428,8 +438,38 @@ def record_v2_candidate_decision(
     vision = evidence.get("vision_decision") if isinstance(evidence.get("vision_decision"), dict) else {}
     direct_url = str(candidate.get("direct_image_url") or "").strip()
     source_page_url = str(candidate.get("source_page_url") or "").strip()
+    matched_fields = {
+        "filename", "og_title", "page_title", "alt_original", "figcaption",
+        "heading", "page_url", "query",
+    }
+    matched = evidence.get("matched")
+    penalties = evidence.get("penalties")
     reference = json.dumps({
         "verdict": str(evidence.get("verdict") or ""),
+        "gate": str(evidence.get("gate") or "") if str(evidence.get("gate") or "") in {
+            "provenance", "diversity", "relevance",
+        } else "",
+        "score": (
+            int(evidence["score"])
+            if isinstance(evidence.get("score"), int) and not isinstance(evidence.get("score"), bool)
+            else None
+        ),
+        "local_score": (
+            int(evidence["local_score"])
+            if isinstance(evidence.get("local_score"), int) and not isinstance(evidence.get("local_score"), bool)
+            else None
+        ),
+        # Keep only field labels, not the text that matched them; titles,
+        # queries and alt text can contain private or user-supplied content.
+        "matched": sorted({str(field) for field in matched if str(field) in matched_fields})
+        if isinstance(matched, (list, tuple, set)) else [],
+        "penalties": sorted({
+            str(value)[:40] for value in penalties
+            if isinstance(value, str) and value.replace("_", "").isalnum()
+        }) if isinstance(penalties, (list, tuple, set)) else [],
+        "source_comparison_proved": candidate.get("source_comparison_proved") is True
+        or evidence.get("source_comparison_proved") is True,
+        "recoverable": evidence.get("recoverable") is True,
         "source_domain": (urlsplit(source_page_url).hostname or "").casefold(),
         # Hash URLs rather than storing their query strings: discovery URLs can
         # contain signed parameters, but recovery needs an exact provenance
@@ -453,6 +493,8 @@ def record_v2_candidate_decision(
     }, sort_keys=True)
     allowed_reason_codes = {
         "candidate_accepted", "transient_provider_failure", "candidate_rejected",
+        "source_verification_inconclusive",
+        "unresolved_source", "reject",
         "incomplete_provenance", "ambiguous", "vision_input_unavailable",
         "source_mismatch", "source_bytes_mismatch",
         "source_page_unavailable", "source_asset_unavailable",
