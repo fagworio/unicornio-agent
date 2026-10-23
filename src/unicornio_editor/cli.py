@@ -143,6 +143,21 @@ def build_parser() -> argparse.ArgumentParser:
     v2_abandon_parser.add_argument("--exclude-post-id", type=int, default=None)
     v2_abandon_parser.add_argument("--apply", action="store_true", help="aplica a transição após as validações")
 
+    v2_isolate_parser = subparsers.add_parser(
+        "v2-isolate-uncertain",
+        help="isola uma transação writer incerta sem replay; preview por padrão",
+    )
+    v2_isolate_parser.add_argument("post_id", type=int)
+    v2_isolate_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_isolate_parser.add_argument("--cycle-id", required=True)
+    v2_isolate_parser.add_argument("--authorization-id", required=True)
+    v2_isolate_parser.add_argument("--pending-round", type=int, required=True)
+    v2_isolate_parser.add_argument("--selected-ids", required=True)
+    v2_isolate_parser.add_argument("--run-id", required=True)
+    v2_isolate_parser.add_argument("--preview-evidence", type=Path, default=None)
+    v2_isolate_parser.add_argument("--operator-authorization", default=None)
+    v2_isolate_parser.add_argument("--apply", action="store_true")
+
     v2_recover_interrupted_parser = subparsers.add_parser(
         "v2-recover-interrupted",
         help="recupera um journal protocol-v2 interrompido antes do writer; dry-run por padrão",
@@ -2817,6 +2832,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 new_cycle_id=args.new_cycle_id,
                 exclude_post_id=args.exclude_post_id,
                 apply=bool(args.apply),
+            )
+        elif args.command == "v2-isolate-uncertain":
+            from .pipeline_v2.cycle_admin import isolate_uncertain_transaction
+
+            evidence = None
+            if args.preview_evidence is not None:
+                evidence = json.loads(args.preview_evidence.read_text(encoding="utf-8"))
+            result = isolate_uncertain_transaction(
+                args.root,
+                client,
+                cycle_id=args.cycle_id,
+                authorization_id=args.authorization_id,
+                pending_round=int(args.pending_round),
+                selected_ids=[int(item.strip()) for item in args.selected_ids.split(",") if item.strip()],
+                post_id=int(args.post_id),
+                run_id=args.run_id,
+                apply=bool(args.apply),
+                preview=evidence,
+                operator_authorization=args.operator_authorization,
             )
         elif args.command == "v2-recover-interrupted":
             from .pipeline_v2.runtime import recover_interrupted_journal
