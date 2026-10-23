@@ -154,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     v2_isolate_parser.add_argument("--pending-round", type=int, required=True)
     v2_isolate_parser.add_argument("--selected-ids", required=True)
     v2_isolate_parser.add_argument("--run-id", required=True)
+    v2_isolate_parser.add_argument("--isolated-post-ids", default=None, help="IDs incertos adicionais separados por vírgula")
+    v2_isolate_parser.add_argument("--run-ids", default=None, help="mapa post_id=run_id separado por vírgula")
     v2_isolate_parser.add_argument("--preview-evidence", type=Path, default=None)
     v2_isolate_parser.add_argument("--operator-authorization", default=None)
     v2_isolate_parser.add_argument("--apply", action="store_true")
@@ -2851,6 +2853,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 apply=bool(args.apply),
                 preview=evidence,
                 operator_authorization=args.operator_authorization,
+                isolated_post_ids=(
+                    [int(item.strip()) for item in args.isolated_post_ids.split(",") if item.strip()]
+                    if args.isolated_post_ids else None
+                ),
+                run_ids=(
+                    {int(item.split("=", 1)[0]): item.split("=", 1)[1] for item in args.run_ids.split(",") if "=" in item}
+                    if args.run_ids else None
+                ),
             )
         elif args.command == "v2-recover-interrupted":
             from .pipeline_v2.runtime import recover_interrupted_journal

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -159,6 +160,49 @@ def _round_authorized_at(
     return None
 
 
+def _parse_registry_timestamp(value: Any) -> datetime | None:
+    """Parse Registry timestamps into UTC-aware datetimes.
+
+    Historical Registry rows are naive UTC strings; new rows may use ISO-8601
+    offsets or ``Z``. Invalid and missing values remain unknown, never zero.
+    """
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _registry_timestamp_audit(
+    rows: list[tuple[str, Any, Any]], *, authorized_at: str | None
+) -> dict[str, Any] | None:
+    authorized = _parse_registry_timestamp(authorized_at)
+    if authorized is None:
+        return None
+    missing_or_invalid = [
+        {"table": table, "post_id": int(post_id), "timestamp": timestamp}
+        for table, post_id, timestamp in rows
+        if _parse_registry_timestamp(timestamp) is None
+    ]
+    current_rows = [
+        {"table": table, "post_id": int(post_id), "timestamp": str(timestamp)}
+        for table, post_id, timestamp in rows
+        if (parsed := _parse_registry_timestamp(timestamp)) is not None
+        and parsed >= authorized
+    ]
+    return {
+        "authorized_at_utc": authorized.isoformat(),
+        "missing_or_invalid_timestamps": missing_or_invalid,
+        "current_round_rows": current_rows,
+        "proof_of_absence": not missing_or_invalid and not current_rows,
+    }
+
+
 def _registry_has_round_evidence(
     root: Path,
     selected_ids: list[int],
@@ -191,20 +235,26 @@ def _registry_has_round_evidence(
     except (OSError, sqlite3.Error):
         return None
     if not rows:
-        return {"media_registry_checked": True, "media_registry_rows": 0}
-    if not authorized_at or any(not str(timestamp or "").strip() for _, _, timestamp in rows):
-        return None
-    current_rows = [
-        {"table": table, "post_id": int(post_id), "at": str(timestamp or "")}
-        for table, post_id, timestamp in rows
-        if timestamp and str(timestamp) >= str(authorized_at).replace("T", " ")[:19]
-    ]
-    if current_rows:
+        parsed_authorized = _parse_registry_timestamp(authorized_at)
+        return {
+            "media_registry_checked": True,
+            "media_registry_rows": 0,
+            "media_registry_current_round_rows": 0,
+            "media_registry_timestamp_audit": {
+                "authorized_at_utc": parsed_authorized.isoformat() if parsed_authorized else None,
+                "missing_or_invalid_timestamps": [],
+                "current_round_rows": [],
+                "proof_of_absence": True,
+            },
+        }
+    audit = _registry_timestamp_audit(rows, authorized_at=authorized_at)
+    if audit is None or audit["current_round_rows"] or audit["missing_or_invalid_timestamps"]:
         return None
     return {
         "media_registry_checked": True,
         "media_registry_rows": len(rows),
         "media_registry_current_round_rows": 0,
+        "media_registry_timestamp_audit": audit,
     }
 
 
@@ -363,14 +413,18 @@ def _historical_journal_evidence(
         return None
     if not row or not row[1]:
         return None
-    run_created_at = str(row[1]).replace("T", " ")[:19]
-    current_authorized_at = str(authorized_at).replace("T", " ")[:19]
-    if run_created_at >= current_authorized_at:
+    run_created_at = _parse_registry_timestamp(row[1])
+    current_authorized_at = _parse_registry_timestamp(authorized_at)
+    if (
+        run_created_at is None
+        or current_authorized_at is None
+        or run_created_at >= current_authorized_at
+    ):
         return None
     return {
         "historical_run_id": str(journal["run_id"]),
-        "historical_run_created_at": run_created_at,
-        "current_authorized_at": current_authorized_at,
+        "historical_run_created_at_utc": run_created_at.isoformat(),
+        "current_authorized_at_utc": current_authorized_at.isoformat(),
         "post_id": int(post_id),
     }
 
