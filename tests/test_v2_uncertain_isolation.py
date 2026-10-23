@@ -121,27 +121,69 @@ def _fixture(root: Path):
         "phase": "media",
         "blocker": "inline_missing",
     }
-    for index, other_post_id in enumerate(value for value in SELECTED if value != POST):
-        other_run = f"historical-run-{other_post_id}"
-        committed = index == 0
-        other_journal = {
-            "status": "committed" if committed else "failed_pre_writer",
-            "post_id": other_post_id,
-            "run_id": other_run,
+    previous_lifecycle = {
+        "version": 2,
+        "state": "ready",
+        "phase": "publish",
+        "blocker": None,
+    }
+    historical = {
+        115215: {
+            "status": "committed",
+            "cycle_id": "previous-cycle-115215",
+            "cycle_round": 3,
+            "authorization_id": "previous-auth-115215",
+            "state": previous_lifecycle,
+            "readback": True,
+            "writer_started": True,
+            "resumable": False,
+        },
+        # This journal has no cycle identity; its run timestamp in the
+        # MediaRegistry is the independent proof that it predates this auth.
+        115512: {
+            "status": "failed_pre_writer",
+            "state": previous_lifecycle,
+            "readback": False,
+            "writer_started": False,
+            "resumable": True,
+        },
+        # The lifecycle in this old journal intentionally differs from the
+        # current WordPress lifecycle. Current-auth no-write proof must not
+        # mistake that historical state for an execution in this round.
+        115338: {
+            "status": "committed",
             "cycle_id": CYCLE,
             "cycle_round": 1,
-            "authorization_id": AUTH,
-            "state": other_state,
-            "readback": committed,
-            "writer_started": committed,
-            "resumable": not committed,
-            "media_state": "accepted_working" if committed else "apply_not_attempted",
-            "media_application_status": "not_attempted",
-            "html_readback_status": "not_attempted",
-            "media_ids": [],
-            "media_records": [],
-            "apply_media_records": [],
-        }
+            "authorization_id": "previous-auth-115338",
+            "state": previous_lifecycle,
+            "readback": True,
+            "writer_started": True,
+            "resumable": False,
+        },
+    }
+    for other_post_id in (value for value in SELECTED if value != POST):
+        if other_post_id == 115524:
+            other_run = f"current-run-{other_post_id}"
+            other_journal = {
+                "status": "committed",
+                "post_id": other_post_id,
+                "run_id": other_run,
+                "cycle_id": CYCLE,
+                "cycle_round": 1,
+                "authorization_id": AUTH,
+                "state": other_state,
+                "readback": True,
+                "writer_started": True,
+                "resumable": False,
+                "media_state": "accepted_working",
+            }
+        else:
+            other_run = f"historical-run-{other_post_id}"
+            other_journal = {
+                **historical[other_post_id],
+                "post_id": other_post_id,
+                "run_id": other_run,
+            }
         (journal_dir / f"{other_post_id}.json").write_text(
             json.dumps(other_journal), encoding="utf-8"
         )
@@ -151,18 +193,54 @@ def _fixture(root: Path):
         con.executescript(
             """
             CREATE TABLE media_runs (run_id TEXT, post_id INTEGER, acquisition_outcome TEXT, created_at TEXT);
-            CREATE TABLE media_decisions (run_id TEXT, post_id INTEGER, disposition TEXT, reason_code TEXT);
+            CREATE TABLE media_decisions (
+                run_id TEXT, post_id INTEGER, disposition TEXT,
+                reason_code TEXT, created_at TEXT
+            );
             CREATE TABLE media_usage (post_id INTEGER, status TEXT, applied_at TEXT);
             """
         )
         con.execute("INSERT INTO media_runs VALUES (?, ?, ?, ?)", (RUN, POST, "started", "2026-10-23T04:03:17Z"))
-        con.execute("INSERT INTO media_decisions VALUES (?, ?, ?, ?)", (RUN, POST, "started", "media"))
+        con.execute(
+            "INSERT INTO media_decisions VALUES (?, ?, ?, ?, ?)",
+            (RUN, POST, "started", "media", "2026-10-23 04:03:17"),
+        )
+        con.execute(
+            "INSERT INTO media_runs VALUES (?, ?, ?, ?)",
+            ("current-run-115524", 115524, "readback_confirmed", "2026-10-23T04:03:18Z"),
+        )
+        con.execute(
+            "INSERT INTO media_decisions VALUES (?, ?, ?, ?, ?)",
+            ("current-run-115524", 115524, "committed", "readback", "2026-10-23 04:03:18"),
+        )
+        for other_post_id in (115215, 115512, 115338):
+            con.execute(
+                "INSERT INTO media_runs VALUES (?, ?, ?, ?)",
+                (f"historical-run-{other_post_id}", other_post_id, "historical", "2020-01-01 00:00:00"),
+            )
 
 
 def _args(root):
+    client = FakeClient()
+    for other_post_id in (value for value in SELECTED if value != POST):
+        client.posts[other_post_id] = {
+            "id": other_post_id,
+            "status": "awaiting_human" if other_post_id == 115524 else "pending",
+            "featured_media": 0,
+            "meta": {
+                "_hermes_work_state": json.dumps({
+                    "version": 2,
+                    "state": "human_required",
+                    "phase": "media",
+                    "blocker": "inline_missing",
+                }),
+            },
+            "content": {"raw": ""},
+            "title": {"raw": ""},
+        }
     return dict(
         root=root,
-        client=FakeClient(),
+        client=client,
         cycle_id=CYCLE,
         authorization_id=AUTH,
         selected_ids=SELECTED,
@@ -180,6 +258,61 @@ def test_preview_classifies_uncertain_without_writing(tmp_path):
     assert result["wordpress_writes"] == 0
     assert not (tmp_path / "work" / "v2-cycle" / "transaction-isolations").exists()
     assert CycleStateStore(tmp_path).load().pending_round["preview_selected_ids"] == SELECTED
+
+
+def test_preview_reconciles_audit_shaped_historical_posts_without_inventing_attempts(tmp_path):
+    _fixture(tmp_path)
+    args = _args(tmp_path)
+    result = isolate_uncertain_transaction(**args, apply=False)
+
+    by_id = {item["post_id"]: item for item in result["evidence"]["round_post_evidence"]}
+    assert by_id[115331]["classification"] == "UNCERTAIN_ISOLATED"
+    assert by_id[115524]["classification"] == "COMMITTED_NO_REPLAY"
+    assert by_id[115215]["classification"] == "NOT_EXECUTED"
+    assert by_id[115512]["classification"] == "NOT_EXECUTED"
+    assert by_id[115338]["classification"] == "NOT_EXECUTED"
+    assert by_id[115512]["historical_journal_evidence"]["historical_run_id"] == "historical-run-115512"
+    previous_lifecycle = {
+        "version": 2,
+        "state": "ready",
+        "phase": "publish",
+        "blocker": None,
+    }
+    assert by_id[115338]["wordpress"]["work_state_sha256"] != transaction_admin._hash_value(
+        previous_lifecycle
+    )
+    assert result["round_classifications"] == {
+        "reconciled_post_ids": [115215, 115338, 115512, 115524],
+        "not_executed_post_ids": [115215, 115338, 115512],
+        "executed_ids": [115524],
+        "unresolved_post_ids": [],
+    }
+    persisted = CycleStateStore(tmp_path).load()
+    assert persisted.attempts_total == 0
+    assert persisted.attempts_by_post == {}
+    assert persisted.rounds == 0
+    assert args["client"].write_calls == 0
+
+
+def test_historical_committed_journal_is_not_current_without_registry_run_identity(tmp_path):
+    _fixture(tmp_path)
+    db = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM media_runs WHERE run_id=?", ("current-run-115524",))
+    result = isolate_uncertain_transaction(**_args(tmp_path), apply=False)
+    by_id = {item["post_id"]: item for item in result["evidence"]["round_post_evidence"]}
+    assert by_id[115524]["classification"] == "UNCERTAIN_ISOLATED"
+    assert by_id[115215]["classification"] == "NOT_EXECUTED"
+
+
+def test_identityless_historical_journal_needs_registry_timestamp_proof(tmp_path):
+    _fixture(tmp_path)
+    db = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM media_runs WHERE run_id=?", ("historical-run-115512",))
+    result = isolate_uncertain_transaction(**_args(tmp_path), apply=False)
+    by_id = {item["post_id"]: item for item in result["evidence"]["round_post_evidence"]}
+    assert by_id[115512]["classification"] == "UNCERTAIN_ISOLATED"
 
 
 def test_apply_requires_exact_preview_and_operator_confirmation(tmp_path):
@@ -578,6 +711,7 @@ def test_apply_blocks_if_any_other_selected_post_lacks_proof(tmp_path):
     _fixture(tmp_path)
     (tmp_path / "work/v2-journal/115215.json").unlink()
     args = _args(tmp_path)
+    args["client"].posts[115215]["status"] = "awaiting_human"
     preview = isolate_uncertain_transaction(**args, apply=False)
     assert 115215 in preview["round_classifications"]["unresolved_post_ids"]
     assert 115215 not in preview["round_classifications"]["reconciled_post_ids"]

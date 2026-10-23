@@ -127,7 +127,13 @@ def _selection_mismatch_evidence(
     }
 
 
-def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | None:
+def _round_authorized_at(
+    root: Path,
+    cycle_id: str,
+    round_number: int,
+    *,
+    authorization_id: str | None = None,
+) -> str | None:
     path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
     if not path.is_file():
         return None
@@ -144,6 +150,10 @@ def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | 
             event.get("event") == "round_authorized"
             and str(event.get("cycle_id") or "") == str(cycle_id)
             and int(event.get("round_number", -1)) == int(round_number)
+            and (
+                authorization_id is None
+                or str(event.get("authorization_id") or "") == str(authorization_id)
+            )
         ):
             return str(event.get("at") or "") or None
     return None
@@ -182,7 +192,7 @@ def _registry_has_round_evidence(
         return None
     if not rows:
         return {"media_registry_checked": True, "media_registry_rows": 0}
-    if not authorized_at:
+    if not authorized_at or any(not str(timestamp or "").strip() for _, _, timestamp in rows):
         return None
     current_rows = [
         {"table": table, "post_id": int(post_id), "at": str(timestamp or "")}
@@ -250,10 +260,18 @@ def _confirm_round_has_no_write(
         if status != "pending":
             return None
         wordpress_statuses[str(int(post_id))] = status
+    authorized_at = _round_authorized_at(
+        root,
+        cycle_id,
+        round_number,
+        authorization_id=authorization_id,
+    )
+    if authorization_id and not authorized_at:
+        return None
     registry_evidence = _registry_has_round_evidence(
         root,
         selected_ids,
-        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+        authorized_at=authorized_at,
     )
     if registry_evidence is None:
         return None
@@ -277,6 +295,7 @@ def _post_no_write_evidence(
     *,
     cycle_id: str,
     round_number: int,
+    authorization_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Prove that one post has no effect belonging to the current round."""
     try:
@@ -285,15 +304,26 @@ def _post_no_write_evidence(
         return None
     if not isinstance(post, dict) or str(post.get("status") or "") != "pending":
         return None
+    authorized_at = _round_authorized_at(
+        root,
+        cycle_id,
+        round_number,
+        authorization_id=authorization_id,
+    )
+    if authorization_id and not authorized_at:
+        return None
     registry_evidence = _registry_has_round_evidence(
         root,
         [int(post_id)],
-        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+        authorized_at=authorized_at,
     )
     if registry_evidence is None:
         return None
     return {
         "post_id": int(post_id),
+        "cycle_id": str(cycle_id),
+        "cycle_round": int(round_number),
+        "authorization_id": str(authorization_id or ""),
         "wordpress_status": "pending",
         **registry_evidence,
     }
@@ -512,6 +542,7 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is not None:
                 details.append({
@@ -549,7 +580,10 @@ def _reconcile_completed_round(
                 int(post_id),
                 journal,
                 authorized_at=_round_authorized_at(
-                    root, expected_cycle_id, expected_cycle_round
+                    root,
+                    expected_cycle_id,
+                    expected_cycle_round,
+                    authorization_id=expected_authorization_id,
                 ),
             )
             if historical is None:
@@ -561,6 +595,7 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is None:
                 unresolved.append({
@@ -592,6 +627,7 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is not None:
                 details.append({

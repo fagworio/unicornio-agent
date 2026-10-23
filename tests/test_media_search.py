@@ -30,6 +30,17 @@ class SearchUrlTests(unittest.TestCase):
 
 
 class SearchWebImagesTests(unittest.TestCase):
+    def setUp(self):
+        # These legacy orchestration tests mock urllib-based providers. Keep
+        # their plan explicit so the optional DDGS adapter cannot reach the
+        # network; DDG behavior is exercised by its dedicated integration tests.
+        self._provider_config = mock.patch.dict(
+            "os.environ",
+            {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google"},
+        )
+        self._provider_config.start()
+        self.addCleanup(self._provider_config.stop)
+
     def test_batch_search_keeps_titles_isolated_ordered_and_deduplicated(self):
         def fake_search(query, **_kwargs):
             return [{"query": query, "direct_image_url": f"https://cdn.example/{query}.jpg"}]

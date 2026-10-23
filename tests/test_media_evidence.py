@@ -321,7 +321,9 @@ class DedupePhashTests(unittest.TestCase):
             return []
 
         # as duas URLs servem o MESMO frame visual (hash idêntico)
-        with mock.patch.object(
+        with mock.patch.dict(
+            "os.environ", {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google"}
+        ), mock.patch.object(
             visual_hash, "image_hashes",
             return_value={"https://cdn.bing/a.jpg": "3f2a", "https://cdn.ya/a.jpg": "3f2a"},
         ), mock.patch("unicornio_editor.media.search.search_bing_images", bing), \
