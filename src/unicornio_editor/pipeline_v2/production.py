@@ -18,6 +18,7 @@ from ..checklist import required_image_count, required_image_count_for_content
 from ..batch import BatchError, wordpress_text
 from .legacy import LegacyStateLoader
 from .media_accounting import account_visual_media
+from .media_layout import validate_normal_article_layout_policy
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
@@ -125,9 +126,26 @@ class ProductionCandidateReader:
         title = str(context.get("title") or "")
         editorial = context.get("editorial") or context.get("draft") or {}
         html = str(editorial.get("cleaned_html") or context.get("content") or "")
-        current_required = required_image_count_for_content(html, title=title)
         current_media = state.media
-        if current_media.required != current_required:
+        ideal_required = required_image_count_for_content(html, title=title)
+        structure = self.context_loader._read_json(directory / "editorial.structure.json")
+        layout_policy = current_media.layout_policy or structure.get("media_layout_policy") or {}
+        policy_validation = (
+            validate_normal_article_layout_policy(
+                html,
+                layout_policy,
+                target_ideal=ideal_required,
+                media=current_media,
+                listicle=structure.get("layout") == "listicle_preserved",
+            )
+            if layout_policy else {"valid": False}
+        )
+        if policy_validation.get("valid"):
+            current_required = int(policy_validation["target_effective"])
+        else:
+            current_required = ideal_required
+            layout_policy = {}
+        if current_media.required != current_required or current_media.layout_policy != layout_policy:
             current_media = MediaProgress(
                 required=current_required,
                 inline=current_media.inline,
@@ -136,6 +154,10 @@ class ProductionCandidateReader:
                 enrichment_round=current_media.enrichment_round,
                 waiver_applied=current_media.waiver_applied,
                 waiver_reason=current_media.waiver_reason,
+                layout_policy=layout_policy,
+                closing_featured_repeat=(
+                    current_media.closing_featured_repeat if layout_policy else {}
+                ),
             )
         if not active_journal:
             return WorkState(
@@ -245,6 +267,8 @@ class ProductionCandidateReader:
                     enrichment_round=candidate.enrichment_round,
                     waiver_applied=candidate.waiver_applied,
                     waiver_reason=candidate.waiver_reason,
+                    layout_policy=layout_policy,
+                    closing_featured_repeat=candidate.closing_featured_repeat,
                 )
             except ValueError:
                 continue

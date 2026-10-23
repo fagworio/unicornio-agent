@@ -10,6 +10,7 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -35,6 +36,7 @@ from ..media.inserter import (
     plan_normal_media_insertions,
     remove_empty_paragraphs,
     remove_media_urls,
+    select_normal_media_slots,
 )
 from ..media.vision_gate import VisionGateError
 from ..wordpress import WordPressError
@@ -48,6 +50,12 @@ from ..workflow import (
 from .errors import StageError
 from .media_accounting import reconcile_working_visual_media
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
+from .model import WorkState
+from .media_layout import (
+    build_normal_article_layout_policy,
+    editorial_body_sha256,
+    validate_normal_article_layout_policy,
+)
 from ..observability import _redact_text, record_unexpected_error
 
 
@@ -75,18 +83,37 @@ def _prepare_editorial_media_structure(
     editorial rework reason before any media provider or upload is invoked.
     """
     working = dict(editorial)
-    original_html = str(working.get("cleaned_html") or "")
+    original_html = normalize_h1_headings(
+        str(working.get("cleaned_html") or ""), post_title=title,
+    )
     body_without_footer = strip_canonical_footer(original_html)
     empty_result = remove_empty_paragraphs(body_without_footer)
     body = str(empty_result["html"])
     audit: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "status": "prepared",
         "canonical_footer_stripped": body_without_footer != original_html,
         "empty_paragraphs_removed": int(empty_result["audit"]["removed"]),
         "paragraphs_before": len(re.findall(r"<p\b[^>]*>.*?</p>", original_html, re.IGNORECASE | re.DOTALL)),
         "paragraphs_after_cleanup": len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL)),
     }
+    decision = str(
+        working.get("decision")
+        or (working.get("site_relevance") or {}).get("decision")
+        or ""
+    ).casefold()
+    if decision in {"skip", "uncertain"}:
+        working["cleaned_html"] = body
+        audit.update({
+            "status": "not_applicable",
+            "layout": "not_applicable",
+            "decision": decision,
+            "prepared_body_sha256": editorial_body_sha256(body),
+            "paragraphs_after": audit["paragraphs_after_cleanup"],
+        })
+        audit["structure_sha256"] = _editorial_structure_sha256(body, audit)
+        return working, audit, None
+
     categories = working.get("categories") or categories or ()
     listicle_subjects = post_subjects(
         title=title,
@@ -97,8 +124,12 @@ def _prepare_editorial_media_structure(
     )
     if detect_list_format(title, body, categories) is not None or len(listicle_subjects) > 1:
         working["cleaned_html"] = body
-        audit["layout"] = "listicle_preserved"
-        audit["paragraphs_after"] = audit["paragraphs_after_cleanup"]
+        audit.update({
+            "layout": "listicle_preserved",
+            "prepared_body_sha256": editorial_body_sha256(body),
+            "paragraphs_after": audit["paragraphs_after_cleanup"],
+        })
+        audit["structure_sha256"] = _editorial_structure_sha256(body, audit)
         return working, audit, None
 
     audit["layout"] = "normal_article"
@@ -115,53 +146,216 @@ def _prepare_editorial_media_structure(
         if getattr(featured, "status", None) is FeaturedStatus.VALID
         else ""
     )
-    future_urls = [
-        str(getattr(item, "media_url", "") or "")
-        for item in reconciliation.eligible_inline
-    ]
-    future_urls.extend(
-        f"__v2_pending_media_{index}__"
-        for index in range(reconciliation.accounting.effective_missing)
-    )
-    insertions = normal_media_urls_to_insert(body, future_urls, featured_url)
-    audit["required_inline"] = required
-    audit["valid_existing_inline"] = reconciliation.accounting.valid_distinct_inline_count
-    audit["media_positions_needed"] = len(insertions)
+    eligible_inline = tuple(reconciliation.eligible_inline)
 
-    if insertions:
-        allow_after_body = bool(re.search(r"</p>\s*$", body, re.IGNORECASE))
-        target = minimum_normal_article_paragraphs(
-            len(insertions),
-            allow_after_body=allow_after_body,
+    def planned_urls(source_body: str, target: int) -> tuple[list[str], list[str]]:
+        from ..media.relevance import iter_content_images
+
+        embedded = {
+            _canonical_media_ref(str(row.get("src") or ""))
+            for row in iter_content_images(source_body)
+            if str(row.get("src") or "").strip()
+        }
+        present = [
+            item for item in eligible_inline
+            if _canonical_media_ref(str(getattr(item, "media_url", "") or "")) in embedded
+        ]
+        selected: list[Any] = list(present)
+        remaining = max(0, target - len(selected))
+        present_ids = {int(getattr(item, "media_id", 0) or 0) for item in present}
+        for item in eligible_inline:
+            if remaining <= 0:
+                break
+            if int(getattr(item, "media_id", 0) or 0) in present_ids:
+                continue
+            selected.append(item)
+            present_ids.add(int(getattr(item, "media_id", 0) or 0))
+            remaining -= 1
+        urls = [str(getattr(item, "media_url", "") or "") for item in selected]
+        urls.extend(f"__v2_pending_media_{index}__" for index in range(remaining))
+        return urls, [str(getattr(item, "media_url", "") or "") for item in selected]
+
+    ideal_urls, _ = planned_urls(body, required)
+    initial_insertions = normal_media_urls_to_insert(body, ideal_urls, featured_url)
+    normalization_audit: dict[str, Any] = {
+        "original_paragraphs": len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL)),
+        "final_paragraphs": len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL)),
+        "changed": False,
+        "reason": None,
+        "splits": [],
+    }
+    if initial_insertions:
+        from ..media.inserter import normal_media_slot_capacity
+
+        layout = normal_media_slot_capacity(body)
+        target_paragraphs = minimum_normal_article_paragraphs(
+            len(initial_insertions),
+            allow_after_body=bool(layout.get("body_end_available")),
         )
-        audit["after_editorial_body_slot_available"] = allow_after_body
-        audit["target_paragraphs"] = target
-        result = normalize_normal_article_paragraphs(
+        normalization = normalize_normal_article_paragraphs(
             body,
-            required_paragraphs=target,
-            # The old 1,000-word cap remains the migration default. V2 also
-            # allows longer bodies because this operation only splits existing
-            # text and independently verifies byte-visible text preservation.
+            required_paragraphs=target_paragraphs,
             max_words=max(1000, len(body)),
         )
-        body = str(result["html"])
-        audit["paragraph_normalization"] = result["audit"]
+        body = str(normalization["html"])
+        normalization_audit = dict(normalization["audit"])
+
+    featured_state = getattr(getattr(state, "media", None), "featured", None)
+    featured_media_id = int(getattr(featured_state, "media_id", 0) or 0) or None
+    layout_policy = build_normal_article_layout_policy(
+        body,
+        target_ideal=required,
+        verified_inline=eligible_inline,
+        featured_media_id=featured_media_id,
+        featured_repeat_evidence=featured_state,
+    )
+    target_effective = (
+        int(layout_policy["target_effective"])
+        if layout_policy is not None else required
+    )
+    effective_urls, selected_urls = planned_urls(body, target_effective)
+    insertions = normal_media_urls_to_insert(body, effective_urls, featured_url)
+    audit.update({
+        "required_inline": required,
+        "target_ideal": required,
+        "capacity_verified": (
+            int(layout_policy["capacity_verified"])
+            if layout_policy is not None else None
+        ),
+        "target_effective": target_effective,
+        "reduction_reason": (
+            str(layout_policy.get("reduction_reason") or "")
+            if layout_policy is not None else ""
+        ),
+        "valid_existing_inline": reconciliation.accounting.valid_distinct_inline_count,
+        "verified_inline_in_body": (
+            int(layout_policy["verified_inline_in_body"])
+            if layout_policy is not None else 0
+        ),
+        "selected_verified_inline": len(selected_urls),
+        "media_positions_needed": len(insertions),
+        "paragraph_normalization": normalization_audit,
+    })
+    if layout_policy is not None:
+        audit["media_layout_policy"] = layout_policy
+
+    if insertions:
         try:
-            plan_normal_media_insertions(
-                body,
-                [{"media_url": url} for url in insertions],
-            )
+            plan_normal_media_insertions(body, [{"media_url": url} for url in insertions])
         except MediaInsertionError as exc:
             audit["status"] = "rework_required"
             audit["failure_code"] = exc.code
             audit["failure"] = str(exc)
-            audit["paragraphs_after"] = result["audit"].get("final_paragraphs", 0)
+            audit["paragraphs_after"] = len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL))
             working["cleaned_html"] = body
             return working, audit, str(exc)
 
     working["cleaned_html"] = body
+    audit["prepared_body_sha256"] = editorial_body_sha256(body)
     audit["paragraphs_after"] = len(re.findall(r"<p\b[^>]*>.*?</p>", body, re.IGNORECASE | re.DOTALL))
+    audit["structure_sha256"] = _editorial_structure_sha256(body, audit)
     return working, audit, None
+
+
+def _editorial_structure_sha256(body: str, audit: dict[str, Any]) -> str:
+    from ..media.inserter import normal_media_slot_capacity
+
+    layout_facts: dict[str, Any] = {"layout": str(audit.get("layout") or "")}
+    if audit.get("layout") == "normal_article":
+        layout = normal_media_slot_capacity(body)
+        layout_facts.update({
+            key: layout.get(key)
+            for key in (
+                "verified", "paragraph_count", "substantive_paragraphs", "first_slot",
+                "last_slot", "body_end_available", "existing_media_slots", "capacity_slots",
+                "minimum_spacing",
+            )
+        })
+    policy = audit.get("media_layout_policy")
+    payload = {
+        "body_sha256": editorial_body_sha256(body),
+        "layout_facts": layout_facts,
+        "layout_policy_sha256": (
+            str(policy.get("layout_sha256") or "") if isinstance(policy, dict) else ""
+        ),
+        "empty_paragraphs_removed": int(audit.get("empty_paragraphs_removed") or 0),
+        "paragraph_normalization": audit.get("paragraph_normalization") or {},
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _ensure_prepared_media_structure(
+    root: Path,
+    post_id: int,
+    editorial: dict[str, Any],
+    state: Any,
+    *,
+    title: str,
+    categories: Any = (),
+    persist: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Reconcile legacy/resumed drafts with the exact prepared-body contract."""
+    if str(editorial.get("cleaned_html") or ""):
+        editorial["cleaned_html"] = normalize_editorial_dashes(
+            str(editorial.get("cleaned_html") or "")
+        )
+    structure_path = Path(root) / "backups" / str(post_id) / "editorial.structure.json"
+    body = str(editorial.get("cleaned_html") or "")
+    body_hash = editorial_body_sha256(body)
+    try:
+        audit = _json_object(structure_path) if structure_path.is_file() else {}
+    except BatchError:
+        audit = {}
+    current = (
+        audit.get("version") == 2
+        and audit.get("status") in {"prepared", "not_applicable"}
+        and audit.get("prepared_body_sha256") == body_hash
+        and audit.get("structure_sha256") == _editorial_structure_sha256(body, audit)
+    )
+    if not current:
+        prepared, audit, error = _prepare_editorial_media_structure(
+            editorial,
+            state,
+            title=title,
+            categories=categories,
+        )
+        if persist:
+            _write_json(Path(root), post_id, "editorial.structure.json", audit)
+        if error:
+            if persist:
+                _write_json(Path(root), post_id, "editorial.draft.json", prepared)
+            raise StageError(
+                BlockerCode.STRUCTURE,
+                Phase.EDITORIAL,
+                f"media_structure:{audit.get('failure_code') or 'invalid'}: {error}",
+            )
+        editorial.clear()
+        editorial.update(prepared)
+        if persist:
+            _write_json(Path(root), post_id, "editorial.draft.json", prepared)
+
+    policy = audit.get("media_layout_policy")
+    if policy is not None:
+        ideal = required_image_count_for_content(
+            str(editorial.get("cleaned_html") or ""),
+            title=title,
+        )
+        validation = validate_normal_article_layout_policy(
+            str(editorial.get("cleaned_html") or ""),
+            policy,
+            target_ideal=ideal,
+            media=getattr(state, "media", None),
+            listicle=audit.get("layout") == "listicle_preserved",
+        )
+        if not validation.get("valid"):
+            raise StageError(
+                BlockerCode.STRUCTURE,
+                Phase.EDITORIAL,
+                f"media_layout_policy:{validation.get('reason') or 'invalid'}",
+            )
+        return editorial, audit, dict(policy)
+    return editorial, audit, {}
 
 
 def _canonical_media_ref(value: str) -> str:
@@ -359,7 +553,7 @@ class ProductionEditorialStage:
             )
             if state.phase is Phase.EDITORIAL and (validation_path.is_file() or has_structure_failure):
                 validation = _json_object(validation_path) if validation_path.is_file() else {}
-                editorial_gates = {"qualidade_texto", "seo", "estrutura", "fonte", "schema_editorial", "conteudo_nao_vazio", "conteudo_sem_metadados_operacionais", "estrutura_lista", "cta_canonico"}
+                editorial_gates = {"qualidade_texto", "seo", "estrutura", "fonte", "schema_editorial", "conteudo_nao_vazio", "conteudo_sem_metadados_operacionais", "estrutura_lista", "cta_canonico", "html_semantics"}
                 failures = [failure for failure in validation.get("failures", []) if failure.get("gate") in editorial_gates]
                 if has_structure_failure:
                     failures.append({
@@ -492,19 +686,37 @@ class ProductionMediaStage:
         # Only snapshots produced by this invocation may survive its failure.
         context.pop("_v2_media_progress", None)
         previous = state.media
-        required = required_image_count_for_content(
-            str(editorial.get("cleaned_html") or ""),
-            title=str(context.get("title") or ""),
-        )
-        accepted = {item.media_id: item for item in previous.inline}
-        featured = previous.featured
         try:
+            editorial, _structure_audit, layout_policy = _ensure_prepared_media_structure(
+                self.root,
+                int(context["post_id"]),
+                editorial,
+                state,
+                title=str(context.get("title") or ""),
+                categories=context.get("categories") or (),
+            )
+            ideal_required = required_image_count_for_content(
+                str(editorial.get("cleaned_html") or ""),
+                title=str(context.get("title") or ""),
+            )
+            required = int(layout_policy.get("target_effective") or ideal_required)
+            previous = replace(
+                previous,
+                required=required,
+                layout_policy=layout_policy,
+            )
+            state = replace(state, media=previous) if isinstance(state, WorkState) else SimpleNamespace(
+                media=previous,
+                phase=getattr(state, "phase", None),
+            )
+            accepted = {item.media_id: item for item in previous.inline}
+            featured = previous.featured
             if self.resolver is not None:
                 result = self.resolver(context, state, editorial, previous)
                 if isinstance(result, MediaProgress):
-                    media = result
+                    media = replace(result, required=required, layout_policy=layout_policy)
                 else:
-                    media = self._from_result(result, required, accepted, featured)
+                    media = self._from_result(result, required, accepted, featured, layout_policy)
             else:
                 plan = list(editorial.get("media_plan") or [])
                 if featured.status is FeaturedStatus.VALID:
@@ -570,8 +782,18 @@ class ProductionMediaStage:
                     FeaturedStatus.VALID, featured_id, str(featured_row.get("media_url") or ""),
                     str(featured_row.get("sha256") or ""), str(featured_row.get("phash") or ""),
                     str(featured_row.get("visual_group_id") or ""), dict(featured_row.get("visual_verification") or {}),
+                    str(featured_row.get("alt_text") or ""),
+                    str(featured_row.get("credit_text") or ""),
+                    int(featured_row.get("width") or 0),
+                    int(featured_row.get("height") or 0),
                 ) if featured_id else featured
-                media = MediaProgress(required=required, inline=inline, featured=fp, search=previous.search)
+                media = MediaProgress(
+                    required=required,
+                    inline=inline,
+                    featured=fp,
+                    search=previous.search,
+                    layout_policy=layout_policy,
+                )
             if getattr(state, "phase", None) is Phase.MEDIA and media.enrichment_round <= previous.enrichment_round:
                 media = replace(
                     media,
@@ -611,11 +833,23 @@ class ProductionMediaStage:
             ) from exc
 
     @staticmethod
-    def _from_result(result: Any, required: int, accepted: dict[int, InlineMedia], featured: FeaturedProgress) -> MediaProgress:
+    def _from_result(
+        result: Any,
+        required: int,
+        accepted: dict[int, InlineMedia],
+        featured: FeaturedProgress,
+        layout_policy: dict[str, Any] | None = None,
+    ) -> MediaProgress:
         rows = result if isinstance(result, list) else (result.get("inline") or [])
         inline = tuple(accepted.values()) + tuple(InlineMedia.from_dict(row) for row in rows if int(row.get("media_id", 0)) not in accepted)
         search = MediaSearchProgress.from_dict(result.get("search")) if isinstance(result, dict) else MediaSearchProgress()
-        return MediaProgress(required=required, inline=inline, featured=featured, search=search)
+        return MediaProgress(
+            required=required,
+            inline=inline,
+            featured=featured,
+            search=search,
+            layout_policy=dict(layout_policy or {}),
+        )
 
 
 class ProductionComposeStage:
@@ -634,6 +868,28 @@ class ProductionComposeStage:
         persist: bool = True,
     ) -> dict[str, Any]:
         try:
+            source_editorial, structure_audit, source_layout_policy = _ensure_prepared_media_structure(
+                self.root,
+                int(context["post_id"]),
+                editorial,
+                SimpleNamespace(media=media),
+                title=str(context.get("title") or ""),
+                categories=context.get("categories") or (),
+                persist=persist,
+            )
+            editorial = source_editorial
+            ideal_required = required_image_count_for_content(
+                str(editorial.get("cleaned_html") or ""),
+                title=str(context.get("title") or ""),
+            )
+            effective_required = int(
+                source_layout_policy.get("target_effective") or ideal_required
+            )
+            media = replace(
+                media,
+                required=effective_required,
+                layout_policy=source_layout_policy,
+            )
             is_listicle = detect_list_format(
                 str(context.get("title") or ""),
                 str(editorial.get("cleaned_html") or ""),
@@ -683,6 +939,33 @@ class ProductionComposeStage:
             featured_url = str(media.featured.media_url or "").strip()
             if featured_url and not is_listicle:
                 existing_html = remove_media_urls(existing_html, [featured_url])
+            # Removing an invalid/duplicate image may leave an empty paragraph
+            # and changes the layout identity. Prepare and hash that exact body
+            # again before selecting any new placement.
+            if existing_html != str(editorial.get("cleaned_html") or ""):
+                prepared_editorial, structure_audit, structure_error = _prepare_editorial_media_structure(
+                    {**editorial, "cleaned_html": existing_html},
+                    SimpleNamespace(media=media),
+                    title=str(context.get("title") or ""),
+                    categories=context.get("categories") or (),
+                )
+                if structure_error:
+                    raise MediaInsertionError(
+                        f"prepared body after media cleanup is not placeable: {structure_error}",
+                        code="insufficient_paragraph_slots",
+                    )
+                editorial = prepared_editorial
+                existing_html = str(editorial.get("cleaned_html") or "")
+                source_layout_policy = dict(structure_audit.get("media_layout_policy") or {})
+                if persist:
+                    _write_json(self.root, int(context["post_id"]), "editorial.structure.json", structure_audit)
+                    _write_json(self.root, int(context["post_id"]), "editorial.draft.json", editorial)
+                effective_required = int(source_layout_policy.get("target_effective") or ideal_required)
+                media = replace(
+                    media,
+                    required=effective_required,
+                    layout_policy=source_layout_policy,
+                )
             insertable_urls = set(normal_media_urls_to_insert(
                 existing_html,
                 [str(item.media_url or "") for item in media.inline if item.media_id in valid_ids],
@@ -720,20 +1003,149 @@ class ProductionComposeStage:
                     "section_slot": item.section_slot,
                     "subject": item.subject,
                 })
-            if placements and not is_listicle:
-                placements = plan_normal_media_insertions(existing_html, placements)
+            closing_repeat_record: dict[str, Any] = {}
+            if not is_listicle:
+                if source_layout_policy:
+                    planned_positions = list(source_layout_policy.get("placement_plan") or [])
+                    if len(placements) > len(planned_positions):
+                        raise MediaInsertionError(
+                            "composed media exceeds the verified layout placement capacity: "
+                            f"requested={len(placements)}, available={len(planned_positions)}",
+                            code="insufficient_paragraph_slots",
+                        )
+                    body_hash = str(source_layout_policy.get("body_sha256") or "")
+                    if editorial_body_sha256(existing_html) != body_hash:
+                        raise MediaInsertionError(
+                            "prepared body changed after layout planning",
+                            code="layout_body_hash_mismatch",
+                        )
+                    feature = media.featured
+                    repeat_policy = source_layout_policy.get("closing_featured_repeat")
+                    feature_decision = str(
+                        (feature.visual_verification or {}).get("decision") or ""
+                    ).upper()
+                    repeat_policy_matches = bool(
+                        isinstance(repeat_policy, dict)
+                        and repeat_policy.get("role") == "closing_featured_repeat"
+                        and repeat_policy.get("placement") == "after_editorial_body"
+                        and repeat_policy.get("media_id") == feature.media_id
+                        and _canonical_media_ref(str(repeat_policy.get("media_url") or ""))
+                        == _canonical_media_ref(str(feature.media_url or ""))
+                        and repeat_policy.get("asset_sha256") == feature.sha256
+                        and repeat_policy.get("asset_phash") == feature.phash
+                        and repeat_policy.get("visual_group_id") == feature.visual_group_id
+                        and repeat_policy.get("body_sha256") == body_hash
+                        and repeat_policy.get("placement_plan_sha256")
+                        == source_layout_policy.get("placement_plan_sha256")
+                    )
+                    exhausted_proof = bool(
+                        media.waiver_applied
+                        and media.search.completed
+                        and media.search.exhausted
+                        and media.search.completion_reason == "EXHAUSTED_VERIFIED"
+                    )
+                    feature_display_ready = bool(
+                        feature.status is FeaturedStatus.VALID
+                        and feature.media_id and feature.media_url
+                        and feature.alt_text.strip()
+                        and feature.credit_text.strip().casefold().startswith("crédito da imagem:")
+                        and 1200 <= feature.width <= 1600 and feature.height > 0
+                        and feature.sha256 and feature.phash and feature.visual_group_id
+                        and feature_decision in {"INITIAL", "DIFFERENT"}
+                    )
+                    closing_anchor = (
+                        planned_positions[-1]
+                        if planned_positions
+                        and planned_positions[-1].get("anchor") == "after_editorial_body"
+                        else None
+                    )
+                    use_closing_repeat = bool(
+                        repeat_policy_matches
+                        and feature_display_ready
+                        and exhausted_proof
+                        and accounting.effective_missing > 0
+                        and closing_anchor is not None
+                        and len(placements) < len(planned_positions)
+                    )
+                    available_positions = planned_positions[:-1] if use_closing_repeat else planned_positions
+                    if len(placements) > len(available_positions):
+                        if use_closing_repeat:
+                            use_closing_repeat = False
+                            available_positions = planned_positions
+                        if len(placements) > len(available_positions):
+                            raise MediaInsertionError(
+                                "composed media exceeds the verified layout placement capacity: "
+                                f"requested={len(placements)}, available={len(available_positions)}",
+                                code="insufficient_paragraph_slots",
+                            )
+                    selected_slots = select_normal_media_slots(
+                        [int(row["paragraph_index"]) for row in available_positions],
+                        len(placements),
+                        minimum_spacing=int(source_layout_policy.get("minimum_spacing") or 3),
+                    )
+                    anchors_by_slot = {
+                        int(row["paragraph_index"]): row for row in available_positions
+                    }
+                    for placement, slot in zip(placements, selected_slots):
+                        anchor = anchors_by_slot[slot]
+                        if anchor.get("body_sha256") != body_hash:
+                            raise MediaInsertionError(
+                                "layout placement anchor is not bound to the prepared body",
+                                code="layout_anchor_hash_mismatch",
+                            )
+                        placement["paragraph_index"] = int(anchor["paragraph_index"])
+                        if anchor.get("anchor") == "after_editorial_body":
+                            placement["placement"] = "after_editorial_body"
+                        else:
+                            placement.pop("placement", None)
+                    if use_closing_repeat and closing_anchor is not None:
+                        repeat_slot = int(closing_anchor["paragraph_index"])
+                        placements.append({
+                            "paragraph_index": repeat_slot,
+                            "placement": "after_editorial_body",
+                            "role": "closing_featured_repeat",
+                            "media_id": int(feature.media_id),
+                            "media_url": str(feature.media_url),
+                            "alt_text": feature.alt_text,
+                            "credit_text": feature.credit_text,
+                            "width": feature.width,
+                            "height": feature.height,
+                            "subject": feature.alt_text,
+                        })
+                        closing_repeat_record = {
+                            **dict(repeat_policy),
+                            "paragraph_index": repeat_slot,
+                            "placement": "after_editorial_body",
+                        }
+                else:
+                    if placements:
+                        placements = plan_normal_media_insertions(existing_html, placements)
             placement_audit = [
                 {
                     "media_url": str(item.get("media_url") or ""),
                     "paragraph_index": int(item.get("paragraph_index", 0)),
                     **(
+                        {"role": str(item["role"]), "media_id": int(item["media_id"])}
+                        if item.get("role") == "closing_featured_repeat" and item.get("media_id")
+                        else {}
+                    ),
+                    **(
                         {"placement": str(item["placement"])}
                         if item.get("placement")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "body_sha256": str(source_layout_policy.get("body_sha256") or ""),
+                            "placement_plan_sha256": str(source_layout_policy.get("placement_plan_sha256") or ""),
+                        }
+                        if source_layout_policy and not is_listicle
                         else {}
                     ),
                 }
                 for item in placements
             ]
+            prepared_body = str(editorial.get("cleaned_html") or "")
             working = dict(editorial)
             # Drop legacy operational localization context before creating the
             # candidate; the canonical editorial document remains schema-only.
@@ -746,8 +1158,21 @@ class ProductionComposeStage:
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)
-            candidate_media = replace(media, inline=eligible_inline, accepted_count=None)
-            candidate = {"content": content, "editorial": working, "seo": working.get("seo") or {}, "title": str(working.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            # Keep the exact prepared editorial body as the quota and layout
+            # evidence source. The composed publication HTML is stored
+            # separately in candidate["content"] and may contain captions,
+            # CTA, credits, and source boilerplate that must not alter the
+            # 2/4/6 quota or the layout proof.
+            candidate_editorial = dict(working)
+            candidate_editorial["cleaned_html"] = prepared_body
+            candidate_media = replace(
+                media,
+                inline=eligible_inline,
+                accepted_count=None,
+                layout_policy=source_layout_policy,
+                closing_featured_repeat=closing_repeat_record,
+            )
+            candidate = {"content": content, "editorial": candidate_editorial, "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
             if persist:
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
@@ -768,6 +1193,64 @@ class ProductionValidateStage:
     def __call__(self, context: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
         try:
             post = _post(context)
+            post_id = int(context["post_id"])
+            candidate_media = MediaProgress.from_dict(candidate.get("media"))
+            source_editorial = None
+            if "candidate_must_be_fresh" in context:
+                source_editorial = context.get("editorial") or context.get("draft")
+            if "candidate_must_be_fresh" in context and not isinstance(source_editorial, dict):
+                draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
+                source_editorial = _json_object(draft_path) if draft_path.is_file() else None
+            if isinstance(source_editorial, dict):
+                source_editorial = dict(source_editorial)
+                source_editorial, _structure_audit, source_policy = _ensure_prepared_media_structure(
+                    self.root,
+                    post_id,
+                    source_editorial,
+                    SimpleNamespace(media=candidate_media),
+                    title=str(context.get("title") or ""),
+                    categories=context.get("categories") or (),
+                )
+                source_body = str(source_editorial.get("cleaned_html") or "")
+                ideal_required = required_image_count_for_content(
+                    source_body,
+                    title=str(context.get("title") or ""),
+                )
+                effective_required = int(
+                    source_policy.get("target_effective") or ideal_required
+                )
+                current_policy = candidate_media.layout_policy
+                current_body = str((candidate.get("editorial") or {}).get("cleaned_html") or "")
+                policy_valid = False
+                if current_policy:
+                    policy_result = validate_normal_article_layout_policy(
+                        source_body,
+                        current_policy,
+                        target_ideal=ideal_required,
+                        media=candidate_media,
+                        listicle=not bool(source_policy),
+                    )
+                    policy_valid = bool(
+                        policy_result.get("valid")
+                        and current_policy == source_policy
+                        and candidate_media.required == effective_required
+                    )
+                elif not source_policy:
+                    policy_valid = candidate_media.required == effective_required
+                if current_body != source_body or not policy_valid:
+                    candidate_media = replace(
+                        candidate_media,
+                        required=effective_required,
+                        layout_policy=source_policy,
+                    )
+                    candidate = ProductionComposeStage(
+                        self.config, self.root
+                    ).compose_candidate(
+                        context,
+                        source_editorial,
+                        candidate_media,
+                        persist=True,
+                    )
             checklist_editorial = dict(candidate["editorial"])
             checklist_editorial.pop("decision", None)
             # Localization is preparation context, not part of the strict
@@ -853,6 +1336,8 @@ class ProductionValidateStage:
             }
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", result)
             return result
+        except StageError:
+            raise
         except Exception as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.VALIDATE, str(exc)) from exc
 

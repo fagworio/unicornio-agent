@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from unicornio_editor.media.inserter import (
@@ -7,6 +8,7 @@ from unicornio_editor.media.inserter import (
     minimum_normal_article_paragraphs,
     normalize_normal_article_paragraphs,
     plan_normal_media_insertions,
+    normal_media_slot_capacity,
     remove_empty_paragraphs,
 )
 
@@ -96,18 +98,42 @@ class MediaInserterTests(unittest.TestCase):
             for count in (2, 4, 6)
         ] == [6, 12, 18]
 
-    def test_empty_paragraph_cleanup_only_removes_attribute_free_blank_nodes(self):
+    def test_empty_paragraph_cleanup_preserves_anchor_targets_without_layout_blocks(self):
         html = (
             "<p>Texto mantido.</p><p> &nbsp; </p><p><br /></p>"
             '<p id="anchor"><br></p><p><a href="https://example.test"></a></p>'
             "<p>[shortcode]</p>"
         )
         result = remove_empty_paragraphs(html)
-        assert result["audit"] == {"removed": 2, "changed": True}
+        assert result["audit"] == {"removed": 3, "changed": True}
         assert result["html"] == (
-            '<p>Texto mantido.</p><p id="anchor"><br></p>'
+            '<p>Texto mantido.</p><a id="anchor"></a>'
             '<p><a href="https://example.test"></a></p><p>[shortcode]</p>'
         )
+
+    def test_existing_inline_images_reserve_spacing_and_wordpress_size_variants_dedupe(self):
+        body = self._paragraphs(13)
+        with_existing = body
+        # Put an existing media block after paragraph four; new placement may
+        # not reuse its boundary or either adjacent two-paragraph interval.
+        ends = list(re.finditer(r"</p>", body))
+        boundary = ends[4].end()
+        with_existing = body[:boundary] + '<img src="https://media.example/old.webp">' + body[boundary:]
+        placement = plan_normal_media_insertions(with_existing, [_item(url="https://media.example/new.webp")])[0]
+        assert abs(placement["paragraph_index"] - 4) >= 3
+
+        from unicornio_editor.media.inserter import normal_media_urls_to_insert
+
+        assert normal_media_urls_to_insert(
+            '<img src="https://media.example/photo-320x240.webp?width=320">',
+            ["https://media.example/photo.webp"],
+        ) == []
+
+    def test_verified_slot_capacity_supports_layout_policy_thresholds(self):
+        for paragraph_count, expected in ((10, 3), (11, 4), (17, 6)):
+            layout = normal_media_slot_capacity(self._paragraphs(paragraph_count))
+            assert layout["verified"] is True
+            assert layout["capacity"] == expected
 
     def test_normalizer_turns_nine_paragraphs_into_eleven_without_text_changes(self):
         long_body = (

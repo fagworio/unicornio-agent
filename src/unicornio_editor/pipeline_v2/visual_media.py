@@ -144,6 +144,8 @@ def materialize_media_identity(
                     featured.status, featured.media_id, resolved_url,
                     identity.sha256, identity.phash, identity.visual_group_id,
                     verification,
+                    featured.alt_text, featured.credit_text,
+                    featured.width, featured.height,
                 )
                 retained.append({**row, "visual_verification": verification})
             except Exception as exc:  # noqa: BLE001 - keep the post retryable

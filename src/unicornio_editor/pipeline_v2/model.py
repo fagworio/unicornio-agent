@@ -115,28 +115,53 @@ class FeaturedProgress:
     phash: str = ""
     visual_group_id: str = ""
     visual_verification: dict[str, Any] = field(default_factory=dict)
+    # Optional display metadata is retained only when sourced from the
+    # verified upload/attachment. Legacy checkpoints deserialize empty and
+    # cannot authorize a repeated featured image in the body.
+    alt_text: str = ""
+    credit_text: str = ""
+    width: int = 0
+    height: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, FeaturedStatus):
             object.__setattr__(self, "status", FeaturedStatus(self.status))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "status": self.status.value, "media_id": self.media_id,
             "media_url": self.media_url, "sha256": self.sha256,
             "phash": self.phash, "visual_group_id": self.visual_group_id,
             "visual_verification": self.visual_verification,
         }
+        if self.alt_text:
+            value["alt_text"] = self.alt_text
+        if self.credit_text:
+            value["credit_text"] = self.credit_text
+        if self.width > 0:
+            value["width"] = self.width
+        if self.height > 0:
+            value["height"] = self.height
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "FeaturedProgress":
         value = value or {}
         verification = value.get("visual_verification")
+        try:
+            width = max(0, int(value.get("width") or 0))
+            height = max(0, int(value.get("height") or 0))
+        except (TypeError, ValueError):
+            width = height = 0
         return cls(
             value.get("status", "missing"), value.get("media_id"), value.get("media_url"),
             str(value.get("sha256") or ""), str(value.get("phash") or ""),
             str(value.get("visual_group_id") or ""),
             dict(verification) if isinstance(verification, dict) else {},
+            str(value.get("alt_text") or ""),
+            str(value.get("credit_text") or ""),
+            width,
+            height,
         )
 
 
@@ -301,6 +326,8 @@ class MediaProgress:
     enrichment_round: int = 0
     waiver_applied: bool = False
     waiver_reason: str = ""
+    layout_policy: dict[str, Any] = field(default_factory=dict)
+    closing_featured_repeat: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.required < 0:
@@ -315,6 +342,10 @@ class MediaProgress:
             raise ValueError("accepted_count must cover inline assets")
         if self.enrichment_round < 0:
             raise ValueError("enrichment_round cannot be negative")
+        if not isinstance(self.layout_policy, dict):
+            raise ValueError("layout_policy must be an object")
+        if not isinstance(self.closing_featured_repeat, dict):
+            raise ValueError("closing_featured_repeat must be an object")
 
     @property
     def accepted(self) -> int:
@@ -340,7 +371,7 @@ class MediaProgress:
         return self.visual_accounting.effective_missing
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "inline": {
                 "required": self.required,
                 "accepted": [item.to_dict() for item in self.inline],
@@ -356,6 +387,11 @@ class MediaProgress:
             },
             "visual_identity_policy": 4,
         }
+        if self.layout_policy:
+            value["layout_policy"] = dict(self.layout_policy)
+        if self.closing_featured_repeat:
+            value["closing_featured_repeat"] = dict(self.closing_featured_repeat)
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "MediaProgress":
@@ -378,6 +414,8 @@ class MediaProgress:
             int(value.get("enrichment_round", 0)),
             bool(waiver.get("applied", value.get("waiver_applied", False))),
             str(waiver.get("reason", value.get("waiver_reason", "")) or ""),
+            dict(value.get("layout_policy") or {}),
+            dict(value.get("closing_featured_repeat") or {}),
         )
 
 

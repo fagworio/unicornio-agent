@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Mapping
 from html import escape
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,19 +20,63 @@ class MediaInsertionError(ValueError):
         self.code = code
 
 
-_EMPTY_PARAGRAPH_RE = re.compile(r"<p>(?P<body>[\s\S]*?)</p>", re.IGNORECASE)
+_EMPTY_PARAGRAPH_RE = re.compile(r"(?P<open><p\b[^>]*>)(?P<body>[\s\S]*?)</p>", re.IGNORECASE)
 _EMPTY_PARAGRAPH_BODY_RE = re.compile(
     r"(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*",
     re.IGNORECASE,
 )
 
 
-def remove_empty_paragraphs(html: str) -> dict[str, Any]:
-    """Remove only attribute-free paragraphs containing no visible content.
+class _BalancedMediaHtmlParser(HTMLParser):
+    """Conservative structural check used before claiming verified capacity."""
 
-    Anchored or otherwise attributed paragraphs are preserved because their
-    attributes may carry navigation or presentation semantics. Images, links,
-    comments, shortcodes, and all non-empty text are left untouched.
+    _VOID = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.stack: list[str] = []
+        self.valid = True
+
+    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.casefold()
+        if normalized not in self._VOID:
+            if normalized == "p" and "p" in self.stack:
+                self.valid = False
+            self.stack.append(normalized)
+
+    def handle_startendtag(self, _tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        return
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.casefold()
+        if normalized in self._VOID:
+            self.valid = False
+            return
+        if not self.stack or self.stack[-1] != normalized:
+            self.valid = False
+            return
+        self.stack.pop()
+
+
+def _media_html_is_structurally_balanced(html: str) -> bool:
+    parser = _BalancedMediaHtmlParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        return False
+    return parser.valid and not parser.stack
+
+
+def remove_empty_paragraphs(html: str) -> dict[str, Any]:
+    """Remove blank paragraphs, preserving simple id/name anchors as anchors.
+
+    Only id/name attributes are transferable to an empty ``<a>`` target.
+    Paragraphs with any other attributes remain untouched. Images, links,
+    comments, shortcodes, and all non-empty text are preserved.
     """
     if not isinstance(html, str):
         raise MediaInsertionError("HTML must be a string")
@@ -40,8 +86,38 @@ def remove_empty_paragraphs(html: str) -> dict[str, Any]:
         nonlocal removed
         if not _EMPTY_PARAGRAPH_BODY_RE.fullmatch(match.group("body")):
             return match.group(0)
+        attributes = match.group("open")[2:-1]
+        parsed: list[tuple[str, str]] = []
+        cursor = 0
+        attribute_re = re.compile(
+            r"\s+([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))"
+        )
+        for attribute in attribute_re.finditer(attributes):
+            if attributes[cursor:attribute.start()].strip():
+                return match.group(0)
+            name = attribute.group(1).casefold()
+            value = next(
+                (part for part in attribute.groups()[1:] if part is not None),
+                "",
+            )
+            if name not in {"id", "name"} or any(old_name == name for old_name, _ in parsed):
+                return match.group(0)
+            parsed.append((name, value))
+            cursor = attribute.end()
+        if attributes[cursor:].strip():
+            return match.group(0)
+        if not parsed:
+            removed += 1
+            return ""
+        # Preserve an anchor target but remove the empty block's layout. Only
+        # id/name attributes are transferred; arbitrary paragraph attributes
+        # are never copied onto a different element.
+        anchor_attributes = " ".join(
+            f'{name}="{escape(unescape(value), quote=True)}"'
+            for name, value in parsed
+        )
         removed += 1
-        return ""
+        return f"<a {anchor_attributes}></a>"
 
     cleaned = _EMPTY_PARAGRAPH_RE.sub(replace, html)
     return {
@@ -201,16 +277,198 @@ def normal_media_urls_to_insert(
     """
     if not isinstance(html, str) or not isinstance(media_urls, (list, tuple)):
         raise MediaInsertionError("HTML and media URLs have invalid types")
-    featured = str(featured_url or "").strip()
+    featured = _canonical_media_url(str(featured_url or "").strip())
+    existing_urls = {
+        _canonical_media_url(match.group(2))
+        for match in re.finditer(
+            r"\bsrc\s*=\s*(['\"])(.*?)\1",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    }
     selected: list[str] = []
     seen: set[str] = set()
     for value in media_urls:
         media_url = str(value or "").strip()
-        if not media_url or media_url in html or media_url == featured or media_url in seen:
+        canonical = _canonical_media_url(media_url)
+        if not media_url or canonical in existing_urls or canonical == featured or canonical in seen:
             continue
         selected.append(media_url)
-        seen.add(media_url)
+        seen.add(canonical)
     return selected
+
+
+def _canonical_media_url(value: str) -> str:
+    parsed = urlparse(unescape(str(value or "").strip()))
+    if not parsed.scheme or not parsed.netloc:
+        return str(value or "").strip().split("?", 1)[0]
+    path = re.sub(r"-\d+x\d+(?=\.[^./]+$)", "", parsed.path)
+    return f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}{path.rstrip('/') or '/'}"
+
+
+def _safe_media_tail(value: str) -> bool:
+    """Accept only trailing, self-contained media blocks after the body text."""
+    tail = str(value or "")
+    if not tail.strip():
+        return True
+    block_patterns = (
+        re.compile(r"\[caption\b[^\]]*\][\s\S]*?\[/caption\]", re.IGNORECASE),
+        re.compile(r"<figure\b[^>]*>[\s\S]*?</figure>", re.IGNORECASE),
+        re.compile(r"<img\b[^>]*>", re.IGNORECASE),
+    )
+    remainder = tail
+    changed = True
+    while changed:
+        changed = False
+        for pattern in block_patterns:
+            match = pattern.search(remainder)
+            if match and re.search(r"<img\b", match.group(0), re.IGNORECASE):
+                remainder = remainder[:match.start()] + remainder[match.end():]
+                changed = True
+                break
+    return not remainder.strip()
+
+
+def normal_media_slot_capacity(
+    html: str,
+    *,
+    minimum_spacing: int = 3,
+) -> dict[str, Any]:
+    """Describe safe normal-article slots, reserving every existing image.
+
+    The count is the maximum number of *additional* images that can be placed
+    without violating the established lead and spacing rules. Existing images
+    occupy their nearest paragraph boundary even when they are not V2-approved;
+    approval/counting remains a separate media-evidence decision.
+    """
+    if not isinstance(html, str):
+        raise MediaInsertionError("HTML must be a string")
+    if isinstance(minimum_spacing, bool) or minimum_spacing < 1:
+        raise MediaInsertionError("minimum_spacing must be positive")
+    structurally_verified = _media_html_is_structurally_balanced(html)
+    paragraph_matches = list(
+        re.finditer(r"<p\b[^>]*>([\s\S]*?)</p>", html, flags=re.IGNORECASE)
+    )
+    paragraph_ends = [
+        match.end() for match in re.finditer(r"</p>\s*", html, flags=re.IGNORECASE)
+    ]
+    paragraph_count = len(paragraph_matches)
+    tail = html[paragraph_ends[-1]:] if paragraph_ends else html
+    body_end_available = bool(paragraph_ends and _safe_media_tail(tail))
+    last_slot = (
+        paragraph_count - 1
+        if body_end_available
+        else max(0, paragraph_count - 2)
+    )
+    substantive = [
+        index for index, match in enumerate(paragraph_matches)
+        if _plain_word_count(match.group(1)) >= 12
+    ]
+    first_slot = substantive[1] if len(substantive) >= 2 else None
+    existing_slots: set[int] = set()
+    for image in re.finditer(r"<img\b[^>]*>", html, flags=re.IGNORECASE):
+        containing = next(
+            (
+                index for index, paragraph in enumerate(paragraph_matches)
+                if paragraph.start() <= image.start() < paragraph.end()
+            ),
+            None,
+        )
+        if containing is not None:
+            slot = containing
+        else:
+            slot = bisect_right(paragraph_ends, image.start()) - 1
+            if slot < 0:
+                # Images before the editorial lead still reserve its earliest
+                # boundaries; they do not become verified inline coverage.
+                slot = 0
+            if paragraph_count:
+                slot = min(slot, paragraph_count - 1)
+        existing_slots.add(slot)
+
+    if first_slot is None:
+        candidates: list[int] = []
+    else:
+        candidates = [
+            slot for slot in range(first_slot, last_slot + 1)
+            if all(abs(slot - existing) >= minimum_spacing for existing in existing_slots)
+        ]
+    maximum: list[int] = []
+    for slot in candidates:
+        if not maximum or slot - maximum[-1] >= minimum_spacing:
+            maximum.append(slot)
+    return {
+        "verified": structurally_verified,
+        "paragraph_count": paragraph_count,
+        "substantive_paragraphs": len(substantive),
+        "first_slot": first_slot,
+        "last_slot": last_slot,
+        "body_end_available": body_end_available,
+        "existing_media_slots": sorted(existing_slots),
+        "available_slots": candidates,
+        "capacity": len(maximum) if structurally_verified else 0,
+        "capacity_slots": maximum if structurally_verified else [],
+        "minimum_spacing": minimum_spacing,
+    }
+
+
+def _select_spaced_slots(
+    candidates: list[int], count: int, minimum_spacing: int,
+) -> list[int]:
+    """Choose a deterministic, evenly distributed feasible subset of slots."""
+    if count == 0:
+        return []
+    if count == 1:
+        target = (candidates[0] + candidates[-1]) / 2
+        return [min(candidates, key=lambda slot: (abs(slot - target), slot))]
+    targets = [
+        candidates[0] + (candidates[-1] - candidates[0]) * index / (count - 1)
+        for index in range(count)
+    ]
+    memo: dict[tuple[int, int], tuple[float, tuple[int, ...]] | None] = {}
+
+    def solve(position: int, previous_index: int) -> tuple[float, tuple[int, ...]] | None:
+        key = (position, previous_index)
+        if key in memo:
+            return memo[key]
+        if position == count:
+            return (0.0, ())
+        best: tuple[float, tuple[int, ...]] | None = None
+        remaining = count - position - 1
+        for index in range(previous_index + 1, len(candidates) - remaining):
+            slot = candidates[index]
+            if previous_index >= 0 and slot - candidates[previous_index] < minimum_spacing:
+                continue
+            suffix = solve(position + 1, index)
+            if suffix is None:
+                continue
+            candidate = ((slot - targets[position]) ** 2 + suffix[0], (slot, *suffix[1]))
+            if best is None or candidate < best:
+                best = candidate
+        memo[key] = best
+        return best
+
+    selected = solve(0, -1)
+    if selected is None:
+        raise MediaInsertionError("insufficient spaced paragraph slots", code="insufficient_paragraph_slots")
+    return list(selected[1])
+
+
+def select_normal_media_slots(
+    planned_slots: list[int],
+    count: int,
+    *,
+    minimum_spacing: int = 3,
+) -> list[int]:
+    """Select a deterministic subset from a body-bound verified slot plan."""
+    if isinstance(count, bool) or count < 0 or count > len(planned_slots):
+        raise MediaInsertionError("requested media count exceeds the verified placement plan")
+    if any(isinstance(slot, bool) or not isinstance(slot, int) or slot < 0 for slot in planned_slots):
+        raise MediaInsertionError("verified placement plan contains an invalid slot")
+    if len(set(planned_slots)) != len(planned_slots):
+        raise MediaInsertionError("verified placement plan contains duplicate slots")
+    ordered = sorted(planned_slots)
+    return _select_spaced_slots(ordered, count, minimum_spacing)
 
 
 def plan_normal_media_insertions(
@@ -230,60 +488,34 @@ def plan_normal_media_insertions(
         raise MediaInsertionError("HTML and media plan have invalid types")
     if minimum_spacing < 1:
         raise MediaInsertionError("minimum_spacing must be positive")
-    paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>\s*", html, flags=re.IGNORECASE | re.DOTALL)
-    paragraph_count = len(paragraphs)
-    paragraph_ends = list(re.finditer(r"</p>\s*", html, flags=re.IGNORECASE))
-    has_body_end_slot = bool(
-        paragraph_ends
-        and not html[paragraph_ends[-1].end():].strip()
-    )
-    # The last boundary is safe only when the final closed paragraph also ends
-    # the editorial body. Non-paragraph tail markup keeps the older boundary.
-    last_slot = (
-        paragraph_count - 1
-        if has_body_end_slot
-        else max(0, paragraph_count - 2)
-    )
+    layout = normal_media_slot_capacity(html, minimum_spacing=minimum_spacing)
     count = len(plan)
     if count == 0:
         return []
     # The lead needs two substantive paragraphs before the first inline image.
     # A tag-only or one-line spacer is not editorial lead copy and cannot earn
     # that placement. Slots are zero-based paragraph boundaries.
-    substantive = [
-        index for index, paragraph in enumerate(paragraphs)
-        if _plain_word_count(paragraph) >= 12
-    ]
-    if len(substantive) < 2:
+    if layout["first_slot"] is None:
         raise MediaInsertionError(
             "at least two substantive paragraphs are required before the first inline image",
             code="insufficient_substantive_paragraphs",
         )
-    first_slot = substantive[1]
-    capacity = 1 + ((last_slot - first_slot) // minimum_spacing) if last_slot >= first_slot else 0
-    if capacity < count:
+    candidates = list(layout["available_slots"])
+    if int(layout["capacity"]) < count:
         raise MediaInsertionError(
-            f"insufficient valid paragraph slots: requested={count}, available={capacity}, "
-            f"minimum_spacing={minimum_spacing}, first_slot={first_slot}, "
-            f"last_slot={last_slot}, substantive_paragraphs={len(substantive)}, "
-            f"html_paragraphs={paragraph_count}",
+            f"insufficient valid paragraph slots: requested={count}, available={layout['capacity']}, "
+            f"minimum_spacing={minimum_spacing}, first_slot={layout['first_slot']}, "
+            f"last_slot={layout['last_slot']}, existing_media_slots={layout['existing_media_slots']}, "
+            f"substantive_paragraphs={layout['substantive_paragraphs']}, "
+            f"html_paragraphs={layout['paragraph_count']}",
             code="insufficient_paragraph_slots",
         )
-    if count == 1:
-        slots = [max(first_slot, last_slot // 2)]
-    else:
-        span = last_slot - first_slot
-        minimum_span = minimum_spacing * (count - 1)
-        slack = span - minimum_span
-        slots = [
-            first_slot + index * minimum_spacing + round(slack * index / (count - 1))
-            for index in range(count)
-        ]
+    slots = _select_spaced_slots(candidates, count, minimum_spacing)
     planned: list[dict[str, Any]] = []
     for item, slot in zip(plan, slots):
         placement = dict(item)
         placement["paragraph_index"] = int(slot)
-        if has_body_end_slot and slot == last_slot:
+        if layout["body_end_available"] and slot == layout["last_slot"]:
             placement["placement"] = "after_editorial_body"
         planned.append(placement)
     return planned
@@ -442,6 +674,10 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
     if len(plan) > 12:
         raise MediaInsertionError("at most twelve images are allowed")
     paragraph_ends = [match.end() for match in re.finditer(r"</p>\s*", html, flags=re.IGNORECASE)]
+    existing_media_slots = (
+        set(normal_media_slot_capacity(html)["existing_media_slots"])
+        if not listicle else set()
+    )
     placements: list[tuple[int, str, Mapping[str, Any]]] = []
     indexes: list[int] = []
     for item in plan:
@@ -451,6 +687,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         allowed = required | {
             "item_identity", "item_title", "item_group", "html_position",
             "item_number", "section_heading", "section_slot", "subject", "placement",
+            "role", "media_id",
         }
         if not required.issubset(item) or set(item) - allowed:
             raise MediaInsertionError("media placement has missing or unknown fields")
@@ -459,13 +696,22 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             raise MediaInsertionError("paragraph_index must be non-negative")
         placement_kind = item.get("placement")
         after_editorial_body = placement_kind == "after_editorial_body"
+        if "role" in item or "media_id" in item:
+            if (
+                item.get("role") != "closing_featured_repeat"
+                or not after_editorial_body
+                or isinstance(item.get("media_id"), bool)
+                or not isinstance(item.get("media_id"), int)
+                or item.get("media_id", 0) < 1
+            ):
+                raise MediaInsertionError("only an identified featured repeat may carry a closing role")
         if placement_kind is not None and not after_editorial_body:
             raise MediaInsertionError("unsupported media placement")
         if after_editorial_body and (
             listicle
             or not paragraph_ends
             or index != len(paragraph_ends) - 1
-            or html[paragraph_ends[-1]:].strip()
+            or not _safe_media_tail(html[paragraph_ends[-1]:])
         ):
             raise MediaInsertionError("after_editorial_body requires the final paragraph boundary")
         if not after_editorial_body and index >= len(paragraph_ends) - (1 if not listicle else 0):
@@ -475,6 +721,11 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         if not listicle:
             if index in indexes or any(abs(index - other) < 3 for other in indexes):
                 raise MediaInsertionError("images must be at least three paragraphs apart")
+            if any(abs(index - existing) < 3 for existing in existing_media_slots):
+                raise MediaInsertionError(
+                    "new images must be spaced from existing inline media",
+                    code="existing_media_spacing_conflict",
+                )
         url = item["media_url"]
         if not isinstance(url, str) or url.lower().split("?", 1)[0].rsplit("/", 1)[-1].endswith(".webp") is False:
             raise MediaInsertionError("media_url must point to a WebP file")

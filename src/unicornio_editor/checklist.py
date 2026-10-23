@@ -276,6 +276,12 @@ def run_pre_publish_checklist(
         supplied_quota = media_context.get("quota_content")
         if isinstance(supplied_quota, str) and supplied_quota.strip():
             quota_content = supplied_quota
+    layout_policy = media_context.get("layout_policy") if isinstance(media_context, Mapping) else None
+    canonical_editorial_body = str(editorial.get("cleaned_html") or "")
+    if layout_policy and canonical_editorial_body.strip():
+        # The 2/4/6 band is based on source editorial copy, not media captions
+        # or composed template blocks that are absent from that source.
+        quota_content = canonical_editorial_body
     words = word_count(quota_content)
     raw_title = post.get("title")
     if isinstance(raw_title, Mapping):
@@ -291,6 +297,40 @@ def run_pre_publish_checklist(
         raw_required = inline_context.get("required") if isinstance(inline_context, Mapping) else None
         if isinstance(raw_required, int) and not isinstance(raw_required, bool) and raw_required >= 0:
             required = raw_required
+    required_ideal = required
+    from .list_quality import detect_list_format
+
+    categories = editorial.get("categories") or post.get("categories") or ()
+    is_list = detect_list_format(title_str, content, categories) is not None
+    layout_validation: dict[str, Any] = {"valid": False, "present": False, "reason": "not_provided"}
+    if layout_policy:
+        from .pipeline_v2.media_layout import validate_normal_article_layout_policy
+
+        layout_body = str(editorial.get("cleaned_html") or "")
+        layout_validation = validate_normal_article_layout_policy(
+            layout_body,
+            layout_policy,
+            target_ideal=required_ideal,
+            media=media_context,
+            listicle=is_list,
+        )
+        check(
+            "media_layout_policy",
+            bool(layout_validation.get("valid")),
+            (
+                "redução de layout estrutural comprovada: "
+                f"ideal={required_ideal}, efetivo={layout_validation.get('target_effective')}"
+                if layout_validation.get("valid") and layout_validation.get("target_effective") != required_ideal
+                else "capacidade de layout verificada"
+                if layout_validation.get("valid")
+                else "política de layout ausente, divergente ou inválida: "
+                + str(layout_validation.get("reason") or "invalid")
+            ),
+            blocker="structure" if not layout_validation.get("valid") else None,
+            phase="editorial" if not layout_validation.get("valid") else None,
+        )
+        if layout_validation.get("valid"):
+            required = int(layout_validation["target_effective"])
     from .media.relevance import iter_content_images
 
     img_items = iter_content_images(content)
@@ -351,10 +391,7 @@ def run_pre_publish_checklist(
     # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
     required_effective = required
 
-    from .list_quality import detect_list_format
     search_progress = media_context.get("search") if isinstance(media_context, Mapping) else None
-    categories = editorial.get("categories") or post.get("categories") or ()
-    is_list = detect_list_format(title_str, content, categories) is not None
     enrichment_round = 0
     if isinstance(media_context, Mapping):
         try:
@@ -392,6 +429,62 @@ def run_pre_publish_checklist(
     from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 
     content_images = iter_content_images(content)
+    closing_repeat_valid = False
+    post_featured_id = post.get("featured_media")
+    if not is_list and isinstance(media_context, Mapping) and layout_validation.get("valid"):
+        repeat_claim = media_context.get("closing_featured_repeat")
+        featured_payload = media_context.get("featured")
+        policy_repeat = layout_policy.get("closing_featured_repeat") if isinstance(layout_policy, Mapping) else None
+        placement_plan = layout_policy.get("placement_plan") if isinstance(layout_policy, Mapping) else None
+        search_proof = media_context.get("search")
+        waiver_proof = media_context.get("waiver")
+        if (
+            isinstance(repeat_claim, Mapping)
+            and isinstance(featured_payload, Mapping)
+            and isinstance(policy_repeat, Mapping)
+            and isinstance(placement_plan, list)
+            and placement_plan
+            and featured_payload.get("status") == "valid"
+            and isinstance(post_featured_id, int)
+            and not isinstance(post_featured_id, bool)
+            and post_featured_id > 0
+            and featured_payload.get("media_id") == post_featured_id
+            and isinstance(search_proof, Mapping)
+            and search_proof.get("completed") is True
+            and search_proof.get("exhausted") is True
+            and search_proof.get("completion_reason") == "EXHAUSTED_VERIFIED"
+            and isinstance(waiver_proof, Mapping)
+            and waiver_proof.get("applied") is True
+            and repeat_claim.get("role") == "closing_featured_repeat"
+            and repeat_claim.get("placement") == "after_editorial_body"
+            and repeat_claim.get("media_id") == post_featured_id
+            and repeat_claim.get("media_url") == policy_repeat.get("media_url")
+            and repeat_claim.get("asset_sha256") == policy_repeat.get("asset_sha256") == featured_payload.get("sha256")
+            and repeat_claim.get("asset_phash") == policy_repeat.get("asset_phash") == featured_payload.get("phash")
+            and repeat_claim.get("visual_group_id") == policy_repeat.get("visual_group_id") == featured_payload.get("visual_group_id")
+            and repeat_claim.get("body_sha256") == policy_repeat.get("body_sha256") == layout_policy.get("body_sha256")
+            and repeat_claim.get("placement_plan_sha256") == policy_repeat.get("placement_plan_sha256") == layout_policy.get("placement_plan_sha256")
+            and repeat_claim.get("paragraph_index") == placement_plan[-1].get("paragraph_index")
+            and placement_plan[-1].get("anchor") == "after_editorial_body"
+            and len(content_images) >= 1
+        ):
+            from .media.text import plain_text
+
+            feature_url = _canonical_image_url(str(featured_payload.get("media_url") or ""))
+            repeated_positions = [
+                index for index, image in enumerate(content_images)
+                if _canonical_image_url(str(image.get("src") or "")) == feature_url
+            ]
+            last_image = content_images[-1]
+            expected_credit = plain_text(str(featured_payload.get("credit_text") or ""))
+            expected_alt = plain_text(str(featured_payload.get("alt_text") or ""))
+            closing_repeat_valid = bool(
+                repeat_claim.get("media_url") == feature_url
+                and repeated_positions == [len(content_images) - 1]
+                and plain_text(str(last_image.get("alt") or "")) == expected_alt
+                and plain_text(str(last_image.get("caption") or "")) == expected_credit
+                and expected_credit.casefold().startswith("crédito da imagem:")
+            )
     # Policy v4: media accepted after visual-identity rollout must carry a
     # durable identity and a positive (INITIAL/DIFFERENT) verification.  The
     # marker keeps historical serialized states backward compatible until the
@@ -782,6 +875,11 @@ def run_pre_publish_checklist(
             len(repeated_featured_indexes) == 1
             and repeated_featured_indexes[0] == len(content_images) - 1
         )
+    elif repeated_featured_indexes and closing_repeat_valid:
+        featured_inline_ok = (
+            len(repeated_featured_indexes) == 1
+            and repeated_featured_indexes[0] == len(content_images) - 1
+        )
     check(
         "featured_inline_position",
         featured_inline_ok,
@@ -789,7 +887,9 @@ def run_pre_publish_checklist(
             "featured não se repete no corpo"
             if not repeated_featured_indexes else
             "featured repetida uma vez ao final da lista"
-            if featured_inline_ok else
+            if is_list and featured_inline_ok else
+            "featured repetida uma vez no fechamento normal com identidade e layout comprovados"
+            if closing_repeat_valid and featured_inline_ok else
             f"featured repetida no corpo nas posições {repeated_featured_indexes}"
         ),
     )

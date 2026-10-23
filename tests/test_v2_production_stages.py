@@ -5,12 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from unicornio_editor.pipeline_v2.errors import StageError
-from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, MediaSearchProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production_stages import (
     ProductionComposeStage,
     ProductionEditorialStage,
     ProductionMediaStage,
     ProductionValidateStage,
+    _ensure_prepared_media_structure,
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
 )
@@ -52,12 +53,29 @@ def _verified_inline(media_id, url, slot, *, decision="DIFFERENT"):
     )
 
 
+def _long_single_sentence_body(paragraphs=10):
+    sentence = " ".join(["Videogame"] + [f"detalhe{index}" for index in range(70)] + ["confirmado."])
+    return "".join(f"<p>{sentence}</p>" for _ in range(paragraphs))
+
+
+def _substantive_body(paragraphs=6):
+    sentence = (
+        "A equipe confirmou detalhes importantes sobre o videogame e explicou os próximos "
+        "passos nesta atualização recente para os jogadores interessados."
+    )
+    return "".join(f"<p>{sentence}</p>" for _ in range(paragraphs))
+
+
 def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     existing = InlineMedia(10, "https://example.test/a.webp", 0, "A", "Crédito da imagem: A")
     stage = ProductionMediaStage(object(), Config(), tmp_path, resolver=lambda *_args: MediaProgress(
         required=2, inline=(existing,), featured=FeaturedProgress(FeaturedStatus.MISSING)
     ))
-    result = stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=2, inline=(existing,))), {})
+    result = stage(
+        {"post_id": 7, "title": "Notícia sobre videogame"},
+        SimpleNamespace(media=MediaProgress(required=2, inline=(existing,))),
+        {"cleaned_html": _substantive_body(), "site_relevance": {"decision": "process"}},
+    )
     assert result.accepted == 1
     assert (tmp_path / "backups/7/editorial.partial.json").exists()
 
@@ -85,7 +103,11 @@ def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):
         ),
     )
     with pytest.raises(StageError) as error:
-        stage({"post_id": 7}, SimpleNamespace(media=MediaProgress(required=1)), {})
+        stage(
+            {"post_id": 7, "title": "Notícia sobre videogame"},
+            SimpleNamespace(media=MediaProgress(required=1)),
+            {"cleaned_html": _substantive_body(), "site_relevance": {"decision": "process"}},
+        )
     assert error.value.blocker is BlockerCode.INTERNAL_ERROR
     assert error.value.phase is Phase.MEDIA
 
@@ -97,9 +119,9 @@ def test_media_stage_logs_contract_error_with_run_identity_and_redacted_tracebac
     )
     with pytest.raises(StageError) as error:
         stage(
-            {"post_id": 115152, "v2_run_id": "run-contract"},
+            {"post_id": 115152, "title": "Notícia sobre videogame", "v2_run_id": "run-contract"},
             SimpleNamespace(media=MediaProgress(required=1)),
-            {},
+            {"cleaned_html": _substantive_body(), "site_relevance": {"decision": "process"}},
         )
     assert error.value.blocker is BlockerCode.INTERNAL_ERROR
     event = json.loads((tmp_path / "work/telemetry.jsonl").read_text(encoding="utf-8"))
@@ -316,7 +338,7 @@ def test_editorial_stage_prepares_body_before_media_and_places_final_image_befor
     assert end_marker_position < final_image_position < cta_position
 
 
-def test_unplaceable_normal_article_is_routed_to_editorial_rework(tmp_path, monkeypatch):
+def test_capacity_limited_normal_article_gets_audited_layout_reduction(tmp_path, monkeypatch):
     post_id = 115778
     title = "Atualização semanal de videogame"
     sentence = " ".join(
@@ -359,27 +381,302 @@ def test_unplaceable_normal_article_is_routed_to_editorial_rework(tmp_path, monk
         "unicornio_editor.pipeline_v2.production_stages.generate_editorial_batch",
         lambda *_args, **_kwargs: {"output": "generated.json"},
     )
-    with pytest.raises(StageError) as first_error:
-        stage(context, WorkState(phase=Phase.EDITORIAL))
-    assert first_error.value.blocker is BlockerCode.STRUCTURE
+    prepared = stage(context, WorkState(phase=Phase.EDITORIAL))
     audit_path = tmp_path / "backups" / str(post_id) / "editorial.structure.json"
-    assert json.loads(audit_path.read_text())["status"] == "rework_required"
+    audit = json.loads(audit_path.read_text())
+    assert audit["status"] == "prepared"
+    assert audit["target_ideal"] == 4
+    assert audit["capacity_verified"] == 3
+    assert audit["target_effective"] == 3
+    assert audit["reduction_reason"] == "layout_limited"
+    assert prepared["cleaned_html"] == one_sentence_paragraphs
 
-    captured = {}
 
-    def capture_rework(path, **_kwargs):
-        captured.update(json.loads(Path(path).read_text()))
-        return {"output": "generated.json"}
+def test_media_stage_uses_audited_effective_target_before_provider_resolution(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(10)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    observed = {}
+
+    def resolver(_context, state, _editorial, previous):
+        observed["state_required"] = state.media.required
+        observed["previous_required"] = previous.required
+        observed["policy"] = previous.layout_policy
+        return MediaProgress(required=previous.required)
+
+    state = WorkState(phase=Phase.MEDIA, media=MediaProgress(required=4))
+    result = ProductionMediaStage(object(), Config(), tmp_path, resolver=resolver)(
+        {"post_id": 115779, "title": "Atualização semanal de videogame"},
+        state,
+        {"cleaned_html": body, "site_relevance": {"decision": "process"}},
+    )
+    assert observed["state_required"] == 3
+    assert observed["previous_required"] == 3
+    assert observed["policy"]["reduction_reason"] == "layout_limited"
+    assert result.required == 3
+    assert result.layout_policy == observed["policy"]
+
+
+def test_compose_keeps_quota_body_separate_from_composed_media_html(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(10)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    prepared, audit, error = _prepare_editorial_media_structure(
+        {"cleaned_html": body, "seo": {"title": "Notícia sobre videogame", "focus_keyword": "videogame"}},
+        WorkState(phase=Phase.EDITORIAL),
+        title="Notícia sobre videogame",
+    )
+    assert error is None
+    directory = tmp_path / "backups" / "115780"
+    directory.mkdir(parents=True)
+    (directory / "editorial.structure.json").write_text(json.dumps(audit), encoding="utf-8")
+    (directory / "editorial.draft.json").write_text(json.dumps(prepared), encoding="utf-8")
+    accepted = tuple(
+        _verified_inline(index, f"https://media.example/{index}.webp", index - 1)
+        for index in range(1, 4)
+    )
+    media = MediaProgress(
+        required=3,
+        inline=accepted,
+        featured=FeaturedProgress(FeaturedStatus.MISSING),
+        layout_policy=audit["media_layout_policy"],
+    )
+    candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
+        {"post_id": 115780, "title": "Notícia sobre videogame", "original_link": None},
+        prepared,
+        media,
+    )
+    assert candidate["editorial"]["cleaned_html"] == prepared["cleaned_html"]
+    assert candidate["content"].count("<img") == 3
+    assert candidate["media"]["inline"]["required"] == 3
+    assert candidate["media"]["layout_policy"] == audit["media_layout_policy"]
+
+
+def test_compose_adds_non_distinct_featured_only_at_verified_exhausted_closure(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(11)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID, 99, "https://media.example/featured.webp",
+        "f" * 64, "f" * 16, "visual:featured", {"decision": "INITIAL"},
+        "Featured key art", "Crédito da imagem: Fonte oficial", 1280, 720,
+    )
+    editorial = {
+        "title": "Notícia sobre videogame",
+        "cleaned_html": body,
+        "seo": {"title": "Notícia sobre videogame", "focus_keyword": "videogame"},
+        "site_relevance": {"decision": "process"},
+    }
+    prepared, audit, error = _prepare_editorial_media_structure(
+        editorial,
+        WorkState(phase=Phase.EDITORIAL, media=MediaProgress(required=4, featured=featured)),
+        title="Notícia sobre videogame",
+    )
+    assert error is None
+    assert "closing_featured_repeat" in audit["media_layout_policy"]
+    media = MediaProgress(
+        required=4,
+        inline=(
+            _verified_inline(21, "https://media.example/inline-21.webp", 0),
+            _verified_inline(22, "https://media.example/inline-22.webp", 1),
+        ),
+        featured=featured,
+        search=MediaSearchProgress(
+            completed=True, exhausted=True, completion_reason="EXHAUSTED_VERIFIED",
+        ),
+        waiver_applied=True,
+        waiver_reason="search_exhausted",
+        layout_policy=audit["media_layout_policy"],
+    )
+    candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
+        {"post_id": 115781, "title": "Notícia sobre videogame", "original_link": None},
+        prepared,
+        media,
+    )
+    assert candidate["content"].count("<img") == 3
+    assert candidate["content"].rfind("featured.webp") > candidate["content"].rfind("inline-22.webp")
+    assert candidate["media"]["closing_featured_repeat"]["media_id"] == 99
+    assert candidate["media"]["inline"]["accepted_count"] == 2
+
+
+def test_skip_decision_bypasses_media_structure_requirements():
+    short_skip = {
+        "decision": "skip",
+        "cleaned_html": "<p>Não é uma notícia processável.</p>",
+        "media_plan": [],
+    }
+    prepared, audit, error = _prepare_editorial_media_structure(
+        short_skip,
+        WorkState(phase=Phase.EDITORIAL),
+        title="Item não relacionado",
+    )
+    assert error is None
+    assert audit["status"] == "not_applicable"
+    assert audit["decision"] == "skip"
+    assert "media_layout_policy" not in audit
+    assert prepared["cleaned_html"] == short_skip["cleaned_html"]
+
+
+def test_structure_audit_hash_mismatch_rebuilds_prepared_layout(tmp_path, monkeypatch):
+    post_id = 115783
+    title = "Atualização semanal de videogame"
+    body = _long_single_sentence_body(10)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    prepared, audit, error = _prepare_editorial_media_structure(
+        {"cleaned_html": body, "seo": {}},
+        WorkState(phase=Phase.EDITORIAL),
+        title=title,
+    )
+    assert error is None
+    assert audit["structure_sha256"]
+    audit["structure_sha256"] = "0" * 64
+    directory = tmp_path / "backups" / str(post_id)
+    directory.mkdir(parents=True)
+    (directory / "editorial.structure.json").write_text(json.dumps(audit), encoding="utf-8")
+    (directory / "editorial.draft.json").write_text(json.dumps(prepared), encoding="utf-8")
+
+    editorial = dict(prepared)
+    editorial, rebuilt_audit, policy = _ensure_prepared_media_structure(
+        tmp_path,
+        post_id,
+        editorial,
+        WorkState(phase=Phase.MEDIA),
+        title=title,
+    )
+    assert rebuilt_audit["structure_sha256"] != "0" * 64
+    assert rebuilt_audit["prepared_body_sha256"]
+    assert policy["target_effective"] == 3
+    saved = json.loads((directory / "editorial.structure.json").read_text(encoding="utf-8"))
+    assert saved["structure_sha256"] == rebuilt_audit["structure_sha256"]
+
+
+def test_editorial_rework_includes_html_semantics_gate_and_omits_media_gate(tmp_path, monkeypatch):
+    post_id = 115781
+    title = "Notícia sobre videogame"
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"posts": [{"post_id": post_id, "title": title}]}), encoding="utf-8")
+    directory = tmp_path / "backups" / str(post_id)
+    directory.mkdir(parents=True)
+    old_editorial = {"title": title, "cleaned_html": _substantive_body(5), "seo": {}}
+    (directory / "editorial.draft.json").write_text(json.dumps(old_editorial), encoding="utf-8")
+    (directory / "editorial.validation.json").write_text(json.dumps({
+        "failures": [
+            {"gate": "html_semantics", "detail": "empty paragraph"},
+            {"gate": "imagens_no_corpo", "detail": "missing media"},
+        ],
+    }), encoding="utf-8")
+    (directory / "editorial.structure.json").write_text(json.dumps({
+        "status": "rework_required", "failure": "unplaceable planned media",
+    }), encoding="utf-8")
 
     monkeypatch.setattr(
-        "unicornio_editor.pipeline_v2.production_stages.generate_editorial_batch",
-        capture_rework,
+        "unicornio_editor.pipeline_v2.production_stages.prepare_batch",
+        lambda *_args: {"prepared": 1, "editorial_input": str(input_path)},
     )
-    with pytest.raises(StageError):
-        stage(context, WorkState(phase=Phase.EDITORIAL, blocker=BlockerCode.STRUCTURE))
-    rework = captured["posts"][0]["rework"]
-    assert rework["blocker"] == BlockerCode.STRUCTURE.value
-    assert any(item["gate"] == "estrutura" for item in rework["failed_gates"])
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    captured = {}
+
+    def generate(path, **_kwargs):
+        captured["input"] = json.loads(Path(path).read_text(encoding="utf-8"))
+        return {"output": "generated.json"}
+
+    monkeypatch.setattr("unicornio_editor.pipeline_v2.production_stages.generate_editorial_batch", generate)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.load_editorial_batch",
+        lambda *_args: {"items": [{"post_id": post_id, "status": "ok", "editorial": {
+            "title": title,
+            "cleaned_html": _substantive_body(6),
+            "seo": {"title": title, "meta_description": "Descrição editorial suficientemente longa para a validação.", "focus_keyword": "videogame"},
+            "site_relevance": {"decision": "process", "confidence": 0.95, "reason": "games", "matched_topics": ["games"]},
+        }}]},
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.resolve_editorial_defaults",
+        lambda editorial, _post: editorial,
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.validate_editorial",
+        lambda editorial, **_kwargs: editorial,
+    )
+    editorial_config = SimpleNamespace(
+        editorial_api_key="test", editorial_base_url="https://editorial.test",
+        editorial_model="test", http_timeout=1, min_relevance_confidence=0.8,
+    )
+    result = ProductionEditorialStage(object(), editorial_config, tmp_path)(
+        {"post_id": post_id, "title": title, "post": {"id": post_id, "title": {"raw": title}}},
+        WorkState(phase=Phase.EDITORIAL, blocker=BlockerCode.STRUCTURE),
+    )
+    rework = captured["input"]["posts"][0]["rework"]
+    gates = {failure["gate"] for failure in rework["failed_gates"]}
+    assert "html_semantics" in gates
+    assert "estrutura" in gates
+    assert "imagens_no_corpo" not in gates
+    assert result["site_relevance"]["decision"] == "process"
+
+
+def test_validate_recomposes_candidate_when_resumed_body_changed(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(10) + "<p><br></p>"
+    title = "Atualização semanal de videogame"
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.compose_final_content",
+        lambda editorial, *_args, **_kwargs: (editorial["cleaned_html"], None, "not_required"),
+    )
+    observed = {}
+
+    def checklist(**kwargs):
+        observed["editorial"] = kwargs["editorial"]
+        observed["content"] = kwargs["content"]
+        observed["media"] = kwargs["media_context"]
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr("unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist", checklist)
+    source = {
+        "title": title,
+        "cleaned_html": body,
+        "seo": {"title": title, "meta_description": "Descrição suficientemente longa para este teste de validação local.", "focus_keyword": "videogame"},
+        "site_relevance": {"decision": "process", "confidence": 0.95, "reason": "games", "matched_topics": ["games"]},
+    }
+    candidate = {
+        "_v2_run_id": "previous-run",
+        "content": "<p>Candidato antigo que não corresponde ao corpo preparado.</p>",
+        "editorial": {"cleaned_html": "<p>Texto antigo.</p>", "seo": {}},
+        "media": MediaProgress(required=4).to_dict(),
+        "featured_media": None,
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {
+            "post_id": 115782,
+            "title": title,
+            "original_link": None,
+            "post": {"id": 115782, "status": "pending", "title": {"raw": title}, "meta": {}},
+            "editorial": source,
+            "candidate_must_be_fresh": True,
+            "v2_run_id": "current-run",
+        },
+        candidate,
+    )
+    assert result["passed"] is True
+    assert observed["editorial"]["cleaned_html"] == _long_single_sentence_body(10)
+    assert "Candidato antigo" not in observed["content"]
+    assert observed["media"]["inline"]["required"] == 3
+    assert observed["media"]["layout_policy"]["target_ideal"] == 4
+    assert observed["media"]["layout_policy"]["target_effective"] == 3
 
 
 def test_listicle_media_preparation_does_not_restructure_item_coverage():
@@ -431,7 +728,7 @@ def test_media_structure_counts_only_positions_not_already_present_and_verified(
 
 def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):
     editorial = {
-        "cleaned_html": "<p>one</p><p>two</p><p>three</p><p>four</p>",
+        "cleaned_html": _substantive_body(6),
         "seo": {
             "title": "Título SEO",
             "meta_description": "Descrição editorial com contexto suficiente para validar o fluxo seguro de publicação e confirmar os dados principais.",
@@ -525,11 +822,15 @@ def test_compose_does_not_repeat_existing_or_featured_inline_media(tmp_path):
 
 
 def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path):
+    paragraph = (
+        "A equipe responsável pelo projeto confirmou nesta semana que a atualização amplia os recursos "
+        "disponíveis, melhora o desempenho nas principais plataformas e corrige problemas relatados pelos "
+        "jogadores desde o lançamento. Os desenvolvedores também explicaram como cada mudança será "
+        "distribuída, quais opções permanecem configuráveis e de que maneira o público poderá acompanhar "
+        "as próximas etapas do trabalho."
+    )
     editorial = {
-        "cleaned_html": "".join(
-                f"<p>Parágrafo {index} com contexto editorial suficiente sobre videogame e seus detalhes principais.</p>"
-            for index in range(13)
-        ),
+        "cleaned_html": "".join(f"<p>{paragraph}</p>" for _ in range(13)),
         "seo": {},
     }
     media = MediaProgress(
@@ -550,7 +851,7 @@ def test_compose_plans_four_accepted_images_against_current_paragraphs(tmp_path)
 def test_compose_routes_insufficient_paragraphs_to_structured_editorial_error(tmp_path):
     editorial = {
         "cleaned_html": "".join(
-            "<p>Parágrafo com contexto editorial suficiente para explicar os detalhes conhecidos da notícia.</p>"
+            "<p>Parágrafo com contexto editorial suficiente para explicar os detalhes conhecidos da notícia ao público interessado.</p>"
             for _ in range(4)
         ),
         "seo": {},

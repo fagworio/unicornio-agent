@@ -1349,17 +1349,55 @@ class ProductionMediaResolver:
         if not isinstance(normalized_id, int) or normalized_id <= 0:
             return unavailable
         media_url = ""
+        alt_text = ""
+        credit_text = ""
+        width = height = 0
         try:
-            media_url = str(self.client.get_media(normalized_id).get("source_url") or "")
+            attachment = self.client.get_media(normalized_id)
+            media_url = str(attachment.get("source_url") or "")
+            from ..media.text import plain_text
+
+            alt_text = plain_text(str(attachment.get("alt_text") or ""))
+            credit_text = plain_text(str(((attachment.get("caption") or {}).get("rendered") or "")))
+            details = attachment.get("media_details") or {}
+            width = int(details.get("width") or 0)
+            height = int(details.get("height") or 0)
         except Exception:
             pass
-        return FeaturedProgress(FeaturedStatus.VALID, normalized_id, media_url)
+        return FeaturedProgress(
+            FeaturedStatus.VALID, normalized_id, media_url,
+            alt_text=alt_text, credit_text=credit_text, width=width, height=height,
+        )
 
     def __call__(self, context, state, editorial, previous):
         html = str(editorial.get("cleaned_html") or "")
         title = str(context.get("title") or "")
         focus_keyword = str((editorial.get("seo") or {}).get("focus_keyword") or "")
         total_required = _required_image_count_for_editorial(html, title=title)
+        if previous.layout_policy:
+            from .media_layout import validate_normal_article_layout_policy
+
+            policy_validation = validate_normal_article_layout_policy(
+                html,
+                previous.layout_policy,
+                target_ideal=total_required,
+                media=previous,
+                listicle=detect_list_format(
+                    title,
+                    html,
+                    editorial.get("categories") or context.get("categories") or (),
+                ) is not None,
+            )
+            if not policy_validation.get("valid"):
+                from .errors import StageError
+                from .model import BlockerCode
+
+                raise StageError(
+                    BlockerCode.STRUCTURE,
+                    Phase.EDITORIAL,
+                    "media_layout_policy:" + str(policy_validation.get("reason") or "invalid"),
+                )
+            total_required = int(policy_validation["target_effective"])
         registry_media: list[dict[str, Any]] = []
         try:
             from ..media.registry import load_v2_media
@@ -1403,11 +1441,24 @@ class ProductionMediaResolver:
             (row for row in registry_media if row.get("role") == "featured" and row.get("wordpress_media_id")),
             None,
         )
+        registry_featured_attachment: dict[str, Any] = {}
+        registry_featured_alt = ""
+        registry_featured_credit = ""
+        registry_featured_width = 0
+        registry_featured_height = 0
         if registry_featured:
             try:
-                attachment = self.client.get_media(int(registry_featured["wordpress_media_id"]))
-                if _canonical_embedded_media_url(str((attachment or {}).get("source_url") or "")) != _canonical_embedded_media_url(str(registry_featured.get("canonical_url") or "")):
+                registry_featured_attachment = self.client.get_media(int(registry_featured["wordpress_media_id"]))
+                if _canonical_embedded_media_url(str((registry_featured_attachment or {}).get("source_url") or "")) != _canonical_embedded_media_url(str(registry_featured.get("canonical_url") or "")):
                     registry_featured = None
+                if registry_featured:
+                    from ..media.text import plain_text
+
+                    details = registry_featured_attachment.get("media_details") or {}
+                    registry_featured_alt = plain_text(str(registry_featured_attachment.get("alt_text") or ""))
+                    registry_featured_credit = plain_text(str(((registry_featured_attachment.get("caption") or {}).get("rendered") or "")))
+                    registry_featured_width = int(details.get("width") or 0)
+                    registry_featured_height = int(details.get("height") or 0)
             except Exception:
                 registry_featured = None
         featured = (
@@ -1419,6 +1470,10 @@ class ProductionMediaResolver:
                 str(registry_featured.get("phash") or ""),
                 str(registry_featured.get("visual_group_id") or ""),
                 dict(registry_featured.get("visual_verification") or {}),
+                registry_featured_alt,
+                registry_featured_credit,
+                registry_featured_width,
+                registry_featured_height,
             )
             if registry_featured and previous.featured.status not in {FeaturedStatus.VALID, FeaturedStatus.VISION_REJECTED, FeaturedStatus.INVALID}
             and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
@@ -1438,6 +1493,8 @@ class ProductionMediaResolver:
                 enrichment_round=previous.enrichment_round,
                 waiver_applied=previous.waiver_applied,
                 waiver_reason=previous.waiver_reason,
+                layout_policy=previous.layout_policy,
+                closing_featured_repeat=previous.closing_featured_repeat,
             ),
             post_id=int(context.get("post_id") or 0) or None,
             run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
@@ -1653,6 +1710,8 @@ class ProductionMediaResolver:
                 enrichment_round=previous.enrichment_round,
                 waiver_applied=previous.waiver_applied,
                 waiver_reason=previous.waiver_reason,
+                layout_policy=previous.layout_policy,
+                closing_featured_repeat=previous.closing_featured_repeat,
             )
         rejection_history = _media_rejection_history(self.root, int(context["post_id"]))
         from ..media.vision_policy import featured_vision_context_key
@@ -1949,6 +2008,10 @@ class ProductionMediaResolver:
                     str(baseline_featured_asset.get("phash") or current_featured.phash),
                     str(baseline_featured_asset.get("visual_group_id") or current_featured.visual_group_id),
                     dict(baseline_featured_asset.get("visual_verification") or current_featured.visual_verification),
+                    current_featured.alt_text,
+                    current_featured.credit_text,
+                    current_featured.width,
+                    current_featured.height,
                 )
             # Crash-safe incremental progress: an accepted asset is durable
             # before the resolver moves on to the next candidate/query.
@@ -2454,6 +2517,8 @@ class ProductionMediaResolver:
             featured=current_featured,
             search=search_progress,
             enrichment_round=enrichment_round,
+            layout_policy=previous.layout_policy,
+            closing_featured_repeat=previous.closing_featured_repeat,
         )
 
     @staticmethod
@@ -2785,6 +2850,35 @@ class WordPressWriterV2:
         )
         candidate_media_present = outcome.type.value == "ready" and isinstance(candidate.get("media"), dict)
         if outcome.type.value == "ready" and content:
+            candidate_editorial = candidate.get("editorial") if isinstance(candidate.get("editorial"), dict) else {}
+            layout_body = str(candidate_editorial.get("cleaned_html") or "")
+            layout_policy = getattr(candidate_media, "layout_policy", {}) or {}
+            layout_ideal = required_image_count_for_content(
+                layout_body,
+                title=str(candidate.get("title") or context.get("title") or ""),
+            )
+            if layout_policy:
+                from .media_layout import validate_normal_article_layout_policy
+
+                layout_result = validate_normal_article_layout_policy(
+                    layout_body,
+                    layout_policy,
+                    target_ideal=layout_ideal,
+                    media=candidate_media,
+                    listicle=detect_list_format(
+                        str(candidate.get("title") or context.get("title") or ""),
+                        layout_body,
+                        candidate_editorial.get("categories") or context.get("categories") or (),
+                    ) is not None,
+                )
+                if (
+                    not layout_result.get("valid")
+                    or int(layout_result.get("target_effective") or 0) != candidate_media.required
+                ):
+                    raise RuntimeError(
+                        "approved candidate has invalid media layout evidence: "
+                        + str(layout_result.get("reason") or "required_count_mismatch")
+                    )
             _assert_candidate_media_contract(
                 content,
                 candidate_media if candidate_media_present else proposed_media,
@@ -2835,6 +2929,12 @@ class WordPressWriterV2:
                 or candidate_accounting.unverified_count
             ):
                 raise RuntimeError("approved candidate contains ineligible visual media")
+            if (
+                candidate_media_present
+                and not layout_policy
+                and candidate_media.required < layout_ideal
+            ):
+                raise RuntimeError("approved candidate reduces media quota without layout evidence")
             proposed_featured = getattr(proposed_media, "featured", None)
             if (
                 getattr(candidate_featured, "media_id", None)
@@ -3088,6 +3188,8 @@ class WordPressWriterV2:
                         inline=tuple(candidate_media.inline),
                         featured=candidate_media.featured,
                         accepted_count=None,
+                        layout_policy=dict(candidate_media.layout_policy),
+                        closing_featured_repeat=dict(candidate_media.closing_featured_repeat),
                     ),
                 )
                 state_json = json.dumps(final_state.to_dict(), ensure_ascii=False, separators=(",", ":"))

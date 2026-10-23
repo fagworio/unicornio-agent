@@ -72,6 +72,20 @@ def test_repeated_identity_group_cannot_inflate_visual_coverage():
     assert result.effective_missing == 1
 
 
+def test_repeated_featured_attachment_is_not_counted_as_distinct_inline_media():
+    featured = _asset(9, "INITIAL", "a" * 64, "1" * 16, "visual:a")
+    inline_featured = _asset(9, "DIFFERENT", "b" * 64, "2" * 16, "visual:b")
+    distinct = _asset(10, "DIFFERENT", "c" * 64, "3" * 16, "visual:c")
+    result = account_visual_media({
+        "required": 2,
+        "featured": {"status": "valid", "media_id": 9, **featured},
+        "inline": [inline_featured, distinct],
+    })
+    assert result.valid_inline_ids == (10,)
+    assert result.duplicate_inline_ids == (9,)
+    assert result.effective_missing == 1
+
+
 def test_listicle_missing_items_are_derived_from_verified_media_only():
     result = account_visual_media(
         {

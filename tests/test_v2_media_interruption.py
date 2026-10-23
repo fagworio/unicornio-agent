@@ -143,6 +143,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
 
     monkeypatch.setattr(cli, "_resolve_media_batch", discover)
     monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(stages, "required_image_count_for_content", lambda *_args, **_kwargs: 4)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Jogo"}])
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
     monkeypatch.setattr(visual_media, "materialize_media_identity", lambda _c, _cfg, _r, media, **_kw: media)

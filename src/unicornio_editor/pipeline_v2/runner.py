@@ -347,6 +347,8 @@ class PipelineRunner:
                 enrichment_round=media.enrichment_round,
                 waiver_applied=media.waiver_applied,
                 waiver_reason=media.waiver_reason,
+                layout_policy=media.layout_policy,
+                closing_featured_repeat={},
             )
 
         inline_blockers = {
@@ -386,7 +388,7 @@ class PipelineRunner:
                     continue
                 if PipelineRunner._identity_verified(item):
                     merged.append(item)
-            return MediaProgress(required=media.required, inline=tuple(merged), featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
+            return MediaProgress(required=media.required, inline=tuple(merged), featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason, layout_policy=media.layout_policy, closing_featured_repeat={})
 
         def same_asset(item: InlineMedia, invalid: dict[str, Any]) -> bool:
             if invalid.get("media_id") is not None:
@@ -426,12 +428,12 @@ class PipelineRunner:
         if not matched_any:
             # An unrecognized descriptor is not a safe identity. Discard only
             # the current untrusted delta and preserve the previous baseline.
-            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
+            return MediaProgress(required=media.required, inline=safe_previous_inline, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason, layout_policy=media.layout_policy, closing_featured_repeat={})
         remaining = tuple(
             item for item in all_inline.values()
             if not any(same_asset(item, invalid) for invalid in invalid_media)
         )
-        return MediaProgress(required=media.required, inline=remaining, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason)
+        return MediaProgress(required=media.required, inline=remaining, featured=media.featured, search=media.search, enrichment_round=media.enrichment_round, waiver_applied=media.waiver_applied, waiver_reason=media.waiver_reason, layout_policy=media.layout_policy, closing_featured_repeat={})
 
     @staticmethod
     def _next_state(
