@@ -540,6 +540,47 @@ def run_pre_publish_checklist(
             if evidence_matches_current_media
             else "evidência visual ausente, inválida ou divergente do conjunto atual de mídia",
         )
+        application_contract = media_context.get("media_application_contract")
+        if isinstance(application_contract, Mapping):
+            accepted_contract = {
+                int(value) for value in (application_contract.get("accepted") or [])
+                if str(value).isdigit()
+            }
+            applied_contract = {
+                int(value) for value in (application_contract.get("applied") or [])
+                if str(value).isdigit()
+            }
+            surplus_contract = {
+                int(value) for value in (application_contract.get("accepted_working_not_applied") or [])
+                if str(value).isdigit()
+            }
+            body_applied_ids = {
+                int(str(asset.get("media_id")))
+                for asset in inline_assets
+                if str(asset.get("media_id") or "").isdigit()
+                and _canonical_image_url(str(asset.get("media_url") or ""))
+                in {_canonical_image_url(url) for url in inline_images}
+            }
+            contract_valid = (
+                accepted_contract == applied_contract | surplus_contract
+                and applied_contract <= body_applied_ids
+                and (
+                    not surplus_contract
+                    or (
+                        application_contract.get("layout_reduction_authorized") is True
+                        and application_contract.get("journal_readback_proven") is True
+                    )
+                )
+            )
+            check(
+                "media_application_contract",
+                contract_valid,
+                "mídia aceita/aplicada reconciliada com readback e layout"
+                if contract_valid
+                else "contrato aceito/aplicado ausente, divergente ou sem prova de layout/readback",
+                blocker="media_invalid" if not contract_valid else None,
+                phase="media" if not contract_valid else None,
+            )
 
         check(
             "media_duplicate_confirmed",

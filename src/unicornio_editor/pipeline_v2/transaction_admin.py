@@ -81,10 +81,32 @@ def _registry_snapshot(
 ) -> dict[str, Any]:
     path = Path(root) / "work" / "media_registry.sqlite"
     if not path.is_file():
-        return {"present": False, "run": [], "decisions": [], "usages": []}
+        return {"present": False, "schema_complete": False, "run": [], "decisions": [], "usages": [], "operations": []}
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
             db.row_factory = sqlite3.Row
+            tables = {
+                str(row[0])
+                for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            required_columns = {
+                "media_runs": {"run_id", "post_id", "created_at"},
+                "media_decisions": {"run_id", "post_id", "created_at"},
+                "media_usage": {
+                    "post_id", "status", "applied_at", "run_id", "cycle_id",
+                    "cycle_round", "authorization_id", "accepted_at",
+                },
+                "media_operations": {
+                    "post_id", "run_id", "cycle_id", "cycle_round",
+                    "authorization_id", "started_at",
+                },
+            }
+            if set(required_columns) - tables:
+                return {"present": False, "schema_complete": False, "run": [], "decisions": [], "usages": [], "operations": []}
+            for table, required in required_columns.items():
+                columns = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+                if required - columns:
+                    return {"present": False, "schema_complete": False, "run": [], "decisions": [], "usages": [], "operations": []}
             if run_id:
                 run_query = "SELECT * FROM media_runs WHERE run_id=? AND post_id=? ORDER BY rowid"
                 run_args: tuple[Any, ...] = (run_id, int(post_id))
@@ -107,9 +129,20 @@ def _registry_snapshot(
                 "SELECT * FROM media_usage WHERE post_id=? ORDER BY rowid",
                 (int(post_id),),
             )]
+            operations = [dict(row) for row in db.execute(
+                "SELECT * FROM media_operations WHERE post_id=? ORDER BY rowid",
+                (int(post_id),),
+            )]
     except (OSError, sqlite3.Error) as exc:
         raise TransactionIsolationError(f"MediaRegistry read failed: {type(exc).__name__}") from exc
-    return {"present": True, "run": run, "decisions": decisions, "usages": usages}
+    return {
+        "present": True,
+        "schema_complete": True,
+        "run": run,
+        "decisions": decisions,
+        "usages": usages,
+        "operations": operations,
+    }
 
 
 def _linked_evidence(journal: Mapping[str, Any], evidence: Mapping[str, Any] | None) -> bool:
@@ -198,10 +231,11 @@ def _validate_checkpoint(
     authorization_id: str,
     selected_ids: list[int],
     pending_round: int,
+    target_post_id: int,
 ) -> dict[str, Any]:
     state_path = Path(root) / "work" / "v2-cycle" / "state.json"
     journal_path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
-    target_path = Path(root) / "work" / "v2-journal" / "115331.json"
+    target_path = Path(root) / "work" / "v2-journal" / f"{int(target_post_id)}.json"
     policy_path = Path(root) / "config" / "v2-quarantine.json"
     if not all(path.is_file() for path in (state_path, journal_path, target_path, policy_path)):
         raise TransactionIsolationError("checkpoint, aggregate journal, target journal, or quarantine is missing")
@@ -220,14 +254,32 @@ def _validate_checkpoint(
         raise TransactionIsolationError("selection diverged")
     journal = _read_json(target_path)
     expected = {
-        "post_id": 115331,
+        "post_id": int(target_post_id),
         "run_id": str(journal.get("run_id") or ""),
         "cycle_id": str(journal.get("cycle_id") or ""),
         "cycle_round": journal.get("cycle_round"),
         "authorization_id": str(journal.get("authorization_id") or ""),
     }
-    if expected["cycle_id"] != cycle_id or expected["cycle_round"] != pending_round or expected["authorization_id"] != authorization_id:
-        raise TransactionIsolationError("target journal identity diverged")
+    if expected["post_id"] not in {int(value) for value in selected_ids}:
+        raise TransactionIsolationError("target post is not in the authorized selection")
+    if not expected["run_id"]:
+        raise TransactionIsolationError("target journal has no run_id")
+    target_is_current = _journal_matches_authorized_round(
+        journal,
+        post_id=int(target_post_id),
+        cycle_id=cycle_id,
+        authorization_id=authorization_id,
+        pending_round=int(pending_round),
+    )
+    if target_is_current:
+        _validate_uncertain(journal, run_id=expected["run_id"])
+    else:
+        _validate_historical_target_journal(
+            journal,
+            post_id=int(target_post_id),
+            run_id=expected["run_id"],
+            current_authorization_id=authorization_id,
+        )
     return {
         "state": state,
         "journal": journal,
@@ -235,6 +287,7 @@ def _validate_checkpoint(
         "journal_sha256": _hash_file(journal_path),
         "target_journal_sha256": _hash_file(target_path),
         "quarantine_sha256": _hash_file(policy_path),
+        "target_journal_is_current": target_is_current,
         "paths": {"state": str(state_path), "journal": str(journal_path), "target_journal": str(target_path)},
     }
 
@@ -397,9 +450,11 @@ def _wp_summary(post: Mapping[str, Any]) -> dict[str, Any]:
 def _registry_summary(registry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "present": registry.get("present") is True,
+        "schema_complete": registry.get("schema_complete") is True,
         "run_count": len(registry.get("run") or []),
         "decision_count": len(registry.get("decisions") or []),
         "usage_count": len(registry.get("usages") or []),
+        "operation_count": len(registry.get("operations") or []),
         "snapshot_sha256": _hash_value(dict(registry)),
     }
 
@@ -415,11 +470,22 @@ def _round_post_evidence(
     target_journal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
-    journal = (
-        dict(target_journal)
-        if target_journal is not None
-        else _read_json(journal_path) if journal_path.is_file() else None
-    )
+    journal = None
+    journal_sha256 = ""
+    if journal_path.is_file():
+        try:
+            journal_bytes = journal_path.read_bytes()
+            live_journal = json.loads(journal_bytes.decode("utf-8"))
+        except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TransactionIsolationError(f"invalid post journal for {post_id}") from exc
+        if not isinstance(live_journal, dict):
+            raise TransactionIsolationError(f"post journal must be an object for {post_id}")
+        if target_journal is not None and dict(target_journal) != live_journal:
+            raise TransactionIsolationError(f"post journal changed while reading evidence for {post_id}")
+        journal = dict(target_journal) if target_journal is not None else live_journal
+        journal_sha256 = _hash_bytes(journal_bytes)
+    elif target_journal is not None:
+        raise TransactionIsolationError(f"post journal disappeared for {post_id}")
     journal_post_id = str((journal or {}).get("post_id") or "")
     journal_identity_matches = journal is not None and journal_post_id == str(int(post_id))
     if journal is not None and journal_post_id not in {str(int(post_id)), ""}:
@@ -567,7 +633,7 @@ def _round_post_evidence(
         "reason": reason,
         "journal": {
             "present": journal is not None,
-            "sha256": _hash_file(journal_path) if journal is not None and target_journal is None else "",
+            "sha256": journal_sha256,
             "status": (journal or {}).get("status"),
             "run_id": str((journal or {}).get("run_id") or ""),
             "cycle_id": (journal or {}).get("cycle_id"),
@@ -625,7 +691,11 @@ def _derive_round_classifications(
     }
 
 
-def _validate_uncertain(journal: Mapping[str, Any], *, run_id: str) -> None:
+def _validate_uncertain(
+    journal: Mapping[str, Any],
+    *,
+    run_id: str,
+) -> None:
     if str(journal.get("run_id") or "") != run_id:
         raise TransactionIsolationError("run_id diverged")
     if journal.get("status") != "committing":
@@ -634,8 +704,38 @@ def _validate_uncertain(journal: Mapping[str, Any], *, run_id: str) -> None:
         raise TransactionIsolationError("transactional readback is already present; use committed reconciliation")
     if journal.get("media_state") != "apply_not_attempted":
         raise TransactionIsolationError("media_state is not apply_not_attempted")
-    if journal.get("writer_started") is False:
-        raise TransactionIsolationError("journal is pre-writer recoverable, not uncertain isolation")
+    if journal.get("writer_started") is not True:
+        raise TransactionIsolationError("journal has no positive writer-start evidence for uncertain isolation")
+
+
+def _validate_historical_target_journal(
+    journal: Mapping[str, Any],
+    *,
+    post_id: int,
+    run_id: str,
+    current_authorization_id: str,
+) -> None:
+    """Accept only a fully identified committed journal from another authorization."""
+    try:
+        cycle_round = journal.get("cycle_round")
+        if isinstance(cycle_round, bool):
+            raise ValueError
+        cycle_round = int(cycle_round)
+    except (TypeError, ValueError):
+        cycle_round = 0
+    journal_authorization_id = str(journal.get("authorization_id") or "").strip()
+    if (
+        str(journal.get("post_id") or "") != str(int(post_id))
+        or str(journal.get("run_id") or "").strip() != str(run_id).strip()
+        or not str(journal.get("cycle_id") or "").strip()
+        or cycle_round < 1
+        or not journal_authorization_id
+        or journal_authorization_id == str(current_authorization_id)
+        or journal.get("status") != "committed"
+        or journal.get("readback") is not True
+        or journal.get("writer_started") is not True
+    ):
+        raise TransactionIsolationError("historical target journal identity or committed evidence is invalid")
 
 
 def _transition_path(root: Path, isolation_id: str) -> Path:
@@ -766,14 +866,41 @@ def _validate_transition_archive(
     ):
         raise TransactionIsolationError("prepared round accounting diverges from archived checkpoint")
     archived_journal = _read_json(archive / f"journal-{int(transition['post_id'])}.json")
-    if (
-        str(archived_journal.get("post_id") or "") != str(transition["post_id"])
-        or str(archived_journal.get("cycle_id") or "") != str(transition["cycle_id"])
-        or str(archived_journal.get("authorization_id") or "") != str(transition["authorization_id"])
-        or str(archived_journal.get("cycle_round") or "") != str(transition["pending_round"])
+    if str(archived_journal.get("post_id") or "") != str(transition["post_id"]):
+        raise TransactionIsolationError("archived target journal post identity diverges from transition")
+    if _journal_matches_authorized_round(
+        archived_journal,
+        post_id=int(transition["post_id"]),
+        cycle_id=str(transition["cycle_id"]),
+        authorization_id=str(transition["authorization_id"]),
+        pending_round=int(transition["pending_round"]),
     ):
-        raise TransactionIsolationError("archived target journal identity diverges from transition")
-    _validate_uncertain(archived_journal, run_id=str(transition.get("run_id") or ""))
+        _validate_uncertain(archived_journal, run_id=str(transition.get("run_id") or ""))
+    else:
+        _validate_historical_target_journal(
+            archived_journal,
+            post_id=int(transition["post_id"]),
+            run_id=str(transition.get("run_id") or ""),
+            current_authorization_id=str(transition["authorization_id"]),
+        )
+    primary_evidence = next(
+        (
+            item for item in (record.get("round_post_evidence") or [])
+            if isinstance(item, Mapping) and int(item.get("post_id") or 0) == int(transition["post_id"])
+        ),
+        None,
+    )
+    primary_journal_evidence = (primary_evidence or {}).get("journal")
+    if (
+        not isinstance(primary_journal_evidence, Mapping)
+        or primary_journal_evidence.get("sha256") != hashes.get("target_journal")
+        or primary_journal_evidence.get("run_id") != archived_journal.get("run_id")
+        or primary_journal_evidence.get("cycle_id") != archived_journal.get("cycle_id")
+        or primary_journal_evidence.get("cycle_round") != archived_journal.get("cycle_round")
+        or primary_journal_evidence.get("authorization_id") != archived_journal.get("authorization_id")
+        or primary_journal_evidence.get("status") != archived_journal.get("status")
+    ):
+        raise TransactionIsolationError("archived target journal evidence diverges from its preserved identity")
     for isolated_id in transition["isolated_post_ids"]:
         if int(isolated_id) == int(transition["post_id"]):
             continue
@@ -940,15 +1067,15 @@ def _validate_live_round_evidence(
     ]
     primary_id = int(transition["post_id"])
     primary = next((item for item in expected if int(item.get("post_id") or 0) == primary_id), None)
+    primary_journal = (primary or {}).get("journal")
+    primary_hash = str((primary_journal or {}).get("sha256") or "")
     if (
-        not isinstance(primary, Mapping)
-        or not isinstance(primary.get("journal"), Mapping)
-        or str(primary["journal"].get("sha256") or "")
+        not isinstance(primary_journal, Mapping)
+        or primary_journal.get("present") is not True
+        or len(primary_hash) != 64
+        or any(char not in "0123456789abcdef" for char in primary_hash)
     ):
         raise TransactionIsolationError("prepared primary journal evidence is invalid")
-    for item in actual:
-        if int(item["post_id"]) == primary_id:
-            item["journal"]["sha256"] = ""
     if _hash_value(actual) != _hash_value(expected):
         raise TransactionIsolationError(
             "live WordPress, MediaRegistry, or selected journal evidence changed since preparation"
@@ -1352,11 +1479,26 @@ def isolate_uncertain_transaction(
                 raise TransactionIsolationError("pending transition does not match the requested authorization")
             return _apply_transition(root, transition, client)
 
-        checkpoint = _validate_checkpoint(root, cycle_id=cycle_id, authorization_id=authorization_id, selected_ids=selected_ids, pending_round=pending_round)
+        checkpoint = _validate_checkpoint(
+            root,
+            cycle_id=cycle_id,
+            authorization_id=authorization_id,
+            selected_ids=selected_ids,
+            pending_round=pending_round,
+            target_post_id=int(post_id),
+        )
         journal = checkpoint["journal"]
         if str(journal.get("post_id") or "") not in {str(post_id), ""}:
             raise TransactionIsolationError("post_id diverged")
-        _validate_uncertain(journal, run_id=run_id)
+        if checkpoint.get("target_journal_is_current"):
+            _validate_uncertain(journal, run_id=run_id)
+        else:
+            _validate_historical_target_journal(
+                journal,
+                post_id=int(post_id),
+                run_id=run_id,
+                current_authorization_id=authorization_id,
+            )
         round_post_evidence = [
             _round_post_evidence(
                 root,

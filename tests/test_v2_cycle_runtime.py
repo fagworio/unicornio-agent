@@ -50,10 +50,153 @@ def _empty_media_registry(root):
             );
             CREATE TABLE media_usage (
                 post_id INTEGER, wordpress_media_id INTEGER,
-                status TEXT, applied_at TEXT
+                status TEXT, applied_at TEXT, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, accepted_at TEXT,
+                readback_confirmed_at TEXT
+            );
+            CREATE TABLE media_operations (
+                post_id INTEGER, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT,
+                started_at TEXT, completed_at TEXT, operation_status TEXT
             );
             """
         )
+
+
+def test_registry_temporal_audit_distinguishes_accepted_unapplied_from_unknown(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits, acquisition_outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("historical-run", 115181, "{}", "accepted", "2026-10-15T23:56:35+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_decisions(run_id, post_id, candidate_id, disposition, reason_code, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("historical-run", 115181, "candidate", "accepted", "candidate_accepted", "post", "2026-10-15T23:56:36+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, wordpress_media_id, status, applied_at) VALUES (?, ?, ?, ?)",
+            (115181, 115399, "accepted", None),
+        )
+
+    audit = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+    )
+
+    assert audit is not None
+    assert audit["proof_of_absence"] is False
+    assert audit["temporal_classification"]["accepted_not_applied"] == [115181]
+    assert audit["temporal_classification"]["evidence_temporally_unavailable"] == [115181]
+
+
+def test_historical_uncertain_checkpoint_validation_is_target_post_generic(tmp_path):
+    from unicornio_editor.pipeline_v2.transaction_admin import _validate_checkpoint
+
+    cycle_dir = tmp_path / "work" / "v2-cycle"
+    journal_dir = tmp_path / "work" / "v2-journal"
+    policy_path = tmp_path / "config" / "v2-quarantine.json"
+    cycle_dir.mkdir(parents=True)
+    journal_dir.mkdir(parents=True)
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    (cycle_dir / "state.json").write_text(json.dumps({
+        "cycle_id": "current-cycle",
+        "status": "running",
+        "phase": "ADMISSION",
+        "pending_round": {
+            "round_number": 1,
+            "authorization_id": "current-auth",
+            "preview_selected_ids": [115203, 115181],
+        },
+    }), encoding="utf-8")
+    (cycle_dir / "journal.jsonl").write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "current-cycle",
+        "round_number": 1,
+        "authorization_id": "current-auth",
+        "at": "2026-10-23T23:37:47.140176+00:00",
+    }) + "\n", encoding="utf-8")
+    (journal_dir / "115181.json").write_text(json.dumps({
+        "post_id": 115181,
+        "run_id": "historical-run",
+        "cycle_id": "old-cycle",
+        "cycle_round": 3,
+        "authorization_id": "old-auth",
+        "status": "committed",
+        "readback": True,
+        "writer_started": True,
+    }), encoding="utf-8")
+    policy_path.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}), encoding="utf-8")
+
+    checkpoint = _validate_checkpoint(
+        tmp_path,
+        cycle_id="current-cycle",
+        authorization_id="current-auth",
+        selected_ids=[115203, 115181],
+        pending_round=1,
+        target_post_id=115181,
+    )
+
+    assert checkpoint["target_journal_is_current"] is False
+    assert checkpoint["journal"]["post_id"] == 115181
+
+
+def test_115181_historical_committed_plus_accepted_null_stays_uncertain(tmp_path):
+    _empty_media_registry(tmp_path)
+    cycle_dir = tmp_path / "work" / "v2-cycle"
+    journal_dir = tmp_path / "work" / "v2-journal"
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    (cycle_dir / "journal.jsonl").write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "2a5c2e324e20479180b8f4e99c348b55",
+        "round_number": 1,
+        "authorization_id": "78440ceb2d234d93b8ad9f2d7f392b5c",
+        "at": "2026-10-23T23:37:47.140176+00:00",
+    }) + "\n", encoding="utf-8")
+    (journal_dir / "115181.json").write_text(json.dumps({
+        "post_id": 115181,
+        "run_id": "d5cdbed6eaee42e0a1ab2d473ef2867f",
+        "cycle_id": "98c32bba7ec5494aa1ef26e3bf9554b5",
+        "cycle_round": 3,
+        "authorization_id": "4c8ec7675c994e83920305db0688c836",
+        "status": "committed",
+        "readback": True,
+        "state": WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA).to_dict(),
+    }), encoding="utf-8")
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits, acquisition_outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("d5cdbed6eaee42e0a1ab2d473ef2867f", 115181, "{}", "accepted", "2026-10-15T23:56:35+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, wordpress_media_id, status, applied_at) VALUES (?, ?, ?, ?)",
+            (115181, 115399, "accepted", None),
+        )
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{"id": 115181, "status": "pending"}] if page == 1 else []
+
+        def get_post(self, post_id):
+            return {"id": int(post_id), "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(),
+        tmp_path,
+        [115181],
+        expected_cycle_id="2a5c2e324e20479180b8f4e99c348b55",
+        expected_cycle_round=1,
+        expected_authorization_id="78440ceb2d234d93b8ad9f2d7f392b5c",
+    )
+
+    assert result.reconciliation_blocked is True
+    assert result.executed_ids == ()
+    unresolved = result.reconciliation_blocking_info["unresolved_posts"][0]
+    assert unresolved["reason"] == "historical_effect_uncertain"
+    assert unresolved["registry_evidence"]["proof_of_absence"] is False
+    assert unresolved["registry_evidence"]["temporal_classification"]["accepted_not_applied"] == [115181]
 
 
 def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path, monkeypatch):
@@ -1245,6 +1388,132 @@ def test_no_write_proof_blocks_registry_rows_without_timestamps(tmp_path):
         round_number=4,
         authorization_id="current-auth",
     ) is None
+
+
+def test_exact_current_registry_identity_overrides_same_second_timestamp_truncation(tmp_path):
+    _empty_media_registry(tmp_path)
+    authorized_at = "2026-10-23T23:37:47.140176+00:00"
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_operations(post_id, run_id, cycle_id, cycle_round, authorization_id, started_at, operation_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (115181, "current-run", "current-cycle", 1, "current-auth", "2026-10-23T23:37:47.000000+00:00", "started"),
+        )
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            ("current-run", 115181, "2026-10-23 23:37:47"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, status, applied_at, run_id, cycle_id, cycle_round, authorization_id, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (115181, "accepted", None, "current-run", "current-cycle", 1, "current-auth", "2026-10-23T23:37:47.000000+00:00"),
+        )
+
+    evidence = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at=authorized_at,
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=1,
+        expected_authorization_id="current-auth",
+    )
+
+    assert evidence is not None
+    assert evidence["proof_of_absence"] is False
+    assert evidence["temporal_classification"]["current_round_operation"] == [115181]
+    assert evidence["temporal_classification"]["historical_operation"] == []
+    assert evidence["media_registry_timestamp_audit"]["current_round_rows"]
+
+
+def test_current_authorization_accepted_usage_alone_cannot_prove_absence(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_usage(post_id, status, run_id, cycle_id, cycle_round, authorization_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (115181, "accepted", "accepted-run", "current-cycle", 1, "current-auth"),
+        )
+
+    evidence = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=1,
+        expected_authorization_id="current-auth",
+    )
+
+    assert evidence is not None
+    assert evidence["proof_of_absence"] is False
+    assert evidence["temporal_classification"]["accepted_not_applied"] == [115181]
+    assert evidence["temporal_classification"]["current_round_operation"] == [115181]
+
+
+def test_coarse_same_second_registry_timestamp_is_temporally_inconclusive(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            ("legacy-run", 115181, "2026-10-23 23:37:47"),
+        )
+
+    evidence = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=1,
+        expected_authorization_id="current-auth",
+    )
+
+    assert evidence is not None
+    assert evidence["proof_of_absence"] is False
+    assert evidence["temporal_classification"]["historical_operation"] == []
+    assert evidence["temporal_classification"]["evidence_temporally_unavailable"] == [115181]
+
+    journal_evidence = cycle_runtime._historical_journal_evidence(
+        tmp_path,
+        115181,
+        {"run_id": "legacy-run"},
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+    )
+    assert journal_evidence is None
+
+
+def test_registry_without_v5_operation_table_cannot_prove_absence(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute("DROP TABLE media_operations")
+
+    assert cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+    ) is None
+
+
+def test_registry_partial_current_authorization_identity_is_ambiguous_not_historical(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_operations(post_id, run_id, cycle_id, cycle_round, authorization_id, started_at, operation_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (115181, "conflicting-run", "wrong-cycle", 1, "current-auth", "2026-10-23T23:37:47.000000+00:00", "started"),
+        )
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            ("conflicting-run", 115181, "2026-10-23T23:37:47.000000+00:00"),
+        )
+
+    evidence = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=1,
+        expected_authorization_id="current-auth",
+    )
+
+    assert evidence is not None
+    assert evidence["proof_of_absence"] is False
+    assert evidence["temporal_classification"]["historical_operation"] == []
+    assert evidence["temporal_classification"]["evidence_temporally_unavailable"] == [115181]
 
 
 def test_legacy_round_reconciles_per_post_and_blocks_uncorrelated_running_journal(

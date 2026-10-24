@@ -81,6 +81,29 @@ class SourceVerifyTests(unittest.TestCase):
             _normalized_url("https://cdn.test/art work.jpg"),
         )
 
+    def test_relative_source_page_is_rejected_at_the_boundary(self):
+        result = validate_discovered_candidate(
+            {
+                "direct_image_url": "https://cdn.test/art.jpg",
+                "source_page_url": "/search/coastal landscape/",
+            },
+            subject="coastal landscape",
+        )
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason_code"], "source_page_unavailable")
+
+    def test_absolute_source_page_with_unescaped_space_is_candidate_failure(self):
+        result = validate_discovered_candidate(
+            {
+                "direct_image_url": "https://cdn.test/art.jpg",
+                "source_page_url": "https://example.test/search/coastal landscape/",
+            },
+            subject="coastal landscape",
+        )
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason_code"], "source_page_unavailable")
+        self.assertIn("invalid", result["reason"])
+
     @classmethod
     def setUpClass(cls):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), SourcePageHandler)

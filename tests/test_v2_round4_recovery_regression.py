@@ -34,7 +34,12 @@ def test_round4_mixed_journals_reconcile_without_replay_or_fake_correlation(tmp_
             );
             CREATE TABLE media_usage (
                 post_id INTEGER, wordpress_media_id INTEGER,
-                status TEXT, applied_at TEXT
+                status TEXT, applied_at TEXT, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, accepted_at TEXT
+            );
+            CREATE TABLE media_operations (
+                post_id INTEGER, run_id TEXT, cycle_id TEXT, cycle_round INTEGER,
+                authorization_id TEXT, started_at TEXT, operation_status TEXT
             );
             """
         )

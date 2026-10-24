@@ -3296,11 +3296,15 @@ def _read_v2_work_state(post: dict[str, Any]) -> dict[str, Any] | None:
 def _publish_v2_media_context(
     v2_state: dict[str, Any] | None,
     post: dict[str, Any],
+    *,
+    root: Path | None = None,
 ) -> dict[str, Any] | None:
     """Return fail-closed V2 media evidence for publisher checklist validation.
 
-    READY V2 posts use visual-identity policy 4. Missing or malformed evidence
-    must not silently downgrade the checklist to its legacy image-count rules.
+    ``inline.accepted`` is the verified working set, not necessarily the set
+    written to the current WordPress body.  A valid normal-article layout
+    reduction may preserve a bounded surplus as ``accepted_working_not_applied``;
+    every applied asset still needs current HTML/readback and journal proof.
     """
     if v2_state is None:
         return None
@@ -3340,6 +3344,94 @@ def _publish_v2_media_context(
         and featured.get("status") == "valid"
         and featured.get("media_id") == current_featured_id
     )
+    accepted_ids = {
+        int(item["media_id"])
+        for item in accepted
+        if isinstance(item.get("media_id"), int)
+        and not isinstance(item.get("media_id"), bool)
+        and item["media_id"] > 0
+    }
+    applied_urls = accepted_urls & current_urls
+    surplus_urls = accepted_urls - current_urls
+    layout_policy = media.get("layout_policy")
+    layout_policy = layout_policy if isinstance(layout_policy, dict) else {}
+    target_ideal = layout_policy.get("target_ideal")
+    target_effective = layout_policy.get("target_effective")
+    try:
+        from .pipeline_v2.media_layout import _layout_sha256
+
+        layout_hash_valid = layout_policy.get("layout_sha256") == _layout_sha256(layout_policy)
+    except (TypeError, ValueError, KeyError):
+        layout_hash_valid = False
+    reduction_authorized = (
+        layout_policy.get("schema_version") == 2
+        and layout_policy.get("policy") == "normal-article-layout-v2"
+        and layout_policy.get("layout") == "normal_article"
+        and isinstance(target_ideal, int)
+        and not isinstance(target_ideal, bool)
+        and isinstance(target_effective, int)
+        and not isinstance(target_effective, bool)
+        and target_ideal >= target_effective >= 1
+        and target_effective == required
+        and layout_policy.get("reduction_reason") == "layout_limited"
+        and layout_hash_valid
+    )
+    reduction_limit = (
+        max(0, int(target_ideal) - int(target_effective))
+        if reduction_authorized else 0
+    )
+    surplus_authorized = (
+        reduction_authorized
+        and len(surplus_urls) <= reduction_limit
+        and len(applied_urls) == int(target_effective)
+    )
+    journal_proof = False
+    journal = None
+    if root is not None:
+        journal_path = Path(root) / "work" / "v2-journal" / f"{int(post.get('id') or 0)}.json"
+        try:
+            journal_value = json.loads(journal_path.read_text(encoding="utf-8"))
+            journal = journal_value if isinstance(journal_value, dict) else None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            journal = None
+    if surplus_urls:
+        apply_records = journal.get("apply_media_records") if isinstance(journal, dict) else None
+        media_records = journal.get("media_records") if isinstance(journal, dict) else None
+        confirmed_ids = {
+            int(record.get("media_id"))
+            for record in (apply_records or [])
+            if isinstance(record, dict)
+            and str(record.get("role") or "") == "inline"
+            and record.get("readback_status") == "confirmed"
+            and str(record.get("destination") or "") == "applied_readback_confirmed"
+            and str(record.get("media_id") or "").isdigit()
+        }
+        unapplied_ids = {
+            int(record.get("media_id"))
+            for record in (media_records or [])
+            if isinstance(record, dict)
+            and str(record.get("role") or "") == "inline"
+            and str(record.get("destination") or "") == "accepted_working_not_applied"
+            and str(record.get("media_id") or "").isdigit()
+        }
+        surplus_ids = {
+            int(item["media_id"])
+            for item in accepted
+            if _canonical_image_url(str(item.get("media_url") or "")) in surplus_urls
+        }
+        current_hash = hashlib.sha256(
+            str((post.get("content") or {}).get("raw") or "").encode("utf-8")
+        ).hexdigest()
+        journal_proof = bool(
+            journal
+            and journal.get("status") == "committed"
+            and journal.get("readback") is True
+            and journal.get("media_application_status") == "confirmed"
+            and journal.get("html_readback_status") == "confirmed"
+            and confirmed_ids == accepted_ids - surplus_ids
+            and unapplied_ids == surplus_ids
+            and journal.get("candidate_hash") == current_hash
+        )
     evidence_matches_current_media = (
         isinstance(raw_media, dict)
         and isinstance(raw_inline, dict)
@@ -3348,8 +3440,9 @@ def _publish_v2_media_context(
         and len(accepted) == len(raw_inline["accepted"])
         and len(accepted_urls) == len(accepted)
         and featured_is_mapping
-        and accepted_urls.issubset(current_urls)
-        and (bool(accepted_urls) or not current_urls)
+        and bool(applied_urls) == bool(accepted_urls)
+        and accepted_urls.issubset(current_urls | surplus_urls)
+        and (not surplus_urls or surplus_authorized and journal_proof)
         and featured_matches
     )
     # Keep the exact persisted V2 media contract (including search and waiver
@@ -3360,6 +3453,28 @@ def _publish_v2_media_context(
     context: dict[str, Any] = dict(media)
     context["visual_identity_policy"] = 4
     context["visual_identity_evidence_valid"] = evidence_matches_current_media
+    context["accepted_media_ids"] = sorted(accepted_ids)
+    context["applied_inline_ids"] = sorted(
+        int(item["media_id"])
+        for item in accepted
+        if _canonical_image_url(str(item.get("media_url") or "")) in applied_urls
+        and isinstance(item.get("media_id"), int)
+        and not isinstance(item.get("media_id"), bool)
+    )
+    context["accepted_working_not_applied_ids"] = sorted(
+        int(item["media_id"])
+        for item in accepted
+        if _canonical_image_url(str(item.get("media_url") or "")) in surplus_urls
+        and isinstance(item.get("media_id"), int)
+        and not isinstance(item.get("media_id"), bool)
+    )
+    context["media_application_contract"] = {
+        "accepted": sorted(accepted_ids),
+        "applied": context["applied_inline_ids"],
+        "accepted_working_not_applied": context["accepted_working_not_applied_ids"],
+        "layout_reduction_authorized": bool(reduction_authorized),
+        "journal_readback_proven": bool(journal_proof),
+    }
     context["inline"] = {**inline, "required": required, "accepted": accepted}
     context["featured"] = featured
     return context
@@ -3968,7 +4083,7 @@ def _publish_post_unlocked(
             "state": STATE_BLOCKED,
             "language": language_report,
         }
-    publish_media_context = _publish_v2_media_context(v2_state, post)
+    publish_media_context = _publish_v2_media_context(v2_state, post, root=root)
     if state == STATE_READY:
         raw_meta = post.get("meta")
         meta = raw_meta if isinstance(raw_meta, dict) else {}

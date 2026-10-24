@@ -83,6 +83,12 @@ def _media_audit_summary(media: MediaProgress, write: dict[str, Any]) -> dict[st
         },
         "applied_media_ids": list(write.get("applied_media_ids") or []),
         "applied_inline_ids": list(write.get("applied_inline_ids") or []),
+        "accepted_working_not_applied_ids": list(
+            write.get("accepted_working_not_applied_ids") or []
+        ),
+        "media_application_contract": dict(
+            write.get("media_application_contract") or {}
+        ),
         "media_readback_status": str(write.get("media_readback_status") or "not_attempted"),
         "media_application_status": str(write.get("media_application_status") or "not_attempted"),
         "html_readback_status": str(write.get("html_readback_status") or "not_attempted"),
@@ -3067,6 +3073,13 @@ class WordPressWriterV2:
             "media_ids": media_ids,
             "media_records": media_records,
             "apply_media_records": apply_media_records,
+            "accepted_working_not_applied_ids": sorted(accepted_working_not_applied_ids),
+            "media_application_contract": {
+                "accepted": media_ids,
+                "applied": sorted(applied_media_ids),
+                "accepted_working_not_applied": sorted(accepted_working_not_applied_ids),
+                "layout_reduction_authorized": bool(layout_target_reduced),
+            },
             "media_state": media_state,
             "media_readback_status": media_readback_status,
             "media_application_status": "not_attempted",
@@ -3369,6 +3382,13 @@ class WordPressWriterV2:
             "media_ids": media_ids,
             "applied_media_ids": sorted(applied_media_ids) if media_readback else [],
             "applied_inline_ids": sorted(applied_inline_ids) if media_readback else [],
+            "accepted_working_not_applied_ids": sorted(accepted_working_not_applied_ids),
+            "media_application_contract": {
+                "accepted": media_ids,
+                "applied": sorted(applied_media_ids) if media_readback else [],
+                "accepted_working_not_applied": sorted(accepted_working_not_applied_ids),
+                "layout_reduction_authorized": bool(layout_target_reduced),
+            },
             "state": final_state.to_dict(),
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
@@ -3816,6 +3836,9 @@ def run_v2(
                         root, post_id=post_id, run_id=run_id, state=initial,
                         phase=initial.phase.value, outcome="started",
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
+                        cycle_id=str(cycle_id or ""), cycle_round=cycle_round,
+                        authorization_id=str(authorization_id or ""),
+                        operation_status="started", write_started=False,
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error
@@ -3918,6 +3941,10 @@ def run_v2(
                         phase=buffered.state.phase.value, outcome=outcome.type.value,
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
                         applied=applied,
+                        cycle_id=str(cycle_id or ""), cycle_round=cycle_round,
+                        authorization_id=str(authorization_id or ""),
+                        operation_status="completed",
+                        write_started=True, readback_confirmed=bool(applied),
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error

@@ -279,5 +279,6 @@ def validate_normal_article_layout_policy(
         "target_ideal": target_ideal,
         "capacity_verified": capacity,
         "target_effective": effective,
+        "allowed_surplus": max(0, target_ideal - effective),
         "reduction_reason": reduction_reason,
     }

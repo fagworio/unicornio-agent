@@ -1,10 +1,12 @@
 import hashlib
 import json
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+import unicornio_editor.media.registry as media_registry
 from unicornio_editor.media.registry import (
     RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index,
     record_v2_candidate_decision, record_v2_observation, registry_path,
@@ -92,7 +94,7 @@ def test_registry_schema_has_decisions_usage_and_runs(tmp_path):
         db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
         with pytest.raises(Exception):
             db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
-    assert {"media_assets", "media_decisions", "media_usage", "media_runs", "registry_migration_log"} <= tables
+    assert {"media_assets", "media_decisions", "media_usage", "media_runs", "media_operations", "registry_migration_log"} <= tables
 
 
 def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_path):
@@ -269,11 +271,149 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         assert "usage_id" in columns
         assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
         assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
         migrated.execute("INSERT INTO media_assets(asset_id, canonical_url) VALUES (3, 'https://cdn.test/b')")
         migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
         with pytest.raises(Exception):
             migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
+
+
+def _create_v4_registry(root):
+    path = registry_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES ('schema_version', '4');
+            CREATE TABLE media_assets (
+                asset_id INTEGER PRIMARY KEY, canonical_url TEXT NOT NULL UNIQUE,
+                source_page_url TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '',
+                sha256 TEXT NOT NULL DEFAULT '', phash TEXT NOT NULL DEFAULT '',
+                visual_group_id TEXT NOT NULL DEFAULT '', width INTEGER, height INTEGER,
+                mime_type TEXT NOT NULL DEFAULT '', wordpress_media_id INTEGER,
+                subject TEXT NOT NULL DEFAULT '', article_id INTEGER,
+                legacy_uses INTEGER NOT NULL DEFAULT 0, provenance_evidence TEXT NOT NULL DEFAULT '{}',
+                identity_evidence TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'known',
+                policy_version TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE media_decisions (
+                decision_id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL DEFAULT '', candidate_id TEXT NOT NULL DEFAULT '',
+                asset_id INTEGER REFERENCES media_assets(asset_id), role TEXT NOT NULL,
+                subject TEXT NOT NULL DEFAULT '', reason_code TEXT NOT NULL,
+                disposition TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'post', retry_after TEXT,
+                evidence_reference TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE TABLE media_usage (
+                post_id INTEGER NOT NULL, asset_id INTEGER NOT NULL REFERENCES media_assets(asset_id),
+                wordpress_media_id INTEGER, role TEXT NOT NULL, list_item TEXT NOT NULL DEFAULT '',
+                section_slot INTEGER, subject TEXT NOT NULL DEFAULT '', identity_evidence TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'accepted', applied_at TEXT, usage_id INTEGER PRIMARY KEY
+            );
+            CREATE UNIQUE INDEX uq_media_usage_position
+                ON media_usage(post_id, asset_id, role, COALESCE(section_slot, -1));
+            CREATE TABLE media_runs (
+                run_id TEXT PRIMARY KEY, post_id INTEGER NOT NULL,
+                planned_deficits TEXT NOT NULL DEFAULT '{}', queries_attempted INTEGER NOT NULL DEFAULT 0,
+                acquisition_outcome TEXT NOT NULL DEFAULT '', checkpoint_reference TEXT NOT NULL DEFAULT '',
+                completion_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE TABLE registry_migration_log (
+                migration_id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_media_decisions_post ON media_decisions(post_id);
+            CREATE INDEX idx_media_decisions_candidate ON media_decisions(candidate_id);
+            INSERT INTO media_assets(asset_id, canonical_url) VALUES (7, 'https://cdn.test/v4.webp');
+            INSERT INTO media_runs(run_id, post_id, created_at) VALUES ('v4-run', 701, '2026-10-20 10:00:00');
+            INSERT INTO media_decisions(post_id, run_id, role, reason_code, disposition, created_at)
+                VALUES (701, 'v4-run', 'inline', 'candidate_accepted', 'accepted', '2026-10-20 10:00:01');
+            INSERT INTO media_usage(post_id, asset_id, role, status, applied_at)
+                VALUES (701, 7, 'inline', 'applied', '2026-10-20 10:00:02');
+            """
+        )
+    return path
+
+
+def test_registry_v4_to_v5_migration_preserves_records_indexes_and_rejects_old_reader(tmp_path, monkeypatch):
+    path = _create_v4_registry(tmp_path)
+
+    with connect(tmp_path) as db:
+        assert db.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert db.execute("SELECT run_id, post_id FROM media_runs").fetchone()[:] == ("v4-run", 701)
+        assert db.execute("SELECT post_id, reason_code FROM media_decisions").fetchone()[:] == (701, "candidate_accepted")
+        usage = db.execute("SELECT post_id, asset_id, status, applied_at, run_id, authorization_id FROM media_usage").fetchone()
+        assert tuple(usage) == (701, 7, "applied", "2026-10-20 10:00:02", "", "")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(media_usage)")}
+        assert {"run_id", "cycle_id", "cycle_round", "authorization_id", "accepted_at", "readback_confirmed_at"} <= columns
+        indexes = {row[1] for row in db.execute("PRAGMA index_list(media_usage)")}
+        assert "uq_media_usage_position" in indexes
+        db.execute(
+            "INSERT INTO media_operations(post_id, run_id, cycle_id, cycle_round, authorization_id, phase, operation_status, started_at) VALUES (702, 'v5-run', 'cycle', 1, 'auth', 'media', 'started', '2026-10-23T23:37:47.140176+00:00')"
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, asset_id, role, status, run_id, cycle_id, cycle_round, authorization_id, accepted_at) VALUES (702, 7, 'inline', 'accepted', 'v5-run', 'cycle', 1, 'auth', '2026-10-23T23:37:47.140176+00:00')"
+        )
+        db.commit()
+
+    monkeypatch.setattr(media_registry, "SCHEMA_VERSION", 4)
+    with pytest.raises(RegistryError, match="schema de registry futuro"):
+        connect(tmp_path)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert db.execute("SELECT run_id FROM media_operations").fetchone()[0] == "v5-run"
+
+
+def test_interrupted_v4_to_v5_migration_rolls_back_schema_and_keeps_records(tmp_path):
+    path = _create_v4_registry(tmp_path)
+    with sqlite3.connect(path) as db:
+        db.execute(
+            """CREATE TRIGGER reject_v5_schema BEFORE INSERT ON schema_meta
+               WHEN NEW.key='schema_version' AND NEW.value='5'
+               BEGIN SELECT RAISE(ABORT, 'simulated interrupted migration'); END"""
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="simulated interrupted migration"):
+        connect(tmp_path)
+
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert db.execute("SELECT COUNT(*) FROM media_runs WHERE run_id='v4-run'").fetchone()[0] == 1
+        assert "media_operations" not in {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        columns = {row[1] for row in db.execute("PRAGMA table_info(media_usage)")}
+        assert "accepted_at" not in columns
+
+
+def test_v2_registry_observation_timestamps_use_utc_microseconds(tmp_path):
+    media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(7, "https://cdn.test/precise.webp", 0, "alt", "credit", "subject"),),
+        search=MediaSearchProgress(queries_attempted=1),
+    )
+    record_v2_observation(
+        tmp_path,
+        post_id=703,
+        run_id="precise-run",
+        state=SimpleNamespace(media=media),
+        phase="media",
+        cycle_id="precise-cycle",
+        cycle_round=1,
+        authorization_id="precise-auth",
+        operation_status="started",
+    )
+    with connect(tmp_path) as db:
+        timestamps = [
+            db.execute("SELECT started_at FROM media_operations WHERE run_id='precise-run'").fetchone()[0],
+            db.execute("SELECT created_at FROM media_runs WHERE run_id='precise-run'").fetchone()[0],
+            db.execute("SELECT accepted_at FROM media_usage WHERE post_id=703").fetchone()[0],
+            db.execute("SELECT created_at FROM media_decisions WHERE post_id=703").fetchone()[0],
+        ]
+    for stamp in timestamps:
+        assert stamp.endswith("+00:00")
+        assert len(stamp.split(".", 1)[1].split("+", 1)[0]) == 6
 
 
 def test_v2_observation_separates_state_readback_from_media_application(tmp_path):
@@ -290,12 +430,27 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
         search=MediaSearchProgress(queries_attempted=2),
     )
     state = SimpleNamespace(media=media)
-    record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="media", outcome="retry")
+    record_v2_observation(
+        tmp_path,
+        post_id=10,
+        run_id="run-1",
+        state=state,
+        phase="media",
+        outcome="retry",
+        cycle_id="cycle-current",
+        cycle_round=1,
+        authorization_id="auth-current",
+        operation_status="started",
+    )
     with connect(tmp_path) as db:
         assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "accepted"
         metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
         assert metrics["initial"]["missing"] == 1
         assert metrics["initial"]["queries_attempted"] == 2
+        operation = db.execute(
+            "SELECT cycle_id, cycle_round, authorization_id, operation_status FROM media_operations WHERE run_id='run-1'"
+        ).fetchone()
+        assert tuple(operation) == ("cycle-current", 1, "auth-current", "started")
     assert load_v2_media(tmp_path, post_id=10) == []
 
     record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
@@ -433,7 +588,7 @@ def test_registry_migrates_v2_applied_usage_without_losing_readback(tmp_path):
         assert {"identity_evidence", "subject"} <= columns
         assert migrated.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "4"
+        ).fetchone()[0] == "5"
         row = migrated.execute(
             "SELECT status, applied_at FROM media_usage WHERE post_id=115234"
         ).fetchone()

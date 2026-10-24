@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import tempfile
 import unittest
@@ -2396,7 +2397,104 @@ class WorkflowTests(unittest.TestCase):
             self.assertIsNotNone(context)
             self.assertTrue(context["visual_identity_evidence_valid"])
 
-    def test_v2_context_preserves_waiver_and_allows_empty_inline_evidence(self):
+    def test_v2_context_allows_one_authorized_layout_surplus_with_journal_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = "<article><p>Corpo editorial.</p>" + "".join(
+                f'<img src="https://cdn.test/inline-{index}.webp" />'
+                for index in range(1, 4)
+            ) + "</article>"
+            accepted = [
+                {
+                    "media_id": 100 + index,
+                    "media_url": f"https://cdn.test/inline-{index}.webp",
+                    "sha256": "a" * 64,
+                    "phash": "b" * 16,
+                    "visual_group_id": f"visual:{index}",
+                    "visual_verification": {"decision": "DIFFERENT"},
+                }
+                for index in range(1, 5)
+            ]
+            state = {
+                "media": {
+                    "inline": {"required": 3, "accepted": accepted},
+                    "featured": {"status": "valid", "media_id": 7, "media_url": "https://cdn.test/featured.webp"},
+                    "layout_policy": {
+                        "schema_version": 2,
+                        "policy": "normal-article-layout-v2",
+                        "layout": "normal_article",
+                        "target_ideal": 4,
+                        "target_effective": 3,
+                        "reduction_reason": "layout_limited",
+                    },
+                }
+            }
+            from unicornio_editor.pipeline_v2.media_layout import _layout_sha256
+
+            state["media"]["layout_policy"]["layout_sha256"] = _layout_sha256(
+                state["media"]["layout_policy"]
+            )
+            post = {
+                "id": 42,
+                "status": "pending",
+                "featured_media": 7,
+                "content": {"raw": body},
+            }
+            journal_dir = root / "work" / "v2-journal"
+            journal_dir.mkdir(parents=True)
+            journal = {
+                "status": "committed",
+                "readback": True,
+                "media_application_status": "confirmed",
+                "html_readback_status": "confirmed",
+                "candidate_hash": hashlib.sha256(body.encode()).hexdigest(),
+                "apply_media_records": [
+                    {
+                        "role": "inline",
+                        "media_id": 100 + index,
+                        "readback_status": "confirmed",
+                        "destination": "applied_readback_confirmed",
+                    }
+                    for index in range(1, 4)
+                ],
+                "media_records": [
+                    {
+                        "role": "inline",
+                        "media_id": 104,
+                        "destination": "accepted_working_not_applied",
+                    }
+                ],
+            }
+            (journal_dir / "42.json").write_text(json.dumps(journal), encoding="utf-8")
+
+            context = _publish_v2_media_context(state, post, root=root)
+
+            self.assertIsNotNone(context)
+            self.assertTrue(context["visual_identity_evidence_valid"])
+            self.assertEqual(context["applied_inline_ids"], [101, 102, 103])
+            self.assertEqual(context["accepted_working_not_applied_ids"], [104])
+            self.assertTrue(context["media_application_contract"]["journal_readback_proven"])
+
+    def test_v2_context_rejects_surplus_without_structural_and_journal_proof(self):
+        accepted = [
+            {"media_id": index, "media_url": f"https://cdn.test/{index}.webp"}
+            for index in range(1, 5)
+        ]
+        state = {
+            "media": {
+                "inline": {"required": 3, "accepted": accepted},
+                "featured": {"status": "valid", "media_id": 7},
+            }
+        }
+        post = {
+            "id": 42,
+            "featured_media": 7,
+            "content": {"raw": '<img src="https://cdn.test/1.webp" />'},
+        }
+        context = _publish_v2_media_context(state, post)
+        self.assertIsNotNone(context)
+        self.assertFalse(context["visual_identity_evidence_valid"])
+
         state = {
             "media": {
                 "inline": {"required": 2, "accepted": [], "accepted_count": 0, "missing": 2},
