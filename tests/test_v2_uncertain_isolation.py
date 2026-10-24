@@ -16,6 +16,7 @@ from unicornio_editor.pipeline_v2.cycle_runtime import (
     _parse_registry_timestamp,
     _registry_timestamp_audit,
 )
+from unicornio_editor.media.registry import connect
 from unicornio_editor.workflow import publish_ready_posts
 from unicornio_editor.backup import atomic_write_text
 
@@ -115,6 +116,7 @@ def _fixture(root: Path):
         "cycle_round": 1,
         "authorization_id": AUTH,
         "state": {"version": 2, "state": "human_required", "phase": "media", "blocker": "inline_missing"},
+        "writer_started": True,
         "media_state": "apply_not_attempted",
         "media_readback_status": "not_attempted",
         "media_ids": [],
@@ -202,7 +204,14 @@ def _fixture(root: Path):
                 run_id TEXT, post_id INTEGER, disposition TEXT,
                 reason_code TEXT, created_at TEXT
             );
-            CREATE TABLE media_usage (post_id INTEGER, status TEXT, applied_at TEXT);
+            CREATE TABLE media_usage (
+                post_id INTEGER, status TEXT, applied_at TEXT, run_id TEXT,
+                cycle_id TEXT, cycle_round INTEGER, authorization_id TEXT, accepted_at TEXT
+            );
+            CREATE TABLE media_operations (
+                post_id INTEGER, run_id TEXT, cycle_id TEXT, cycle_round INTEGER,
+                authorization_id TEXT, started_at TEXT, operation_status TEXT
+            );
             """
         )
         con.execute("INSERT INTO media_runs VALUES (?, ?, ?, ?)", (RUN, POST, "started", "2026-10-23T04:03:17Z"))
@@ -223,6 +232,128 @@ def _fixture(root: Path):
                 "INSERT INTO media_runs VALUES (?, ?, ?, ?)",
                 (f"historical-run-{other_post_id}", other_post_id, "historical", "2020-01-01 00:00:00"),
             )
+
+
+def _audit_115181_fixture(root: Path):
+    cycle_id = "2a5c2e324e20479180b8f4e99c348b55"
+    authorization_id = "78440ceb2d234d93b8ad9f2d7f392b5c"
+    target_run_id = "d5cdbed6eaee42e0a1ab2d473ef2867f"
+    selected_ids = [115181, 200001, 200002, 200003, 200004]
+    root = Path(root)
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}), encoding="utf-8"
+    )
+    store = CycleStateStore(root)
+    state = CycleState(cycle_id=cycle_id, phase="ADMISSION", status="running", config={"ready_target": 5})
+    state.pending_round = {
+        "round_number": 1,
+        "authorization_id": authorization_id,
+        "preview_selected_ids": selected_ids,
+        "request": {"batch_size": 5},
+    }
+    store.save(
+        state,
+        event="round_authorized",
+        round_number=1,
+        authorization_id=authorization_id,
+        selected_ids=selected_ids,
+        at="2026-10-23T23:37:47.140176+00:00",
+    )
+    journal_dir = root / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    historical_journal = {
+        "post_id": 115181,
+        "run_id": target_run_id,
+        "cycle_id": "98c32bba7ec5494aa1ef26e3bf9554b5",
+        "cycle_round": 3,
+        "authorization_id": "4c8ec7675c994e83920305db0688c836",
+        "status": "committed",
+        "readback": True,
+        "writer_started": True,
+        "resumable": False,
+        "state": {"version": 2, "state": "pending", "phase": "media", "blocker": None},
+        "media_state": "accepted_working",
+    }
+    (journal_dir / "115181.json").write_text(json.dumps(historical_journal), encoding="utf-8")
+    current_state = {
+        "version": 2,
+        "state": "human_required",
+        "phase": "media",
+        "blocker": "inline_missing",
+    }
+    posts = {
+        post_id: {
+            "id": post_id,
+            "status": "pending",
+            "featured_media": 0,
+            "meta": {"_hermes_work_state": json.dumps(current_state)},
+            "content": {"raw": ""},
+            "title": {"raw": ""},
+        }
+        for post_id in selected_ids
+    }
+
+    class Client:
+        def __init__(self):
+            self.posts = posts
+            self.write_calls = 0
+
+        def get_post(self, post_id):
+            return json.loads(json.dumps(self.posts[int(post_id)]))
+
+        def update_post(self, post_id, payload):
+            self.write_calls += 1
+            raise AssertionError("uncertain isolation must never repeat a WordPress write")
+
+    client = Client()
+    run_ids = {115181: target_run_id}
+    with connect(root) as db:
+        asset_id = db.execute(
+            "INSERT INTO media_assets(canonical_url) VALUES (?) RETURNING asset_id",
+            ("https://cdn.test/115181-historical.webp",),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            (target_run_id, 115181, "2026-10-15T23:56:35+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, asset_id, role, status, applied_at, run_id, cycle_id, cycle_round, authorization_id, accepted_at) VALUES (?, ?, 'inline', 'accepted', NULL, ?, ?, ?, ?, NULL)",
+            (115181, asset_id, target_run_id, historical_journal["cycle_id"], 3, historical_journal["authorization_id"]),
+        )
+        for post_id in selected_ids[1:]:
+            run_id = f"current-run-{post_id}"
+            run_ids[post_id] = run_id
+            journal = {
+                "post_id": post_id,
+                "run_id": run_id,
+                "cycle_id": cycle_id,
+                "cycle_round": 1,
+                "authorization_id": authorization_id,
+                "status": "committed",
+                "readback": True,
+                "writer_started": True,
+                "resumable": False,
+                "state": current_state,
+                "media_state": "accepted_working",
+            }
+            (journal_dir / f"{post_id}.json").write_text(json.dumps(journal), encoding="utf-8")
+            db.execute(
+                "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+                (run_id, post_id, "2026-10-23T23:37:47.000000+00:00"),
+            )
+        db.commit()
+    return {
+        "root": root,
+        "client": client,
+        "cycle_id": cycle_id,
+        "authorization_id": authorization_id,
+        "selected_ids": selected_ids,
+        "pending_round": 1,
+        "post_id": 115181,
+        "run_id": target_run_id,
+        "run_ids": run_ids,
+    }
 
 
 def _args(root):
@@ -269,7 +400,7 @@ def _multi_isolation_args(root):
     )
     with sqlite3.connect(root / "work" / "media_registry.sqlite") as con:
         con.executemany(
-            "INSERT INTO media_usage VALUES (?, ?, ?)",
+            "INSERT INTO media_usage(post_id, status, applied_at) VALUES (?, ?, ?)",
             [(115215, "accepted", None), (115512, "accepted", None)],
         )
     return args
@@ -284,6 +415,118 @@ def test_preview_classifies_uncertain_without_writing(tmp_path):
     assert not (tmp_path / "work" / "v2-cycle" / "transaction-isolations").exists()
     assert CycleStateStore(tmp_path).load().pending_round["preview_selected_ids"] == SELECTED
 
+
+
+def test_115181_historical_uncertainty_is_archived_without_replay_and_resumes_idempotently(tmp_path):
+    args = _audit_115181_fixture(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / "115181.json"
+    original_journal = journal_path.read_bytes()
+    preview = isolate_uncertain_transaction(**args, apply=False)
+
+    assert preview["status"] == "preview"
+    assert preview["classification"] == "UNCERTAIN_ISOLATED"
+    assert preview["round_classifications"] == {
+        "reconciled_post_ids": [200001, 200002, 200003, 200004],
+        "not_executed_post_ids": [],
+        "executed_ids": [200001, 200002, 200003, 200004],
+        "unresolved_post_ids": [],
+    }
+    target_evidence = next(
+        item for item in preview["evidence"]["round_post_evidence"]
+        if item["post_id"] == 115181
+    )
+    assert target_evidence["journal"]["sha256"] == transaction_admin._hash_file(journal_path)
+    assert target_evidence["journal"]["authorization_id"] == json.loads(original_journal)["authorization_id"]
+    assert target_evidence["classification"] == "UNCERTAIN_ISOLATED"
+    assert target_evidence["no_write_evidence"] is None
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+    applied = isolate_uncertain_transaction(
+        **args, apply=True, preview=preview,
+        operator_authorization="test-only-isolation-115181",
+    )
+    assert applied["status"] == "applied"
+    assert applied["wordpress_writes"] == 0
+    archive = Path(applied["archive_dir"])
+    archived_journal_path = archive / "journal-115181.json"
+    archived_journal = json.loads(archived_journal_path.read_text())
+    assert archived_journal_path.read_bytes() == original_journal
+    assert archived_journal["authorization_id"] != args["authorization_id"]
+    assert archived_journal["cycle_id"] != args["cycle_id"]
+    assert archived_journal["status"] == "committed"
+    assert archived_journal["readback"] is True
+    record = json.loads((archive / "isolation-record.json").read_text())
+    assert record["classification"] == "UNCERTAIN_ISOLATED"
+    assert record["round_post_evidence"][0]["journal"]["sha256"] == transaction_admin._hash_file(
+        archived_journal_path
+    )
+    persisted = CycleStateStore(tmp_path).load()
+    assert persisted.pending_round is None
+    assert persisted.rounds == 1
+    assert persisted.attempts_by_post == {200001: 1, 200002: 1, 200003: 1, 200004: 1}
+    assert persisted.seen_post_ids == [200001, 200002, 200003, 200004]
+    assert persisted.attempts_total == 4
+    assert persisted.round_reports[-1]["unresolved_post_ids"] == [115181]
+    assert persisted.round_reports[-1]["write_replayed"] is False
+    assert journal_path.read_bytes() == original_journal
+    repeated = isolate_uncertain_transaction(
+        **args, apply=True, preview=preview,
+        operator_authorization="test-only-isolation-115181",
+    )
+    assert repeated["status"] == "already_applied"
+    assert CycleStateStore(tmp_path).load().attempts_total == 4
+    assert args["client"].write_calls == 0
+
+
+def test_115181_historical_isolation_recovers_after_interrupted_quarantine_apply(monkeypatch, tmp_path):
+    args = _audit_115181_fixture(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / "115181.json"
+    original_journal = journal_path.read_bytes()
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_write = transaction_admin._write_quarantine_additively
+
+    def write_then_interrupt(*call_args, **call_kwargs):
+        original_write(*call_args, **call_kwargs)
+        raise RuntimeError("simulated stop after quarantine update")
+
+    monkeypatch.setattr(transaction_admin, "_write_quarantine_additively", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="after quarantine update"):
+        isolate_uncertain_transaction(
+            **args, apply=True, preview=preview,
+            operator_authorization="test-only-isolation-115181",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert journal_path.read_bytes() == original_journal
+    assert args["client"].write_calls == 0
+    monkeypatch.setattr(transaction_admin, "_write_quarantine_additively", original_write)
+    resumed = isolate_uncertain_transaction(
+        **args, apply=True, preview=preview,
+        operator_authorization="test-only-isolation-115181",
+    )
+    assert resumed["status"] == "applied"
+    assert CycleStateStore(tmp_path).load().attempts_total == 4
+    assert journal_path.read_bytes() == original_journal
+    assert args["client"].write_calls == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"post_id": None}, {"run_id": ""}, {"cycle_id": ""}, {"cycle_round": None},
+        {"authorization_id": ""},
+        {"authorization_id": "78440ceb2d234d93b8ad9f2d7f392b5c"},
+        {"status": "failed_pre_writer"}, {"readback": False},
+    ],
+)
+def test_historical_target_journal_without_verifiable_distinct_identity_is_rejected(tmp_path, changes):
+    args = _audit_115181_fixture(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / "115181.json"
+    journal = json.loads(journal_path.read_text())
+    journal.update(changes)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    with pytest.raises(TransactionIsolationError, match="journal"):
+        isolate_uncertain_transaction(**args, apply=False)
 
 
 def test_missing_usage_timestamps_keep_historical_posts_uncertain(tmp_path):

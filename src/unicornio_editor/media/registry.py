@@ -10,11 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 5
+
+
+def _utc_timestamp() -> str:
+    """Return a sortable UTC instant with microsecond precision for new evidence."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class RegistryError(RuntimeError):
@@ -41,7 +47,11 @@ def connect(root: str | Path) -> sqlite3.Connection:
     db.execute("PRAGMA foreign_keys = ON")
     db.execute("PRAGMA busy_timeout = 30000")
     db.execute("PRAGMA journal_mode = WAL")
-    _migrate(db)
+    try:
+        _migrate(db)
+    except Exception:
+        db.close()
+        raise
     return db
 
 
@@ -340,6 +350,7 @@ def record_v2_observation(
         "phase": phase,
         "queries_attempted": int(getattr(getattr(media, "search", None), "queries_attempted", 0) or 0),
     }
+    observed_at = _utc_timestamp()
     with connect(root) as db:
         if str(run_id or "").strip():
             db.execute(
@@ -347,8 +358,8 @@ def record_v2_observation(
                 (post_id, run_id, cycle_id, cycle_round, authorization_id, phase,
                  operation_status, started_at, completed_at, write_started,
                  readback_confirmed, outcome)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
-                        CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE NULL END,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                        CASE WHEN ? IN ('completed', 'failed') THEN ? ELSE NULL END,
                         ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     cycle_id=CASE WHEN excluded.cycle_id <> '' THEN excluded.cycle_id ELSE media_operations.cycle_id END,
@@ -363,7 +374,8 @@ def record_v2_observation(
                 (
                     int(post_id), str(run_id), str(cycle_id or ""),
                     cycle_round, str(authorization_id or ""), str(phase or ""),
-                    str(operation_status or "observed"), str(operation_status or ""),
+                    str(operation_status or "observed"), observed_at,
+                    str(operation_status or ""), observed_at,
                     int(bool(write_started)), int(bool(readback_confirmed)), str(outcome or ""),
                 ),
             )
@@ -390,7 +402,7 @@ def record_v2_observation(
         db.execute(
             """INSERT INTO media_runs
             (run_id, post_id, planned_deficits, queries_attempted, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 planned_deficits=excluded.planned_deficits,
                 queries_attempted=excluded.queries_attempted,
@@ -398,7 +410,7 @@ def record_v2_observation(
                 checkpoint_reference=excluded.checkpoint_reference,
                 completion_reason=excluded.completion_reason""",
             (run_id, int(post_id), json.dumps(planned, sort_keys=True), queries_attempted, outcome,
-             checkpoint_reference, "readback_confirmed" if applied else phase),
+             checkpoint_reference, "readback_confirmed" if applied else phase, observed_at),
         )
         assets = []
         inline = getattr(media, "inline", ()) if media is not None else ()
@@ -439,9 +451,9 @@ def record_v2_observation(
                  subject, identity_evidence, status, applied_at, run_id,
                  cycle_id, cycle_round, authorization_id, accepted_at,
                  readback_confirmed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
-                        ?, ?, ?, ?, CURRENT_TIMESTAMP,
-                        CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN ? ELSE NULL END,
+                        ?, ?, ?, ?, ?,
+                        CASE WHEN ? THEN ? ELSE NULL END)
                 ON CONFLICT(post_id, asset_id, role, COALESCE(section_slot, -1)) DO UPDATE SET
                     status=CASE WHEN media_usage.status = 'applied' THEN 'applied' ELSE excluded.status END,
                     applied_at=COALESCE(excluded.applied_at, media_usage.applied_at),
@@ -456,15 +468,15 @@ def record_v2_observation(
                     readback_confirmed_at=COALESCE(excluded.readback_confirmed_at, media_usage.readback_confirmed_at)""",
                 (int(post_id), asset_id, getattr(item, "media_id", None), role,
                  getattr(item, "section_slot", None), str(getattr(item, "subject", "") or ""),
-                 identity_evidence, "applied" if applied else "accepted", applied,
+                 identity_evidence, "applied" if applied else "accepted", applied, observed_at,
                  str(run_id or ""), str(cycle_id or ""), cycle_round, str(authorization_id or ""),
-                 bool(readback_confirmed)),
+                 observed_at, bool(readback_confirmed), observed_at),
             )
         db.execute(
             """INSERT INTO media_decisions
             (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
-            VALUES (?, ?, '', 'run', '', ?, ?, 'post', ?, CURRENT_TIMESTAMP)""",
-            (int(post_id), run_id, phase, outcome or phase, checkpoint_reference),
+            VALUES (?, ?, '', 'run', '', ?, ?, 'post', ?, ?)""",
+            (int(post_id), run_id, phase, outcome or phase, checkpoint_reference, observed_at),
         )
         db.commit()
 
@@ -585,13 +597,14 @@ def record_v2_candidate_decision(
     safe_reason_code = str(reason_code or "").casefold().strip()
     if safe_reason_code not in allowed_reason_codes:
         safe_reason_code = "candidate_rejected"
+    created_at = _utc_timestamp()
     with connect(root) as db:
         db.execute(
             """INSERT INTO media_decisions
             (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, CURRENT_TIMESTAMP)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)""",
             (int(post_id), run_id, candidate_id, role, str(candidate.get("subject") or ""),
-             safe_reason_code, disposition, reference),
+             safe_reason_code, disposition, reference, created_at),
         )
         db.commit()
 

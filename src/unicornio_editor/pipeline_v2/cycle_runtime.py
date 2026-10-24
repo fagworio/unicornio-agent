@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +179,23 @@ def _parse_registry_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _timestamp_resolution_overlaps_authorization(
+    value: Any, authorized_at: datetime
+) -> bool:
+    """Return true when a coarse timestamp in the same second is ambiguous.
+
+    Legacy SQLite timestamps commonly have only whole-second precision. If
+    authorization happened within that same second, the stored value cannot
+    establish whether the event preceded or followed it.
+    """
+    parsed = _parse_registry_timestamp(value)
+    if parsed is None or parsed.replace(microsecond=0) != authorized_at.replace(microsecond=0):
+        return False
+    raw = str(value).strip()
+    fractional = re.search(r"\d{2}:\d{2}:\d{2}\.(\d+)", raw)
+    return fractional is None or len(fractional.group(1)) < 6
+
+
 def _registry_timestamp_audit(
     rows: list[tuple[str, Any, Any]], *, authorized_at: str | None
 ) -> dict[str, Any] | None:
@@ -230,8 +248,24 @@ def _registry_has_round_evidence(
                 str(row[0])
                 for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
-            if {"media_runs", "media_decisions", "media_usage"} - tables:
+            required_columns = {
+                "media_runs": {"run_id", "post_id", "created_at"},
+                "media_decisions": {"run_id", "post_id", "created_at"},
+                "media_usage": {
+                    "post_id", "status", "applied_at", "run_id", "cycle_id",
+                    "cycle_round", "authorization_id", "accepted_at",
+                },
+                "media_operations": {
+                    "post_id", "run_id", "cycle_id", "cycle_round",
+                    "authorization_id", "started_at",
+                },
+            }
+            if set(required_columns) - tables:
                 return None
+            for table, required in required_columns.items():
+                columns = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+                if required - columns:
+                    return None
             runs = [dict(row) for row in db.execute(
                 f"SELECT * FROM media_runs WHERE post_id IN ({placeholders})", selected_ids
             ).fetchall()]
@@ -241,11 +275,9 @@ def _registry_has_round_evidence(
             usages = [dict(row) for row in db.execute(
                 f"SELECT * FROM media_usage WHERE post_id IN ({placeholders})", selected_ids
             ).fetchall()]
-            operations = []
-            if "media_operations" in tables:
-                operations = [dict(row) for row in db.execute(
-                    f"SELECT * FROM media_operations WHERE post_id IN ({placeholders})", selected_ids
-                ).fetchall()]
+            operations = [dict(row) for row in db.execute(
+                f"SELECT * FROM media_operations WHERE post_id IN ({placeholders})", selected_ids
+            ).fetchall()]
     except (OSError, sqlite3.Error):
         return None
     parsed_authorized = _parse_registry_timestamp(authorized_at)
@@ -280,6 +312,31 @@ def _registry_has_round_evidence(
     }
     current_rows: list[dict[str, Any]] = []
     missing_or_invalid: list[dict[str, Any]] = []
+    has_expected_identity = bool(
+        expected_cycle_id
+        and expected_cycle_round is not None
+        and expected_authorization_id
+    )
+    current_run_ids = {
+        str(row.get("run_id") or "")
+        for row in operations
+        if has_expected_identity
+        and str(row.get("run_id") or "").strip()
+        and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
+        and row.get("cycle_round") == expected_cycle_round
+        and str(row.get("authorization_id") or "") == str(expected_authorization_id or "")
+    }
+    identity_conflict_run_ids = {
+        str(row.get("run_id") or "")
+        for row in operations
+        if str(row.get("run_id") or "").strip()
+        and str(row.get("authorization_id") or "") == str(expected_authorization_id or "")
+        and (
+            not has_expected_identity
+            or str(row.get("cycle_id") or "") != str(expected_cycle_id or "")
+            or row.get("cycle_round") != expected_cycle_round
+        )
+    }
     def add_once(key: str, post_id: int) -> None:
         if post_id not in classification[key]:
             classification[key].append(post_id)
@@ -288,8 +345,18 @@ def _registry_has_round_evidence(
             post_id = int(row.get("post_id") or 0)
             timestamp = row.get("created_at")
             parsed = _parse_registry_timestamp(timestamp)
-            if parsed is None:
+            if str(row.get("run_id") or "") in current_run_ids:
+                current_rows.append({"table": table_name, "post_id": post_id, "timestamp": str(timestamp or "")})
+                add_once("current_round_operation", post_id)
+                if parsed is None:
+                    missing_or_invalid.append({"table": table_name, "post_id": post_id, "timestamp": timestamp})
+                    add_once("evidence_temporally_unavailable", post_id)
+            elif str(row.get("run_id") or "") in identity_conflict_run_ids:
+                add_once("evidence_temporally_unavailable", post_id)
+            elif parsed is None:
                 missing_or_invalid.append({"table": table_name, "post_id": post_id, "timestamp": timestamp})
+                add_once("evidence_temporally_unavailable", post_id)
+            elif _timestamp_resolution_overlaps_authorization(timestamp, parsed_authorized):
                 add_once("evidence_temporally_unavailable", post_id)
             elif parsed >= parsed_authorized:
                 current_rows.append({"table": table_name, "post_id": post_id, "timestamp": str(timestamp)})
@@ -300,18 +367,41 @@ def _registry_has_round_evidence(
         post_id = int(row.get("post_id") or 0)
         status = str(row.get("status") or "").casefold()
         usage_identity_matches = bool(
-            expected_authorization_id
+            has_expected_identity
             and str(row.get("authorization_id") or "") == str(expected_authorization_id)
             and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
             and (expected_cycle_round is None or row.get("cycle_round") == expected_cycle_round)
         )
+        usage_authorization_matches = bool(
+            expected_authorization_id
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+        )
+        usage_identity_conflicts = usage_authorization_matches and not usage_identity_matches
         if status == "accepted":
             add_once("accepted_not_applied", post_id)
             if not str(row.get("run_id") or "").strip():
                 add_once("evidence_temporally_unavailable", post_id)
             else:
                 accepted_at = _parse_registry_timestamp(row.get("accepted_at"))
-                if usage_identity_matches or (accepted_at is not None and accepted_at >= parsed_authorized):
+                if usage_identity_matches:
+                    add_once("current_round_operation", post_id)
+                    current_rows.append({
+                        "table": "media_usage",
+                        "post_id": post_id,
+                        "timestamp": str(row.get("accepted_at") or ""),
+                    })
+                elif usage_identity_conflicts:
+                    add_once("evidence_temporally_unavailable", post_id)
+                elif accepted_at is not None and _timestamp_resolution_overlaps_authorization(
+                    row.get("accepted_at"), parsed_authorized
+                ):
+                    add_once("evidence_temporally_unavailable", post_id)
+                elif accepted_at is not None and accepted_at >= parsed_authorized:
+                    current_rows.append({
+                        "table": "media_usage",
+                        "post_id": post_id,
+                        "timestamp": str(row.get("accepted_at") or ""),
+                    })
                     add_once("current_round_operation", post_id)
                 elif accepted_at is None:
                     add_once("evidence_temporally_unavailable", post_id)
@@ -323,7 +413,14 @@ def _registry_has_round_evidence(
             if parsed is None:
                 missing_or_invalid.append({"table": "media_usage", "post_id": post_id, "timestamp": row.get("applied_at")})
                 add_once("evidence_temporally_unavailable", post_id)
-            elif usage_identity_matches or parsed >= parsed_authorized:
+            elif usage_identity_matches:
+                current_rows.append({"table": "media_usage", "post_id": post_id, "timestamp": str(row.get("applied_at"))})
+                add_once("current_round_operation", post_id)
+            elif usage_identity_conflicts:
+                add_once("evidence_temporally_unavailable", post_id)
+            elif _timestamp_resolution_overlaps_authorization(row.get("applied_at"), parsed_authorized):
+                add_once("evidence_temporally_unavailable", post_id)
+            elif parsed >= parsed_authorized:
                 current_rows.append({"table": "media_usage", "post_id": post_id, "timestamp": str(row.get("applied_at"))})
                 add_once("current_round_operation", post_id)
             else:
@@ -332,19 +429,29 @@ def _registry_has_round_evidence(
         post_id = int(row.get("post_id") or 0)
         started = _parse_registry_timestamp(row.get("started_at"))
         identity_matches = bool(
-            expected_authorization_id
+            has_expected_identity
             and str(row.get("authorization_id") or "") == str(expected_authorization_id)
             and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
             and (expected_cycle_round is None or row.get("cycle_round") == expected_cycle_round)
         )
-        if started is None:
-            add_once("evidence_temporally_unavailable", post_id)
-        elif identity_matches and started >= parsed_authorized:
-            current_rows.append({"table": "media_operations", "post_id": post_id, "timestamp": str(row.get("started_at"))})
+        authorization_matches = bool(
+            expected_authorization_id
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+        )
+        if identity_matches:
+            current_rows.append({"table": "media_operations", "post_id": post_id, "timestamp": str(row.get("started_at") or "")})
             add_once("current_round_operation", post_id)
+            if started is None:
+                add_once("evidence_temporally_unavailable", post_id)
+        elif authorization_matches:
+            add_once("evidence_temporally_unavailable", post_id)
+        elif started is None:
+            add_once("evidence_temporally_unavailable", post_id)
+        elif _timestamp_resolution_overlaps_authorization(row.get("started_at"), parsed_authorized):
+            add_once("evidence_temporally_unavailable", post_id)
         elif started < parsed_authorized:
             add_once("historical_operation", post_id)
-        elif identity_matches is False:
+        else:
             add_once("evidence_temporally_unavailable", post_id)
     proof = not current_rows and not missing_or_invalid and not classification["evidence_temporally_unavailable"]
     return {
@@ -552,6 +659,7 @@ def _historical_journal_evidence(
     if (
         run_created_at is None
         or current_authorized_at is None
+        or _timestamp_resolution_overlaps_authorization(row[1], current_authorized_at)
         or run_created_at >= current_authorized_at
     ):
         return None
