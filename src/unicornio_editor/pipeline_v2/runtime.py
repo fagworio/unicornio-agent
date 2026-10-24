@@ -846,6 +846,8 @@ def _write_v2_journal_checkpoint(
         "state": state.to_dict(),
         "protocol_version": 2,
         "writer_started": status in {"committing", "writer_failed", "media_readback_failed"},
+        "writer_status": "possibly_started" if status in {"committing", "writer_failed", "media_readback_failed"} else "not_started",
+        "writer_outcome": "failed" if status == "writer_failed" else "pending",
         "last_safe_point": "before_writer" if status in {"running", "validated"} else status,
         **({"run_id": run_id} if run_id else {}),
         **({"cycle_id": cycle_id} if cycle_id else {}),
@@ -886,7 +888,9 @@ def _record_v2_writer_exception(
             existing["status"] = "writer_failed"
             existing["state"] = state.to_dict()
             existing["protocol_version"] = 2
-            existing["writer_started"] = True
+            existing.setdefault("writer_started", None)
+            existing.setdefault("writer_status", "unknown")
+            existing["writer_outcome"] = "failed"
             existing["last_safe_point"] = "writer_exception"
             if cycle_id:
                 existing["cycle_id"] = cycle_id
@@ -3084,6 +3088,9 @@ class WordPressWriterV2:
             "media_readback_status": media_readback_status,
             "media_application_status": "not_attempted",
             "html_readback_status": "not_attempted",
+            "writer_started": False,
+            "writer_status": "not_started",
+            "writer_outcome": "pending",
         }
         if not candidate_fresh and outcome.type.value == "ready":
             raise RuntimeError("stale editorial candidate cannot produce READY")
@@ -3193,6 +3200,8 @@ class WordPressWriterV2:
                 media_update["featured_media"] = candidate.get("featured_media")
             intent["media_state"] = "apply_started"
             intent["media_application_status"] = "started"
+            intent["writer_started"] = True
+            intent["writer_status"] = "possibly_started"
             _write_v2_journal_payload(
                 journal,
                 {**intent, "status": "media_committing"},
@@ -3202,6 +3211,7 @@ class WordPressWriterV2:
             try:
                 self.client.update_post(post_id, media_update)
                 media_update_returned = True
+                intent["writer_status"] = "submitted"
                 intent["media_application_status"] = "submitted"
                 intent["html_readback_status"] = "attempted"
                 media_readback_post = self.client.get_post(post_id)
@@ -3209,9 +3219,13 @@ class WordPressWriterV2:
                     raise RuntimeError("WordPress media read-back missing")
                 html_readback_received = True
                 assert_media_readback(media_readback_post)
+                intent["writer_status"] = "readback_confirmed"
                 intent["media_application_status"] = "confirmed"
                 intent["html_readback_status"] = "confirmed"
             except Exception as exc:
+                intent["writer_status"] = (
+                    "submitted" if media_update_returned else "possibly_started"
+                )
                 intent["media_application_status"] = (
                     "submitted" if media_update_returned else "uncertain"
                 )
@@ -3248,6 +3262,7 @@ class WordPressWriterV2:
                 payload_meta["_hermes_work_state"] = state_json
                 update["meta"] = dict(payload_meta)
                 intent["state"] = final_state.to_dict()
+            intent["writer_status"] = "possibly_started"
             _write_v2_journal_payload(
                 journal,
                 {
@@ -3259,22 +3274,30 @@ class WordPressWriterV2:
                 },
             )
             self.client.update_post(post_id, update)
+            intent["writer_status"] = "submitted"
             readback = self.client.get_post(post_id)
+            intent["writer_status"] = "readback_confirmed"
             changed = True
         elif (
             (not apply_inline or update.get("content", {}).get("raw") == current.get("raw"))
             and "title" not in update
             and meta.get("_hermes_work_state") == state_json
         ):
+            intent["writer_status"] = "not_started"
+            intent["writer_outcome"] = "no_change"
             readback = post
             changed = False
         else:
+            intent["writer_started"] = True
+            intent["writer_status"] = "possibly_started"
             _write_v2_journal_payload(
                 journal,
                 {**intent, "status": "committing"},
             )
             self.client.update_post(post_id, update)
+            intent["writer_status"] = "submitted"
             readback = self.client.get_post(post_id)
+            intent["writer_status"] = "readback_confirmed"
             changed = True
         if not isinstance(readback, dict):
             raise RuntimeError("WordPress read-back missing")
@@ -3359,6 +3382,7 @@ class WordPressWriterV2:
         if media_readback:
             media_state = "applied_readback_confirmed"
             media_readback_status = "confirmed"
+        intent["writer_outcome"] = "changed" if changed else "no_change"
         _write_v2_journal_payload(
             journal,
             {
@@ -3378,6 +3402,9 @@ class WordPressWriterV2:
             "media_readback_status": media_readback_status,
             "media_application_status": str(intent.get("media_application_status") or "not_attempted"),
             "html_readback_status": str(intent.get("html_readback_status") or "not_attempted"),
+            "writer_started": intent.get("writer_started"),
+            "writer_status": str(intent.get("writer_status") or "unknown"),
+            "writer_outcome": str(intent.get("writer_outcome") or "pending"),
             "media_state": media_state,
             "media_ids": media_ids,
             "applied_media_ids": sorted(applied_media_ids) if media_readback else [],
@@ -3944,7 +3971,7 @@ def run_v2(
                         cycle_id=str(cycle_id or ""), cycle_round=cycle_round,
                         authorization_id=str(authorization_id or ""),
                         operation_status="completed",
-                        write_started=True, readback_confirmed=bool(applied),
+                        write_started=bool(write.get("writer_started")), readback_confirmed=bool(applied),
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error

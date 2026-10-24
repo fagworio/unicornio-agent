@@ -71,6 +71,65 @@ def _substantive_body(paragraphs=6):
     return "".join(f"<p>{sentence}</p>" for _ in range(paragraphs))
 
 
+def test_writer_commit_emits_write_intent_and_readback_contract(tmp_path):
+    post_id = 99181
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.FEATURED_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(required=2),
+    )
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": post_id,
+                "status": "pending",
+                "title": {"raw": "Teste de journal"},
+                "content": {"raw": "<p>Conteúdo existente.</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.update_calls = 0
+
+        def get_post(self, _post_id):
+            return json.loads(json.dumps(self.post))
+
+        def update_post(self, _post_id, payload):
+            self.update_calls += 1
+            self.post.update({key: value for key, value in payload.items() if key != "meta"})
+            self.post.setdefault("meta", {}).update(payload.get("meta") or {})
+
+        def move_to_status(self, _post_id, status):
+            self.post["status"] = status
+
+    client = Client()
+    result = WordPressWriterV2(client, tmp_path).commit(
+        post_id,
+        {
+            "post_id": post_id,
+            "v2_run_id": "writer-contract-run",
+            "v2_cycle_id": "writer-contract-cycle",
+            "v2_cycle_round": 1,
+            "v2_authorization_id": "writer-contract-auth",
+        },
+        state,
+        Outcome.human_required(Phase.MEDIA, BlockerCode.FEATURED_MISSING, "featured missing"),
+    )
+
+    journal = json.loads(
+        (tmp_path / "work" / "v2-journal" / f"{post_id}.json").read_text(encoding="utf-8")
+    )
+    assert result["wordpress_changed"] is True
+    assert client.update_calls == 1
+    assert journal["status"] == "committed"
+    assert journal["readback"] is True
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == "readback_confirmed"
+    assert journal["writer_outcome"] == "changed"
+
+
 def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     existing = InlineMedia(10, "https://example.test/a.webp", 0, "A", "Crédito da imagem: A")
     stage = ProductionMediaStage(object(), Config(), tmp_path, resolver=lambda *_args: MediaProgress(

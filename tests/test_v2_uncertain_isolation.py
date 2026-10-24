@@ -270,7 +270,6 @@ def _audit_115181_fixture(root: Path):
         "authorization_id": "4c8ec7675c994e83920305db0688c836",
         "status": "committed",
         "readback": True,
-        "writer_started": True,
         "resumable": False,
         "state": {"version": 2, "state": "pending", "phase": "media", "blocker": None},
         "media_state": "accepted_working",
