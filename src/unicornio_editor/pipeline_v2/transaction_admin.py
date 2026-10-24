@@ -724,6 +724,8 @@ def _validate_historical_target_journal(
     except (TypeError, ValueError):
         cycle_round = 0
     journal_authorization_id = str(journal.get("authorization_id") or "").strip()
+    writer_started_present = "writer_started" in journal
+    writer_started_valid = (not writer_started_present) or journal.get("writer_started") is True
     if (
         str(journal.get("post_id") or "") != str(int(post_id))
         or str(journal.get("run_id") or "").strip() != str(run_id).strip()
@@ -733,7 +735,7 @@ def _validate_historical_target_journal(
         or journal_authorization_id == str(current_authorization_id)
         or journal.get("status") != "committed"
         or journal.get("readback") is not True
-        or journal.get("writer_started") is not True
+        or not writer_started_valid
     ):
         raise TransactionIsolationError("historical target journal identity or committed evidence is invalid")
 

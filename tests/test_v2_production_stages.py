@@ -71,6 +71,269 @@ def _substantive_body(paragraphs=6):
     return "".join(f"<p>{sentence}</p>" for _ in range(paragraphs))
 
 
+def test_writer_commit_emits_write_intent_and_readback_contract(tmp_path):
+    post_id = 99181
+    state = WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.FEATURED_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(required=2),
+    )
+
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": post_id,
+                "status": "pending",
+                "title": {"raw": "Teste de journal"},
+                "content": {"raw": "<p>Conteúdo existente.</p>"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.update_calls = 0
+
+        def get_post(self, _post_id):
+            return json.loads(json.dumps(self.post))
+
+        def update_post(self, _post_id, payload):
+            self.update_calls += 1
+            self.post.update({key: value for key, value in payload.items() if key != "meta"})
+            self.post.setdefault("meta", {}).update(payload.get("meta") or {})
+
+        def move_to_status(self, _post_id, status):
+            self.post["status"] = status
+
+    client = Client()
+    result = WordPressWriterV2(client, tmp_path).commit(
+        post_id,
+        {
+            "post_id": post_id,
+            "v2_run_id": "writer-contract-run",
+            "v2_cycle_id": "writer-contract-cycle",
+            "v2_cycle_round": 1,
+            "v2_authorization_id": "writer-contract-auth",
+        },
+        state,
+        Outcome.human_required(Phase.MEDIA, BlockerCode.FEATURED_MISSING, "featured missing"),
+    )
+
+    journal = json.loads(
+        (tmp_path / "work" / "v2-journal" / f"{post_id}.json").read_text(encoding="utf-8")
+    )
+    assert result["wordpress_changed"] is True
+    assert client.update_calls == 1
+    assert journal["status"] == "committed"
+    assert journal["readback"] is True
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == "readback_confirmed"
+    assert journal["writer_outcome"] == "changed"
+
+
+def _human_required_state_for_writer():
+    return WorkState(
+        state=LifecycleState.HUMAN_REQUIRED,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.FEATURED_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(required=0),
+    )
+
+
+class _StatusTransitionClient:
+    def __init__(self, post_id, status="pending", *, move_error=None, interrupt_after_move=False, divergent=False):
+        self.post = {
+            "id": post_id,
+            "status": status,
+            "title": {"raw": "Teste"},
+            "content": {"raw": "<p>Conteúdo existente.</p>"},
+            "featured_media": 0,
+            "meta": {},
+        }
+        self.move_calls = 0
+        self.update_calls = 0
+        self.get_calls = 0
+        self.move_error = move_error
+        self.interrupt_after_move = interrupt_after_move
+        self.divergent = divergent
+
+    def get_post(self, _post_id):
+        self.get_calls += 1
+        if self.interrupt_after_move and self.get_calls == 2:
+            raise ConnectionError("readback interrupted")
+        return json.loads(json.dumps(self.post))
+
+    def update_post(self, _post_id, payload):
+        self.update_calls += 1
+        self.post.update({key: value for key, value in payload.items() if key != "meta"})
+        self.post.setdefault("meta", {}).update(payload.get("meta") or {})
+
+    def move_to_status(self, _post_id, status):
+        self.move_calls += 1
+        if self.move_error:
+            raise self.move_error
+        if not self.divergent:
+            self.post["status"] = status
+
+
+def _commit_human_required_status_transition(tmp_path, client, *, existing_work_state=None):
+    post_id = client.post["id"]
+    state = _human_required_state_for_writer()
+    state_json = json.dumps(state.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    client.post["meta"]["_hermes_work_state"] = (
+        state_json if existing_work_state is None else existing_work_state
+    )
+    return WordPressWriterV2(client, tmp_path).commit(
+        post_id,
+        {
+            "post_id": post_id,
+            "v2_run_id": f"status-run-{post_id}",
+            "v2_cycle_id": "status-cycle",
+            "v2_cycle_round": 1,
+            "v2_authorization_id": "status-auth",
+        },
+        state,
+        Outcome.human_required(Phase.MEDIA, BlockerCode.FEATURED_MISSING, "featured missing"),
+    )
+
+
+def _read_writer_journal(root, post_id):
+    return json.loads((root / "work" / "v2-journal" / f"{post_id}.json").read_text(encoding="utf-8"))
+
+
+def test_human_required_pending_moves_status_and_records_writer_effect(tmp_path):
+    client = _StatusTransitionClient(99201, status="pending")
+    result = _commit_human_required_status_transition(tmp_path, client)
+    journal = _read_writer_journal(tmp_path, 99201)
+    assert client.update_calls == 0
+    assert client.move_calls == 1
+    assert result["wordpress_changed"] is True
+    assert result["writer_started"] is True
+    assert result["writer_outcome"] == "changed"
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == "readback_confirmed"
+    assert journal["writer_outcome"] == "changed"
+
+
+def test_human_required_already_awaiting_human_does_not_write(tmp_path):
+    client = _StatusTransitionClient(99202, status="awaiting_human")
+    result = _commit_human_required_status_transition(tmp_path, client)
+    journal = _read_writer_journal(tmp_path, 99202)
+    assert client.update_calls == 0
+    assert client.move_calls == 0
+    assert result["wordpress_changed"] is False
+    assert result["writer_started"] is False
+    assert result["writer_outcome"] == "no_change"
+    assert journal["writer_started"] is False
+    assert journal["writer_status"] == "not_started"
+    assert journal["writer_outcome"] == "no_change"
+
+
+def test_human_required_metadata_update_preserves_confirmed_writer_evidence(tmp_path):
+    client = _StatusTransitionClient(99206, status="awaiting_human")
+    result = _commit_human_required_status_transition(
+        tmp_path, client, existing_work_state="{}"
+    )
+    journal = _read_writer_journal(tmp_path, 99206)
+
+    assert client.update_calls == 1
+    assert client.move_calls == 0
+    assert client.post["meta"]["_hermes_work_state"] == json.dumps(
+        _human_required_state_for_writer().to_dict(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert result["wordpress_changed"] is True
+    assert result["writer_started"] is True
+    assert result["writer_status"] == "readback_confirmed"
+    assert result["writer_outcome"] == "changed"
+    assert journal["status"] == "committed"
+    assert journal["readback"] is True
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == "readback_confirmed"
+    assert journal["writer_outcome"] == "changed"
+
+
+@pytest.mark.parametrize(
+    "client_kwargs, expected_status, expected_writer_status",
+    [
+        ({"move_error": RuntimeError("status POST failed")}, "writer_failed", "possibly_started"),
+        ({"interrupt_after_move": True}, "readback_failed", "submitted"),
+        ({"divergent": True}, "readback_failed", "submitted"),
+    ],
+)
+def test_human_required_status_transition_failures_remain_conservative(
+    tmp_path, client_kwargs, expected_status, expected_writer_status
+):
+    client = _StatusTransitionClient(99203, status="pending", **client_kwargs)
+    with pytest.raises(Exception):
+        _commit_human_required_status_transition(tmp_path, client)
+    journal = _read_writer_journal(tmp_path, 99203)
+    assert journal["status"] == expected_status
+    assert journal["status"] != "committed"
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == expected_writer_status
+    assert journal["writer_outcome"] in {"failed", "uncertain"}
+
+
+
+def test_media_registry_evidence_uses_writer_result_for_status_transition(tmp_path):
+    client = _StatusTransitionClient(99204, status="pending")
+    result = _commit_human_required_status_transition(tmp_path, client)
+    state = _human_required_state_for_writer()
+    record_v2_observation(
+        tmp_path,
+        post_id=99204,
+        run_id="status-run-99204",
+        state=state,
+        phase=state.phase.value,
+        outcome="human_required",
+        cycle_id="status-cycle",
+        cycle_round=1,
+        authorization_id="status-auth",
+        operation_status="completed",
+        write_started=bool(result["writer_started"]),
+        readback_confirmed=bool(result["readback"]),
+    )
+    with connect_media_registry(tmp_path) as db:
+        row = db.execute(
+            "SELECT operation_status, write_started, readback_confirmed FROM media_operations WHERE run_id=?",
+            ("status-run-99204",),
+        ).fetchone()
+    assert tuple(row) == ("completed", 1, 1)
+    assert result["writer_started"] is True
+    assert result["writer_status"] == "readback_confirmed"
+    assert result["writer_outcome"] == "changed"
+
+
+
+def test_media_registry_evidence_preserves_no_change_for_existing_status(tmp_path):
+    client = _StatusTransitionClient(99205, status="awaiting_human")
+    result = _commit_human_required_status_transition(tmp_path, client)
+    state = _human_required_state_for_writer()
+    record_v2_observation(
+        tmp_path,
+        post_id=99205,
+        run_id="status-run-99205",
+        state=state,
+        phase=state.phase.value,
+        outcome="human_required",
+        operation_status="completed",
+        write_started=bool(result["writer_started"]),
+        readback_confirmed=bool(result["readback"]),
+    )
+    with connect_media_registry(tmp_path) as db:
+        row = db.execute(
+            "SELECT operation_status, write_started, readback_confirmed FROM media_operations WHERE run_id=?",
+            ("status-run-99205",),
+        ).fetchone()
+    assert tuple(row) == ("completed", 0, 1)
+    assert result["writer_started"] is False
+    assert result["writer_status"] == "not_started"
+    assert result["writer_outcome"] == "no_change"
+
+
+
 def test_media_stage_reuses_existing_and_writes_manifest(tmp_path):
     existing = InlineMedia(10, "https://example.test/a.webp", 0, "A", "Crédito da imagem: A")
     stage = ProductionMediaStage(object(), Config(), tmp_path, resolver=lambda *_args: MediaProgress(
