@@ -25,3 +25,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["integration: uses an isolated live service such as ephemeral WordPress"]

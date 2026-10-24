@@ -13,7 +13,7 @@ O sistema usa duas camadas:
 
 ## Ambiente de desenvolvimento e testes
 
-Antes de considerar qualquer alteração concluída, valide a implementação no ambiente local do WordPress utilizando o **Devilbox**.
+Valide alterações WordPress contra uma instalação real e isolada. O **Devilbox local** continua suportado; a homologação **WordPress Writer V2 E2E** do GitHub Actions é uma alternativa oficial e reproduzível, com WordPress, banco de dados e credenciais efêmeros. A suíte unitária ou mocks não substituem nenhum desses testes REST reais.
 
 ### Devilbox
 
@@ -33,9 +33,9 @@ A instalação local do WordPress está em:
 /home/joaofagner/workfolder/devilbox/data/www/wordpress/htdocs
 ```
 
-Todas as alterações relacionadas ao WordPress devem ser testadas nessa instalação antes de serem consideradas prontas.
+Para a homologação automatizada, consulte [docs/wordpress-e2e-homologation.md](docs/wordpress-e2e-homologation.md). O workflow separado provisiona os MU-plugins usados pelo projeto, executa o WordPressClient e WordPressWriterV2 reais e destrói o ambiente após a execução. Não requer nem utiliza dados, URLs ou credenciais de produção.
 
-### Cenários de teste
+### Cenários de teste no Devilbox
 
 Para cada modificação realizada:
 
@@ -45,7 +45,7 @@ Para cada modificação realizada:
 4. Inclua cenários positivos, negativos e casos de borda relevantes.
 5. Quando a lógica depender de campos, taxonomias, metadados, conteúdo, status ou outras características do post, configure os posts locais com combinações representativas desses dados.
 6. Não dependa de posts do ambiente de produção para validar a implementação.
-7. Não considere a tarefa concluída apenas porque o código foi alterado: execute os testes no WordPress local e confirme que o resultado obtido corresponde ao comportamento esperado.
+7. Não considere a tarefa concluída apenas porque o código foi alterado: execute os testes no WordPress local ou obtenha homologação E2E aprovada no GitHub Actions para o SHA exato, e confirme que o resultado obtido corresponde ao comportamento esperado.
 8. Caso encontre regressões ou resultados inesperados, corrija a implementação e repita os testes.
 
 Ao finalizar, informe quais cenários foram testados e o resultado de cada um.

@@ -1,6 +1,8 @@
-# Cenários WordPress locais
+# Cenários WordPress locais e E2E
 
-Estas fixtures são exclusivas do Devilbox e sempre criam posts `pending`.
+As fixtures abaixo continuam exclusivas do Devilbox e sempre criam posts pending. Para homologação E2E isolada e automatizada do Writer V2, o workflow [WordPress Writer V2 E2E](../../.github/workflows/wordpress-e2e.yml) provisiona WordPress e banco efêmeros no GitHub Actions. Essa homologação usa a REST API real, os MU-plugins do repositório e credenciais geradas para a execução; não é substituída por mocks e não acessa produção.
+
+Consulte [docs/wordpress-e2e-homologation.md](../../docs/wordpress-e2e-homologation.md) para execução, cenários, relatório e critérios de aprovação.
 
 ## Preparação
 
