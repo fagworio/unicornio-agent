@@ -3306,12 +3306,65 @@ class WordPressWriterV2:
             raise RuntimeError("V2 state read-back mismatch")
         if outcome.type.value == "human_required":
             # Keep the WP editor's manual-review queue synchronized with the
-            # canonical V2 lifecycle.  The native WP status must remain
-            # awaiting_human, otherwise a human moving it back to pending has
-            # no durable queue marker and the UI hides the work.
+            # canonical V2 lifecycle.  A status transition is itself a
+            # WordPress write and therefore has the same journal contract as a
+            # metadata/content update.  Do not issue a redundant metadata POST
+            # when the lifecycle metadata is already equal.
             if readback.get("status") != "awaiting_human":
-                self.client.move_to_status(post_id, "awaiting_human")
-                readback = self.client.get_post(post_id)
+                intent["writer_started"] = True
+                intent["writer_status"] = "possibly_started"
+                intent["writer_outcome"] = "pending"
+                _write_v2_journal_payload(
+                    journal,
+                    {
+                        **intent,
+                        "status": "committing",
+                        "last_safe_point": "before_status_move",
+                    },
+                )
+                try:
+                    self.client.move_to_status(post_id, "awaiting_human")
+                except Exception as exc:
+                    intent["writer_status"] = "possibly_started"
+                    intent["writer_outcome"] = "uncertain"
+                    _write_v2_journal_payload(
+                        journal,
+                        {
+                            **intent,
+                            "status": "writer_failed",
+                            "readback": False,
+                            "detail": str(exc)[:400],
+                            "last_safe_point": "status_move_failed",
+                        },
+                    )
+                    raise
+                intent["writer_status"] = "submitted"
+                try:
+                    readback = self.client.get_post(post_id)
+                    if not isinstance(readback, dict):
+                        raise RuntimeError("Awaiting Human status read-back missing")
+                    if readback.get("status") != "awaiting_human":
+                        raise RuntimeError("Awaiting Human status read-back mismatch")
+                except Exception as exc:
+                    intent["writer_status"] = "submitted"
+                    intent["writer_outcome"] = "uncertain"
+                    _write_v2_journal_payload(
+                        journal,
+                        {
+                            **intent,
+                            "status": "readback_failed",
+                            "readback": False,
+                            "detail": str(exc)[:400],
+                            "last_safe_point": "status_move_readback_failed",
+                        },
+                    )
+                    raise
+                intent["writer_status"] = "readback_confirmed"
+                intent["writer_outcome"] = "changed"
+                changed = True
+            else:
+                intent["writer_status"] = "not_started"
+                intent["writer_outcome"] = "no_change"
             if readback.get("status") != "awaiting_human":
                 raise RuntimeError("Awaiting Human status read-back mismatch")
         media_readback = False
