@@ -470,19 +470,22 @@ def _round_post_evidence(
     target_journal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
-    journal = (
-        dict(target_journal)
-        if target_journal is not None
-        else _read_json(journal_path) if journal_path.is_file() else None
-    )
+    journal = None
     journal_sha256 = ""
-    if journal is not None:
-        if not journal_path.is_file():
-            raise TransactionIsolationError(f"post journal disappeared for {post_id}")
-        live_journal = _read_json(journal_path)
-        if live_journal != journal:
+    if journal_path.is_file():
+        try:
+            journal_bytes = journal_path.read_bytes()
+            live_journal = json.loads(journal_bytes.decode("utf-8"))
+        except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TransactionIsolationError(f"invalid post journal for {post_id}") from exc
+        if not isinstance(live_journal, dict):
+            raise TransactionIsolationError(f"post journal must be an object for {post_id}")
+        if target_journal is not None and dict(target_journal) != live_journal:
             raise TransactionIsolationError(f"post journal changed while reading evidence for {post_id}")
-        journal_sha256 = _hash_file(journal_path)
+        journal = dict(target_journal) if target_journal is not None else live_journal
+        journal_sha256 = _hash_bytes(journal_bytes)
+    elif target_journal is not None:
+        raise TransactionIsolationError(f"post journal disappeared for {post_id}")
     journal_post_id = str((journal or {}).get("post_id") or "")
     journal_identity_matches = journal is not None and journal_post_id == str(int(post_id))
     if journal is not None and journal_post_id not in {str(int(post_id)), ""}:
