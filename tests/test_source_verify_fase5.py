@@ -21,6 +21,9 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         )
         self.assertFalse(out["valid"])
         self.assertIn("source_page_url", out["reason"])
+        self.assertEqual(out["verification_stage"], "source_page_validation")
+        self.assertGreaterEqual(out["verification_elapsed_ms"], 0)
+        self.assertIn("source_page_validation", out["verification_stage_durations_ms"])
 
     def test_source_page_html_is_cached_for_rights_validation(self):
         page = "https://page.example/source"
@@ -61,6 +64,52 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
             )
         self.assertFalse(out["valid"])
         self.assertIn("inacessivel", out["reason"])
+
+    def test_html_dinamico_sem_referencias_fica_inconclusivo_e_temporizado(self):
+        html = "<html><script>document.write('<img src=\\\"https://cdn.example/lazy.jpg\\\">')</script></html>"
+        with mock.patch.object(
+            source_verify, "_fetch", return_value=html.encode("utf-8")
+        ):
+            out = source_verify.validate_discovered_candidate({
+                "direct_image_url": "https://discovery.example/lazy.jpg",
+                "source_page_url": "https://page.example/dynamic",
+            })
+
+        self.assertFalse(out["valid"])
+        self.assertEqual(out["reason_code"], "source_scan_incomplete")
+        self.assertEqual(out["verification_stage"], "asset_extraction")
+        self.assertTrue(out["recoverable"])
+        self.assertIsInstance(out["verification_elapsed_ms"], float)
+        self.assertIn("asset_extraction", out["verification_stage_durations_ms"])
+
+    def test_cross_cdn_srcset_variant_requires_and_records_visual_proof(self):
+        page_url = "https://publisher.example/story"
+        canonical_url = "https://media.publisher-cdn.example/story-art-1200x675.webp"
+        html = f'''<article><h2>Jogo</h2><figure>
+          <source srcset="https://media.publisher-cdn.example/story-art-1200x675.webp 1200w">
+          <figcaption>Arte oficial do jogo</figcaption></figure></article>'''
+
+        def fetch(url, *_args, **_kwargs):
+            if url == page_url:
+                return html.encode("utf-8")
+            return b"image-bytes"
+
+        with mock.patch.object(source_verify, "_fetch", side_effect=fetch), mock.patch.object(
+            source_verify, "verify_image_identity", return_value=(True, "PIXEL_IDENTICAL")
+        ) as identity:
+            out = source_verify.validate_discovered_candidate({
+                "direct_image_url": "https://discovery-cdn.example/opaque-asset-77.webp",
+                "source_page_url": page_url,
+            }, subject="Jogo")
+
+        self.assertTrue(out["valid"])
+        self.assertTrue(out["source_comparison_proved"])
+        self.assertEqual(out["matched_image_url"], canonical_url)
+        self.assertEqual(out["verification_stage"], "visual_comparison")
+        self.assertIn("candidate_image_fetch", out["verification_stage_durations_ms"])
+        self.assertIn("source_asset_fetch", out["verification_stage_durations_ms"])
+        self.assertIn("visual_comparison", out["verification_stage_durations_ms"])
+        identity.assert_called_once()
 
     def test_candidato_indisponivel_nao_vira_source_mismatch(self):
         html = '<article><img src="https://source.example/other.jpg"></article>'

@@ -576,7 +576,27 @@ class ProductionEditorialStage:
             if not item or item.get("status") == "needs_retry":
                 retry_kind = str((item or {}).get("retry_kind") or "none")
                 reason = str((item or {}).get("reason") or "editorial provider requested retry")
+                failure_class = str(
+                    (item or {}).get("failure_class") or "editorial_content_retry"
+                )
+                retryable = bool((item or {}).get("retryable", True))
+                http_status = (item or {}).get("http_status")
+                context.update({
+                    "provider_failure_phase": Phase.EDITORIAL.value,
+                    "provider_failure_class": failure_class,
+                    "provider_retryable": retryable,
+                    "provider_http_status": http_status,
+                })
                 if retry_kind == "facts":
+                    _write_json(self.root, post_id, "editorial.error.json", {
+                        "reason": reason,
+                        "status": (item or {}).get("status", "needs_retry"),
+                        "blocker": BlockerCode.TEXT_QUALITY.value,
+                        "failure_class": failure_class,
+                        "retryable": retryable,
+                        "http_status": http_status,
+                        "phase": Phase.EDITORIAL.value,
+                    })
                     raise StageError(BlockerCode.TEXT_QUALITY, Phase.EDITORIAL, reason, human_required=True)
                 if retry_kind == "seo":
                     blocker, phase = BlockerCode.SEO, Phase.EDITORIAL
@@ -594,7 +614,15 @@ class ProductionEditorialStage:
                         blocker, phase = BlockerCode.TEXT_QUALITY, Phase.EDITORIAL
                     else:
                         blocker, phase = BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL
-                _write_json(self.root, post_id, "editorial.error.json", {"reason": reason, "status": (item or {}).get("status", "needs_retry"), "blocker": blocker.value})
+                _write_json(self.root, post_id, "editorial.error.json", {
+                    "reason": reason,
+                    "status": (item or {}).get("status", "needs_retry"),
+                    "blocker": blocker.value,
+                    "failure_class": failure_class,
+                    "retryable": retryable,
+                    "http_status": http_status,
+                    "phase": phase.value,
+                })
                 raise StageError(blocker, phase, reason)
             raw_editorial = dict(item["editorial"])
             if must_localize:
@@ -664,7 +692,20 @@ class ProductionEditorialStage:
         except StageError:
             raise
         except EditorialProviderError as exc:
-            _write_json(self.root, post_id, "editorial.error.json", {"reason": str(exc), "status": "provider_error"})
+            context.update({
+                "provider_failure_phase": Phase.EDITORIAL.value,
+                "provider_failure_class": exc.failure_class,
+                "provider_retryable": exc.retryable,
+                "provider_http_status": exc.http_status,
+            })
+            _write_json(self.root, post_id, "editorial.error.json", {
+                "reason": str(exc),
+                "status": "provider_error",
+                "failure_class": exc.failure_class,
+                "retryable": exc.retryable,
+                "http_status": exc.http_status,
+                "phase": Phase.EDITORIAL.value,
+            })
             raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, str(exc)) from exc
         except BatchError as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, str(exc)) from exc

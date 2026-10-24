@@ -16,6 +16,7 @@ import io
 import re
 from http.client import InvalidURL
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from threading import Lock
 from urllib.error import HTTPError, URLError
@@ -377,7 +378,7 @@ def _valid_http(url: str) -> bool:
     )
 
 
-def validate_discovered_candidate(
+def _validate_discovered_candidate(
     candidate: dict[str, Any],
     *,
     cache: dict[str, list[str] | None] | None = None,
@@ -411,17 +412,32 @@ def validate_discovered_candidate(
         "source_comparison_proved": False,
         "images_in_page": 0,
         "verification_status": "unverified",
+        "verification_stage": "source_page_fetch",
+        "verification_stage_durations_ms": {},
         "comparisons_attempted": 0,
         "assets_considered": 0,
     }
+    page_validation_started = monotonic()
     if not _valid_http(page_url):
+        resultado["verification_stage"] = "source_page_validation"
+        resultado["verification_stage_durations_ms"]["source_page_validation"] = round(
+            (monotonic() - page_validation_started) * 1000, 1
+        )
         resultado["reason_code"] = "source_page_unavailable"
         resultado["recoverable"] = True
         resultado["reason"] = _coded_reason(
             "source_page_unavailable", "source_page_url ausente ou invalida"
         )
         return resultado
+    candidate_validation_started = monotonic()
     if not _valid_http(image_url):
+        resultado["verification_stage"] = "candidate_url_validation"
+        resultado["verification_stage_durations_ms"]["source_page_validation"] = round(
+            (monotonic() - page_validation_started) * 1000, 1
+        )
+        resultado["verification_stage_durations_ms"]["candidate_url_validation"] = round(
+            (monotonic() - candidate_validation_started) * 1000, 1
+        )
         resultado["reason_code"] = "source_asset_unavailable"
         resultado["recoverable"] = True
         resultado["reason"] = _coded_reason(
@@ -432,9 +448,18 @@ def validate_discovered_candidate(
     cache = cache if cache is not None else {}
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     if page_url not in cache:
+        fetch_started = monotonic()
         pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
+        resultado["verification_stage_durations_ms"]["source_page_fetch"] = round(
+            (monotonic() - fetch_started) * 1000, 1
+        )
         texto = pagina.decode("utf-8", "ignore") if pagina is not None else ""
+        extraction_started = monotonic()
         cache[page_url] = _image_urls_in_page(texto, page_url) if pagina is not None else None
+        if pagina is not None:
+            resultado["verification_stage_durations_ms"]["asset_extraction"] = round(
+                (monotonic() - extraction_started) * 1000, 1
+            )
         # Guarda o HTML da origem: o chamador extrai o contexto (og:title,
         # page title, alt original, figcaption) e alimenta o score de
         # relevância sem baixar a página uma segunda vez.
@@ -450,6 +475,7 @@ def validate_discovered_candidate(
         )
         return resultado
     if not listadas:
+        resultado["verification_stage"] = "asset_extraction"
         resultado["reason_code"] = "source_scan_incomplete"
         resultado["recoverable"] = True
         resultado["reason"] = _coded_reason(
@@ -459,9 +485,14 @@ def validate_discovered_candidate(
         return resultado
     resultado["images_in_page"] = len(listadas)
 
+    reference_started = monotonic()
     alvo = _normalized_url(image_url)
     exact_match = next((url for url in listadas if _normalized_url(url) == alvo), "")
     if exact_match:
+        resultado["verification_stage_durations_ms"]["source_reference"] = round(
+            (monotonic() - reference_started) * 1000, 1
+        )
+        resultado["verification_stage"] = "source_reference"
         resultado["valid"] = True
         resultado["source_verified"] = True
         resultado["matched_image_url"] = exact_match
@@ -478,6 +509,10 @@ def validate_discovered_candidate(
     else:
         slug_match = ""
     if slug_match:
+        resultado["verification_stage_durations_ms"]["source_reference"] = round(
+            (monotonic() - reference_started) * 1000, 1
+        )
+        resultado["verification_stage"] = "source_reference"
         resultado["valid"] = True
         resultado["source_verified"] = True
         resultado["matched_image_url"] = slug_match
@@ -488,6 +523,9 @@ def validate_discovered_candidate(
             "source_reference_found", "mesma imagem (slug) listada na pagina de origem"
         )
         return resultado
+    resultado["verification_stage_durations_ms"]["source_reference"] = round(
+        (monotonic() - reference_started) * 1000, 1
+    )
 
     rendition_key = _asset_rendition_key(image_url)
     rendition_matches = [
@@ -516,7 +554,12 @@ def validate_discovered_candidate(
     scan_urls = ranked_urls[:scan_limit]
     scan_truncated = len(ranked_urls) > len(scan_urls)
     try:
+        resultado["verification_stage"] = "candidate_image_fetch"
+        candidate_fetch_started = monotonic()
         candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+        resultado["verification_stage_durations_ms"]["candidate_image_fetch"] = round(
+            (monotonic() - candidate_fetch_started) * 1000, 1
+        )
         if candidate_bytes is None:
             resultado.update({
                 "reason_code": "candidate_asset_unavailable",
@@ -527,15 +570,30 @@ def validate_discovered_candidate(
                 ),
             })
             return resultado
+        resultado["verification_stage"] = "visual_comparison"
         compared = 0
         unavailable = 0
         decode_failed = False
         for listed_url in scan_urls:
+            source_fetch_started = monotonic()
             asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+            resultado["verification_stage_durations_ms"]["source_asset_fetch"] = round(
+                resultado["verification_stage_durations_ms"].get("source_asset_fetch", 0.0)
+                + (monotonic() - source_fetch_started) * 1000,
+                1,
+            )
             if asset_bytes is None:
                 unavailable += 1
+                resultado["verification_stage"] = "source_asset_fetch"
                 continue
+            resultado["verification_stage"] = "visual_comparison"
+            visual_started = monotonic()
             same_frame, level = verify_image_identity(candidate_bytes, asset_bytes)
+            resultado["verification_stage_durations_ms"]["visual_comparison"] = round(
+                resultado["verification_stage_durations_ms"].get("visual_comparison", 0.0)
+                + (monotonic() - visual_started) * 1000,
+                1,
+            )
             resultado["comparisons_attempted"] += 1
             if level == "UNVERIFIED":
                 decode_failed = True
@@ -562,20 +620,55 @@ def validate_discovered_candidate(
         return resultado
     if scan_truncated:
         code, detail = "source_scan_incomplete", "a origem excede o limite de assets comparados"
+        resultado["verification_stage"] = "asset_comparison_limit"
     elif unavailable:
         code, detail = "source_asset_unavailable", "um ou mais assets da origem não puderam ser baixados"
+        resultado["verification_stage"] = "source_asset_fetch"
     elif decode_failed:
         code, detail = "source_decode_failed", "um ou mais assets da origem não puderam ser decodificados"
+        resultado["verification_stage"] = "visual_comparison"
     elif compared:
         code, detail = "source_mismatch", "comparação completa comprovou bytes visuais incompatíveis"
+        resultado["verification_stage"] = "visual_comparison"
         resultado["verification_status"] = "incompatible"
         resultado["source_comparison_proved"] = True
     else:
         code, detail = "source_scan_incomplete", "não foi possível comparar assets da origem"
+        resultado["verification_stage"] = "visual_comparison"
     resultado["reason_code"] = code
     resultado["recoverable"] = code in SOURCE_VERIFICATION_RETRYABLE_CODES
     resultado["reason"] = _coded_reason(code, detail)
     return resultado
+
+
+def validate_discovered_candidate(
+    candidate: dict[str, Any],
+    *,
+    cache: dict[str, list[str] | None] | None = None,
+    cache_html: dict[str, str] | None = None,
+    subject: str = "",
+    audit=None,
+    url_policy: str = "audit",
+) -> dict[str, Any]:
+    """Validate source membership and report bounded stage timing.
+
+    Timing is diagnostic only; it never affects a provenance decision or a
+    retry policy. The wrapper also keeps every early-return path observable.
+    """
+    started = monotonic()
+    result = _validate_discovered_candidate(
+        candidate,
+        cache=cache,
+        cache_html=cache_html,
+        subject=subject,
+        audit=audit,
+        url_policy=url_policy,
+    )
+    result["verification_elapsed_ms"] = max(
+        0.0, round((monotonic() - started) * 1000, 1)
+    )
+    return result
+
 
 def verify_downloaded_against_source(
     *,
