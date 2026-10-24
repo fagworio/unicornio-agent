@@ -83,6 +83,12 @@ def _media_audit_summary(media: MediaProgress, write: dict[str, Any]) -> dict[st
         },
         "applied_media_ids": list(write.get("applied_media_ids") or []),
         "applied_inline_ids": list(write.get("applied_inline_ids") or []),
+        "accepted_working_not_applied_ids": list(
+            write.get("accepted_working_not_applied_ids") or []
+        ),
+        "media_application_contract": dict(
+            write.get("media_application_contract") or {}
+        ),
         "media_readback_status": str(write.get("media_readback_status") or "not_attempted"),
         "media_application_status": str(write.get("media_application_status") or "not_attempted"),
         "html_readback_status": str(write.get("html_readback_status") or "not_attempted"),
@@ -3067,6 +3073,13 @@ class WordPressWriterV2:
             "media_ids": media_ids,
             "media_records": media_records,
             "apply_media_records": apply_media_records,
+            "accepted_working_not_applied_ids": sorted(accepted_working_not_applied_ids),
+            "media_application_contract": {
+                "accepted": media_ids,
+                "applied": sorted(applied_media_ids),
+                "accepted_working_not_applied": sorted(accepted_working_not_applied_ids),
+                "layout_reduction_authorized": bool(layout_target_reduced),
+            },
             "media_state": media_state,
             "media_readback_status": media_readback_status,
             "media_application_status": "not_attempted",
@@ -3369,6 +3382,13 @@ class WordPressWriterV2:
             "media_ids": media_ids,
             "applied_media_ids": sorted(applied_media_ids) if media_readback else [],
             "applied_inline_ids": sorted(applied_inline_ids) if media_readback else [],
+            "accepted_working_not_applied_ids": sorted(accepted_working_not_applied_ids),
+            "media_application_contract": {
+                "accepted": media_ids,
+                "applied": sorted(applied_media_ids) if media_readback else [],
+                "accepted_working_not_applied": sorted(accepted_working_not_applied_ids),
+                "layout_reduction_authorized": bool(layout_target_reduced),
+            },
             "state": final_state.to_dict(),
             "ready_hash": ready_hash,
             "candidate_fresh": candidate_fresh,
