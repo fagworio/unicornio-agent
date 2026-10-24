@@ -3362,7 +3362,7 @@ class WordPressWriterV2:
                 intent["writer_status"] = "readback_confirmed"
                 intent["writer_outcome"] = "changed"
                 changed = True
-            else:
+            elif not changed:
                 intent["writer_status"] = "not_started"
                 intent["writer_outcome"] = "no_change"
             if readback.get("status") != "awaiting_human":

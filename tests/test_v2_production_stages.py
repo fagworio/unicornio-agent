@@ -163,9 +163,10 @@ class _StatusTransitionClient:
             raise ConnectionError("readback interrupted")
         return json.loads(json.dumps(self.post))
 
-    def update_post(self, _post_id, _payload):
+    def update_post(self, _post_id, payload):
         self.update_calls += 1
-        raise AssertionError("no metadata POST is expected for this scenario")
+        self.post.update({key: value for key, value in payload.items() if key != "meta"})
+        self.post.setdefault("meta", {}).update(payload.get("meta") or {})
 
     def move_to_status(self, _post_id, status):
         self.move_calls += 1
@@ -175,11 +176,13 @@ class _StatusTransitionClient:
             self.post["status"] = status
 
 
-def _commit_human_required_status_transition(tmp_path, client):
+def _commit_human_required_status_transition(tmp_path, client, *, existing_work_state=None):
     post_id = client.post["id"]
     state = _human_required_state_for_writer()
     state_json = json.dumps(state.to_dict(), ensure_ascii=False, separators=(",", ":"))
-    client.post["meta"]["_hermes_work_state"] = state_json
+    client.post["meta"]["_hermes_work_state"] = (
+        state_json if existing_work_state is None else existing_work_state
+    )
     return WordPressWriterV2(client, tmp_path).commit(
         post_id,
         {
@@ -224,6 +227,31 @@ def test_human_required_already_awaiting_human_does_not_write(tmp_path):
     assert journal["writer_started"] is False
     assert journal["writer_status"] == "not_started"
     assert journal["writer_outcome"] == "no_change"
+
+
+def test_human_required_metadata_update_preserves_confirmed_writer_evidence(tmp_path):
+    client = _StatusTransitionClient(99206, status="awaiting_human")
+    result = _commit_human_required_status_transition(
+        tmp_path, client, existing_work_state="{}"
+    )
+    journal = _read_writer_journal(tmp_path, 99206)
+
+    assert client.update_calls == 1
+    assert client.move_calls == 0
+    assert client.post["meta"]["_hermes_work_state"] == json.dumps(
+        _human_required_state_for_writer().to_dict(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert result["wordpress_changed"] is True
+    assert result["writer_started"] is True
+    assert result["writer_status"] == "readback_confirmed"
+    assert result["writer_outcome"] == "changed"
+    assert journal["status"] == "committed"
+    assert journal["readback"] is True
+    assert journal["writer_started"] is True
+    assert journal["writer_status"] == "readback_confirmed"
+    assert journal["writer_outcome"] == "changed"
 
 
 @pytest.mark.parametrize(
