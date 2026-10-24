@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from http.client import InvalidURL
 from pathlib import Path
 from typing import Any
 from threading import Lock
@@ -245,7 +246,7 @@ def _fetch(
                 return None
             budget[0] -= len(data)
             return data
-    except (HTTPError, URLError, OSError, ValueError):
+    except (HTTPError, URLError, OSError, ValueError, InvalidURL):
         return None
 
 
@@ -358,12 +359,22 @@ def verify_image_identity(
 
 
 def _valid_http(url: str) -> bool:
-    """URL http(s) absoluta com host (Fase 5)."""
-    try:
-        parsed = urlparse(str(url or ""))
-    except ValueError:
+    """URL HTTP(S) absoluta, sem caracteres de controle ou espaço cru."""
+    raw = str(url or "")
+    if any(char.isspace() or ord(char) < 0x20 for char in raw):
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+    try:
+        parsed = urlparse(raw)
+        # Accessing port validates malformed bracketed/port syntax as well.
+        _ = parsed.port
+    except (ValueError, TypeError):
+        return False
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and not parsed.username
+        and not parsed.password
+    )
 
 
 def validate_discovered_candidate(

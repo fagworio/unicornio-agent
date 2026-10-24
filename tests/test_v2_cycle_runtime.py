@@ -56,6 +56,141 @@ def _empty_media_registry(root):
         )
 
 
+def test_registry_temporal_audit_distinguishes_accepted_unapplied_from_unknown(tmp_path):
+    _empty_media_registry(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits, acquisition_outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("historical-run", 115181, "{}", "accepted", "2026-10-15T23:56:35+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_decisions(run_id, post_id, candidate_id, disposition, reason_code, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("historical-run", 115181, "candidate", "accepted", "candidate_accepted", "post", "2026-10-15T23:56:36+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, wordpress_media_id, status, applied_at) VALUES (?, ?, ?, ?)",
+            (115181, 115399, "accepted", None),
+        )
+
+    audit = cycle_runtime._registry_has_round_evidence(
+        tmp_path,
+        [115181],
+        authorized_at="2026-10-23T23:37:47.140176+00:00",
+    )
+
+    assert audit is not None
+    assert audit["proof_of_absence"] is False
+    assert audit["temporal_classification"]["accepted_not_applied"] == [115181]
+    assert audit["temporal_classification"]["evidence_temporally_unavailable"] == [115181]
+
+
+def test_historical_uncertain_checkpoint_validation_is_target_post_generic(tmp_path):
+    from unicornio_editor.pipeline_v2.transaction_admin import _validate_checkpoint
+
+    cycle_dir = tmp_path / "work" / "v2-cycle"
+    journal_dir = tmp_path / "work" / "v2-journal"
+    policy_path = tmp_path / "config" / "v2-quarantine.json"
+    cycle_dir.mkdir(parents=True)
+    journal_dir.mkdir(parents=True)
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    (cycle_dir / "state.json").write_text(json.dumps({
+        "cycle_id": "current-cycle",
+        "status": "running",
+        "phase": "ADMISSION",
+        "pending_round": {
+            "round_number": 1,
+            "authorization_id": "current-auth",
+            "preview_selected_ids": [115203, 115181],
+        },
+    }), encoding="utf-8")
+    (cycle_dir / "journal.jsonl").write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "current-cycle",
+        "round_number": 1,
+        "authorization_id": "current-auth",
+        "at": "2026-10-23T23:37:47.140176+00:00",
+    }) + "\n", encoding="utf-8")
+    (journal_dir / "115181.json").write_text(json.dumps({
+        "post_id": 115181,
+        "run_id": "historical-run",
+        "cycle_id": "old-cycle",
+        "cycle_round": 3,
+        "authorization_id": "old-auth",
+        "status": "committed",
+        "readback": True,
+    }), encoding="utf-8")
+    policy_path.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}), encoding="utf-8")
+
+    checkpoint = _validate_checkpoint(
+        tmp_path,
+        cycle_id="current-cycle",
+        authorization_id="current-auth",
+        selected_ids=[115203, 115181],
+        pending_round=1,
+        target_post_id=115181,
+    )
+
+    assert checkpoint["target_journal_is_current"] is False
+    assert checkpoint["journal"]["post_id"] == 115181
+
+
+def test_115181_historical_committed_plus_accepted_null_stays_uncertain(tmp_path):
+    _empty_media_registry(tmp_path)
+    cycle_dir = tmp_path / "work" / "v2-cycle"
+    journal_dir = tmp_path / "work" / "v2-journal"
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    (cycle_dir / "journal.jsonl").write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "2a5c2e324e20479180b8f4e99c348b55",
+        "round_number": 1,
+        "authorization_id": "78440ceb2d234d93b8ad9f2d7f392b5c",
+        "at": "2026-10-23T23:37:47.140176+00:00",
+    }) + "\n", encoding="utf-8")
+    (journal_dir / "115181.json").write_text(json.dumps({
+        "post_id": 115181,
+        "run_id": "d5cdbed6eaee42e0a1ab2d473ef2867f",
+        "cycle_id": "98c32bba7ec5494aa1ef26e3bf9554b5",
+        "cycle_round": 3,
+        "authorization_id": "4c8ec7675c994e83920305db0688c836",
+        "status": "committed",
+        "readback": True,
+        "state": WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA).to_dict(),
+    }), encoding="utf-8")
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits, acquisition_outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("d5cdbed6eaee42e0a1ab2d473ef2867f", 115181, "{}", "accepted", "2026-10-15T23:56:35+00:00"),
+        )
+        db.execute(
+            "INSERT INTO media_usage(post_id, wordpress_media_id, status, applied_at) VALUES (?, ?, ?, ?)",
+            (115181, 115399, "accepted", None),
+        )
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [{"id": 115181, "status": "pending"}] if page == 1 else []
+
+        def get_post(self, post_id):
+            return {"id": int(post_id), "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(),
+        tmp_path,
+        [115181],
+        expected_cycle_id="2a5c2e324e20479180b8f4e99c348b55",
+        expected_cycle_round=1,
+        expected_authorization_id="78440ceb2d234d93b8ad9f2d7f392b5c",
+    )
+
+    assert result.reconciliation_blocked is True
+    assert result.executed_ids == ()
+    unresolved = result.reconciliation_blocking_info["unresolved_posts"][0]
+    assert unresolved["reason"] == "historical_effect_uncertain"
+    assert unresolved["registry_evidence"]["proof_of_absence"] is False
+    assert unresolved["registry_evidence"]["temporal_classification"]["accepted_not_applied"] == [115181]
+
+
 def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path, monkeypatch):
     calls = []
     next_id = iter((101, 102))

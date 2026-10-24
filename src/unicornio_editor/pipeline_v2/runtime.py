@@ -3836,6 +3836,9 @@ def run_v2(
                         root, post_id=post_id, run_id=run_id, state=initial,
                         phase=initial.phase.value, outcome="started",
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
+                        cycle_id=str(cycle_id or ""), cycle_round=cycle_round,
+                        authorization_id=str(authorization_id or ""),
+                        operation_status="started", write_started=False,
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error
@@ -3938,6 +3941,10 @@ def run_v2(
                         phase=buffered.state.phase.value, outcome=outcome.type.value,
                         checkpoint_reference=f"work/v2-journal/{post_id}.json",
                         applied=applied,
+                        cycle_id=str(cycle_id or ""), cycle_round=cycle_round,
+                        authorization_id=str(authorization_id or ""),
+                        operation_status="completed",
+                        write_started=True, readback_confirmed=bool(applied),
                     )
                 except Exception as exc:
                     from ..observability import record_unexpected_error

@@ -92,7 +92,7 @@ def test_registry_schema_has_decisions_usage_and_runs(tmp_path):
         db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
         with pytest.raises(Exception):
             db.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES(1, ?, 'inline')", (asset_id,))
-    assert {"media_assets", "media_decisions", "media_usage", "media_runs", "registry_migration_log"} <= tables
+    assert {"media_assets", "media_decisions", "media_usage", "media_runs", "media_operations", "registry_migration_log"} <= tables
 
 
 def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_path):
@@ -269,7 +269,7 @@ def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_p
         assert "usage_id" in columns
         assert migrated.execute("SELECT COUNT(*) FROM media_usage").fetchone()[0] == 1
         assert migrated.execute("SELECT COUNT(*) FROM registry_migration_log").fetchone()[0] == 1
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
         migrated.execute("INSERT INTO media_assets(asset_id, canonical_url) VALUES (3, 'https://cdn.test/b')")
         migrated.execute("INSERT INTO media_usage(post_id, asset_id, role) VALUES (1, 3, 'inline')")
         with pytest.raises(Exception):
@@ -290,12 +290,27 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
         search=MediaSearchProgress(queries_attempted=2),
     )
     state = SimpleNamespace(media=media)
-    record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="media", outcome="retry")
+    record_v2_observation(
+        tmp_path,
+        post_id=10,
+        run_id="run-1",
+        state=state,
+        phase="media",
+        outcome="retry",
+        cycle_id="cycle-current",
+        cycle_round=1,
+        authorization_id="auth-current",
+        operation_status="started",
+    )
     with connect(tmp_path) as db:
         assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "accepted"
         metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
         assert metrics["initial"]["missing"] == 1
         assert metrics["initial"]["queries_attempted"] == 2
+        operation = db.execute(
+            "SELECT cycle_id, cycle_round, authorization_id, operation_status FROM media_operations WHERE run_id='run-1'"
+        ).fetchone()
+        assert tuple(operation) == ("cycle-current", 1, "auth-current", "started")
     assert load_v2_media(tmp_path, post_id=10) == []
 
     record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
@@ -433,7 +448,7 @@ def test_registry_migrates_v2_applied_usage_without_losing_readback(tmp_path):
         assert {"identity_evidence", "subject"} <= columns
         assert migrated.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "4"
+        ).fetchone()[0] == "5"
         row = migrated.execute(
             "SELECT status, applied_at FROM media_usage WHERE post_id=115234"
         ).fetchone()

@@ -198,10 +198,11 @@ def _validate_checkpoint(
     authorization_id: str,
     selected_ids: list[int],
     pending_round: int,
+    target_post_id: int,
 ) -> dict[str, Any]:
     state_path = Path(root) / "work" / "v2-cycle" / "state.json"
     journal_path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
-    target_path = Path(root) / "work" / "v2-journal" / "115331.json"
+    target_path = Path(root) / "work" / "v2-journal" / f"{int(target_post_id)}.json"
     policy_path = Path(root) / "config" / "v2-quarantine.json"
     if not all(path.is_file() for path in (state_path, journal_path, target_path, policy_path)):
         raise TransactionIsolationError("checkpoint, aggregate journal, target journal, or quarantine is missing")
@@ -220,13 +221,22 @@ def _validate_checkpoint(
         raise TransactionIsolationError("selection diverged")
     journal = _read_json(target_path)
     expected = {
-        "post_id": 115331,
+        "post_id": int(target_post_id),
         "run_id": str(journal.get("run_id") or ""),
         "cycle_id": str(journal.get("cycle_id") or ""),
         "cycle_round": journal.get("cycle_round"),
         "authorization_id": str(journal.get("authorization_id") or ""),
     }
-    if expected["cycle_id"] != cycle_id or expected["cycle_round"] != pending_round or expected["authorization_id"] != authorization_id:
+    if expected["post_id"] not in {int(value) for value in selected_ids}:
+        raise TransactionIsolationError("target post is not in the authorized selection")
+    if not expected["run_id"]:
+        raise TransactionIsolationError("target journal has no run_id")
+    target_is_current = (
+        expected["cycle_id"] == cycle_id
+        and expected["cycle_round"] == int(pending_round)
+        and expected["authorization_id"] == authorization_id
+    )
+    if target_is_current is False and expected["post_id"] != int(target_post_id):
         raise TransactionIsolationError("target journal identity diverged")
     return {
         "state": state,
@@ -235,6 +245,7 @@ def _validate_checkpoint(
         "journal_sha256": _hash_file(journal_path),
         "target_journal_sha256": _hash_file(target_path),
         "quarantine_sha256": _hash_file(policy_path),
+        "target_journal_is_current": target_is_current,
         "paths": {"state": str(state_path), "journal": str(journal_path), "target_journal": str(target_path)},
     }
 
@@ -625,9 +636,20 @@ def _derive_round_classifications(
     }
 
 
-def _validate_uncertain(journal: Mapping[str, Any], *, run_id: str) -> None:
+def _validate_uncertain(
+    journal: Mapping[str, Any],
+    *,
+    run_id: str,
+    allow_historical_committed: bool = False,
+) -> None:
     if str(journal.get("run_id") or "") != run_id:
         raise TransactionIsolationError("run_id diverged")
+    if allow_historical_committed:
+        if journal.get("status") != "committed":
+            raise TransactionIsolationError("historical target journal is not committed")
+        # A historical committed journal is preserved as evidence; it is not
+        # reclassified as current-round success and is never replayed.
+        return
     if journal.get("status") != "committing":
         raise TransactionIsolationError("target journal is not committing")
     if journal.get("readback") is True:
@@ -1352,11 +1374,22 @@ def isolate_uncertain_transaction(
                 raise TransactionIsolationError("pending transition does not match the requested authorization")
             return _apply_transition(root, transition, client)
 
-        checkpoint = _validate_checkpoint(root, cycle_id=cycle_id, authorization_id=authorization_id, selected_ids=selected_ids, pending_round=pending_round)
+        checkpoint = _validate_checkpoint(
+            root,
+            cycle_id=cycle_id,
+            authorization_id=authorization_id,
+            selected_ids=selected_ids,
+            pending_round=pending_round,
+            target_post_id=int(post_id),
+        )
         journal = checkpoint["journal"]
         if str(journal.get("post_id") or "") not in {str(post_id), ""}:
             raise TransactionIsolationError("post_id diverged")
-        _validate_uncertain(journal, run_id=run_id)
+        _validate_uncertain(
+            journal,
+            run_id=run_id,
+            allow_historical_committed=not bool(checkpoint.get("target_journal_is_current")),
+        )
         round_post_evidence = [
             _round_post_evidence(
                 root,
