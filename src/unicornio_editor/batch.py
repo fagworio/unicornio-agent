@@ -28,6 +28,11 @@ from .workflow import (
 
 BATCH_SCHEMA_VERSION = 1
 _BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+_EDITORIAL_FAILURE_CLASSES = frozenset({
+    "api_http_error", "timeout", "transport_error", "invalid_response",
+    "editorial_schema_invalid", "editorial_content_retry",
+    "request_input_invalid", "configuration_error",
+})
 
 
 class BatchError(ValueError):
@@ -105,12 +110,23 @@ def load_editorial_batch(path: Path | str) -> dict[str, Any]:
         if status == "needs_retry" and editorial is not None and not isinstance(editorial, dict):
             raise BatchError(f"items[{position}].editorial precisa ser objeto ou ausente")
         seen.add(post_id)
+        failure_class = str(item.get("failure_class") or "")
+        retryable = item.get("retryable", True)
         normalized.append({
             "post_id": post_id,
             "status": status,
             "reason": str(item.get("reason") or "").strip(),
             "retry_mode": str(item.get("retry_mode") or "").strip(),
             "retry_kind": str(item.get("retry_kind") or "none").strip(),
+            "failure_class": failure_class if failure_class in _EDITORIAL_FAILURE_CLASSES else "",
+            "retryable": retryable if isinstance(retryable, bool) else True,
+            "http_status": (
+                int(item["http_status"])
+                if isinstance(item.get("http_status"), int)
+                and not isinstance(item.get("http_status"), bool)
+                and 100 <= item["http_status"] <= 599
+                else None
+            ),
             "editorial": editorial if isinstance(editorial, dict) else {},
         })
     return {
@@ -206,6 +222,7 @@ def load_media_resolve_batch(path: Path | str) -> dict[str, Any]:
         if isinstance(needed, bool) or not isinstance(needed, int) or not 1 <= needed <= 6:
             raise BatchError(f"needed invalido em post {post_id} (use 1..6)")
         seen.add(post_id)
+        role = str(item.get("role") or "").strip().lower()
         normalized.append({
             "post_id": post_id,
             "subject": subject,
@@ -216,6 +233,7 @@ def load_media_resolve_batch(path: Path | str) -> dict[str, Any]:
             "ratio": str(item.get("ratio") or "w").strip(),
             "limit": min(10, max(1, int(item.get("limit") or max(needed, 3)))),
             "engine": str(item.get("engine") or "auto").strip(),
+            "role": role if role in {"inline", "featured"} else "",
         })
     return {"schema_version": BATCH_SCHEMA_VERSION, "batch_id": batch_id, "posts": normalized}
 

@@ -9,6 +9,7 @@ an output envelope that ``apply-batch`` can consume.
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,6 +21,19 @@ from .editorial_schema import EditorialValidationError, validate_editorial
 
 class EditorialProviderError(RuntimeError):
     """Raised when the direct editorial provider call cannot be trusted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_class: str = "editorial_schema_invalid",
+        retryable: bool = True,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_class = failure_class
+        self.retryable = bool(retryable)
+        self.http_status = http_status
 
 
 _RELEVANCE_SCHEMA = {
@@ -172,22 +186,26 @@ def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise EditorialProviderError(f"entrada editorial invalida: {source}: {exc}") from exc
+        raise EditorialProviderError(
+            f"entrada editorial invalida: {source}: {exc}",
+            failure_class="request_input_invalid",
+            retryable=False,
+        ) from exc
     if not isinstance(payload, dict):
-        raise EditorialProviderError("entrada editorial precisa ser um objeto JSON")
+        raise EditorialProviderError("entrada editorial precisa ser um objeto JSON", failure_class="request_input_invalid", retryable=False)
     batch_id = validate_batch_id(str(payload.get("batch_id") or ""))
     posts = payload.get("posts")
     if not isinstance(posts, list) or not 1 <= len(posts) <= 2:
-        raise EditorialProviderError("entrada editorial precisa conter de 1 a 2 posts")
+        raise EditorialProviderError("entrada editorial precisa conter de 1 a 2 posts", failure_class="request_input_invalid", retryable=False)
     ids: set[int] = set()
     for item in posts:
         if not isinstance(item, dict):
-            raise EditorialProviderError("cada post da entrada editorial precisa ser um objeto")
+            raise EditorialProviderError("cada post da entrada editorial precisa ser um objeto", failure_class="request_input_invalid", retryable=False)
         post_id = item.get("post_id")
         if isinstance(post_id, bool) or not isinstance(post_id, int) or post_id <= 0:
-            raise EditorialProviderError("post_id invalido na entrada editorial")
+            raise EditorialProviderError("post_id invalido na entrada editorial", failure_class="request_input_invalid", retryable=False)
         if post_id in ids:
-            raise EditorialProviderError(f"post_id duplicado na entrada editorial: {post_id}")
+            raise EditorialProviderError(f"post_id duplicado na entrada editorial: {post_id}", failure_class="request_input_invalid", retryable=False)
         ids.add(post_id)
     return batch_id, posts
 
@@ -196,11 +214,11 @@ def _response_text(body: dict[str, Any]) -> str:
     try:
         content = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise EditorialProviderError("resposta editorial sem choices[0].message.content") from exc
+        raise EditorialProviderError("resposta editorial sem choices[0].message.content", failure_class="invalid_response") from exc
     if isinstance(content, list):
         content = "".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
     if not isinstance(content, str) or not content.strip():
-        raise EditorialProviderError("resposta editorial vazia")
+        raise EditorialProviderError("resposta editorial vazia", failure_class="invalid_response")
     return content.strip()
 
 
@@ -208,9 +226,9 @@ def _parse_json(text: str) -> dict[str, Any]:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise EditorialProviderError("resposta editorial nao e JSON") from exc
+        raise EditorialProviderError("resposta editorial nao e JSON", failure_class="invalid_response") from exc
     if not isinstance(value, dict):
-        raise EditorialProviderError("resposta editorial precisa ser um objeto")
+        raise EditorialProviderError("resposta editorial precisa ser um objeto", failure_class="invalid_response")
     return value
 
 
@@ -246,7 +264,14 @@ def _normalize_output(
             raise EditorialProviderError(f"status editorial invalido para {post_id}: {status!r}")
         retry_kind = str(item.get("retry_kind") or "none")
         if status == "needs_retry" and retry_kind != "media":
-            normalized.append({"post_id": post_id, "status": status, "reason": reason or "retry solicitado", "retry_kind": retry_kind})
+            normalized.append({
+                "post_id": post_id,
+                "status": status,
+                "reason": reason or "retry solicitado",
+                "retry_kind": retry_kind,
+                "failure_class": "editorial_content_retry",
+                "retryable": True,
+            })
         else:
             editorial = item.get("editorial")
             if isinstance(editorial, str):
@@ -260,11 +285,22 @@ def _normalize_output(
                         "post_id": post_id,
                         "status": "needs_retry",
                         "reason": f"editorial invalido: string nao e JSON ({exc})",
+                        "retry_kind": "text",
+                        "failure_class": "invalid_response",
+                        "retryable": True,
+                        "http_status": None,
                     })
                     seen.add(post_id)
                     continue
             if not isinstance(editorial, dict):
-                normalized.append({"post_id": post_id, "status": "needs_retry", "reason": reason or "editorial ausente", "retry_kind": retry_kind})
+                normalized.append({
+                    "post_id": post_id,
+                    "status": "needs_retry",
+                    "reason": reason or "editorial ausente",
+                    "retry_kind": "text",
+                    "failure_class": "invalid_response",
+                    "retryable": True,
+                })
                 seen.add(post_id)
                 continue
             normalizations: list[str] = []
@@ -306,6 +342,9 @@ def _normalize_output(
                     "status": "needs_retry",
                     "reason": "localizacao_pt_br_incompleta: " + ", ".join(missing_localization_fields),
                     "retry_kind": "text",
+                    "failure_class": "editorial_schema_invalid",
+                    "retryable": True,
+                    "http_status": None,
                     "normalizations": normalizations,
                 })
                 seen.add(post_id)
@@ -331,6 +370,10 @@ def _normalize_output(
                     "post_id": post_id,
                     "status": "needs_retry",
                     "reason": f"editorial invalido: {exc}",
+                    "retry_kind": "text",
+                    "failure_class": "editorial_schema_invalid",
+                    "retryable": True,
+                    "http_status": None,
                     "normalizations": normalizations,
                 })
             else:
@@ -369,7 +412,11 @@ def generate_editorial_batch(
 ) -> dict[str, Any]:
     """Generate and validate one editorial batch with exactly one HTTP call."""
     if not api_key:
-        raise EditorialProviderError("EDITORIAL_API_KEY/OPENAI_API_KEY ausente")
+        raise EditorialProviderError(
+            "EDITORIAL_API_KEY/OPENAI_API_KEY ausente",
+            failure_class="configuration_error",
+            retryable=False,
+        )
     batch_id, posts = _read_input(input_path)
     request_payload = {
         "model": model,
@@ -406,11 +453,38 @@ def generate_editorial_batch(
     )
     try:
         with urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+            response_bytes = response.read()
     except HTTPError as exc:
-        raise EditorialProviderError(f"API editorial respondeu HTTP {exc.code}") from exc
-    except (URLError, OSError, ValueError) as exc:
-        raise EditorialProviderError(f"falha na API editorial: {exc}") from exc
+        retryable = exc.code in {408, 425, 429} or 500 <= int(exc.code) < 600
+        raise EditorialProviderError(
+            f"API editorial respondeu HTTP {exc.code}",
+            failure_class="api_http_error",
+            retryable=retryable,
+            http_status=int(exc.code),
+        ) from exc
+    except (URLError, OSError, TimeoutError, ValueError) as exc:
+        reason = getattr(exc, "reason", exc)
+        reason_text = str(reason).casefold()
+        failure_class = (
+            "timeout"
+            if isinstance(reason, (TimeoutError, socket.timeout))
+            or "timed out" in reason_text
+            or "timeout" in reason_text
+            else "transport_error"
+        )
+        raise EditorialProviderError(
+            f"falha na API editorial: {exc}",
+            failure_class=failure_class,
+            retryable=True,
+        ) from exc
+    try:
+        body = json.loads(response_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EditorialProviderError(
+            "resposta HTTP editorial nao e JSON valido",
+            failure_class="invalid_response",
+            retryable=True,
+        ) from exc
 
     normalized = _normalize_output(
         _parse_json(_response_text(body)),

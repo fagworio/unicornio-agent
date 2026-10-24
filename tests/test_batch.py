@@ -199,6 +199,38 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(batch["items"][1]["status"], "needs_retry")
             self.assertEqual(batch["items"][1]["reason"], "fato")
 
+    def test_editorial_batch_preserves_only_allowlisted_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "editorial-errors.json"
+            path.write_text(json.dumps({
+                "batch_id": "batch-errors",
+                "results": [
+                    {
+                        "post_id": 1,
+                        "status": "needs_retry",
+                        "failure_class": "api_http_error",
+                        "retryable": False,
+                        "http_status": 401,
+                    },
+                    {
+                        "post_id": 2,
+                        "status": "needs_retry",
+                        "failure_class": "secret-provider-detail",
+                        "retryable": "false",
+                        "http_status": 700,
+                    },
+                ],
+            }), encoding="utf-8")
+
+            items = load_editorial_batch(path)["items"]
+
+        assert items[0]["failure_class"] == "api_http_error"
+        assert items[0]["retryable"] is False
+        assert items[0]["http_status"] == 401
+        assert items[1]["failure_class"] == ""
+        assert items[1]["retryable"] is True
+        assert items[1]["http_status"] is None
+
     def test_media_resolve_batch_is_bounded_and_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "media.json"
@@ -209,6 +241,17 @@ class BatchContextTests(unittest.TestCase):
             batch = load_media_resolve_batch(path)
             self.assertEqual(batch["posts"][0]["query"], "Obra")
             self.assertEqual(batch["posts"][0]["limit"], 3)
+            self.assertEqual(batch["posts"][0]["role"], "")
+
+    def test_media_resolve_batch_preserves_known_media_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "media.json"
+            path.write_text(json.dumps({
+                "batch_id": "media-role-test",
+                "posts": [{"post_id": 1, "subject": "Obra", "role": "featured"}],
+            }), encoding="utf-8")
+            batch = load_media_resolve_batch(path)
+        self.assertEqual(batch["posts"][0]["role"], "featured")
 
     def test_media_resolve_batch_rejects_more_than_two_posts(self):
         with tempfile.TemporaryDirectory() as directory:

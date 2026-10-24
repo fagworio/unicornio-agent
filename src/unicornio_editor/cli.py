@@ -1427,6 +1427,7 @@ def _resolve_media_batch(
     allow_reuse: bool = True,
     excluded_urls: dict[int, set[str]] | None = None,
     excluded_fingerprints: dict[int, set[str]] | None = None,
+    attempt_id: str = "",
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
 
@@ -1445,7 +1446,10 @@ def _resolve_media_batch(
         summarize_engine_reports,
     )
     from .observability import append_telemetry
-    from .media.diagnostics import sanitize_candidate_diagnostics
+    from .media.diagnostics import (
+        sanitize_candidate_diagnostic,
+        summarize_candidate_diagnostics,
+    )
 
     posts = batch["posts"]
     from .pipeline_v2.quarantine import assert_post_not_quarantined
@@ -1502,6 +1506,8 @@ def _resolve_media_batch(
             excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(item.get("role") or ""),
         )
         reuse = [
             candidate for candidate in reuse_accepted
@@ -1550,6 +1556,8 @@ def _resolve_media_batch(
             excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(spec.get("role") or ""),
         )
         accepted = [
             candidate for candidate in aprovados
@@ -1603,6 +1611,8 @@ def _resolve_media_batch(
             excluded_urls=excluded_urls.get(post_id, set()),
             excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(item.get("role") or ""),
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1619,8 +1629,27 @@ def _resolve_media_batch(
         # Relatório por post: a contagem deixa explícito em qual gate o funil
         # perdeu candidatos, sem expor bytes ou o payload completo da imagem.
         all_examined = aprovados + rejeitados + deferidos
+        diagnostic_groups = (
+            ("accepted", aprovados),
+            ("rejected", rejeitados),
+            ("deferred", deferidos),
+        )
+        candidate_diagnostics = [
+            sanitize_candidate_diagnostic(
+                candidate,
+                decision=decision,
+                attempt_id=attempt_id,
+                role=str(item.get("role") or ""),
+            )
+            for decision, group in diagnostic_groups
+            for candidate in group
+        ]
+        candidate_diagnostic_summary = summarize_candidate_diagnostics(
+            candidate_diagnostics
+        )
         candidate_verification_incomplete = any(
-            bool((candidate.get("evidence") or {}).get("recoverable"))
+            not candidate.get("capacity_deferred")
+            and bool((candidate.get("evidence") or {}).get("recoverable"))
             for candidate in deferidos
         )
         verdicts = [str((candidate.get("evidence") or {}).get("verdict") or "") for candidate in all_examined]
@@ -1689,6 +1718,7 @@ def _resolve_media_batch(
         diagnostic_engines = configured_engines + sorted(
             set(engine_reports) - set(configured_engines)
         )
+        provider_strategy_complete = bool(expected_engines and all_engines_verified)
         engine_diagnostics = {
             name: {
                 "attempted": name in engine_reports,
@@ -1801,11 +1831,12 @@ def _resolve_media_batch(
                 "provider_config_valid": provider_config_valid,
                 "invalid_engines": list(engine_strategy["invalid_engines"]),
                 "capacity_reached": completion_reason == "TARGET_REACHED",
-                "provider_strategy_complete": bool(
-                    expected_engines
-                    and all_engines_verified
-                    and search_completed
-                ),
+                # Provider traversal and source verification are independent
+                # evidence dimensions. A candidate with an inconclusive source
+                # must keep the overall query incomplete, but must not rewrite
+                # healthy provider reports as an incomplete provider strategy.
+                "provider_strategy_complete": provider_strategy_complete,
+                "provider_queries_completed": int(provider_strategy_complete),
                 # Compatibilidade com o contrato consumido por pipeline_v2:
                 # somente a exaustão verificada pode provar a estratégia
                 # completa e autorizar a reconciliação de coverage.
@@ -1837,6 +1868,9 @@ def _resolve_media_batch(
             root,
             "media_search_query_summary",
             post_id=post_id,
+            role=str(item.get("role") or ""),
+            attempt_id=str(attempt_id or "")[:64],
+            query_id=hashlib.sha256(str(item["query"]).casefold().encode("utf-8", "ignore")).hexdigest()[:16],
             query=str(item["query"])[:200],
             results_found=len(candidates),
             candidates_attempted=candidates_attempted,
@@ -1856,6 +1890,9 @@ def _resolve_media_batch(
             root,
             "media_search_summary",
             post_id=post_id,
+            role=str(item.get("role") or ""),
+            attempt_id=str(attempt_id or "")[:64],
+            query_id=hashlib.sha256(str(item["query"]).casefold().encode("utf-8", "ignore")).hexdigest()[:16],
             required=needed,
             found=len(candidates),
             with_source=sum(bool(str(candidate.get("source_page_url") or "").strip()) for candidate in all_examined),
@@ -1876,18 +1913,21 @@ def _resolve_media_batch(
             downloaded=0,
             converted=0,
             uploaded=0,
-            candidate_diagnostics=sanitize_candidate_diagnostics(all_examined),
+            candidate_diagnostics=candidate_diagnostics[:20],
+            candidate_diagnostic_summary=candidate_diagnostic_summary,
         )
         output.append({
             "post_id": post_id,
             "subject": subject,
+            "role": str(item.get("role") or ""),
             "needed": needed,
             "reuse": reuso,
             "needed_web": needed_web,
             "candidates": compact_candidates[:needed],
             "deferred": len(deferidos),
             "rejected": len(rejeitados),
-            "candidate_diagnostics": sanitize_candidate_diagnostics(all_examined),
+            "candidate_diagnostics": candidate_diagnostics[:20],
+            "candidate_diagnostic_summary": candidate_diagnostic_summary,
             "audit_candidates": aprovados + rejeitados + deferidos,
             "search": search_progress,
         })
@@ -1899,6 +1939,7 @@ def _resolve_media_batch(
         "vision_items": vision_items,
         "economics": {
             "posts": len(output),
+            "attempt_id": str(attempt_id or "")[:64],
             "search_queries": len(queries),
             "external_http_requests": http_request_count(),
             "candidates_examined": total_candidates,
@@ -1912,6 +1953,7 @@ def _resolve_media_batch(
         "media_resolve_batch",
         batch_size=len(output),
         posts=len(output),
+        attempt_id=str(attempt_id or "")[:64],
         search_queries=len(queries),
         external_http_requests=http_request_count(),
         candidates_examined=total_candidates,
@@ -2167,6 +2209,8 @@ def _enriquecer_candidatos(
     excluded_fingerprints: set[str] | None = None,
     emit_terminal: bool = True,
     url_policy: str = "audit",
+    attempt_id: str = "",
+    role: str = "",
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -2239,6 +2283,8 @@ def _enriquecer_candidatos(
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "source_verification_reason_code", "source_verification_recoverable",
+        "verification_stage", "verification_elapsed_ms",
+        "verification_stage_durations_ms",
         "source_comparison_proved",
         "verification_status", "comparisons_attempted", "assets_considered",
         "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
@@ -2404,6 +2450,12 @@ def _enriquecer_candidatos(
             )
             cand["source_verification_recoverable"] = bool(
                 veredito.get("recoverable")
+            )
+            cand["verification_stage"] = str(
+                veredito.get("verification_stage") or ""
+            )
+            cand["verification_elapsed_ms"] = max(
+                0.0, float(veredito.get("verification_elapsed_ms") or 0.0)
             )
             cand["source_comparison_proved"] = bool(
                 veredito.get("source_comparison_proved")
@@ -2654,13 +2706,14 @@ def _enriquecer_candidatos(
             from .media.diagnostics import sanitize_candidate_diagnostic
             for status, grupo in (("ACCEPTED", aprovados), ("REJECTED", rejeitados), ("DEFERRED", deferidos)):
                 for cand in grupo:
-                    diagnostic = sanitize_candidate_diagnostic(cand)
+                    diagnostic = sanitize_candidate_diagnostic(
+                        cand, role=role, attempt_id=attempt_id
+                    )
                     append_telemetry(
                         root, "media_candidate_terminal",
                         post_id=int(post_id) if post_id else None,
                         query=str(cand.get("query") or termo or ""),
                         subject=str(subject or ""),
-                        role=str(cand.get("role") or ""),
                         image_domain=diagnostic_url_domain(cand.get("direct_image_url")),
                         source_domain=diagnostic_url_domain(cand.get("source_page_url") or cand.get("direct_image_url")),
                         status=status,

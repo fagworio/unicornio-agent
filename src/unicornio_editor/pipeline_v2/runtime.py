@@ -1811,6 +1811,7 @@ class ProductionMediaResolver:
                     "needed": needed,
                     "limit": max(needed, 3),
                     "engine": "auto",
+                    "role": role,
                     "size": "xga",
                     "ratio": "w",
                     "existing_media_urls": [item.media_url for item in current_inline],
@@ -1827,6 +1828,7 @@ class ProductionMediaResolver:
                 self.client, self.config, self.root, batch, full=True, allow_reuse=True,
                 excluded_urls=blocked_urls,
                 excluded_fingerprints=blocked_fingerprints,
+                attempt_id=str(context.get("run_id") or context.get("batch_id") or ""),
             )
             row = (resolved.get("posts") or [{}])[0]
             if role == "inline":
@@ -3942,9 +3944,40 @@ def run_v2(
                     authorization_id=authorization_id,
                 )
                 error_path = root / "backups" / str(post_id) / "editorial.error.json"
-                if outcome.blocker is not None and outcome.blocker.value == "provider_error" and error_path.is_file():
+                if (
+                    outcome.blocker is not None
+                    and outcome.blocker.value == "provider_error"
+                    and error_path.is_file()
+                ):
                     try:
-                        context["provider_reason"] = json.loads(error_path.read_text(encoding="utf-8")).get("reason")
+                        editorial_error = json.loads(error_path.read_text(encoding="utf-8"))
+                        if not isinstance(editorial_error, dict):
+                            raise ValueError("editorial error record is not an object")
+                        context["provider_reason"] = editorial_error.get("reason")
+                        context["provider_failure_phase"] = Phase.EDITORIAL.value
+                        failure_class = editorial_error.get("failure_class")
+                        context["provider_failure_class"] = (
+                            failure_class
+                            if isinstance(failure_class, str) and failure_class in {
+                                "api_http_error", "timeout", "transport_error",
+                                "invalid_response", "editorial_schema_invalid",
+                                "editorial_content_retry", "request_input_invalid",
+                                "configuration_error",
+                            }
+                            else ""
+                        )
+                        retryable = editorial_error.get("retryable")
+                        context["provider_retryable"] = (
+                            retryable if isinstance(retryable, bool) else None
+                        )
+                        http_status = editorial_error.get("http_status")
+                        context["provider_http_status"] = (
+                            http_status
+                            if isinstance(http_status, int)
+                            and not isinstance(http_status, bool)
+                            and 100 <= http_status <= 599
+                            else None
+                        )
                     except (OSError, ValueError):
                         context["provider_reason"] = "provider_error"
                 try:
@@ -4047,6 +4080,10 @@ def run_v2(
                     "cycle_round": cycle_round,
                     "duration_ms": round((monotonic() - post_started_at) * 1000, 1),
                     "stage_durations_ms": dict(context.get("_v2_stage_durations_ms") or {}),
+                    "provider_failure_phase": str(context.get("provider_failure_phase") or ""),
+                    "provider_failure_class": str(context.get("provider_failure_class") or ""),
+                    "provider_retryable": context.get("provider_retryable"),
+                    "provider_http_status": context.get("provider_http_status"),
                     "media": _media_audit_summary(buffered.state.media, write),
                     **write,
                 })
@@ -4060,6 +4097,10 @@ def run_v2(
                         "blocker": outcome.blocker.value if outcome.blocker else None,
                         "cycle_id": str(cycle_id or ""),
                         "cycle_round": cycle_round,
+                        "provider_failure_phase": str(context.get("provider_failure_phase") or ""),
+                        "provider_failure_class": str(context.get("provider_failure_class") or ""),
+                        "provider_retryable": context.get("provider_retryable"),
+                        "provider_http_status": context.get("provider_http_status"),
                     }
                     append_telemetry(root, "v2_funnel", stage="processed", **funnel_fields)
                     written_state = write.get("state")

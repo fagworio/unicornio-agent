@@ -1172,6 +1172,111 @@ def test_media_search_preserves_verified_exhaustion_when_candidate_quota_is_met(
     assert coverage_valid is True
 
 
+def test_source_verification_uncertainty_does_not_erase_provider_completion(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    candidate = {
+        "candidate_id": "deferred-1",
+        "query": "a private source query",
+        "direct_image_url": "https://images.example/candidate.webp?signature=secret",
+        "source_page_url": "https://publisher.example/story",
+        "source_verification_reason_code": "source_page_unavailable",
+        "verification_stage": "source_page_fetch",
+        "evidence": {
+            "verdict": "unresolved_source",
+            "gate": "source_verification",
+            "recoverable": True,
+            "reason_code": "source_page_unavailable",
+        },
+    }
+    monkeypatch.setattr(
+        cli,
+        "_enriquecer_candidatos",
+        lambda _candidates, **_kwargs: ([], [], [candidate]),
+    )
+
+    monkeypatch.setattr(search, "search_web_images_batch", lambda _queries, **_kwargs: [{
+        "query": "verified providers, unresolved source",
+        "completion_reason": "EXHAUSTED_VERIFIED",
+        "candidates": [candidate],
+        "engine_reports": {
+            "bing": {"failure_kind": "ok"},
+            "yandex": {"failure_kind": "no_results_legitimate"},
+        },
+    }])
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "source-verification-incomplete",
+            "posts": [{
+                "post_id": 115600,
+                "subject": "Test",
+                "query": "verified providers, unresolved source",
+                "needed": 2,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=False,
+        attempt_id="run-source-audit-1",
+    )
+
+    progress = result["posts"][0]["search"]
+    coverage = progress["coverage"]
+    assert progress["completed"] is False
+    assert progress["completion_reason"] == "SOURCE_VERIFICATION_INCOMPLETE"
+    assert coverage["provider_strategy_complete"] is True
+    assert coverage["provider_queries_completed"] == 1
+    assert coverage["strategy_complete"] is False
+    assert coverage["candidate_verification_incomplete"] is True
+    diagnostics = result["posts"][0]["candidate_diagnostics"]
+    assert diagnostics[0]["attempt_id"] == "run-source-audit-1"
+    assert diagnostics[0]["source_verification_category"] == "source_inaccessible"
+    assert diagnostics[0]["source_verification_reason"] == "source_page_unavailable"
+    assert "signature=secret" not in json.dumps(diagnostics)
+    telemetry = (tmp_path / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+    assert "signature=secret" not in telemetry
+
+
+def test_technical_provider_failure_still_blocks_verified_exhaustion(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", lambda *_args, **_kwargs: ([], [], []))
+    monkeypatch.setattr(search, "search_web_images_batch", lambda _queries, **_kwargs: [{
+        "query": "technical provider failure",
+        "completion_reason": "EXHAUSTED_VERIFIED",
+        "candidates": [],
+        "engine_reports": {
+            "bing": {"failure_kind": "ok"},
+            "yandex": {"failure_kind": "js_required"},
+        },
+    }])
+    result = cli._resolve_media_batch(
+        object(), Config(), tmp_path,
+        {"schema_version": 1, "batch_id": "provider-failure", "posts": [{
+            "post_id": 115601, "subject": "Test", "query": "technical provider failure",
+            "needed": 1, "limit": 3, "engine": "auto",
+        }]},
+        full=True, allow_reuse=False,
+    )
+
+    progress = result["posts"][0]["search"]
+    assert progress["completed"] is False
+    assert progress["completion_reason"] == "SEARCH_INCOMPLETE"
+    assert progress["coverage"]["provider_strategy_complete"] is False
+    assert progress["coverage"]["strategy_complete"] is False
+
+
 def test_media_search_technical_engine_failure_is_incomplete(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
