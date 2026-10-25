@@ -303,7 +303,7 @@ class CompactOutputTests(unittest.TestCase):
 
             first = _monitor_line(report, root)
             self.assertTrue(
-                first.startswith("recovery=v2:cycle-7f401e9:DRAINING:4:authorization-4:")
+                first.startswith("recovery=v3:cycle-7f401e9:DRAINING:4:authorization-4:")
             )
             self.assertEqual(first, _monitor_line(report, root))
 
@@ -330,13 +330,13 @@ class CompactOutputTests(unittest.TestCase):
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps(state), encoding="utf-8")
             legacy = _monitor_line(report, root)
-            self.assertTrue(legacy.startswith("recovery=v2:legacy-cycle:DRAINING:4:legacy:"))
+            self.assertTrue(legacy.startswith("recovery=v3:legacy-cycle:DRAINING:4:legacy:"))
 
             state["pending_round"]["authorization_id"] = "authorization-4"
             state_path.write_text(json.dumps(state), encoding="utf-8")
             identified = _monitor_line(report, root)
             self.assertTrue(
-                identified.startswith("recovery=v2:legacy-cycle:DRAINING:4:authorization-4:")
+                identified.startswith("recovery=v3:legacy-cycle:DRAINING:4:authorization-4:")
             )
             self.assertNotEqual(legacy, identified)
 
@@ -390,7 +390,7 @@ class CompactOutputTests(unittest.TestCase):
             state_path = root / "work" / "v2-cycle" / "state.json"
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps(state), encoding="utf-8")
-            self.assertIn("recovery=v2:", _monitor_line(report, root))
+            self.assertIn("recovery=v3:", _monitor_line(report, root))
 
             state["status"] = "completed"
             state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -409,8 +409,100 @@ class CompactOutputTests(unittest.TestCase):
             state_path.parent.mkdir(parents=True)
             state_path.write_text("{invalid", encoding="utf-8")
             first = _monitor_line(report, root)
-            self.assertEqual(first, "recovery_error=v2:checkpoint_invalid")
+            self.assertEqual(first, "recovery_error=v3:checkpoint_invalid")
             self.assertEqual(first, _monitor_line(report, root))
+
+    def test_monitor_line_rechecks_recovery_uncertain_once_per_hour(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-uncertain",
+            "status": "running",
+            "phase": "DRAINING",
+            "stop_reason": "recovery_uncertain",
+            "pending_round": {
+                "round_number": 4,
+                "preview_selected_ids": [115757],
+                "authorization_id": "authorization-4",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            first = _monitor_line(report, root, now_epoch=1_792_000_000)
+            same_window = _monitor_line(report, root, now_epoch=1_792_000_200)
+            next_window = _monitor_line(report, root, now_epoch=1_792_003_600)
+
+            self.assertIn(":stop=recovery_uncertain:recheck=497777", first)
+            self.assertEqual(first, same_window)
+            self.assertNotEqual(first, next_window)
+
+    def test_monitor_line_recovery_uncertain_transition_wakes_immediately(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-uncertain",
+            "status": "running",
+            "phase": "DRAINING",
+            "pending_round": {
+                "round_number": 4,
+                "preview_selected_ids": [115757],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            before = _monitor_line(report, root, now_epoch=1_792_000_000)
+
+            state["stop_reason"] = "recovery_uncertain"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            blocked = _monitor_line(report, root, now_epoch=1_792_000_000)
+
+            self.assertNotEqual(before, blocked)
+            self.assertIn(":stop=recovery_uncertain:recheck=497777", blocked)
+
+    def test_monitor_line_keeps_non_uncertain_cycle_stable_across_hours(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [],
+            "unprocessed_ids": [],
+            "posts": [],
+        }
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-admission",
+            "status": "running",
+            "phase": "ADMISSION",
+            "stop_reason": "",
+            "pending_round": None,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            first = _monitor_line(report, root, now_epoch=1_792_000_000)
+            later = _monitor_line(report, root, now_epoch=1_792_100_000)
+
+            self.assertEqual(first, later)
+            self.assertIn(":stop=none", first)
+            self.assertNotIn(":recheck=", first)
 
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})

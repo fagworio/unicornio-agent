@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -2064,16 +2065,21 @@ def _compact_checklist(checklist: dict) -> dict:
     return {"status": "pass" if not failed else "fail", "failed": failed}
 
 
-_V2_RECOVERY_MONITOR_PROTOCOL = "v2"
+_V2_RECOVERY_MONITOR_PROTOCOL = "v3"
+_V2_RECOVERY_RECHECK_SECONDS = 60 * 60
 _V2_CYCLE_PHASES = frozenset({"ADMISSION", "DRAINING", "COMPLETED"})
 
 
-def _v2_recovery_monitor_marker(root: Path) -> str | None:
+def _v2_recovery_monitor_marker(
+    root: Path, *, now_epoch: float | None = None
+) -> str | None:
     """Return a stable wake marker for a resumable V2 cycle checkpoint.
 
     The Hermes monitor hashes this line and only wakes the agent when it
-    changes.  Recovery therefore needs a marker that changes for meaningful
-    checkpoint transitions, but never for timestamps or polling counters.
+    changes. Recovery therefore needs a marker that changes for meaningful
+    checkpoint transitions, but never for routine timestamps or polling
+    counters. A ``recovery_uncertain`` checkpoint gets a coarse hourly bucket
+    so Hermes re-evaluates it periodically without waking on every poll.
     Invalid checkpoints stay visible as one stable error marker so recovery
     cannot silently stall or spin.
     """
@@ -2091,12 +2097,16 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
     cycle_id = value.get("cycle_id")
     status = value.get("status")
     phase = value.get("phase")
+    stop_reason = value.get("stop_reason", "")
+    if stop_reason is None:
+        stop_reason = ""
     if (
         not isinstance(cycle_id, str)
         or not cycle_id
         or not re.fullmatch(r"[A-Za-z0-9._-]+", cycle_id)
         or status not in {"running", "completed", "failed"}
         or phase not in _V2_CYCLE_PHASES
+        or not isinstance(stop_reason, str)
     ):
         return f"recovery_error={_V2_RECOVERY_MONITOR_PROTOCOL}:checkpoint_invalid"
     if status != "running":
@@ -2141,20 +2151,33 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
         json.dumps(authorized_ids, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     authorization_segment = f":{authorization_id or 'legacy'}"
+    stop_segment = (
+        ":stop=recovery_uncertain"
+        if stop_reason == "recovery_uncertain"
+        else ":stop=none"
+    )
+    recheck_segment = ""
+    if stop_reason == "recovery_uncertain":
+        current_epoch = time.time() if now_epoch is None else now_epoch
+        recheck_bucket = int(current_epoch // _V2_RECOVERY_RECHECK_SECONDS)
+        recheck_segment = f":recheck={recheck_bucket}"
     return (
         f"recovery={_V2_RECOVERY_MONITOR_PROTOCOL}:{cycle_id}:{phase}:{round_number}"
-        f"{authorization_segment}:{authorized_digest}"
+        f"{authorization_segment}:{authorized_digest}{stop_segment}{recheck_segment}"
     )
 
 
-def _monitor_line(report: dict, root: Path | None = None) -> str:
+def _monitor_line(
+    report: dict, root: Path | None = None, *, now_epoch: float | None = None
+) -> str:
     """Linha ESTAVEL do monitor (hasheada pelo cron).
 
     So muda quando ha trabalho elegivel real: pending nao processado (id),
     rework BLOCKED fora de cooldown (id) e rework em cooldown codificado
     como id@next_retry_at (minuto). O hash so muda quando um cooldown expira
-    (o post troca de grupo cooldown -> elegivel), NUNCA a cada tick por um
-    bucket de parede — evita rework eterno queimando tokens.
+    (o post troca de grupo cooldown -> elegivel). Checkpoints
+    ``recovery_uncertain`` sao a unica excecao: recebem bucket horario para
+    reavaliacao limitada, sem transformar polling normal em custo.
     """
     parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
     parts += [str(pid) for pid in report.get("v2_eligible_ids", [])]
@@ -2186,7 +2209,7 @@ def _monitor_line(report: dict, root: Path | None = None) -> str:
     )
     parts += in_cooldown
     if root is not None:
-        recovery_marker = _v2_recovery_monitor_marker(root)
+        recovery_marker = _v2_recovery_monitor_marker(root, now_epoch=now_epoch)
         if recovery_marker:
             parts.append(recovery_marker)
     return " ".join(parts) or "0"
