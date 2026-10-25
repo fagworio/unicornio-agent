@@ -44,7 +44,9 @@ class FakeClient:
         }
         self.posts = {}
         self.get_calls = 0
+        self.media_get_calls = []
         self.write_calls = 0
+        self.upload_calls = 0
 
     def get_post(self, post_id):
         self.get_calls += 1
@@ -68,6 +70,21 @@ class FakeClient:
 
     def list_pending(self, *, page, per_page):
         return []
+
+    def get_media(self, media_id):
+        self.media_get_calls.append(int(media_id))
+        return {
+            "id": int(media_id),
+            "source_url": f"https://uploads.test/{int(media_id)}.webp",
+            "mime_type": "image/webp",
+            "media_type": "image",
+            "parent": POST,
+            "alt_text": "test attachment",
+        }
+
+    def upload_media(self, *_args, **_kwargs):
+        self.upload_calls += 1
+        raise AssertionError("uncertain isolation must never upload media")
 
     def update_post(self, post_id, payload):
         self.write_calls += 1
@@ -403,6 +420,377 @@ def _multi_isolation_args(root):
             [(115215, "accepted", None), (115512, "accepted", None)],
         )
     return args
+
+
+def _prewriter_media_fixture(root: Path):
+    _fixture(root)
+    policy_path = root / "config" / "v2-quarantine.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["posts"].extend([
+        {"post_id": 115181, "reason_code": "historical_hold", "reason": "preserve existing quarantine"},
+        {"post_id": 115195, "reason_code": "historical_hold", "reason": "preserve existing quarantine"},
+    ])
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    args = _args(root)
+    journal_path = root / "work" / "v2-journal" / f"{POST}.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.update({
+        "status": "running",
+        "protocol_version": 2,
+        "writer_started": False,
+        "resumable": False,
+        "readback": None,
+        "media_state": "acquisition_incomplete",
+        "media_ids": [115775],
+    })
+    original_journal = json.dumps(journal, ensure_ascii=False, sort_keys=True, indent=2).encode() + b"\n"
+    journal_path.write_bytes(original_journal)
+    partial_path = root / "backups" / str(POST) / "editorial.partial.json"
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_bytes = json.dumps({
+        "inline": {
+            "required": 1,
+            "accepted": [{"media_id": 115775, "slot": 0}],
+        },
+        "featured": {"media_id": 0},
+    }, ensure_ascii=False, sort_keys=True, indent=2).encode() + b"\n"
+    partial_path.write_bytes(partial_bytes)
+
+    # This post is a second, independently verified commit in the same round.
+    committed_id = 115215
+    committed_run = "current-run-115215"
+    committed_journal = {
+        "status": "committed",
+        "post_id": committed_id,
+        "run_id": committed_run,
+        "cycle_id": CYCLE,
+        "cycle_round": 1,
+        "authorization_id": AUTH,
+        "state": {
+            "version": 2,
+            "state": "human_required",
+            "phase": "media",
+            "blocker": "inline_missing",
+        },
+        "readback": True,
+        "writer_started": True,
+        "resumable": False,
+        "media_state": "accepted_working",
+    }
+    (root / "work" / "v2-journal" / f"{committed_id}.json").write_text(
+        json.dumps(committed_journal), encoding="utf-8"
+    )
+    with sqlite3.connect(root / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_runs VALUES (?, ?, ?, ?)",
+            (committed_run, committed_id, "readback_confirmed", "2026-10-23T04:03:18Z"),
+        )
+        db.execute(
+            "INSERT INTO media_decisions VALUES (?, ?, ?, ?, ?)",
+            (committed_run, committed_id, "committed", "readback", "2026-10-23 04:03:18"),
+        )
+    args["client"].posts[committed_id] = {
+        "id": committed_id,
+        "status": "awaiting_human",
+        "featured_media": 0,
+        "meta": {
+            "_hermes_work_state": json.dumps(committed_journal["state"]),
+        },
+        "content": {"raw": ""},
+        "title": {"raw": ""},
+    }
+    return args, original_journal, partial_bytes
+
+
+def test_prewriter_media_uncertainty_is_previewed_without_mutating_evidence(tmp_path):
+    args, original_journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    result = isolate_uncertain_transaction(**args, apply=False)
+
+    assert result["status"] == "preview"
+    assert result["classification"] == "UNCERTAIN_ISOLATED"
+    assert result["round_classifications"] == {
+        "reconciled_post_ids": [115215, 115338, 115512, 115524],
+        "not_executed_post_ids": [115338, 115512],
+        "executed_ids": [115215, 115524],
+        "unresolved_post_ids": [],
+    }
+    target = next(
+        item for item in result["evidence"]["round_post_evidence"]
+        if item["post_id"] == POST
+    )
+    assert target["classification"] == "UNCERTAIN_ISOLATED"
+    assert target["prewriter_media_isolation"]["eligible"] is True
+    assert target["prewriter_media_isolation"]["partial_media_ids"] == [115775]
+    assert target["media_artifacts"]["partial"]["sha256"] == transaction_admin._hash_bytes(partial_bytes)
+    assert target["media_artifacts"]["sidecar"] == {
+        "present": False,
+        "sha256": "",
+        "size_bytes": 0,
+        "parse_status": "absent",
+        "archive_name": f"editorial-partial-v2-{POST}.json",
+    }
+    assert target["attachments"]["status"] == "complete"
+    assert target["attachments"]["items"][0]["id"] == 115775
+    assert target["registry"]["audit_rows"]["run"][0]["acquisition_outcome"] == "started"
+    assert target["registry"]["audit_rows"]["usages"] == []
+    assert args["client"].media_get_calls == [115775]
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
+    assert (tmp_path / "work" / "v2-journal" / f"{POST}.json").read_bytes() == original_journal
+    assert (tmp_path / "backups" / str(POST) / "editorial.partial.json").read_bytes() == partial_bytes
+    assert not (tmp_path / "backups" / str(POST) / "editorial.partial.v2.json").exists()
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+
+
+def test_prewriter_media_isolation_archives_exact_partial_and_closes_only_proven_round(tmp_path):
+    args, original_journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    with pytest.raises(TransactionIsolationError, match="operator"):
+        isolate_uncertain_transaction(**args, apply=True, preview=preview)
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert not (tmp_path / "work" / "v2-cycle" / "transaction-isolations").exists()
+
+    result = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="synthetic-e2e-prewriter-isolation",
+    )
+    assert result["status"] == "applied"
+    assert result["wordpress_writes"] == 0
+    assert args["client"].write_calls == 0
+    assert args["client"].media_get_calls == [115775, 115775, 115775, 115775]
+    state = CycleStateStore(tmp_path).load()
+    assert state.pending_round is None
+    assert state.rounds == 1
+    assert state.attempts_by_post == {115215: 1, 115524: 1}
+    assert state.attempts_total == 2
+    assert state.seen_post_ids == [115215, 115524]
+    assert state.round_reports[-1]["write_replayed"] is False
+    assert state.round_reports[-1]["unresolved_post_ids"] == [POST]
+
+    archive = Path(result["archive_dir"])
+    assert (archive / f"journal-{POST}.json").read_bytes() == original_journal
+    assert (archive / f"editorial-partial-{POST}.json").read_bytes() == partial_bytes
+    assert not (archive / f"editorial-partial-v2-{POST}.json").exists()
+    record = json.loads((archive / "isolation-record.json").read_text())
+    target = next(
+        item for item in record["round_post_evidence"] if item["post_id"] == POST
+    )
+    assert target["classification"] == "UNCERTAIN_ISOLATED"
+    assert target["media_artifacts"]["sidecar"]["present"] is False
+    assert record["archive_hashes"]["media_partial"] == transaction_admin._hash_bytes(partial_bytes)
+    assert record["archive_hashes"]["media_sidecar"] is None
+    quarantine = json.loads((tmp_path / "config" / "v2-quarantine.json").read_text())
+    assert POST in {row["post_id"] for row in quarantine["posts"]}
+    assert 115181 in {row["post_id"] for row in quarantine["posts"]}
+    assert 115195 in {row["post_id"] for row in quarantine["posts"]}
+    assert (tmp_path / "work" / "v2-journal" / f"{POST}.json").read_bytes() == original_journal
+    assert (tmp_path / "backups" / str(POST) / "editorial.partial.json").read_bytes() == partial_bytes
+    assert not (tmp_path / "backups" / str(POST) / "editorial.partial.v2.json").exists()
+    repeated = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="synthetic-e2e-prewriter-isolation",
+    )
+    assert repeated["status"] == "already_applied"
+    assert args["client"].upload_calls == 0
+
+
+@pytest.mark.parametrize("changed", ["partial", "sidecar", "attachment"])
+def test_prewriter_media_evidence_change_invalidates_preview(tmp_path, changed):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    if changed == "partial":
+        path = tmp_path / "backups" / str(POST) / "editorial.partial.json"
+        path.write_bytes(path.read_bytes() + b" ")
+    elif changed == "sidecar":
+        path = tmp_path / "backups" / str(POST) / "editorial.partial.v2.json"
+        path.write_text("{}", encoding="utf-8")
+    else:
+        original_get_media = args["client"].get_media
+
+        def changed_attachment(media_id):
+            value = original_get_media(media_id)
+            value["source_url"] = "https://uploads.test/changed.webp"
+            return value
+
+        args["client"].get_media = changed_attachment
+    with pytest.raises(TransactionIsolationError, match="changed since preview"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+
+def test_prewriter_media_apply_fails_closed_when_attachment_readback_is_unavailable(tmp_path):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    args["client"].get_media = lambda _media_id: (_ for _ in ()).throw(RuntimeError("offline"))
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    target = next(
+        item for item in preview["evidence"]["round_post_evidence"]
+        if item["post_id"] == POST
+    )
+    assert target["attachments"]["status"] == "unavailable"
+    with pytest.raises(TransactionIsolationError, match="attachment evidence is incomplete"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+
+def test_prewriter_media_isolation_rejects_contradictory_registry_identity(tmp_path):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute("ALTER TABLE media_runs ADD COLUMN cycle_id TEXT")
+        db.execute("ALTER TABLE media_runs ADD COLUMN cycle_round INTEGER")
+        db.execute("ALTER TABLE media_runs ADD COLUMN authorization_id TEXT")
+        db.execute(
+            "UPDATE media_runs SET cycle_id=?, cycle_round=?, authorization_id=? WHERE run_id=?",
+            ("different-cycle", 99, "different-auth", RUN),
+        )
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    target = next(
+        item for item in preview["evidence"]["round_post_evidence"]
+        if item["post_id"] == POST
+    )
+    conflicts = target["prewriter_media_isolation"]["registry_identity_conflicts"]
+    assert {item["field"] for item in conflicts} == {
+        "cycle_id", "cycle_round", "authorization_id",
+    }
+    with pytest.raises(TransactionIsolationError, match="pre-writer media evidence is incomplete"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
+
+
+def test_prewriter_media_isolation_refuses_busy_global_lock(monkeypatch, tmp_path):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    monkeypatch.setattr(transaction_admin.RunSessionLock, "acquire", lambda _self: False)
+    result = isolate_uncertain_transaction(**args, apply=False)
+    assert result == {
+        "status": "blocked",
+        "reason": "global_lock_unavailable",
+        "wordpress_writes": 0,
+    }
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert args["client"].write_calls == 0
+
+
+def test_prewriter_media_isolation_blocks_when_another_round_post_is_uncertain(tmp_path):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    (tmp_path / "work" / "v2-journal" / "115338.json").unlink()
+    args["client"].posts[115338]["status"] = "awaiting_human"
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    assert 115338 in preview["round_classifications"]["unresolved_post_ids"]
+    with pytest.raises(TransactionIsolationError, match="unresolved execution evidence"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert not (tmp_path / "work" / "v2-cycle" / "transaction-isolations").exists()
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
+
+
+def test_prewriter_media_isolation_recovers_after_quarantine_interruption(
+    monkeypatch, tmp_path
+):
+    args, original_journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_write = transaction_admin._write_quarantine_additively
+
+    def write_then_interrupt(*call_args, **call_kwargs):
+        original_write(*call_args, **call_kwargs)
+        raise RuntimeError("simulated stop after quarantine update")
+
+    monkeypatch.setattr(transaction_admin, "_write_quarantine_additively", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="after quarantine update"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    assert CycleStateStore(tmp_path).load().pending_round is not None
+    assert (tmp_path / "work" / "v2-journal" / f"{POST}.json").read_bytes() == original_journal
+    assert (tmp_path / "backups" / str(POST) / "editorial.partial.json").read_bytes() == partial_bytes
+    assert not (tmp_path / "backups" / str(POST) / "editorial.partial.v2.json").exists()
+    monkeypatch.setattr(transaction_admin, "_write_quarantine_additively", original_write)
+    resumed = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="synthetic-e2e-prewriter-isolation",
+    )
+    assert resumed["status"] == "applied"
+    assert CycleStateStore(tmp_path).load().pending_round is None
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
+
+
+def test_prewriter_media_isolation_recovers_between_checkpoint_and_event(
+    monkeypatch, tmp_path
+):
+    args, _journal, _partial = _prewriter_media_fixture(tmp_path)
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    original_save = CycleStateStore.save
+
+    def crash_after_checkpoint_before_event(self, state, *, event, **fields):
+        if event == transaction_admin.ISOLATION_EVENT:
+            state.touch()
+            self.directory.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(
+                self.state_path,
+                json.dumps(state.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            )
+            raise RuntimeError("simulated stop after checkpoint before event")
+        return original_save(self, state, event=event, **fields)
+
+    monkeypatch.setattr(CycleStateStore, "save", crash_after_checkpoint_before_event)
+    with pytest.raises(RuntimeError, match="checkpoint before event"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="synthetic-e2e-prewriter-isolation",
+        )
+    monkeypatch.setattr(CycleStateStore, "save", original_save)
+    resumed = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="synthetic-e2e-prewriter-isolation",
+    )
+    assert resumed["status"] == "applied"
+    state = CycleStateStore(tmp_path).load()
+    assert state.pending_round is None
+    assert state.attempts_by_post == {115215: 1, 115524: 1}
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "work" / "v2-cycle" / "journal.jsonl").read_text().splitlines()
+    ]
+    assert sum(item.get("event") == transaction_admin.ISOLATION_EVENT for item in events) == 1
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
 
 
 def test_preview_classifies_uncertain_without_writing(tmp_path):

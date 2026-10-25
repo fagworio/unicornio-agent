@@ -32,3 +32,27 @@ readback indisponível ou qualquer indício de aplicação mantêm o bloqueio
 tornam recuperáveis automaticamente; exigem reconciliação explícita com as
 evidências históricas existentes. O mecanismo não altera limites de tentativas
 nem isola automaticamente uma autorização arbitrária com efeitos incertos.
+
+## Contenção administrativa de um parcial legado sem sidecar
+
+Quando a retomada automática não pode provar a correlação, o comando
+administrativo existente v2-isolate-uncertain pode ser usado para conter um
+alvo pré-Writer, sem transformá-lo em retry. O preview exige a identidade exata
+da autorização e mantém o alvo como UNCERTAIN_ISOLATED. Para aplicar, exige
+autorização administrativa explícita e prova completa dos demais posts da
+rodada; qualquer outro post ainda incerto bloqueia o encerramento.
+
+Para essa categoria, o preview registra os hashes e bytes originais do parcial,
+a presença ou ausência explícita do sidecar, o estado do MediaRegistry e
+fingerprints sanitizados dos attachments referenciados. URLs e outros valores
+brutos de attachment não são incluídos no relatório. Antes de aplicar ou
+retomar uma transição interrompida, os arquivos, fingerprints, journals,
+Registry e estado WordPress são lidos novamente. Qualquer mudança invalida a
+transição. Um sidecar ausente continua ausente no arquivo; o procedimento nunca
+fabrica correlação.
+
+O isolamento não executa POST/PUT/PATCH/DELETE, não faz upload, não altera o
+post WordPress e não declara mídia aplicada, READY ou publicada. O journal e o
+parcial originais são preservados. Só os posts individualmente comprovados
+entram na contabilidade da rodada; o alvo isolado permanece em quarentena e
+excluído de novos escritores até resolução independente.
