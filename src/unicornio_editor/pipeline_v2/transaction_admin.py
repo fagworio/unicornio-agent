@@ -29,6 +29,9 @@ from .lock import RunSessionLock
 ISOLATION_VERSION = 1
 ISOLATION_EVENT = "transaction_uncertain_isolated"
 ISOLATION_REASON = "uncertain_transaction"
+PREWRITER_MEDIA_STATUSES = {
+    "running", "validated", "committing", "failed_pre_writer", "interrupted_pre_writer",
+}
 
 
 class TransactionIsolationError(RuntimeError):
@@ -272,7 +275,10 @@ def _validate_checkpoint(
         pending_round=int(pending_round),
     )
     if target_is_current:
-        _validate_uncertain(journal, run_id=expected["run_id"])
+        if journal.get("writer_started") is True:
+            _validate_uncertain(journal, run_id=expected["run_id"])
+        else:
+            _validate_pre_writer_uncertain_journal(journal, run_id=expected["run_id"])
     else:
         _validate_historical_target_journal(
             journal,
@@ -447,8 +453,44 @@ def _wp_summary(post: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _registry_summary(registry: Mapping[str, Any]) -> dict[str, Any]:
+def _registry_audit_rows(registry: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    fields = {
+        "run": (
+            "run_id", "post_id", "created_at", "started_at", "completed_at",
+            "cycle_id", "cycle_round", "authorization_id", "acquisition_outcome",
+            "operation_status", "outcome",
+        ),
+        "decisions": (
+            "run_id", "post_id", "candidate_id", "disposition", "reason_code",
+            "scope", "cycle_id", "cycle_round", "authorization_id", "created_at",
+        ),
+        "usages": (
+            "post_id", "asset_id", "wordpress_media_id", "role", "status",
+            "applied_at", "run_id", "cycle_id", "cycle_round",
+            "authorization_id", "accepted_at", "readback_confirmed_at",
+        ),
+        "operations": (
+            "post_id", "run_id", "cycle_id", "cycle_round", "authorization_id",
+            "started_at", "operation_status", "write_started",
+            "readback_confirmed", "completed_at", "outcome",
+        ),
+    }
     return {
+        section: [
+            {key: row.get(key) for key in allowed if key in row}
+            for row in (registry.get(section) or [])
+            if isinstance(row, Mapping)
+        ]
+        for section, allowed in fields.items()
+    }
+
+
+def _registry_summary(
+    registry: Mapping[str, Any],
+    *,
+    include_audit_rows: bool = False,
+) -> dict[str, Any]:
+    result = {
         "present": registry.get("present") is True,
         "schema_complete": registry.get("schema_complete") is True,
         "run_count": len(registry.get("run") or []),
@@ -456,6 +498,322 @@ def _registry_summary(registry: Mapping[str, Any]) -> dict[str, Any]:
         "usage_count": len(registry.get("usages") or []),
         "operation_count": len(registry.get("operations") or []),
         "snapshot_sha256": _hash_value(dict(registry)),
+    }
+    if include_audit_rows:
+        result["audit_rows"] = _registry_audit_rows(registry)
+    return result
+
+
+def _media_artifact_path(root: Path, post_id: int, kind: str) -> Path:
+    if kind not in {"partial", "sidecar"}:
+        raise TransactionIsolationError("unsupported media artifact kind")
+    root = Path(root)
+    backups_root = root / "backups"
+    post_dir = backups_root / str(int(post_id))
+    if backups_root.is_symlink() or post_dir.is_symlink():
+        raise TransactionIsolationError("media artifact directory must not be a symlink")
+    path = post_dir / (
+        "editorial.partial.json" if kind == "partial" else "editorial.partial.v2.json"
+    )
+    try:
+        path.resolve().relative_to(backups_root.resolve())
+    except (OSError, ValueError) as exc:
+        raise TransactionIsolationError("media artifact path escapes the backup directory") from exc
+    return path
+
+
+def _media_artifact_snapshot(root: Path, post_id: int) -> dict[str, Any]:
+    """Describe the exact partial/sidecar inputs without normalizing their bytes."""
+    paths = {
+        "partial": (
+            _media_artifact_path(root, post_id, "partial"),
+            f"editorial-partial-{int(post_id)}.json",
+        ),
+        "sidecar": (
+            _media_artifact_path(root, post_id, "sidecar"),
+            f"editorial-partial-v2-{int(post_id)}.json",
+        ),
+    }
+    result: dict[str, Any] = {}
+    parsed_partial: Mapping[str, Any] | None = None
+    parsed_sidecar: Mapping[str, Any] | None = None
+    for name, (path, archive_name) in paths.items():
+        if path.is_symlink():
+            result[name] = {
+                "present": True,
+                "sha256": "",
+                "size_bytes": None,
+                "parse_status": "symlink_rejected",
+                "archive_name": archive_name,
+            }
+            continue
+        if not path.exists():
+            result[name] = {
+                "present": False,
+                "sha256": "",
+                "size_bytes": 0,
+                "parse_status": "absent",
+                "archive_name": archive_name,
+            }
+            continue
+        if not path.is_file():
+            result[name] = {
+                "present": True,
+                "sha256": "",
+                "size_bytes": None,
+                "parse_status": "not_a_file",
+                "archive_name": archive_name,
+            }
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            result[name] = {
+                "present": True,
+                "sha256": "",
+                "size_bytes": None,
+                "parse_status": f"read_error:{type(exc).__name__}",
+                "archive_name": archive_name,
+            }
+            continue
+        parsed: Mapping[str, Any] | None = None
+        parse_status = "valid"
+        try:
+            value = json.loads(data.decode("utf-8"))
+            if isinstance(value, Mapping):
+                parsed = value
+            else:
+                parse_status = "invalid_json_object"
+        except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+            parse_status = "invalid_json"
+        result[name] = {
+            "present": True,
+            "sha256": _hash_bytes(data),
+            "size_bytes": len(data),
+            "parse_status": parse_status,
+            "archive_name": archive_name,
+        }
+        if name == "partial":
+            parsed_partial = parsed
+        else:
+            parsed_sidecar = parsed
+
+    partial_ids: set[int] = set()
+    partial_parse_errors: list[str] = []
+    if result["partial"]["present"] and parsed_partial is not None:
+        inline = parsed_partial.get("inline")
+        accepted = inline.get("accepted", []) if isinstance(inline, Mapping) else []
+        if inline is not None and not isinstance(inline, Mapping):
+            partial_parse_errors.append("inline_not_object")
+        if not isinstance(accepted, list):
+            partial_parse_errors.append("inline_accepted_not_list")
+            accepted = []
+        for index, item in enumerate(accepted):
+            if not isinstance(item, Mapping):
+                partial_parse_errors.append(f"inline_item_{index}_not_object")
+                continue
+            value = item.get("media_id")
+            if isinstance(value, bool) or not str(value or "").isdigit():
+                partial_parse_errors.append(f"inline_item_{index}_media_id_invalid")
+                continue
+            if int(value) > 0:
+                partial_ids.add(int(value))
+        featured = parsed_partial.get("featured")
+        if featured is not None and not isinstance(featured, Mapping):
+            partial_parse_errors.append("featured_not_object")
+        elif isinstance(featured, Mapping):
+            value = featured.get("media_id")
+            if value not in (None, "", 0, "0"):
+                if isinstance(value, bool) or not str(value).isdigit():
+                    partial_parse_errors.append("featured_media_id_invalid")
+                elif int(value) > 0:
+                    partial_ids.add(int(value))
+
+    sidecar_summary: dict[str, Any] = {"parse_status": result["sidecar"]["parse_status"]}
+    if parsed_sidecar is not None:
+        sidecar_summary.update({
+            key: parsed_sidecar.get(key)
+            for key in (
+                "schema_version", "post_id", "run_id", "cycle_id",
+                "cycle_round", "authorization_id", "checkpoint_sha256",
+            )
+        })
+        sidecar_media_ids = parsed_sidecar.get("media_ids", [])
+        sidecar_summary["media_ids"] = (
+            sorted(
+                int(value)
+                for value in sidecar_media_ids
+                if not isinstance(value, bool) and str(value).isdigit()
+            )
+            if isinstance(sidecar_media_ids, list)
+            else None
+        )
+    return {
+        **result,
+        "partial_media_ids": sorted(partial_ids),
+        "partial_parse_errors": partial_parse_errors,
+        "sidecar_summary": sidecar_summary,
+    }
+
+
+def _attachment_snapshot(
+    client,
+    *,
+    media_ids: set[int],
+) -> dict[str, Any]:
+    if not media_ids:
+        return {"status": "not_required", "items": []}
+    getter = getattr(client, "get_media", None)
+    if not callable(getter):
+        return {
+            "status": "unavailable",
+            "items": [{"id": media_id, "status": "reader_unavailable"} for media_id in sorted(media_ids)],
+        }
+    items: list[dict[str, Any]] = []
+    for media_id in sorted(media_ids):
+        try:
+            attachment = getter(int(media_id))
+        except Exception as exc:  # noqa: BLE001 - preserve uncertainty on REST failure
+            items.append({
+                "id": media_id,
+                "status": "read_error",
+                "error_type": type(exc).__name__,
+            })
+            continue
+        try:
+            attachment_id = int(attachment.get("id") or 0) if isinstance(attachment, Mapping) else 0
+        except (TypeError, ValueError):
+            attachment_id = 0
+        if not isinstance(attachment, Mapping) or attachment_id != media_id:
+            items.append({"id": media_id, "status": "identity_mismatch"})
+            continue
+        source_url = str(attachment.get("source_url") or "")
+        try:
+            response_sha256 = _hash_value(dict(attachment))
+        except (TypeError, ValueError):
+            items.append({"id": media_id, "status": "invalid_response"})
+            continue
+        items.append({
+            "id": media_id,
+            "status": "read",
+            "response_sha256": response_sha256,
+            "source_url_sha256": _hash_bytes(source_url.encode("utf-8")) if source_url else "",
+            "mime_type": attachment.get("mime_type"),
+            "media_type": attachment.get("media_type"),
+            "parent": attachment.get("post"),
+            "alt_text_sha256": _hash_value(str(attachment.get("alt_text") or "")),
+        })
+    return {
+        "status": "complete" if all(item.get("status") == "read" for item in items) else "unavailable",
+        "items": items,
+    }
+
+
+def _prewriter_media_isolation_evidence(
+    journal: Mapping[str, Any] | None,
+    *,
+    run_id: str | None,
+    current_identity: bool,
+    registry: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+    attachments: Mapping[str, Any],
+) -> dict[str, Any]:
+    initial_state = journal.get("state") if isinstance(journal, Mapping) else None
+    initial_media = initial_state.get("media") if isinstance(initial_state, Mapping) else {}
+    initial_inline = initial_media.get("inline") if isinstance(initial_media, Mapping) else {}
+    initial_items = initial_inline.get("accepted", []) if isinstance(initial_inline, Mapping) else []
+    initial_ids = {
+        int(item["media_id"])
+        for item in initial_items if isinstance(item, Mapping)
+        and not isinstance(item.get("media_id"), bool)
+        and str(item.get("media_id") or "").isdigit() and int(item["media_id"]) > 0
+    } if isinstance(initial_items, list) else set()
+    initial_featured = initial_media.get("featured") if isinstance(initial_media, Mapping) else None
+    if isinstance(initial_featured, Mapping):
+        value = initial_featured.get("media_id")
+        if not isinstance(value, bool) and str(value or "").isdigit() and int(value) > 0:
+            initial_ids.add(int(value))
+    partial_ids = {int(value) for value in artifacts.get("partial_media_ids", [])}
+    registry_runs = registry.get("run") if isinstance(registry.get("run"), list) else []
+    exact_run_rows = [
+        row for row in registry_runs
+        if isinstance(row, Mapping)
+        and str(row.get("run_id") or "") == str(run_id or "")
+        and str(row.get("post_id") or "") == str((journal or {}).get("post_id") or "")
+    ]
+    signals: list[str] = []
+    if partial_ids - initial_ids:
+        signals.append("partial_references_media_not_in_initial_journal_state")
+    if exact_run_rows:
+        signals.append("media_registry_run_exists_for_current_run")
+    if journal and any(journal.get(key) for key in ("media_ids", "media_records", "apply_media_records")):
+        signals.append("journal_contains_media_references")
+    expected_registry_identity = {
+        "cycle_id": str((journal or {}).get("cycle_id") or ""),
+        "cycle_round": (journal or {}).get("cycle_round"),
+        "authorization_id": str((journal or {}).get("authorization_id") or ""),
+    }
+    registry_identity_conflicts: list[dict[str, Any]] = []
+    for section in ("run", "decisions", "usages", "operations"):
+        for index, row in enumerate(registry.get(section) or []):
+            if not isinstance(row, Mapping) or str(row.get("run_id") or "") != str(run_id or ""):
+                continue
+            for field, expected in expected_registry_identity.items():
+                if field not in row or row.get(field) in (None, ""):
+                    continue
+                actual = str(row.get(field)) if field == "cycle_round" else row.get(field)
+                expected_value = str(expected) if field == "cycle_round" else expected
+                if actual != expected_value:
+                    registry_identity_conflicts.append({
+                        "section": section,
+                        "row_index": index,
+                        "field": field,
+                        "expected": expected_value,
+                        "actual": actual,
+                    })
+    basic = bool(
+        current_identity
+        and journal is not None
+        and str(journal.get("run_id") or "") == str(run_id or "")
+        and journal.get("status") in PREWRITER_MEDIA_STATUSES
+        and journal.get("writer_started") is False
+        and journal.get("readback") is not True
+    )
+    artifacts_valid = bool(
+        artifacts.get("partial", {}).get("present") is True
+        and artifacts.get("partial", {}).get("parse_status") == "valid"
+        and not artifacts.get("partial_parse_errors")
+        and artifacts.get("sidecar", {}).get("present") is False
+        and partial_ids
+    )
+    complete_evidence = bool(
+        registry.get("present") is True
+        and registry.get("schema_complete") is True
+        and exact_run_rows
+        and not registry_identity_conflicts
+        and attachments.get("status") == "complete"
+        and {
+            int(item.get("id") or 0)
+            for item in attachments.get("items", [])
+            if item.get("status") == "read"
+        } == partial_ids
+    )
+    eligible = bool(basic and artifacts_valid and complete_evidence and signals)
+    return {
+        "eligible": eligible,
+        "reason": (
+            "pre_writer_media_uncertainty_preserved"
+            if eligible
+            else "pre_writer_media_isolation_evidence_incomplete"
+        ),
+        "signals": signals,
+        "partial_media_ids": sorted(partial_ids),
+        "initial_media_ids": sorted(initial_ids),
+        "registry_current_run_count": len(exact_run_rows),
+        "registry_identity_conflicts": registry_identity_conflicts,
+        "registry_complete": registry.get("schema_complete") is True,
+        "artifacts_valid": artifacts_valid,
+        "attachments_complete": attachments.get("status") == "complete",
     }
 
 
@@ -468,6 +826,7 @@ def _round_post_evidence(
     authorization_id: str,
     pending_round: int,
     target_journal: Mapping[str, Any] | None = None,
+    capture_media_artifacts: bool = False,
 ) -> dict[str, Any]:
     journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
     journal = None
@@ -518,6 +877,45 @@ def _round_post_evidence(
         "authorization_id": str(authorization_id),
         "post_id": int(post_id),
     }
+    artifacts: dict[str, Any] | None = None
+    attachments: dict[str, Any] | None = None
+    prewriter_media_isolation: dict[str, Any] | None = None
+    if capture_media_artifacts:
+        artifacts = _media_artifact_snapshot(root, int(post_id))
+        media_ids = {int(value) for value in artifacts.get("partial_media_ids", [])}
+        for key in ("media_ids",):
+            values = (journal or {}).get(key, [])
+            if isinstance(values, list):
+                media_ids.update(
+                    int(value) for value in values
+                    if not isinstance(value, bool) and str(value).isdigit() and int(value) > 0
+                )
+        for key in ("media_records", "apply_media_records"):
+            values = (journal or {}).get(key, [])
+            if isinstance(values, list):
+                for item in values:
+                    if not isinstance(item, Mapping):
+                        continue
+                    value = item.get("wordpress_media_id", item.get("media_id"))
+                    if not isinstance(value, bool) and str(value or "").isdigit() and int(value) > 0:
+                        media_ids.add(int(value))
+        for item in registry.get("usages") or []:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("run_id") or "") != str(run_id or ""):
+                continue
+            value = item.get("wordpress_media_id", item.get("media_id"))
+            if not isinstance(value, bool) and str(value or "").isdigit() and int(value) > 0:
+                media_ids.add(int(value))
+        attachments = _attachment_snapshot(client, media_ids=media_ids)
+        prewriter_media_isolation = _prewriter_media_isolation_evidence(
+            journal,
+            run_id=run_id,
+            current_identity=current_identity,
+            registry=registry,
+            artifacts=artifacts,
+            attachments=attachments,
+        )
 
     if journal is None:
         no_write_evidence = _post_no_write_evidence(
@@ -647,7 +1045,13 @@ def _round_post_evidence(
         "historical_journal_evidence": historical_journal_evidence,
         "no_write_evidence": no_write_evidence,
         "wordpress": _wp_summary(post),
-        "registry": _registry_summary(registry),
+        "registry": _registry_summary(
+            registry,
+            include_audit_rows=capture_media_artifacts,
+        ),
+        "media_artifacts": artifacts,
+        "attachments": attachments,
+        "prewriter_media_isolation": prewriter_media_isolation,
     }
 
 
@@ -708,6 +1112,39 @@ def _validate_uncertain(
         raise TransactionIsolationError("journal has no positive writer-start evidence for uncertain isolation")
 
 
+def _validate_pre_writer_uncertain_journal(
+    journal: Mapping[str, Any],
+    *,
+    run_id: str,
+) -> None:
+    """Validate only the journal identity/state; media evidence is checked separately."""
+    if str(journal.get("run_id") or "") != run_id:
+        raise TransactionIsolationError("run_id diverged")
+    if journal.get("status") not in PREWRITER_MEDIA_STATUSES:
+        raise TransactionIsolationError("pre-writer journal status is not isolatable")
+    if journal.get("writer_started") is not False:
+        raise TransactionIsolationError("pre-writer isolation requires explicit writer_started=false")
+    if journal.get("readback") is True:
+        raise TransactionIsolationError("pre-writer journal already has confirmed transactional readback")
+
+
+def _validate_isolated_current_journal(
+    journal: Mapping[str, Any],
+    *,
+    run_id: str,
+    evidence: Mapping[str, Any] | None,
+) -> None:
+    if journal.get("writer_started") is True:
+        _validate_uncertain(journal, run_id=run_id)
+        return
+    _validate_pre_writer_uncertain_journal(journal, run_id=run_id)
+    prewriter = (evidence or {}).get("prewriter_media_isolation")
+    if isinstance(prewriter, Mapping) and prewriter.get("attachments_complete") is not True:
+        raise TransactionIsolationError("pre-writer attachment evidence is incomplete")
+    if not isinstance(prewriter, Mapping) or prewriter.get("eligible") is not True:
+        raise TransactionIsolationError("pre-writer media evidence is incomplete for isolation")
+
+
 def _validate_historical_target_journal(
     journal: Mapping[str, Any],
     *,
@@ -764,6 +1201,55 @@ def _write_json_once(path: Path, payload: Mapping[str, Any]) -> None:
             raise TransactionIsolationError(f"prepared archive evidence conflicts: {path.name}")
         return
     atomic_write_text(path, rendered)
+
+
+def _validate_media_artifact_archive(
+    archive: Path,
+    *,
+    post_id: int,
+    primary_post_id: int,
+    detail: Mapping[str, Any],
+    hashes: Mapping[str, Any],
+) -> None:
+    artifacts = detail.get("media_artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise TransactionIsolationError(f"media artifact evidence is missing for {post_id}")
+    for kind, hash_key in (
+        ("partial", "media_partial"),
+        ("sidecar", "media_sidecar"),
+    ):
+        evidence = artifacts.get(kind)
+        if not isinstance(evidence, Mapping):
+            raise TransactionIsolationError(f"{kind} evidence is missing for {post_id}")
+        expected_name = (
+            f"editorial-partial-{int(post_id)}.json"
+            if kind == "partial"
+            else f"editorial-partial-v2-{int(post_id)}.json"
+        )
+        manifest_key = (
+            hash_key
+            if int(post_id) == int(primary_post_id)
+            else f"{hash_key}_{int(post_id)}"
+        )
+        if evidence.get("archive_name") != expected_name:
+            raise TransactionIsolationError(f"media artifact archive identity diverged for {post_id}")
+        archived_path = archive / expected_name
+        if archived_path.is_symlink():
+            raise TransactionIsolationError(f"media artifact archive is a symlink: {expected_name}")
+        if evidence.get("present") is True:
+            expected_hash = str(evidence.get("sha256") or "")
+            if (
+                len(expected_hash) != 64
+                or hashes.get(manifest_key) != expected_hash
+                or not archived_path.is_file()
+                or _hash_file(archived_path) != expected_hash
+            ):
+                raise TransactionIsolationError(f"archived media artifact is missing or changed: {expected_name}")
+        elif evidence.get("present") is False:
+            if hashes.get(manifest_key, "missing") is not None or archived_path.exists():
+                raise TransactionIsolationError(f"absent media artifact was fabricated in archive: {expected_name}")
+        else:
+            raise TransactionIsolationError(f"media artifact presence is ambiguous for {post_id}")
 
 
 def _event_matches_transition(event: Mapping[str, Any], transition: Mapping[str, Any]) -> bool:
@@ -828,6 +1314,25 @@ def _validate_transition_archive(
     hashes = record.get("archive_hashes")
     if not isinstance(hashes, Mapping):
         raise TransactionIsolationError("archive hash manifest is missing")
+    round_evidence = record.get("round_post_evidence")
+    if not isinstance(round_evidence, list):
+        raise TransactionIsolationError("archived round evidence is missing")
+    evidence_by_post = {
+        int(item["post_id"]): item
+        for item in round_evidence
+        if isinstance(item, Mapping) and str(item.get("post_id") or "").isdigit()
+    }
+    for isolated_id in transition["isolated_post_ids"]:
+        detail = evidence_by_post.get(int(isolated_id))
+        if not isinstance(detail, Mapping):
+            raise TransactionIsolationError(f"archived evidence is missing for isolated post {isolated_id}")
+        _validate_media_artifact_archive(
+            archive,
+            post_id=int(isolated_id),
+            primary_post_id=int(transition["post_id"]),
+            detail=detail,
+            hashes=hashes,
+        )
     files = {
         "state": archive / "state.json",
         "journal": archive / "journal.jsonl",
@@ -877,7 +1382,11 @@ def _validate_transition_archive(
         authorization_id=str(transition["authorization_id"]),
         pending_round=int(transition["pending_round"]),
     ):
-        _validate_uncertain(archived_journal, run_id=str(transition.get("run_id") or ""))
+        _validate_isolated_current_journal(
+            archived_journal,
+            run_id=str(transition.get("run_id") or ""),
+            evidence=evidence_by_post.get(int(transition["post_id"])),
+        )
     else:
         _validate_historical_target_journal(
             archived_journal,
@@ -912,7 +1421,19 @@ def _validate_transition_archive(
             raise TransactionIsolationError(f"archived journal identity diverges for {isolated_id}")
         if str(extra.get("run_id") or "") != str(transition["run_ids"][str(int(isolated_id))]):
             raise TransactionIsolationError(f"archived run identity diverges for {isolated_id}")
-        if extra.get("status") not in {"committing", "committed", "failed_pre_writer", "interrupted_pre_writer"}:
+        if _journal_matches_authorized_round(
+            extra,
+            post_id=int(isolated_id),
+            cycle_id=str(transition["cycle_id"]),
+            authorization_id=str(transition["authorization_id"]),
+            pending_round=int(transition["pending_round"]),
+        ):
+            _validate_isolated_current_journal(
+                extra,
+                run_id=str(transition["run_ids"][str(int(isolated_id))]),
+                evidence=evidence_by_post.get(int(isolated_id)),
+            )
+        elif extra.get("status") not in {"committing", "committed", "failed_pre_writer", "interrupted_pre_writer"}:
             raise TransactionIsolationError(f"archived journal status is unsafe for {isolated_id}")
     derived = _derive_round_classifications(
         record.get("round_post_evidence") or [],
@@ -1064,6 +1585,12 @@ def _validate_live_round_evidence(
             cycle_id=str(transition["cycle_id"]),
             authorization_id=str(transition["authorization_id"]),
             pending_round=int(transition["pending_round"]),
+            capture_media_artifacts=any(
+                isinstance(item, Mapping)
+                and int(item.get("post_id") or 0) == post_id
+                and item.get("media_artifacts") is not None
+                for item in expected
+            ),
         )
         for post_id in selected_ids
     ]
@@ -1132,6 +1659,13 @@ def _ensure_snapshot(source: Path, destination: Path, expected_hash: str) -> str
     return _copy_verified(source, destination)
 
 
+def _ensure_absent_snapshot(source: Path, destination: Path) -> None:
+    if source.is_symlink() or source.exists():
+        raise TransactionIsolationError(f"media artifact appeared after preview: {source.name}")
+    if destination.is_symlink() or destination.exists():
+        raise TransactionIsolationError(f"archive contains an artifact recorded as absent: {destination.name}")
+
+
 def _prepare_transition(
     root: Path,
     *,
@@ -1189,6 +1723,43 @@ def _prepare_transition(
         key: _ensure_snapshot(sources[key], destinations[key], hashes[key])
         for key in sources
     }
+    for isolated_id in isolated_post_ids:
+        detail = next(
+            item for item in round_post_evidence
+            if int(item["post_id"]) == int(isolated_id)
+        )
+        artifacts = detail.get("media_artifacts")
+        if not isinstance(artifacts, Mapping):
+            raise TransactionIsolationError(f"media artifact evidence is missing for {isolated_id}")
+        for kind, hash_key in (
+            ("partial", "media_partial"),
+            ("sidecar", "media_sidecar"),
+        ):
+            artifact = artifacts.get(kind)
+            if not isinstance(artifact, Mapping):
+                raise TransactionIsolationError(f"{kind} evidence is missing for {isolated_id}")
+            name = str(artifact.get("archive_name") or "")
+            expected_name = (
+                f"editorial-partial-{int(isolated_id)}.json"
+                if kind == "partial"
+                else f"editorial-partial-v2-{int(isolated_id)}.json"
+            )
+            if name != expected_name:
+                raise TransactionIsolationError(f"media artifact path diverged for {isolated_id}")
+            source = _media_artifact_path(root, int(isolated_id), kind)
+            destination = archive / name
+            scoped_key = (
+                hash_key if int(isolated_id) == int(post_id)
+                else f"{hash_key}_{int(isolated_id)}"
+            )
+            if artifact.get("present") is True:
+                expected_hash = str(artifact.get("sha256") or "")
+                archived[scoped_key] = _ensure_snapshot(source, destination, expected_hash)
+            elif artifact.get("present") is False:
+                _ensure_absent_snapshot(source, destination)
+                archived[scoped_key] = None
+            else:
+                raise TransactionIsolationError(f"media artifact presence is ambiguous for {isolated_id}")
     baseline = _read_json(destinations["quarantine_before"])
     _validate_quarantine_payload(baseline)
     current_policy = _read_json(sources["quarantine_before"])
@@ -1493,7 +2064,10 @@ def isolate_uncertain_transaction(
         if str(journal.get("post_id") or "") not in {str(post_id), ""}:
             raise TransactionIsolationError("post_id diverged")
         if checkpoint.get("target_journal_is_current"):
-            _validate_uncertain(journal, run_id=run_id)
+            if journal.get("writer_started") is True:
+                _validate_uncertain(journal, run_id=run_id)
+            else:
+                _validate_pre_writer_uncertain_journal(journal, run_id=run_id)
         else:
             _validate_historical_target_journal(
                 journal,
@@ -1510,6 +2084,7 @@ def isolate_uncertain_transaction(
                 authorization_id=authorization_id,
                 pending_round=int(pending_round),
                 target_journal=journal if selected_id == int(post_id) else None,
+                capture_media_artifacts=selected_id in isolated_ids,
             )
             for selected_id in selected_ids
         ]
@@ -1558,6 +2133,25 @@ def isolate_uncertain_transaction(
                 allow_quarantine_additions=archive.exists(),
                 archive=archive,
             )
+            for isolated_id in isolated_ids:
+                current_journal = _read_json(
+                    Path(root) / "work" / "v2-journal" / f"{isolated_id}.json"
+                )
+                if (
+                    _journal_matches_authorized_round(
+                        current_journal,
+                        post_id=isolated_id,
+                        cycle_id=cycle_id,
+                        authorization_id=authorization_id,
+                        pending_round=int(pending_round),
+                    )
+                    and current_journal.get("writer_started") is False
+                ):
+                    _validate_isolated_current_journal(
+                        current_journal,
+                        run_id=run_map[isolated_id],
+                        evidence=evidence_by_post[isolated_id],
+                    )
             classifications = _derive_round_classifications(
                 round_post_evidence,
                 isolated_post_ids=isolated_ids,

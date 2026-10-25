@@ -36,6 +36,7 @@ SCENARIOS = (
     "test_divergent_status_readback_does_not_confirm_writer",
     "test_historical_journal_without_writer_started_remains_compatible",
     "test_media_registry_v5_matches_confirmed_writer_transaction",
+    "test_legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -47,6 +48,7 @@ SCENARIO_OPERATIONS = {
     "divergent_status_readback_does_not_confirm_writer": ["divergent"],
     "historical_journal_without_writer_started_remains_compatible": ["historical_journal_compatibility"],
     "media_registry_v5_matches_confirmed_writer_transaction": ["registry"],
+    "legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes": ["prewriter_isolation"],
 }
 POST_FIXTURES = {
     "pending_transition": ("pending", False),
@@ -58,6 +60,11 @@ POST_FIXTURES = {
     "divergent": ("pending", False),
     "historical": ("awaiting_human", False),
     "registry": ("pending", False),
+    "isolation_target": ("pending", True),
+    "isolation_committed_a": ("pending", True),
+    "isolation_committed_b": ("pending", True),
+    "isolation_not_executed_a": ("pending", True),
+    "isolation_not_executed_b": ("pending", True),
 }
 
 
@@ -285,6 +292,15 @@ def main() -> int:
             ids[key] = int(post_id)
             if exact_state:
                 wp_cli(project, env, "post", "meta", "update", post_id, "_hermes_work_state", state_json)
+            if key.startswith("isolation_"):
+                wp_cli(
+                    project, env, "post", "meta", "update", post_id,
+                    "_hermes_human_reopened_at", "2026-10-25T00:00:00Z",
+                )
+                wp_cli(
+                    project, env, "post", "meta", "update", post_id,
+                    "_hermes_human_reopened_from", "awaiting_human",
+                )
         app_env = env.copy()
         app_env.update({
             "PYTHONPATH": str(ROOT / "src"),
