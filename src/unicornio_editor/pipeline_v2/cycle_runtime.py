@@ -15,7 +15,12 @@ from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
 from .model import LifecycleState
 from .production import ProductionCandidateReader
-from .runtime import _media_effect_evidence, recover_interrupted_journal, run_v2
+from .runtime import (
+    _media_effect_evidence,
+    _verify_acquisition_checkpoint_for_resume,
+    recover_interrupted_journal,
+    run_v2,
+)
 
 
 def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
@@ -964,13 +969,77 @@ def _reconcile_completed_round(
             journal.get("writer_started") is False
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("evidence_status") != "no_effects_detected":
+            media_resume = None
+            recovery = None
+            if media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated":
+                handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                    root, [int(post_id)], lock_ttl=lock_ttl
+                )
+                if locked_post_id is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_busy",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                try:
+                    media_resume = _verify_acquisition_checkpoint_for_resume(
+                        client, root, int(post_id), journal, context or {}
+                    )
+                    if media_resume is not None:
+                        handle = handles[int(post_id)]
+                        recovery = recover_interrupted_journal(
+                            root,
+                            int(post_id),
+                            apply=True,
+                            lock_held=True,
+                            lock_handle=handle,
+                            expected_identity={
+                                "run_id": str(journal.get("run_id") or ""),
+                                "cycle_id": str(journal.get("cycle_id") or ""),
+                                "cycle_round": str(journal.get("cycle_round") or ""),
+                                "authorization_id": str(journal.get("authorization_id") or ""),
+                            },
+                            media_checkpoint_resume=media_resume,
+                        )
+                finally:
+                    _release_post_lock_batch(handles)
+                if media_resume is None:
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "media_checkpoint_readback_unverified",
+                        "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                        "media_effect_evidence": media_evidence,
+                    })
+                    continue
+                if recovery is None or recovery.get("locked"):
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": str((recovery or {}).get("reason") or "post_lock_lost"),
+                            "locked_post_id": int(post_id),
+                            "lock_error": str((recovery or {}).get("error") or ""),
+                        },
+                    )
+                if not recovery.get("recovered"):
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "journal_not_recoverable",
+                        "recovery": recovery,
+                    })
+                    continue
+            elif media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
                     "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
                     "media_effect_evidence": media_evidence,
                 })
+                continue
             else:
                 recovery = recover_interrupted_journal(
                     root, int(post_id), apply=True, lock_ttl=lock_ttl
@@ -992,30 +1061,39 @@ def _reconcile_completed_round(
                         "recovery": recovery,
                     })
                     continue
-                journal = json.loads(journal_path.read_text(encoding="utf-8"))
-                wp_post = context.get("post") if isinstance(context, Mapping) else None
-                detail = _reconciled_detail(
-                    int(post_id), journal, state,
-                    wordpress_status=str(wp_post.get("status") or "")
-                    if isinstance(wp_post, Mapping) else "",
-                )
-                if detail is None:
-                    unresolved.append({
-                        "post_id": int(post_id),
-                        "reason": "state_readback_invalid",
-                    })
-                    continue
-                detail.update({
-                    "outcome": "retry",
-                    "ready_verified": False,
-                    "progress": True,
-                    "write_replayed": False,
-                    "recovery_status": "interrupted_pre_writer",
-                    "recovery_classification": "INTERRUPTED_PRE_WRITER",
-                    "failure_class": "process_interrupted",
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            wp_post = context.get("post") if isinstance(context, Mapping) else None
+            detail = _reconciled_detail(
+                int(post_id), journal, state,
+                wordpress_status=str(wp_post.get("status") or "")
+                if isinstance(wp_post, Mapping) else "",
+            )
+            if detail is None:
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "state_readback_invalid",
                 })
-                details.append(detail)
-                executed_ids.append(int(post_id))
+                continue
+            detail.update({
+                "outcome": "retry",
+                "ready_verified": False,
+                "progress": True,
+                "write_replayed": False,
+                "recovery_status": "interrupted_pre_writer",
+                "recovery_classification": (
+                    "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+                    if media_resume is not None
+                    else "INTERRUPTED_PRE_WRITER"
+                ),
+                "failure_class": "process_interrupted",
+            })
+            if media_resume is not None:
+                detail.update({
+                    "accepted_media_ids": list(media_resume["wordpress_readback_media_ids"]),
+                    "media_application": "not_attempted",
+                })
+            details.append(detail)
+            executed_ids.append(int(post_id))
             continue
         if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"} and (
             journal.get("resumable") is True
@@ -1023,7 +1101,36 @@ def _reconcile_completed_round(
             and journal.get("readback") is not True
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("evidence_status") != "no_effects_detected":
+            media_resume = None
+            if media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated":
+                handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                    root, [int(post_id)], lock_ttl=lock_ttl
+                )
+                if locked_post_id is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_busy",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                try:
+                    media_resume = _verify_acquisition_checkpoint_for_resume(
+                        client, root, int(post_id), journal, context or {}
+                    )
+                finally:
+                    _release_post_lock_batch(handles)
+                if media_resume is None:
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "media_checkpoint_readback_unverified",
+                        "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                        "media_effect_evidence": media_evidence,
+                    })
+                    continue
+            elif media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
@@ -1049,6 +1156,12 @@ def _reconcile_completed_round(
                 "recovery_status": str(journal.get("status")),
                 "failure_class": str(journal.get("failure_class") or "process_interrupted"),
             })
+            if media_resume is not None:
+                detail.update({
+                    "recovery_classification": "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE",
+                    "accepted_media_ids": list(media_resume["wordpress_readback_media_ids"]),
+                    "media_application": "not_attempted",
+                })
             details.append(detail)
             executed_ids.append(int(post_id))
             continue

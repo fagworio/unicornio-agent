@@ -3,11 +3,22 @@ import sqlite3
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.runtime import (
+    _incomplete_v2_journal_conflicts,
+    _media_effect_evidence,
     _record_v2_writer_exception,
+    _verify_acquisition_checkpoint_for_resume,
     _write_v2_journal_checkpoint,
+    _write_v2_media_checkpoint,
     recover_interrupted_journal,
 )
-from unicornio_editor.pipeline_v2.model import WorkState
+from unicornio_editor.pipeline_v2.model import (
+    FeaturedProgress,
+    InlineMedia,
+    LifecycleState,
+    MediaProgress,
+    Phase,
+    WorkState,
+)
 from unicornio_editor.locking import LockManager
 
 
@@ -37,6 +48,40 @@ def _empty_media_registry(root: Path) -> None:
                 status TEXT, applied_at TEXT
             );
             """
+        )
+
+
+def _media_resume_registry(root: Path, *, write_started: int = 0) -> None:
+    path = root / "work" / "media_registry.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (run_id TEXT, post_id INTEGER, planned_deficits TEXT,
+                acquisition_outcome TEXT, created_at TEXT);
+            CREATE TABLE media_decisions (run_id TEXT, post_id INTEGER, candidate_id TEXT,
+                disposition TEXT, reason_code TEXT, scope TEXT, created_at TEXT);
+            CREATE TABLE media_usage (post_id INTEGER, wordpress_media_id INTEGER,
+                status TEXT, applied_at TEXT, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, accepted_at TEXT,
+                readback_confirmed_at TEXT);
+            CREATE TABLE media_operations (post_id INTEGER, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, phase TEXT,
+                operation_status TEXT, started_at TEXT, completed_at TEXT,
+                write_started INTEGER, readback_confirmed INTEGER, outcome TEXT);
+            """
+        )
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits) VALUES (?, ?, ?)",
+            ("run-media", 115757, "{}"),
+        )
+        db.execute(
+            """INSERT INTO media_operations
+               (post_id, run_id, cycle_id, cycle_round, authorization_id,
+                operation_status, started_at, write_started, readback_confirmed,
+                completed_at, outcome)
+               VALUES (?, ?, ?, ?, ?, 'started', '2026-10-24T10:00:00+00:00', ?, 0, NULL, '')""",
+            (115757, "run-media", "cycle-a", 4, "auth-a", write_started),
         )
 
 
@@ -218,6 +263,191 @@ def test_recovery_blocks_pre_writer_journal_with_accepted_media_effect(tmp_path)
     assert result["reason"] == "media_effects_pre_writer"
     assert result["recovery_classification"] == "MEDIA_EFFECTS_PRE_WRITER"
     assert "accepted_media_decision" in result["media_effect_evidence"]["reasons"]
+    assert json.loads(path.read_text())["status"] == "running"
+
+
+def test_correlated_pre_writer_media_checkpoint_resumes_only_after_attachment_readback(tmp_path):
+    base_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+    checkpoint_media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(115775, "https://wp.test/uploads/115775.webp", 0),),
+        featured=FeaturedProgress(),
+    )
+    path = tmp_path / "work" / "v2-journal" / "115757.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "status": "running", "post_id": 115757, "run_id": "run-media",
+        "cycle_id": "cycle-a", "cycle_round": 4,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False, "readback": False,
+        "state": base_state.to_dict(),
+    }), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path, 115757, checkpoint_media, run_id="run-media",
+        cycle_id="cycle-a", cycle_round=4, authorization_id="auth-a",
+    )
+    _media_resume_registry(tmp_path)
+
+    evidence = _media_effect_evidence(tmp_path, 115757, json.loads(path.read_text()))
+    assert evidence["evidence_status"] == "acquisition_checkpoint_correlated"
+    assert evidence["acquisition_checkpoint"]["media_ids"] == [115775]
+    assert evidence["acquisition_checkpoint"]["new_media_ids"] == [115775]
+
+    class Client:
+        def get_post(self, post_id):
+            return {
+                "id": post_id,
+                "status": "pending",
+                "meta": {"_hermes_work_state": json.dumps(base_state.to_dict())},
+            }
+
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": "https://wp.test/uploads/115775.webp"}
+
+    context = {"v2_state": WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=checkpoint_media,
+    )}
+    verification = _verify_acquisition_checkpoint_for_resume(
+        Client(), tmp_path, 115757, json.loads(path.read_text()), context
+    )
+    assert verification is not None
+    assert verification["wordpress_readback_media_ids"] == [115775]
+
+    # If the acquired media is already attached to the post content, the
+    # checkpoint no longer proves an acquisition-only pre-writer state.
+    post = Client().get_post(115757)
+    post["content"] = {
+        "raw": '<p>Body</p><img src="https://wp.test/uploads/115775.webp">'
+    }
+
+    class ClientWithPost(Client):
+        def get_post(self, requested_id):
+            return post if requested_id == 115757 else None
+
+    assert _verify_acquisition_checkpoint_for_resume(
+        ClientWithPost(), tmp_path, 115757, json.loads(path.read_text()), context
+    ) is None
+
+    post["content"] = {"raw": "<p>Article body without acquired image.</p>"}
+    verification = _verify_acquisition_checkpoint_for_resume(
+        ClientWithPost(), tmp_path, 115757, json.loads(path.read_text()), context
+    )
+    assert verification is not None
+
+    recovered = recover_interrupted_journal(
+        tmp_path,
+        115757,
+        apply=True,
+        expected_identity={
+            "run_id": "run-media",
+            "cycle_id": "cycle-a",
+            "cycle_round": "4",
+            "authorization_id": "auth-a",
+        },
+        media_checkpoint_resume=verification,
+    )
+    saved = json.loads(path.read_text())
+    assert recovered["recovered"] is True
+    assert recovered["recovery_classification"] == "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+    assert saved["status"] == "interrupted_pre_writer"
+    assert saved["writer_started"] is False
+    assert saved["recovery_evidence"]["media_ids"] == [115775]
+    assert _incomplete_v2_journal_conflicts(
+        tmp_path, [115757], resumable_media_checkpoint_ids={115757: {115775}}
+    ) == []
+
+
+def test_pre_writer_media_checkpoint_stays_blocked_when_attachment_readback_fails(tmp_path):
+    base_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+    checkpoint_media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(115775, "https://wp.test/uploads/115775.webp", 0),),
+    )
+    path = tmp_path / "work" / "v2-journal" / "115757.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "status": "running", "post_id": 115757, "run_id": "run-media",
+        "cycle_id": "cycle-a", "cycle_round": 4,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False, "readback": False,
+        "state": base_state.to_dict(),
+    }), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path, 115757, checkpoint_media, run_id="run-media",
+        cycle_id="cycle-a", cycle_round=4, authorization_id="auth-a",
+    )
+    _media_resume_registry(tmp_path)
+
+    class Client:
+        def get_post(self, post_id):
+            return {
+                "id": post_id,
+                "status": "pending",
+                "meta": {"_hermes_work_state": json.dumps(base_state.to_dict())},
+            }
+
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": "https://wp.test/uploads/other.webp"}
+
+    verification = _verify_acquisition_checkpoint_for_resume(
+        Client(),
+        tmp_path,
+        115757,
+        json.loads(path.read_text()),
+        {"v2_state": WorkState(
+            state=LifecycleState.PENDING,
+            phase=Phase.MEDIA,
+            relevance_approved=True,
+            media=checkpoint_media,
+        )},
+    )
+    assert verification is None
+    recovered = recover_interrupted_journal(tmp_path, 115757, apply=True)
+    assert recovered["recovered"] is False
+    assert recovered["reason"] == "media_effects_pre_writer"
+    assert json.loads(path.read_text())["status"] == "running"
+
+
+def test_media_checkpoint_correlation_rejects_registry_writer_activity(tmp_path):
+    state = WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA).to_dict()
+    path = tmp_path / "work" / "v2-journal" / "115757.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "status": "running", "post_id": 115757, "run_id": "run-media",
+        "cycle_id": "cycle-a", "cycle_round": 4,
+        "authorization_id": "auth-a", "protocol_version": 2,
+        "writer_started": False, "readback": False, "state": state,
+    }), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path,
+        115757,
+        MediaProgress(
+            required=1,
+            inline=(InlineMedia(115775, "https://wp.test/uploads/115775.webp", 0),),
+        ),
+        run_id="run-media",
+        cycle_id="cycle-a",
+        cycle_round=4,
+        authorization_id="auth-a",
+    )
+    _media_resume_registry(tmp_path, write_started=1)
+
+    evidence = _media_effect_evidence(tmp_path, 115757, json.loads(path.read_text()))
+    assert evidence["evidence_status"] != "acquisition_checkpoint_correlated"
+    recovered = recover_interrupted_journal(tmp_path, 115757, apply=True)
+    assert recovered["recovered"] is False
+    assert recovered["reason"] == "media_effects_pre_writer"
     assert json.loads(path.read_text())["status"] == "running"
 
 

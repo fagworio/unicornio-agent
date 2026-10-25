@@ -7,7 +7,14 @@ import pytest
 from unicornio_editor.pipeline_v2 import cycle_runtime
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
 from unicornio_editor.pipeline_v2.lock import RunSessionLock
-from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
+from unicornio_editor.pipeline_v2.model import (
+    FeaturedProgress,
+    InlineMedia,
+    LifecycleState,
+    MediaProgress,
+    Phase,
+    WorkState,
+)
 from unicornio_editor.locking import LockError, LockManager
 
 
@@ -474,6 +481,126 @@ def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_p
             "accepted_decision_count": 1,
         },
     }]
+
+
+def test_reconcile_correlated_acquisition_checkpoint_as_retry_without_writer_replay(tmp_path):
+    from unicornio_editor.pipeline_v2.runtime import _write_v2_media_checkpoint
+
+    post_id = 115757
+    attachment_url = "https://wp.test/uploads/115775.webp"
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+    )
+    checkpoint_media = MediaProgress(
+        required=1,
+        inline=(InlineMedia(
+            115775,
+            attachment_url,
+            0,
+            subject="The example game",
+            phash="p-hash",
+            sha256="s-hash",
+            visual_group_id="group-1",
+            visual_verification={"decision": "DIFFERENT"},
+        ),),
+        featured=FeaturedProgress(),
+    )
+    post = {
+        "id": post_id,
+        "status": "pending",
+        "title": {"raw": "The example game article"},
+        "content": {"raw": "<p>Article body without acquired image.</p>"},
+        "featured_media": 0,
+        "meta": {"_hermes_work_state": json.dumps(state.to_dict())},
+    }
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return [post] if page == 1 else []
+
+        def get_post(self, requested_id):
+            return post if requested_id == post_id else None
+
+        def get_media(self, media_id):
+            return {"id": media_id, "source_url": attachment_url}
+
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    journal_path = journal_dir / f"{post_id}.json"
+    journal_path.write_text(json.dumps({
+        "status": "running",
+        "post_id": post_id,
+        "run_id": "run-media",
+        "cycle_id": "cycle-media",
+        "cycle_round": 4,
+        "authorization_id": "auth-media",
+        "protocol_version": 2,
+        "writer_started": False,
+        "readback": False,
+        "state": state.to_dict(),
+    }), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path,
+        post_id,
+        checkpoint_media,
+        run_id="run-media",
+        cycle_id="cycle-media",
+        cycle_round=4,
+        authorization_id="auth-media",
+    )
+    registry_path = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(registry_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE media_runs (run_id TEXT, post_id INTEGER, planned_deficits TEXT,
+                acquisition_outcome TEXT, created_at TEXT);
+            CREATE TABLE media_decisions (run_id TEXT, post_id INTEGER, candidate_id TEXT,
+                disposition TEXT, reason_code TEXT, scope TEXT, created_at TEXT);
+            CREATE TABLE media_usage (post_id INTEGER, wordpress_media_id INTEGER,
+                status TEXT, applied_at TEXT, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, accepted_at TEXT,
+                readback_confirmed_at TEXT);
+            CREATE TABLE media_operations (post_id INTEGER, run_id TEXT, cycle_id TEXT,
+                cycle_round INTEGER, authorization_id TEXT, phase TEXT,
+                operation_status TEXT, started_at TEXT, completed_at TEXT,
+                write_started INTEGER, readback_confirmed INTEGER, outcome TEXT);
+            """
+        )
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, planned_deficits) VALUES (?, ?, ?)",
+            ("run-media", post_id, "{}"),
+        )
+        db.execute(
+            """INSERT INTO media_operations
+               (post_id, run_id, cycle_id, cycle_round, authorization_id,
+                operation_status, started_at, write_started, readback_confirmed,
+                completed_at, outcome)
+               VALUES (?, ?, ?, ?, ?, 'started', '2026-10-24T10:00:00+00:00', 0, 0, NULL, '')""",
+            (post_id, "run-media", "cycle-media", 4, "auth-media"),
+        )
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(),
+        tmp_path,
+        [post_id],
+        expected_cycle_id="cycle-media",
+        expected_cycle_round=4,
+        expected_authorization_id="auth-media",
+    )
+
+    assert result is not None
+    assert result.reconciled_without_replay is True
+    assert result.executed_ids == (post_id,)
+    detail = result.details[0]
+    assert detail["outcome"] == "retry"
+    assert detail["recovery_classification"] == "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+    assert detail["accepted_media_ids"] == [115775]
+    assert detail["media_application"] == "not_attempted"
+    saved_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert saved_journal["status"] == "interrupted_pre_writer"
+    assert saved_journal["writer_started"] is False
 
 
 
