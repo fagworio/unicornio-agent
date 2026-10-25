@@ -13,6 +13,7 @@ from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
+from ..backup import atomic_write_text
 # Keep the legacy symbol imported: existing integrations/tests patch this
 # module-level name while the production path uses the canonical HTML helper.
 from ..checklist import required_image_count, required_image_count_for_content
@@ -744,16 +745,215 @@ def admit_v2_candidates(
     }
 
 
-def _write_v2_media_checkpoint(root: Path, post_id: int, media: MediaProgress) -> None:
-    """Persist only the reconciled V2 media state for crash recovery."""
+def _write_v2_media_checkpoint(
+    root: Path,
+    post_id: int,
+    media: MediaProgress,
+    *,
+    run_id: str = "",
+    cycle_id: str = "",
+    cycle_round: int | None = None,
+    authorization_id: str = "",
+) -> None:
+    """Persist media progress and a hash-bound execution identity sidecar."""
     target = Path(root) / "backups" / str(post_id) / "editorial.partial.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(media.to_dict(), ensure_ascii=False, sort_keys=True, indent=2),
-        encoding="utf-8",
+    content = json.dumps(media.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)
+    atomic_write_text(target, content)
+    media_ids = sorted({
+        int(item.media_id)
+        for item in media.inline
+        if int(getattr(item, "media_id", 0) or 0) > 0
+    } | ({int(media.featured.media_id)} if media.featured.media_id else set()))
+    sidecar = {
+        "schema_version": 1,
+        "post_id": int(post_id),
+        "run_id": str(run_id or ""),
+        "cycle_id": str(cycle_id or ""),
+        "cycle_round": int(cycle_round) if cycle_round is not None else None,
+        "authorization_id": str(authorization_id or ""),
+        "checkpoint_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "media_ids": media_ids,
+    }
+    atomic_write_text(
+        target.with_name("editorial.partial.v2.json"),
+        json.dumps(sidecar, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
     )
-    temporary.replace(target)
+
+
+def _acquisition_checkpoint_evidence(
+    root: Path,
+    post_id: int,
+    journal: Mapping[str, Any],
+    *,
+    initial_media_ids: set[int],
+) -> dict[str, Any] | None:
+    """Correlate a persisted pre-writer media checkpoint to one V2 run.
+
+    This is not proof that WordPress applied media. A caller still must verify
+    the current post state and every referenced attachment before resuming.
+    """
+    journal_status = str(journal.get("status") or "")
+    if (
+        journal_status not in {"running", "validated", "interrupted_pre_writer", "failed_pre_writer"}
+        or journal.get("protocol_version") != 2
+        or journal.get("writer_started") is not False
+        or journal.get("readback") is True
+        or not str(journal.get("run_id") or "").strip()
+    ):
+        return None
+    partial_path = Path(root) / "backups" / str(int(post_id)) / "editorial.partial.json"
+    sidecar_path = partial_path.with_name("editorial.partial.v2.json")
+    try:
+        checkpoint_bytes = partial_path.read_bytes()
+        checkpoint = json.loads(checkpoint_bytes)
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(checkpoint, Mapping) or not isinstance(sidecar, Mapping):
+        return None
+    inline = checkpoint.get("inline")
+    accepted = inline.get("accepted", []) if isinstance(inline, Mapping) else []
+    media_ids: set[int] = set()
+    for item in accepted if isinstance(accepted, list) else []:
+        if not isinstance(item, Mapping) or not str(item.get("media_id") or "").isdigit():
+            return None
+        media_ids.add(int(item["media_id"]))
+    featured = checkpoint.get("featured")
+    if isinstance(featured, Mapping) and str(featured.get("media_id") or "").isdigit():
+        media_ids.add(int(featured["media_id"]))
+    if not media_ids or media_ids <= initial_media_ids:
+        return None
+    run_id = str(journal.get("run_id") or "")
+    cycle_id = str(journal.get("cycle_id") or "")
+    cycle_round = journal.get("cycle_round")
+    authorization_id = str(journal.get("authorization_id") or "")
+    try:
+        sidecar_ids = {int(value) for value in sidecar.get("media_ids", [])}
+    except (TypeError, ValueError):
+        return None
+    checkpoint_hash = hashlib.sha256(checkpoint_bytes).hexdigest()
+    if (
+        sidecar.get("schema_version") != 1
+        or sidecar.get("post_id") != int(post_id)
+        or str(sidecar.get("run_id") or "") != run_id
+        or str(sidecar.get("cycle_id") or "") != cycle_id
+        or sidecar.get("cycle_round") != cycle_round
+        or str(sidecar.get("authorization_id") or "") != authorization_id
+        or str(sidecar.get("checkpoint_sha256") or "") != checkpoint_hash
+        or sidecar_ids != media_ids
+    ):
+        return None
+    if journal_status in {"interrupted_pre_writer", "failed_pre_writer"}:
+        recovery_evidence = journal.get("recovery_evidence")
+        try:
+            recovered_media_ids = {
+                int(value) for value in recovery_evidence.get("media_ids", [])
+            } if isinstance(recovery_evidence, Mapping) else set()
+        except (TypeError, ValueError):
+            return None
+        if (
+            journal.get("resumable") is not True
+            or not isinstance(recovery_evidence, Mapping)
+            or recovery_evidence.get("classification") != "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+            or recovery_evidence.get("checkpoint_sha256") != checkpoint_hash
+            or recovered_media_ids != media_ids
+        ):
+            return None
+
+    registry_path = Path(root) / "work" / "media_registry.sqlite"
+    required_columns = {
+        "media_runs": {"run_id", "post_id"},
+        "media_decisions": {"run_id", "post_id"},
+        "media_usage": {
+            "post_id", "wordpress_media_id", "status", "applied_at",
+            "run_id", "cycle_id", "cycle_round", "authorization_id",
+            "readback_confirmed_at",
+        },
+        "media_operations": {
+            "post_id", "run_id", "cycle_id", "cycle_round",
+            "authorization_id", "operation_status", "write_started",
+            "readback_confirmed", "completed_at", "outcome",
+        },
+    }
+    try:
+        with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as db:
+            tables = {
+                str(row[0])
+                for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if set(required_columns) - tables:
+                return None
+            for table, required in required_columns.items():
+                columns = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+                if required - columns:
+                    return None
+            operations = db.execute(
+                """SELECT post_id, cycle_id, cycle_round, authorization_id,
+                          operation_status, write_started, readback_confirmed,
+                          completed_at, outcome
+                     FROM media_operations WHERE run_id = ?""",
+                (run_id,),
+            ).fetchall()
+            media_run = db.execute(
+                "SELECT post_id FROM media_runs WHERE run_id = ?", (run_id,)
+            ).fetchall()
+            decisions = db.execute(
+                "SELECT post_id FROM media_decisions WHERE run_id = ?", (run_id,)
+            ).fetchall()
+            usages = db.execute(
+                """SELECT wordpress_media_id, status, applied_at, run_id,
+                          cycle_id, cycle_round, authorization_id,
+                          readback_confirmed_at
+                     FROM media_usage WHERE post_id = ?""",
+                (int(post_id),),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return None
+    if len(operations) != 1 or len(media_run) != 1:
+        return None
+    operation = operations[0]
+    if (
+        int(operation[0] or 0) != int(post_id)
+        or str(operation[1] or "") != cycle_id
+        or operation[2] != cycle_round
+        or str(operation[3] or "") != authorization_id
+        or str(operation[4] or "") != "started"
+        or operation[5] != 0
+        or operation[6] != 0
+        or operation[7] is not None
+        or str(operation[8] or "")
+        or int(media_run[0][0] or 0) != int(post_id)
+        or any(int(row[0] or 0) != int(post_id) for row in decisions)
+    ):
+        return None
+    for row in usages:
+        media_id = int(row[0] or 0)
+        status = str(row[1] or "").casefold()
+        if status not in {"accepted", "applied"} and media_id not in initial_media_ids:
+            return None
+        if status == "accepted" and media_id < 1:
+            return None
+        if (
+            status in {"accepted", "applied"}
+            and media_id not in initial_media_ids
+            and media_id not in media_ids
+        ):
+            return None
+        if status == "applied" or row[2] is not None or row[7] is not None:
+            if media_id not in initial_media_ids:
+                return None
+        elif media_id in media_ids and status != "accepted":
+            return None
+    return {
+        "checkpoint_sha256": checkpoint_hash,
+        "media_ids": sorted(media_ids),
+        "new_media_ids": sorted(media_ids - initial_media_ids),
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "cycle_round": cycle_round,
+        "authorization_id": authorization_id,
+    }
 
 
 def _v2_inline_media_ids_to_invalidate(
@@ -1069,6 +1269,24 @@ def _media_effect_evidence(
         }
 
     effect_reasons = [reason for reason in reasons if reason != "media_registry_incomplete"]
+    acquisition_checkpoint = (
+        _acquisition_checkpoint_evidence(
+            Path(root), int(post_id), journal, initial_media_ids=initial_ids
+        )
+        if effect_reasons
+        else None
+    )
+    if acquisition_checkpoint is not None:
+        return {
+            "media_registry_checked": True,
+            "effects_detected": True,
+            "evidence_status": "acquisition_checkpoint_correlated",
+            "reasons": reasons,
+            "accepted_media_ids": sorted(accepted_media_ids | set(acquisition_checkpoint["new_media_ids"])),
+            "applied_media_ids": sorted(applied_media_ids),
+            "accepted_decision_count": accepted_decision_count,
+            "acquisition_checkpoint": acquisition_checkpoint,
+        }
     return {
         "media_registry_checked": True,
         "effects_detected": bool(effect_reasons),
@@ -1084,6 +1302,129 @@ def _media_effect_evidence(
     }
 
 
+def _verify_acquisition_checkpoint_for_resume(
+    client: Any,
+    root: Path,
+    post_id: int,
+    journal: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Read back the pending post and each attachment in a correlated checkpoint."""
+    journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
+    try:
+        current_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(current_journal, Mapping) or dict(current_journal) != dict(journal):
+        return None
+    evidence = _media_effect_evidence(Path(root), int(post_id), journal)
+    checkpoint_evidence = evidence.get("acquisition_checkpoint")
+    if (
+        evidence.get("evidence_status") != "acquisition_checkpoint_correlated"
+        or not isinstance(checkpoint_evidence, Mapping)
+    ):
+        return None
+    try:
+        post = client.get_post(int(post_id))
+    except Exception:  # noqa: BLE001 - uncertain readback must remain blocked
+        return None
+    if not isinstance(post, Mapping) or int(post.get("id") or 0) != int(post_id):
+        return None
+    if str(post.get("status") or "") != "pending":
+        return None
+    raw_state = (post.get("meta") or {}).get("_hermes_work_state")
+    if isinstance(raw_state, str):
+        try:
+            raw_state = json.loads(raw_state)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    try:
+        wordpress_state = WorkState.from_dict(raw_state)
+        journal_state = WorkState.from_dict(journal.get("state"))
+        recovered_state = context.get("v2_state")
+        checkpoint_path = Path(root) / "backups" / str(int(post_id)) / "editorial.partial.json"
+        checkpoint_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint_media = MediaProgress.from_dict(checkpoint_payload)
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    lifecycle = ("state", "phase", "blocker", "retry", "relevance_approved")
+    if any(
+        getattr(wordpress_state, field) != getattr(journal_state, field)
+        for field in lifecycle
+    ):
+        return None
+    if not isinstance(recovered_state, WorkState):
+        return None
+    checkpoint_items = list(checkpoint_media.inline)
+    if checkpoint_media.featured.media_id:
+        checkpoint_items.append(checkpoint_media.featured)
+    expected_ids = {int(value) for value in checkpoint_evidence.get("media_ids", [])}
+    state_items = {
+        int(item.media_id): item
+        for item in (*recovered_state.media.inline, recovered_state.media.featured)
+        if getattr(item, "media_id", None)
+    }
+    if expected_ids != {int(item.media_id) for item in checkpoint_items}:
+        return None
+    initial_state = journal.get("state") if isinstance(journal.get("state"), Mapping) else {}
+    initial_media = initial_state.get("media") if isinstance(initial_state, Mapping) else {}
+    initial_inline = initial_media.get("inline") if isinstance(initial_media, Mapping) else []
+    initial_assets = (
+        initial_inline.get("accepted", [])
+        if isinstance(initial_inline, Mapping)
+        else initial_inline
+    )
+    initial_ids = {
+        int(item.get("media_id"))
+        for item in (initial_assets if isinstance(initial_assets, list) else [])
+        if isinstance(item, Mapping) and str(item.get("media_id") or "").isdigit()
+    }
+    initial_featured = initial_media.get("featured") if isinstance(initial_media, Mapping) else {}
+    if isinstance(initial_featured, Mapping) and str(initial_featured.get("media_id") or "").isdigit():
+        initial_ids.add(int(initial_featured["media_id"]))
+    new_media_ids = expected_ids - initial_ids
+    content_value = post.get("content")
+    current_html = (
+        str(content_value.get("raw") or content_value.get("rendered") or "")
+        if isinstance(content_value, Mapping)
+        else str(content_value or "")
+    )
+    current_urls = {
+        _canonical_embedded_media_url(url)
+        for url in _embedded_media_urls(current_html)
+    }
+    current_featured_id = int(post.get("featured_media") or 0)
+    for item in checkpoint_items:
+        media_id = int(item.media_id)
+        state_item = state_items.get(media_id)
+        expected_url = str(item.media_url or "").strip()
+        if state_item is None or not expected_url or str(state_item.media_url or "").strip() != expected_url:
+            return None
+        try:
+            attachment = client.get_media(media_id)
+        except Exception:  # noqa: BLE001 - attachment readback is mandatory
+            return None
+        if (
+            not isinstance(attachment, Mapping)
+            or int(attachment.get("id") or 0) != media_id
+            or str(attachment.get("source_url") or "").strip() != expected_url
+        ):
+            return None
+        if media_id in new_media_ids and (
+            _canonical_embedded_media_url(expected_url) in current_urls
+            or current_featured_id == media_id
+        ):
+            # An attachment already visible in the post could have been
+            # applied outside this V2 writer; do not call it acquisition-only.
+            return None
+    return {
+        "checkpoint_sha256": str(checkpoint_evidence.get("checkpoint_sha256") or ""),
+        "wordpress_status": "pending",
+        "wordpress_state_matches": True,
+        "wordpress_readback_media_ids": sorted(expected_ids),
+    }
+
+
 def recover_interrupted_journal(
     root: Path,
     post_id: int,
@@ -1094,6 +1435,7 @@ def recover_interrupted_journal(
     lock_handle: Any | None = None,
     lock_ttl: int = 900,
     expected_identity: Mapping[str, str] | None = None,
+    media_checkpoint_resume: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recover a pre-writer journal while holding its shared post lock.
 
@@ -1117,6 +1459,7 @@ def recover_interrupted_journal(
         return _recover_interrupted_journal_locked(
             root, post_id, apply=apply, legacy_evidence=legacy_evidence,
             lock_handle=lock_handle, expected_identity=expected_identity,
+            media_checkpoint_resume=media_checkpoint_resume,
         )
 
     handle = None
@@ -1140,6 +1483,7 @@ def recover_interrupted_journal(
         return _recover_interrupted_journal_locked(
             root, post_id, apply=True, legacy_evidence=legacy_evidence,
             lock_handle=handle, expected_identity=expected_identity,
+            media_checkpoint_resume=media_checkpoint_resume,
         )
     finally:
         handle.__exit__(None, None, None)
@@ -1153,6 +1497,7 @@ def _recover_interrupted_journal_locked(
     legacy_evidence: Mapping[str, Any] | None,
     lock_handle: Any | None,
     expected_identity: Mapping[str, str] | None,
+    media_checkpoint_resume: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Recover only a protocol-v2 pre-writer journal after process loss.
 
@@ -1187,7 +1532,31 @@ def _recover_interrupted_journal_locked(
     if journal.get("status") not in recoverable_statuses:
         return {"post_id": int(post_id), "recovered": False, "reason": "status_not_running"}
     media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
-    if media_evidence.get("evidence_status") != "no_effects_detected":
+    acquisition_checkpoint = media_evidence.get("acquisition_checkpoint")
+    verified_media_ids = set()
+    if isinstance(media_checkpoint_resume, Mapping):
+        try:
+            verified_media_ids = {
+                int(value) for value in media_checkpoint_resume.get("wordpress_readback_media_ids", [])
+            }
+        except (TypeError, ValueError):
+            verified_media_ids = set()
+    resumable_acquisition = bool(
+        media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated"
+        and isinstance(acquisition_checkpoint, Mapping)
+        and isinstance(media_checkpoint_resume, Mapping)
+        and media_checkpoint_resume.get("wordpress_status") == "pending"
+        and media_checkpoint_resume.get("wordpress_state_matches") is True
+        and str(media_checkpoint_resume.get("checkpoint_sha256") or "")
+        == str(acquisition_checkpoint.get("checkpoint_sha256") or "")
+        and verified_media_ids == {
+            int(value) for value in acquisition_checkpoint.get("media_ids", [])
+        }
+    )
+    if (
+        media_evidence.get("evidence_status") != "no_effects_detected"
+        and not resumable_acquisition
+    ):
         return {
             "post_id": int(post_id),
             "recovered": False,
@@ -1226,6 +1595,8 @@ def _recover_interrupted_journal_locked(
         "failure_class": "process_interrupted",
         "legacy_evidence": dict(legacy_evidence or {}),
     }
+    if resumable_acquisition:
+        result["recovery_classification"] = "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
     if not apply:
         return result | {"applied": False}
     payload = dict(journal)
@@ -1246,6 +1617,14 @@ def _recover_interrupted_journal_locked(
         },
         "recovered_at": datetime.now(timezone.utc).isoformat(),
     })
+    if resumable_acquisition and isinstance(acquisition_checkpoint, Mapping):
+        payload["recovery_evidence"] = {
+            **payload["recovery_evidence"],
+            "classification": "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE",
+            "checkpoint_sha256": str(acquisition_checkpoint.get("checkpoint_sha256") or ""),
+            "media_ids": [int(value) for value in acquisition_checkpoint.get("media_ids", [])],
+            "new_media_ids": [int(value) for value in acquisition_checkpoint.get("new_media_ids", [])],
+        }
     if lock_handle is not None:
         try:
             lock_handle.assert_owned()
@@ -1284,6 +1663,8 @@ def _recover_stale_protocol_journals(
 def _incomplete_v2_journal_conflicts(
     root: Path,
     selected_ids: Collection[int],
+    *,
+    resumable_media_checkpoint_ids: Mapping[int, Collection[int]] | None = None,
 ) -> list[dict[str, Any]]:
     """Report journals that cannot safely be replaced by a new run."""
     journal_dir = Path(root) / "work" / "v2-journal"
@@ -1304,6 +1685,26 @@ def _incomplete_v2_journal_conflicts(
             continue
         if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}:
             media_evidence = _media_effect_evidence(Path(root), int(post_id), journal)
+            checkpoint_evidence = media_evidence.get("acquisition_checkpoint")
+            recovery_evidence = journal.get("recovery_evidence")
+            verified_ids = {
+                int(value)
+                for value in (resumable_media_checkpoint_ids or {}).get(int(post_id), ())
+            }
+            checkpoint_ids = {
+                int(value)
+                for value in (checkpoint_evidence or {}).get("media_ids", ())
+            } if isinstance(checkpoint_evidence, Mapping) else set()
+            if (
+                media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated"
+                and isinstance(recovery_evidence, Mapping)
+                and recovery_evidence.get("classification") == "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+                and recovery_evidence.get("checkpoint_sha256")
+                == (checkpoint_evidence or {}).get("checkpoint_sha256")
+                and checkpoint_ids
+                and verified_ids == checkpoint_ids
+            ):
+                continue
             if media_evidence.get("evidence_status") != "no_effects_detected":
                 conflicts.append({
                     "post_id": int(post_id),
@@ -1538,7 +1939,15 @@ class ProductionMediaResolver:
             # Publish in memory first: even an I/O error cannot roll back an
             # upload that has already been confirmed by WordPress.
             context["_v2_media_progress"] = snapshot
-            _write_v2_media_checkpoint(self.root, int(context["post_id"]), snapshot)
+            _write_v2_media_checkpoint(
+                self.root,
+                int(context["post_id"]),
+                snapshot,
+                run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
+                cycle_id=str(context.get("v2_cycle_id") or ""),
+                cycle_round=context.get("v2_cycle_round"),
+                authorization_id=str(context.get("v2_authorization_id") or ""),
+            )
 
         persist_progress()
         media_reconciliation = reconcile_working_visual_media(
@@ -3841,9 +4250,31 @@ def run_v2(
             [int(item[0]) for item in selected],
             lock_handles=post_lock_handles,
         )
+        resumable_media_checkpoint_ids: dict[int, set[int]] = {}
+        for selected_post_id, context in selected:
+            journal_path = Path(root) / "work" / "v2-journal" / f"{int(selected_post_id)}.json"
+            try:
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            recovery_evidence = journal.get("recovery_evidence")
+            if (
+                journal.get("status") not in {"interrupted_pre_writer", "failed_pre_writer"}
+                or not isinstance(recovery_evidence, Mapping)
+                or recovery_evidence.get("classification") != "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+            ):
+                continue
+            verified = _verify_acquisition_checkpoint_for_resume(
+                client, Path(root), int(selected_post_id), journal, context
+            )
+            if verified is not None:
+                resumable_media_checkpoint_ids[int(selected_post_id)] = {
+                    int(value) for value in verified["wordpress_readback_media_ids"]
+                }
         journal_conflicts = _incomplete_v2_journal_conflicts(
             root,
             [int(item[0]) for item in selected],
+            resumable_media_checkpoint_ids=resumable_media_checkpoint_ids,
         )
         if journal_conflicts:
             return {
@@ -3932,7 +4363,15 @@ def run_v2(
                     except Exception:
                         pass
                 outcome = PipelineRunner(buffered, stages, config=config).run_one(post_id, context)
-                _write_v2_media_checkpoint(root, post_id, buffered.state.media)
+                _write_v2_media_checkpoint(
+                    root,
+                    post_id,
+                    buffered.state.media,
+                    run_id=run_id,
+                    cycle_id=str(cycle_id or ""),
+                    cycle_round=cycle_round,
+                    authorization_id=str(authorization_id or ""),
+                )
                 _write_v2_journal_checkpoint(
                     root,
                     post_id,
@@ -4021,7 +4460,15 @@ def run_v2(
                 canonical_state = write.get("state")
                 if isinstance(canonical_state, dict):
                     buffered.state = WorkState.from_dict(canonical_state)
-                    _write_v2_media_checkpoint(root, post_id, buffered.state.media)
+                    _write_v2_media_checkpoint(
+                        root,
+                        post_id,
+                        buffered.state.media,
+                        run_id=run_id,
+                        cycle_id=str(cycle_id or ""),
+                        cycle_round=cycle_round,
+                        authorization_id=str(authorization_id or ""),
+                    )
                 completed += 1
                 try:
                     from ..media.registry import invalidate_v2_media, record_v2_observation
