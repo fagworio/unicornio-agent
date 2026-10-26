@@ -285,12 +285,28 @@ def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]
                         registry_rows[table] = int(db.execute(f"select count(*) from {table} where {column}=?", (pid,)).fetchone()[0])
         except sqlite3.Error:
             return {"registry_read": "error", "artifacts": artifacts, "journal": journal_present, "uncertain": uncertain_present, "classification": "REVIEW_REQUIRED"}
+    journal_details: list[dict[str, Any]] = []
+    for relative in journal_present:
+        try:
+            value = _read_json(root / relative, {}) or {}
+            journal_details.append({key: value.get(key) for key in ("status", "writer_started", "writer_status", "readback", "media_application_status", "media_readback_status")})
+        except (OSError, ValueError, TypeError):
+            journal_details.append({"read_error": relative})
+    journal_uncertain = any(
+        detail.get("read_error")
+        or detail.get("status") not in {"committed", "readback_verified"}
+        or detail.get("readback") is not True
+        or detail.get("writer_status") in {"possibly_started", "submitted", "uncertain"}
+        or detail.get("media_application_status") in {"started", "submitted", "uncertain"}
+        for detail in journal_details
+    )
     meta = post.get("meta") or {}
-    markers = {key: meta.get(key) for key in ("_hermes_human_reopened_at", "_hermes_human_reopened_from", "_hermes_ready_manifest", "_hermes_ready_hash") if meta.get(key)}
-    external = bool(uncertain_present or journal_present or any(registry_rows.values()) or markers)
+    markers = {key: meta.get(key) for key in (*HUMAN_REOPEN_KEYS, "_hermes_ready_manifest", "_hermes_ready_hash") if meta.get(key)}
+    external = bool(uncertain_present or journal_uncertain or registry_rows.get("media_operations", 0) or registry_rows.get("media_usage", 0) or markers)
     return {
         "artifacts": artifacts,
         "journal": journal_present,
+        "journal_details": journal_details,
         "uncertain": uncertain_present,
         "registry": registry_rows,
         "markers": markers,
