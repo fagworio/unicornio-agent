@@ -215,6 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
         "economia de tokens: corta os campos redundantes do modo cheio",
     )
 
+    reset_epoch_parser = subparsers.add_parser(
+        "v2-reset-epoch", help="preview/apply reset administrativo V2 por geração"
+    )
+    reset_epoch_parser.add_argument("--root", type=Path, default=Path("."))
+    reset_epoch_parser.add_argument("--preview", action="store_true")
+    reset_epoch_parser.add_argument("--apply", action="store_true")
+    reset_epoch_parser.add_argument("--preview-evidence", type=Path, default=None)
+    reset_epoch_parser.add_argument("--operator-authorization", default=None)
+    reset_epoch_parser.add_argument("--report-dir", type=Path, default=None)
+
     telemetry_parser = subparsers.add_parser(
         "telemetry",
         help="resumo agregado das blocagens/resultados do pipeline (work/telemetry.jsonl; "
@@ -2852,6 +2862,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             editorial = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             result = run_write_one(client, config, args.root, args.post_id, editorial, allow_write=bool(args.write))
+        elif args.command == "v2-reset-epoch":
+            from .pipeline_v2.reset_epoch import reset_epoch
+
+            result = reset_epoch(
+                client,
+                config,
+                args.root,
+                preview=bool(args.preview),
+                apply=bool(args.apply),
+                preview_evidence=args.preview_evidence,
+                operator_authorization=args.operator_authorization,
+                report_dir=args.report_dir,
+            )
         elif args.command == "v2-run":
             from .pipeline_v2.runtime import run_v2
 
