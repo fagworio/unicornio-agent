@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import re
 from http.client import InvalidURL
 from pathlib import Path
@@ -222,6 +223,72 @@ def discover_article_source_candidates(
             "role": "inline",
         })
     return result
+
+
+def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy: str = "audit") -> dict[str, Any]:
+    """Attach rights evidence from Wikimedia Commons' authoritative API.
+
+    This never infers permission from a search result. It only enriches a
+    candidate whose source page is a Commons file page and whose exact direct
+    URL is returned by ``imageinfo`` together with compatible extmetadata.
+    """
+    source = str(candidate.get("source_page_url") or "").strip()
+    host = (urlparse(source).hostname or "").casefold()
+    if host not in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
+        return candidate
+    marker = "/wiki/"
+    if marker not in urlparse(source).path:
+        return candidate
+    title = unquote(urlparse(source).path.split(marker, 1)[1])
+    if not title or title.casefold().startswith("special:"):
+        return candidate
+    api = "https://commons.wikimedia.org/w/api.php?action=query&format=json&titles=" + quote(title, safe="") + "&prop=imageinfo&iiprop=url|extmetadata"
+    payload = _fetch(api, "application/json", _PAGE_MAX_BYTES, [_VERIFY_TOTAL_MAX_BYTES], audit, url_policy)
+    if not payload:
+        return candidate
+    try:
+        pages = (json.loads(payload.decode("utf-8", "ignore")).get("query") or {}).get("pages") or {}
+        page = next(iter(pages.values()))
+        info = (page.get("imageinfo") or [])[0]
+        metadata = info.get("extmetadata") or {}
+        def value(name: str) -> str:
+            item = metadata.get(name) or {}
+            return str(item.get("value") if isinstance(item, dict) else item or "").strip()
+        license_name = value("LicenseShortName")
+        license_url = value("LicenseUrl")
+        author = re.sub(r"<[^>]+>", " ", value("Artist"))
+        author = " ".join(author.split())
+        direct = str(info.get("url") or "").strip()
+        if not direct or not license_name or not license_url or not author:
+            return candidate
+        enriched = dict(candidate)
+        enriched.update({
+            "source_page_url": source,
+            "direct_image_url": direct,
+            "author": author,
+            "license": license_name,
+            "license_url": license_url,
+            "captured_at": __import__("datetime").date.today().isoformat(),
+            "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
+            "alt_text": str(candidate.get("alt_text") or candidate.get("subject") or title),
+            "rights_evidence": {
+                "provider": "wikimedia_commons_api",
+                "file_title": title,
+                "image_url": direct,
+                "license": license_name,
+                "license_url": license_url,
+                "author": author,
+            },
+        })
+        from .license import attest_wikimedia_rights
+        attestation = attest_wikimedia_rights(enriched)
+        if attestation:
+            enriched["source_rights_attestation"] = attestation
+            enriched["rights_verified"] = True
+            return enriched
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return candidate
+    return candidate
 
 
 def _fetch(

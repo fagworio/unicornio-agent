@@ -3,6 +3,7 @@ import unittest
 from unicornio_editor.media.license import (
     LicenseError,
     attest_source_rights,
+    attest_wikimedia_rights,
     validate_candidate,
     validate_upload_candidate,
 )
@@ -23,6 +24,22 @@ def candidate():
 
 
 class LicenseTests(unittest.TestCase):
+    def test_wikimedia_api_attestation_requires_exact_metadata(self):
+        value = candidate()
+        value["rights_evidence"] = {
+            "provider": "wikimedia_commons_api",
+            "image_url": value["direct_image_url"],
+            "author": value["author"],
+            "license": value["license"],
+            "license_url": value["license_url"],
+        }
+        attestation = attest_wikimedia_rights(value)
+        self.assertIsNotNone(attestation)
+        value["source_rights_attestation"] = attestation
+        validate_upload_candidate(value)
+        value["rights_evidence"]["image_url"] = "https://upload.wikimedia.org/other.jpg"
+        self.assertIsNone(attest_wikimedia_rights(value))
+
     def test_accepts_verifiable_creative_commons_candidate(self):
         result = validate_candidate(candidate())
         self.assertEqual(result["license"], "CC BY-SA 4.0")

@@ -1572,6 +1572,7 @@ def _resolve_media_batch(
         accepted = [
             candidate for candidate in aprovados
             if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+            and (not candidate.get("rights_checked") or candidate.get("rights_verified") is True)
         ]
         accepted_candidates_by_query[str(query)] = [dict(candidate) for candidate in accepted]
         from .media.visual_hash import canonical_visual_representatives
@@ -2257,10 +2258,15 @@ def _enriquecer_candidatos(
 
     from .media.evidence import evidence_score, source_context
     from .media.official_sources import official_source
-    from .media.source_verify import validate_discovered_candidate
+    from .media.source_verify import enrich_wikimedia_rights, validate_discovered_candidate
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
+        enriched_candidate = enrich_wikimedia_rights(candidate, url_policy=url_policy)
+        if enriched_candidate is not candidate:
+            candidate.clear()
+            candidate.update(enriched_candidate)
+        candidate["rights_checked"] = True
         if not candidate.get("candidate_id"):
             candidate["candidate_id"] = hashlib.sha256(
                 f"{candidate.get('engine','')}|{candidate.get('query', termo)}|{candidate.get('direct_image_url','')}".encode()

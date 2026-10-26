@@ -2570,7 +2570,9 @@ def _execute_media_plan(
                         reason=finding.reason,
                     ),
                 )
-                rights_attestation = attest_source_rights(evidence, page_html or "")
+                rights_attestation = evidence.get("source_rights_attestation") if evidence.get("rights_verified") else None
+                if not isinstance(rights_attestation, dict):
+                    rights_attestation = attest_source_rights(evidence, page_html or "")
                 if rights_attestation is None:
                     detail = "a origem não comprova licença compatível vinculada a esta imagem"
                     _funnel("license_source_proof", "rejected", item, position, detail)

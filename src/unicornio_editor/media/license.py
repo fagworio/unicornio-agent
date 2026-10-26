@@ -193,6 +193,25 @@ def attest_source_rights(candidate: Mapping[str, Any], source_page_html: str) ->
     return {"version": _RIGHTS_ATTESTATION_VERSION, "signature": signature}
 
 
+def attest_wikimedia_rights(candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Seal exact-file rights returned by Wikimedia Commons extmetadata."""
+    evidence = candidate.get("rights_evidence")
+    if not isinstance(evidence, Mapping):
+        return None
+    if str(evidence.get("provider") or "") != "wikimedia_commons_api":
+        return None
+    if str(evidence.get("image_url") or "") != str(candidate.get("direct_image_url") or ""):
+        return None
+    if any(str(evidence.get(key) or "") != str(candidate.get(key) or "") for key in ("author", "license", "license_url")):
+        return None
+    try:
+        normalized = validate_candidate({key: candidate.get(key) for key in _REQUIRED})
+    except LicenseError:
+        return None
+    signature = hmac.new(_RIGHTS_ATTESTATION_KEY, _attestation_payload(normalized), hashlib.sha256).hexdigest()
+    return {"version": _RIGHTS_ATTESTATION_VERSION, "signature": signature, "provider": "wikimedia_commons_api"}
+
+
 def validate_upload_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     """Validate metadata and require a process-local, source-bound rights seal."""
     if not isinstance(candidate, Mapping):

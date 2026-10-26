@@ -2290,6 +2290,11 @@ class ProductionMediaResolver:
                 candidate["section_heading"] = metadata.get("heading") or subject
                 candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
+            from ..media.source_verify import enrich_wikimedia_rights
+            candidates = [
+                enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
+                for candidate in candidates
+            ]
             filtered: list[dict[str, Any]] = []
             for candidate in candidates:
                 candidate_url = _canonical_embedded_media_url(
@@ -2677,7 +2682,11 @@ class ProductionMediaResolver:
                 source_attempted = 0
                 source_accepted = 0
                 source_reused = 0
-                source_candidates = article_source_candidates()
+                from ..media.source_verify import enrich_wikimedia_rights
+                source_candidates = [
+                    enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
+                    for candidate in article_source_candidates()
+                ]
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
