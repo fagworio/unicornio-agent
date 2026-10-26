@@ -27,6 +27,7 @@ from .config import ConfigError, _carregar_env_do_projeto, load_config
 from .editorial_schema import validate_editorial
 from .editorial_provider import EditorialProviderError
 from .maintenance import generate_report
+from .media.diagnostics import diagnostic_url_domain
 from .workflow import (
     MediaFunnelInvariantError,
     WorkflowError,
@@ -141,6 +142,23 @@ def build_parser() -> argparse.ArgumentParser:
     v2_abandon_parser.add_argument("--new-cycle-id", default=None)
     v2_abandon_parser.add_argument("--exclude-post-id", type=int, default=None)
     v2_abandon_parser.add_argument("--apply", action="store_true", help="aplica a transição após as validações")
+
+    v2_isolate_parser = subparsers.add_parser(
+        "v2-isolate-uncertain",
+        help="isola uma transação writer incerta sem replay; preview por padrão",
+    )
+    v2_isolate_parser.add_argument("post_id", type=int)
+    v2_isolate_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_isolate_parser.add_argument("--cycle-id", required=True)
+    v2_isolate_parser.add_argument("--authorization-id", required=True)
+    v2_isolate_parser.add_argument("--pending-round", type=int, required=True)
+    v2_isolate_parser.add_argument("--selected-ids", required=True)
+    v2_isolate_parser.add_argument("--run-id", required=True)
+    v2_isolate_parser.add_argument("--isolated-post-ids", default=None, help="IDs incertos adicionais separados por vírgula")
+    v2_isolate_parser.add_argument("--run-ids", default=None, help="mapa post_id=run_id separado por vírgula")
+    v2_isolate_parser.add_argument("--preview-evidence", type=Path, default=None)
+    v2_isolate_parser.add_argument("--operator-authorization", default=None)
+    v2_isolate_parser.add_argument("--apply", action="store_true")
 
     v2_recover_interrupted_parser = subparsers.add_parser(
         "v2-recover-interrupted",
@@ -363,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     media_search_web_parser = subparsers.add_parser(
         "media-search-web",
-        help="descobre candidatos via Google Browser, Bing e Yandex "
+        help="descobre candidatos via providers de imagem configurados "
         "com fallback fail-safe (somente leitura; index de descoberta, a fonte "
         "e a pagina original)",
     )
@@ -430,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     media_search_web_parser.add_argument(
         "--engine", default="auto",
-        help="buscador: auto (EDITOR_MEDIA_SEARCH_PROVIDERS), google_browser, bing, google, yandex "
+        help="buscador: auto (EDITOR_MEDIA_SEARCH_PROVIDERS), duckduckgo, bing, google, yandex "
         "(default: auto)",
     )
     media_search_web_parser.add_argument("--root", type=Path, default=Path("."))
@@ -1287,6 +1305,73 @@ def _apply_editorial_batch(
     return summary
 
 
+def _safe_provider_stage_details(report: dict[str, Any]) -> dict[str, Any]:
+    """Allow-list bounded DDGS stage telemetry; never copy URLs or bodies."""
+    empty = {
+        "failure_stage": "",
+        "outcome": "",
+        "results_verified": False,
+        "request_observations": [],
+    }
+    if report.get("backend") != "duckduckgo":
+        return empty
+    stages = {"vqd_bootstrap", "image_search"}
+    outcomes = {
+        "not_started", "budget_exhausted", "provider_unavailable",
+        "results_found", "verified_no_results",
+    }
+    failure_stage = str(report.get("failure_stage") or "")
+    outcome = str(report.get("outcome") or "")
+    observations = []
+    raw_observations = report.get("request_observations")
+    if isinstance(raw_observations, (list, tuple)):
+        for row in raw_observations[:2]:
+            if not isinstance(row, dict) or row.get("stage") not in stages:
+                continue
+            try:
+                status = max(0, min(599, int(row.get("http_status") or 0)))
+            except (TypeError, ValueError, OverflowError):
+                status = 0
+            observation = {"stage": row["stage"], "http_status": status}
+            content_type = str(row.get("content_type") or "").split(";", 1)[0].lower()
+            if re.fullmatch(r"[a-z0-9.+-]{1,40}/[a-z0-9.+-]{1,40}", content_type):
+                observation["content_type"] = content_type
+            try:
+                body_bytes = max(0, min(10_000_000, int(row.get("body_bytes"))))
+            except (TypeError, ValueError, OverflowError):
+                body_bytes = None
+            if body_bytes is not None:
+                observation["body_bytes"] = body_bytes
+            if isinstance(row.get("challenge_marker_present"), bool):
+                observation["challenge_marker_present"] = row["challenge_marker_present"]
+            observations.append(observation)
+    cooldown_reason = str(report.get("cooldown_reason") or "")
+    if cooldown_reason != "bot_challenge_suspected":
+        cooldown_reason = ""
+    skip_reason = str(report.get("skip_reason") or "")
+    if skip_reason not in {"cooldown", "attempt_in_progress", "state_unavailable"}:
+        skip_reason = ""
+
+    def _bounded_seconds(key: str) -> int:
+        try:
+            return max(0, min(86400, int(report.get(key) or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return {
+        "failure_stage": failure_stage if failure_stage in stages else "",
+        "outcome": outcome if outcome in outcomes else "",
+        "results_verified": bool(report.get("results_verified")),
+        "request_observations": observations,
+        "cooldown_reason": cooldown_reason,
+        "cooldown_seconds": _bounded_seconds("cooldown_seconds"),
+        "cooldown_remaining_seconds": _bounded_seconds("cooldown_remaining_seconds"),
+        "skip_reason": skip_reason,
+        "recovery_probe_remaining_seconds": max(
+            0, min(900, _bounded_seconds("recovery_probe_remaining_seconds"))
+        ),
+    }
+
+
 def _emit_engine_health(
     root: str | Path,
     reports: dict[str, dict[str, Any]] | None,
@@ -1309,6 +1394,7 @@ def _emit_engine_health(
         for engine, relatorio in reports.items():
             if not isinstance(relatorio, dict):
                 continue
+            stage_details = _safe_provider_stage_details(relatorio)
             append_telemetry(
                 root, "media_engine_health",
                 engine=str(engine),
@@ -1319,7 +1405,8 @@ def _emit_engine_health(
                 candidates=int(relatorio.get("candidates") or 0),
                 pair_unresolved=int(relatorio.get("pair_unresolved") or 0),
                 failure_kind=str(relatorio.get("failure_kind") or ""),
-                final_url=str(relatorio.get("final_url") or "")[:500],
+                **stage_details,
+                final_domain=diagnostic_url_domain(relatorio.get("final_url")),
                 consent_detected=bool(relatorio.get("consent_detected")),
                 consent_handled=bool(relatorio.get("consent_handled")),
                 captcha_detected=bool(relatorio.get("captcha_detected")),
@@ -1340,6 +1427,7 @@ def _resolve_media_batch(
     allow_reuse: bool = True,
     excluded_urls: dict[int, set[str]] | None = None,
     excluded_fingerprints: dict[int, set[str]] | None = None,
+    attempt_id: str = "",
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
 
@@ -1358,6 +1446,10 @@ def _resolve_media_batch(
         summarize_engine_reports,
     )
     from .observability import append_telemetry
+    from .media.diagnostics import (
+        sanitize_candidate_diagnostic,
+        summarize_candidate_diagnostics,
+    )
 
     posts = batch["posts"]
     from .pipeline_v2.quarantine import assert_post_not_quarantined
@@ -1384,6 +1476,43 @@ def _resolve_media_batch(
             and str(asset.get("url") or asset.get("media_url") or "") not in existing_urls
             and not blocked_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
             and not existing_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
+        ]
+        # A historical library match is not current-use authorization. Re-run
+        # source membership, subject relevance and duplicate checks before it
+        # can consume capacity or suppress external discovery.
+        reuse_candidates = [
+            {
+                **asset,
+                "candidate_id": f"library-{asset.get('media_id') or index}",
+                "direct_image_url": str(asset.get("url") or ""),
+                "source_page_url": str(asset.get("source") or ""),
+                "media_library_id": asset.get("media_id"),
+                "usable": True,
+                "engine": "library_reuse",
+                "query": str(item["query"] or item["subject"]),
+            }
+            for index, asset in enumerate(reuse)
+        ]
+        reuse_accepted, _reuse_rejected, _reuse_deferred = _enriquecer_candidatos(
+            reuse_candidates,
+            subject=str(item["subject"]),
+            termo=str(item["query"] or item["subject"]),
+            verify=True,
+            root=root,
+            capacity=int(item["needed"]),
+            existing_media_urls=item.get("existing_media_urls") or [],
+            existing_media_phashes=item.get("existing_media_phashes") or {},
+            excluded_urls=blocked_urls,
+            excluded_fingerprints=blocked_fingerprints,
+            emit_terminal=False,
+            url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(item.get("role") or ""),
+        )
+        reuse = [
+            candidate for candidate in reuse_accepted
+            if candidate.get("valid") is True
+            and (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
         ]
         reuse_by_post[post_id] = reuse
         needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
@@ -1427,6 +1556,8 @@ def _resolve_media_batch(
             excluded_fingerprints=blocked_fingerprints,
             emit_terminal=False,
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(spec.get("role") or ""),
         )
         accepted = [
             candidate for candidate in aprovados
@@ -1445,10 +1576,6 @@ def _resolve_media_batch(
         timeout=config.http_timeout,
         engine=str(first.get("engine") or "auto"),
         accept=accept if searchable else None,
-        remote_url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
-        audit=lambda finding: append_telemetry(
-            root, "remote_url_audit", url=finding.url, reason=finding.reason
-        ),
         budget_seconds=float(
             getattr(config, "media_operation_timeout_seconds", 180.0) or 0.0
         ),
@@ -1484,6 +1611,8 @@ def _resolve_media_batch(
             excluded_urls=excluded_urls.get(post_id, set()),
             excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+            attempt_id=attempt_id,
+            role=str(item.get("role") or ""),
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -1500,6 +1629,29 @@ def _resolve_media_batch(
         # Relatório por post: a contagem deixa explícito em qual gate o funil
         # perdeu candidatos, sem expor bytes ou o payload completo da imagem.
         all_examined = aprovados + rejeitados + deferidos
+        diagnostic_groups = (
+            ("accepted", aprovados),
+            ("rejected", rejeitados),
+            ("deferred", deferidos),
+        )
+        candidate_diagnostics = [
+            sanitize_candidate_diagnostic(
+                candidate,
+                decision=decision,
+                attempt_id=attempt_id,
+                role=str(item.get("role") or ""),
+            )
+            for decision, group in diagnostic_groups
+            for candidate in group
+        ]
+        candidate_diagnostic_summary = summarize_candidate_diagnostics(
+            candidate_diagnostics
+        )
+        candidate_verification_incomplete = any(
+            not candidate.get("capacity_deferred")
+            and bool((candidate.get("evidence") or {}).get("recoverable"))
+            for candidate in deferidos
+        )
         verdicts = [str((candidate.get("evidence") or {}).get("verdict") or "") for candidate in all_examined]
         distinct = {
             str(candidate.get("phash") or candidate.get("direct_image_url") or "")
@@ -1511,17 +1663,24 @@ def _resolve_media_batch(
         requested_engine = str(item.get("engine") or first.get("engine") or "auto")
         engine_strategy = search_engine_strategy(requested_engine)
         expected_engines = list(engine_strategy["expected_engines"])
+        configured_engines = list(engine_strategy["execution_engines"])
+        optional_engines = list(engine_strategy["optional_engines"])
         engines_disabled = list(engine_strategy["disabled_engines"])
         provider_config_valid = bool(engine_strategy["valid"])
         if needed_web <= 0:
             expected_engines = []
+            configured_engines = []
+            optional_engines = []
         if needed_web > 0:
             provider_health = search_row.get("engine_summary") or summarize_engine_reports(
                 engine_reports,
                 expected_engines=expected_engines,
+                configured_engines=configured_engines,
             )
             provider_stop_reason = str(
-                provider_health.get("completion_reason") or "INCOMPLETE_PROVIDER"
+                search_row.get("completion_reason")
+                or provider_health.get("completion_reason")
+                or "INCOMPLETE_PROVIDER"
             )
         else:
             # Reuse completou a necessidade sem consultar providers; isso não
@@ -1529,7 +1688,8 @@ def _resolve_media_batch(
             provider_health = {}
             provider_stop_reason = "NOT_REQUIRED"
         engines_attempted = tuple(
-            name for name in expected_engines if name in engine_reports
+            [name for name in configured_engines if name in engine_reports]
+            + sorted(set(engine_reports) - set(configured_engines))
         )
         from .media.visual_hash import canonical_visual_representatives
         accepted_count = len(canonical_visual_representatives(
@@ -1544,6 +1704,7 @@ def _resolve_media_batch(
         verified_result_kinds = {"ok", "no_results_legitimate"}
         technical_failure_kinds = {
             "captcha", "js_required", "parser_schema_drift", "cooldown_skip",
+            "bot_challenge_suspected",
         }
         non_verified_engine_failures = {
             str((engine_reports.get(name) or {}).get("failure_kind") or "")
@@ -1554,19 +1715,31 @@ def _resolve_media_batch(
         all_engines_verified = bool(
             all_engines_reported and not non_verified_engine_failures
         )
+        diagnostic_engines = configured_engines + sorted(
+            set(engine_reports) - set(configured_engines)
+        )
+        provider_strategy_complete = bool(expected_engines and all_engines_verified)
         engine_diagnostics = {
             name: {
                 "attempted": name in engine_reports,
+                "required": name in expected_engines,
                 "failure_kind": str((engine_reports.get(name) or {}).get("failure_kind") or "unknown"),
                 "error": str((engine_reports.get(name) or {}).get("error") or "")[:200],
                 "http_status": int((engine_reports.get(name) or {}).get("http_status") or 0),
                 "objects_parsed": int((engine_reports.get(name) or {}).get("objects_parsed") or 0),
                 "candidates": int((engine_reports.get(name) or {}).get("candidates") or 0),
+                "usable_candidates": int((engine_reports.get(name) or {}).get("usable_candidates") or 0),
+                "discovery_source_counts": dict(
+                    (engine_reports.get(name) or {}).get("discovery_source_counts") or {}
+                ),
+                **_safe_provider_stage_details(
+                    engine_reports.get(name) or {}
+                ),
             }
-            for name in expected_engines
+            for name in diagnostic_engines
         }
         next_fallback_engines = [
-            name for name in expected_engines if name not in engine_reports
+            name for name in configured_engines if name not in engine_reports
         ]
         technical_engine_failure = not provider_config_valid or bool(
             non_verified_engine_failures.intersection(technical_failure_kinds)
@@ -1582,13 +1755,33 @@ def _resolve_media_batch(
             str((engine_reports.get(name) or {}).get("failure_kind") or "")
             == "budget_exhausted"
             for name in expected_engines
-        )
+        ) or provider_stop_reason == "STOPPED_BY_BUDGET"
+        optional_engine_failures = {
+            name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
+            for name in optional_engines
+            if name in engine_reports
+            and str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
+            not in verified_result_kinds
+        }
         if needed_web <= 0:
             completion_reason = "NOT_REQUIRED"
             search_completed = True
         elif accepted_count >= needed_web:
-            completion_reason = "TARGET_REACHED"
+            # A candidate-level quota can be met after every required provider
+            # was already exhausted and verified. Preserve that stronger proof
+            # so a later conversion/upload rejection can still use the
+            # legitimate article-only exhaustion waiver. If provider traversal
+            # stopped early or was technically incomplete, only discovery has
+            # reached target; it is not an exhaustion proof.
+            completion_reason = (
+                "EXHAUSTED_VERIFIED"
+                if provider_stop_reason == "EXHAUSTED_VERIFIED" and all_engines_verified
+                else "TARGET_REACHED"
+            )
             search_completed = True
+        elif candidate_verification_incomplete:
+            completion_reason = "SOURCE_VERIFICATION_INCOMPLETE"
+            search_completed = False
         elif budget_exhausted:
             completion_reason = "BUDGET_EXHAUSTED"
             search_completed = False
@@ -1626,19 +1819,24 @@ def _resolve_media_batch(
                 "version": 1,
                 "query": str(item["query"]),
                 "expected_engines": list(expected_engines),
+                "required_engines": list(expected_engines),
+                "configured_engines": list(configured_engines),
+                "optional_engines": list(optional_engines),
                 "attempted_engines": list(engines_attempted),
                 "reported_engines": sorted(engine_reports),
                 "engine_reports": engine_diagnostics,
+                "optional_engine_failures": optional_engine_failures,
                 "provider_health": provider_health,
                 "provider_stop_reason": provider_stop_reason,
                 "provider_config_valid": provider_config_valid,
                 "invalid_engines": list(engine_strategy["invalid_engines"]),
                 "capacity_reached": completion_reason == "TARGET_REACHED",
-                "provider_strategy_complete": bool(
-                    expected_engines
-                    and all_engines_verified
-                    and search_completed
-                ),
+                # Provider traversal and source verification are independent
+                # evidence dimensions. A candidate with an inconclusive source
+                # must keep the overall query incomplete, but must not rewrite
+                # healthy provider reports as an incomplete provider strategy.
+                "provider_strategy_complete": provider_strategy_complete,
+                "provider_queries_completed": int(provider_strategy_complete),
                 # Compatibilidade com o contrato consumido por pipeline_v2:
                 # somente a exaustão verificada pode provar a estratégia
                 # completa e autorizar a reconciliação de coverage.
@@ -1652,6 +1850,10 @@ def _resolve_media_batch(
                     name: str((engine_reports.get(name) or {}).get("failure_kind") or "unknown")
                     for name in expected_engines
                 },
+                "provider_results": {
+                    name: str((engine_reports.get(name) or {}).get("failure_kind") or "not_attempted")
+                    for name in configured_engines
+                },
                 "next_fallback_engines": next_fallback_engines,
                 "fallback_available": bool(next_fallback_engines),
                 "technical_failures": sorted(non_verified_engine_failures),
@@ -1659,12 +1861,16 @@ def _resolve_media_batch(
                 "completed_queries": 1 if needed_web > 0 and search_completed else 0,
                 "verified": completion_reason == "EXHAUSTED_VERIFIED",
                 "accepted_visual_representatives": accepted_count,
+                "candidate_verification_incomplete": candidate_verification_incomplete,
             },
         }
         append_telemetry(
             root,
             "media_search_query_summary",
             post_id=post_id,
+            role=str(item.get("role") or ""),
+            attempt_id=str(attempt_id or "")[:64],
+            query_id=hashlib.sha256(str(item["query"]).casefold().encode("utf-8", "ignore")).hexdigest()[:16],
             query=str(item["query"])[:200],
             results_found=len(candidates),
             candidates_attempted=candidates_attempted,
@@ -1684,6 +1890,9 @@ def _resolve_media_batch(
             root,
             "media_search_summary",
             post_id=post_id,
+            role=str(item.get("role") or ""),
+            attempt_id=str(attempt_id or "")[:64],
+            query_id=hashlib.sha256(str(item["query"]).casefold().encode("utf-8", "ignore")).hexdigest()[:16],
             required=needed,
             found=len(candidates),
             with_source=sum(bool(str(candidate.get("source_page_url") or "").strip()) for candidate in all_examined),
@@ -1704,16 +1913,21 @@ def _resolve_media_batch(
             downloaded=0,
             converted=0,
             uploaded=0,
+            candidate_diagnostics=candidate_diagnostics[:20],
+            candidate_diagnostic_summary=candidate_diagnostic_summary,
         )
         output.append({
             "post_id": post_id,
             "subject": subject,
+            "role": str(item.get("role") or ""),
             "needed": needed,
             "reuse": reuso,
             "needed_web": needed_web,
             "candidates": compact_candidates[:needed],
             "deferred": len(deferidos),
             "rejected": len(rejeitados),
+            "candidate_diagnostics": candidate_diagnostics[:20],
+            "candidate_diagnostic_summary": candidate_diagnostic_summary,
             "audit_candidates": aprovados + rejeitados + deferidos,
             "search": search_progress,
         })
@@ -1725,6 +1939,7 @@ def _resolve_media_batch(
         "vision_items": vision_items,
         "economics": {
             "posts": len(output),
+            "attempt_id": str(attempt_id or "")[:64],
             "search_queries": len(queries),
             "external_http_requests": http_request_count(),
             "candidates_examined": total_candidates,
@@ -1738,6 +1953,7 @@ def _resolve_media_batch(
         "media_resolve_batch",
         batch_size=len(output),
         posts=len(output),
+        attempt_id=str(attempt_id or "")[:64],
         search_queries=len(queries),
         external_http_requests=http_request_count(),
         candidates_examined=total_candidates,
@@ -1993,6 +2209,8 @@ def _enriquecer_candidatos(
     excluded_fingerprints: set[str] | None = None,
     emit_terminal: bool = True,
     url_policy: str = "audit",
+    attempt_id: str = "",
+    role: str = "",
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -2065,9 +2283,12 @@ def _enriquecer_candidatos(
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "source_verification_reason_code", "source_verification_recoverable",
+        "verification_stage", "verification_elapsed_ms",
+        "verification_stage_durations_ms",
         "source_comparison_proved",
+        "verification_status", "comparisons_attempted", "assets_considered",
         "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
-        "local_image_path", "sha256", "mime", "width", "height",
+        "sha256", "mime", "width", "height",
     )
     _DISCOVERY_IDENTITY_FIELDS = (
         "candidate_id", "discovery_image_url", "engine", "query",
@@ -2218,7 +2439,7 @@ def _enriquecer_candidatos(
                 url_policy=url_policy,
                 audit=(
                     lambda finding: append_telemetry(
-                        root, "remote_url_audit", url=finding.url, reason=finding.reason
+                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
                     )
                 ) if root is not None else None,
             )
@@ -2230,11 +2451,20 @@ def _enriquecer_candidatos(
             cand["source_verification_recoverable"] = bool(
                 veredito.get("recoverable")
             )
+            cand["verification_stage"] = str(
+                veredito.get("verification_stage") or ""
+            )
+            cand["verification_elapsed_ms"] = max(
+                0.0, float(veredito.get("verification_elapsed_ms") or 0.0)
+            )
             cand["source_comparison_proved"] = bool(
                 veredito.get("source_comparison_proved")
             )
             cand["images_in_page"] = int(veredito.get("images_in_page") or 0)
             cand["verification_level"] = str(veredito.get("verification_level") or "")
+            cand["verification_status"] = str(veredito.get("verification_status") or "unverified")
+            cand["comparisons_attempted"] = int(veredito.get("comparisons_attempted") or 0)
+            cand["assets_considered"] = int(veredito.get("assets_considered") or 0)
             cand["verification_reason"] = str(veredito.get("reason") or "")
             matched = str(veredito.get("matched_image_url") or "").strip()
             if matched:
@@ -2268,6 +2498,7 @@ def _enriquecer_candidatos(
             source_verification_recoverable=bool(
                 cand.get("source_verification_recoverable")
             ),
+            source_comparison_proved=bool(cand.get("source_comparison_proved")),
         )
         cand["evidence"] = pontos
         cand["evidence_score"] = pontos["score"]
@@ -2303,9 +2534,12 @@ def _enriquecer_candidatos(
                     rejeitados.append(cand)
                     _guardar_memo(cand)
                     return
-        (aprovados if pontos["verdict"] in (
-            "deterministic_match", "ambiguous", "insufficient_source_context"
-        ) else rejeitados).append(cand)
+        if pontos.get("recoverable"):
+            deferidos.append(cand)
+        else:
+            (aprovados if pontos["verdict"] in (
+                "deterministic_match", "ambiguous", "insufficient_source_context"
+            ) else rejeitados).append(cand)
         _guardar_memo(cand)
 
     teto_resolver = int(capacity) if capacity and capacity > 0 else 0
@@ -2345,7 +2579,7 @@ def _enriquecer_candidatos(
                         url_policy=url_policy,
                         audit=(
                             lambda finding: append_telemetry(
-                                root, "remote_url_audit", url=finding.url, reason=finding.reason
+                                root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
                             )
                         ) if root is not None else None,
                     ),
@@ -2383,6 +2617,8 @@ def _enriquecer_candidatos(
             continue
         verdict = str((cand.get("evidence") or {}).get("verdict") or "")
         if cand.get("capacity_deferred"):
+            deferidos.append(cand)
+        elif (cand.get("evidence") or {}).get("recoverable"):
             deferidos.append(cand)
         elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context"):
             aprovados.append(cand)
@@ -2438,8 +2674,8 @@ def _enriquecer_candidatos(
             for cand in aprovados + rejeitados:
                 eng = str(cand.get("engine") or "unknown")
                 linha = funil.setdefault(
-                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0,
-                          "deferred": 0},
+                    eng, {"discovered": 0, "verified": 0, "subject_match": 0,
+                          "approved": 0, "selected": 0, "deferred": 0},
                 )
                 linha["discovered"] += 1
                 if cand.get("valid"):
@@ -2450,11 +2686,16 @@ def _enriquecer_candidatos(
                 # Não investigado != reprovado: o funil conta em campo próprio.
                 eng = str(cand.get("engine") or "unknown")
                 funil.setdefault(
-                    eng, {"discovered": 0, "verified": 0, "subject_match": 0, "selected": 0,
-                          "deferred": 0},
+                    eng, {"discovered": 0, "verified": 0, "subject_match": 0,
+                          "approved": 0, "selected": 0, "deferred": 0},
                 )["deferred"] += 1
             for cand in aprovados:
-                funil[str(cand.get("engine") or "unknown")]["selected"] += 1
+                linha = funil[str(cand.get("engine") or "unknown")]
+                linha["approved"] += 1
+                # `selected` is retained as a telemetry compatibility alias;
+                # `approved` is the accurate name (final application is
+                # reported by media_funnel/upload with the same candidate ID).
+                linha["selected"] += 1
             for eng, linha in funil.items():
                 append_telemetry(root, "media_engine_yield", engine=eng, **linha)
         except Exception:  # noqa: BLE001 - telemetria nunca quebra a busca
@@ -2462,29 +2703,23 @@ def _enriquecer_candidatos(
     if root is not None and emit_terminal:
         try:
             from .observability import append_telemetry
+            from .media.diagnostics import sanitize_candidate_diagnostic
             for status, grupo in (("ACCEPTED", aprovados), ("REJECTED", rejeitados), ("DEFERRED", deferidos)):
                 for cand in grupo:
-                    evidence = cand.get("evidence") or {}
-                    reason_code = str(
-                        cand.get("rejected_reason")
-                        or evidence.get("verdict")
-                        or ("capacity_met" if status == "DEFERRED" else "")
+                    diagnostic = sanitize_candidate_diagnostic(
+                        cand, role=role, attempt_id=attempt_id
                     )
                     append_telemetry(
                         root, "media_candidate_terminal",
-                        candidate_id=str(cand.get("candidate_id") or ""),
                         post_id=int(post_id) if post_id else None,
                         query=str(cand.get("query") or termo or ""),
                         subject=str(subject or ""),
-                        role=str(cand.get("role") or ""),
-                        engine=str(cand.get("engine") or "unknown"),
-                        discovery_image_url=str(cand.get("discovery_image_url") or cand.get("direct_image_url") or ""),
-                        direct_image_url=str(cand.get("direct_image_url") or ""),
-                        source_page_url=str(cand.get("source_page_url") or ""),
-                        source_domain=(urlparse(str(cand.get("source_page_url") or cand.get("direct_image_url") or "")).hostname or "").lower(),
+                        image_domain=diagnostic_url_domain(cand.get("direct_image_url")),
+                        source_domain=diagnostic_url_domain(cand.get("source_page_url") or cand.get("direct_image_url")),
                         status=status,
-                        reason_code=reason_code,
+                        reason_code=diagnostic["verdict"],
                         verification_level=str(cand.get("verification_level") or ""),
+                        **diagnostic,
                     )
             discovered_ids = [str(c["candidate_id"]) for c in candidates]
             terminal_ids = [str(c["candidate_id"]) for group in (aprovados, rejeitados, deferidos) for c in group]
@@ -2684,6 +2919,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 new_cycle_id=args.new_cycle_id,
                 exclude_post_id=args.exclude_post_id,
                 apply=bool(args.apply),
+            )
+        elif args.command == "v2-isolate-uncertain":
+            from .pipeline_v2.cycle_admin import isolate_uncertain_transaction
+
+            evidence = None
+            if args.preview_evidence is not None:
+                evidence = json.loads(args.preview_evidence.read_text(encoding="utf-8"))
+            result = isolate_uncertain_transaction(
+                args.root,
+                client,
+                cycle_id=args.cycle_id,
+                authorization_id=args.authorization_id,
+                pending_round=int(args.pending_round),
+                selected_ids=[int(item.strip()) for item in args.selected_ids.split(",") if item.strip()],
+                post_id=int(args.post_id),
+                run_id=args.run_id,
+                apply=bool(args.apply),
+                preview=evidence,
+                operator_authorization=args.operator_authorization,
+                isolated_post_ids=(
+                    [int(item.strip()) for item in args.isolated_post_ids.split(",") if item.strip()]
+                    if args.isolated_post_ids else None
+                ),
+                run_ids=(
+                    {int(item.split("=", 1)[0]): item.split("=", 1)[1] for item in args.run_ids.split(",") if "=" in item}
+                    if args.run_ids else None
+                ),
             )
         elif args.command == "v2-recover-interrupted":
             from .pipeline_v2.runtime import recover_interrupted_journal
@@ -3371,10 +3633,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
                 engine=args.engine,
                 accept=_aceitar_item,
-                remote_url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
-                audit=lambda finding: append_telemetry(
-                    args.root, "remote_url_audit", url=finding.url, reason=finding.reason
-                ),
             )
             items = []
             audit_items: list[dict] = []
@@ -3807,9 +4065,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client, config, args.root, batch, full=bool(args.full)
                 )
             finally:
-                from .media.google_browser import cleanup_browser_artifacts
-
-                cleanup_browser_artifacts()
                 if previous_batch is None:
                     os.environ.pop("UNICORNIO_BATCH_ID", None)
                 else:
@@ -4028,12 +4283,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 # debug/auditoria e um stdout pequeno orientado a proxima acao. O agente nunca
 # carrega o que so serve para auditoria; o operador nunca perde o detalhe.
 def _write_audit(path: Path, payload: Any) -> str:
-    """Grava o produto de auditoria de um comando pesado (fail-soft)."""
+    """Grava audit privado, possivelmente contendo URLs com tokens (fail-soft)."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        import tempfile
+
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, path)
+        finally:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
         return str(path)
     except Exception:  # noqa: BLE001 - auditoria nunca derruba o comando
         return ""
@@ -4351,9 +4618,31 @@ def _reuse_from_library(
             return
         url = str(entrada.get("source_url") or "")
         pagina = str(entrada.get("source_page") or "")
+        entry_subject = " ".join(str(entrada.get("subject") or "").split()).casefold()
+        requested_subject = " ".join(str(subject or "").split()).casefold()
+        if not entry_subject or entry_subject != requested_subject:
+            return
         # Sem origem registrada o reuso NAO e utilizavel: o apply exige a URL
         # listada na pagina original.
         if not (url and pagina) or url in vistos:
+            return
+        from .media.license import LicenseError, validate_candidate
+
+        rights = {
+            "source_page_url": pagina,
+            "direct_image_url": url,
+            "author": entrada.get("author"),
+            "license": entrada.get("license"),
+            "license_url": entrada.get("license_url"),
+            "captured_at": entrada.get("captured_at"),
+            "credit_text": entrada.get("credit_text"),
+            "alt_text": entrada.get("alt_text"),
+        }
+        try:
+            validate_candidate(rights)
+        except LicenseError:
+            # Old index records have provenance but no rights evidence. They
+            # remain in the index for deduplication, never for executable reuse.
             return
         vistos.add(url)
         reuso.append(
@@ -4363,6 +4652,7 @@ def _reuse_from_library(
                 "media_id": entrada.get("media_id"),
                 "phash": str(entrada.get("phash") or ""),
                 "subject": entrada.get("subject"),
+                **rights,
             }
         )
 

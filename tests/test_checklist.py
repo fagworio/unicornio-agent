@@ -6,6 +6,8 @@ from unittest import mock
 from unicornio_editor.checklist import required_image_count, required_image_count_for_content, run_pre_publish_checklist
 from unicornio_editor.config import Config
 from unicornio_editor.media.vision_gate import VisionGateError
+from unicornio_editor.media.inserter import remove_empty_paragraphs
+from unicornio_editor.pipeline_v2.media_layout import build_normal_article_layout_policy
 
 
 def editorial_payload(**overrides):
@@ -177,6 +179,83 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(content=content)
         self.assertEqual(self.statuses(result)["featured_inline_position"], "fail")
 
+    def test_normal_article_allows_only_verified_closing_featured_repeat(self):
+        body = "".join(
+            f"<p>{' '.join(['palavra'] * 55)}</p>"
+            for _ in range(11)
+        )
+        featured_url = "https://media.example/redfall-1280x720.webp"
+        featured = {
+            "status": "valid", "media_id": 7, "media_url": featured_url,
+            "sha256": "f" * 64, "phash": "f" * 16,
+            "visual_group_id": "visual:featured", "alt_text": "Redfall key art",
+            "credit_text": "Crédito da imagem: Fonte oficial",
+            "width": 1280, "height": 720,
+            "visual_verification": {"decision": "INITIAL"},
+        }
+        inline = [
+            {
+                "media_id": media_id,
+                "media_url": f"https://media.example/inline-{media_id}.webp",
+                "slot": media_id,
+                "sha256": f"{media_id:064x}", "phash": f"{media_id:016x}",
+                "visual_group_id": f"visual:{media_id}",
+                "visual_verification": {"decision": "DIFFERENT"},
+            }
+            for media_id in (11, 12, 13)
+        ]
+        policy = build_normal_article_layout_policy(
+            body,
+            target_ideal=4,
+            verified_inline=inline,
+            featured_media_id=7,
+            featured_repeat_evidence=featured,
+        )
+        self.assertIsNotNone(policy)
+        repeat = {
+            **policy["closing_featured_repeat"],
+            "paragraph_index": policy["placement_plan"][-1]["paragraph_index"],
+            "placement": "after_editorial_body",
+        }
+        content = body + "".join(
+            f'<figure><img src="{item["media_url"]}" alt="Redfall" width="1200" height="800">'
+            f'<figcaption>Crédito da imagem: Fonte {item["media_id"]}</figcaption></figure>'
+            for item in inline
+        ) + (
+            f'<figure><img src="{featured_url}" alt="Redfall key art" width="1280" height="720">'
+            "<figcaption>Crédito da imagem: Fonte oficial</figcaption></figure>"
+        )
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 4, "accepted": inline},
+            "featured": featured,
+            "layout_policy": policy,
+            "closing_featured_repeat": repeat,
+            "search": {"completed": True, "exhausted": True, "completion_reason": "EXHAUSTED_VERIFIED"},
+            "waiver": {"applied": True, "reason": "search_exhausted"},
+        }
+        result = self._run_checklist(
+            content=content,
+            editorial=editorial_payload(cleaned_html=body),
+            media_context=media_context,
+        )
+        statuses = self.statuses(result)
+        self.assertEqual(statuses["featured_inline_position"], "pass")
+        self.assertIn("conteudo tem 3", next(item["detail"] for item in result["items"] if item["name"] == "imagens_no_corpo"))
+
+        misplaced = content.replace(
+            f'<figure><img src="{featured_url}" alt="Redfall key art" width="1280" height="720">'
+            "<figcaption>Crédito da imagem: Fonte oficial</figcaption></figure>",
+            "",
+        )
+        misplaced = misplaced.replace("<p>", f'<figure><img src="{featured_url}" alt="Redfall key art" width="1280" height="720"><figcaption>Crédito da imagem: Fonte oficial</figcaption></figure><p>', 1)
+        misplaced_result = self._run_checklist(
+            content=misplaced,
+            editorial=editorial_payload(cleaned_html=body),
+            media_context=media_context,
+        )
+        self.assertEqual(self.statuses(misplaced_result)["featured_inline_position"], "fail")
+
     def test_normal_article_rejects_inline_visually_equal_to_featured(self):
         featured_url = "https://media.example/redfall-1280x720.webp"
         inline_url = "https://other.example/redfall-copy.webp"
@@ -335,6 +414,76 @@ class ChecklistTests(unittest.TestCase):
         item = next(item for item in result["items"] if item["name"] == "html_semantics")
         self.assertEqual(item["status"], "fail")
         self.assertIn("H1 interno", item["detail"])
+
+    def test_html_semantics_rejects_empty_paragraph_variants(self):
+        for empty in ("<p><br></p>", "<p> &nbsp; <br /></p>", "<p>&#160;</p>"):
+            with self.subTest(empty=empty):
+                result = self._run_checklist(content=f"<p>Texto.</p>{empty}")
+                item = next(row for row in result["items"] if row["name"] == "html_semantics")
+                self.assertEqual(item["status"], "fail")
+                self.assertIn("parágrafo vazio", item["detail"])
+
+    def test_prepared_empty_anchor_no_longer_triggers_html_semantics(self):
+        cleaned = remove_empty_paragraphs(
+            '<p>Texto editorial suficiente sobre videogame e seu contexto.</p>'
+            '<p id="anchor"><br></p>'
+        )["html"]
+        result = self._run_checklist(content=cleaned)
+        item = next(row for row in result["items"] if row["name"] == "html_semantics")
+        self.assertEqual(item["status"], "pass")
+
+    @staticmethod
+    def _layout_limited_body():
+        sentence = " ".join(["Videogame"] + [f"detalhe{i}" for i in range(70)] + ["confirmado."])
+        return "".join(f"<p>{sentence}</p>" for _ in range(10))
+
+    def test_verified_layout_reduction_does_not_waive_missing_media(self):
+        body = self._layout_limited_body()
+        policy = build_normal_article_layout_policy(
+            body, target_ideal=4, verified_inline=(),
+        )
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 3, "accepted": []},
+            "featured": {"status": "missing"},
+            "layout_policy": policy,
+        }
+        result = self._run_checklist(
+            editorial=editorial_payload(cleaned_html=body),
+            content=body,
+            media_context=media_context,
+        )
+        statuses = self.statuses(result)
+        self.assertEqual(policy["target_ideal"], 4)
+        self.assertEqual(policy["target_effective"], 3)
+        self.assertEqual(statuses["media_layout_policy"], "pass")
+        self.assertEqual(statuses["imagens_no_corpo"], "fail")
+
+    def test_listicle_cannot_use_normal_article_layout_reduction(self):
+        body = self._layout_limited_body()
+        policy = build_normal_article_layout_policy(
+            body, target_ideal=4, verified_inline=(),
+        )
+        listicle = "".join(
+            f"<h2>{index}. Jogo {index}</h2><p>Descrição editorial do jogo {index}.</p>"
+            for index in range(1, 4)
+        )
+        result = self._run_checklist(
+            post=make_post(title={"raw": "Top 3 jogos"}),
+            editorial=editorial_payload(cleaned_html=listicle),
+            content=listicle,
+            media_context={
+                "visual_identity_policy": 4,
+                "inline": {"required": 1, "accepted": []},
+                "featured": {"status": "missing"},
+                "layout_policy": policy,
+            },
+        )
+        statuses = self.statuses(result)
+        self.assertEqual(statuses["media_layout_policy"], "fail")
+        self.assertIn(">= 3 imagens", next(
+            row["detail"] for row in result["items"] if row["name"] == "imagens_no_corpo"
+        ))
 
     def test_body_images_fail_below_word_count_rule(self):
         # Short content requires 2 images; only 1 present.
@@ -910,8 +1059,19 @@ class ChecklistTests(unittest.TestCase):
                             "verified": True,
                             "strategy_complete": True,
                             "expected_engines": ["bing"],
-                            "reported_engines": ["bing"],
+                            "configured_engines": ["duckduckgo", "bing", "google"],
+                            "optional_engines": ["duckduckgo", "google"],
+                            "reported_engines": ["duckduckgo", "bing", "google"],
                             "engine_results": {"redfall query": {"bing": "no_results_legitimate"}},
+                            "provider_results": {"redfall query": {
+                                "duckduckgo": "provider_error",
+                                "bing": "no_results_legitimate",
+                                "google": "js_required",
+                            }},
+                            "optional_engine_failures": {"redfall query": {
+                                "duckduckgo": "provider_error",
+                                "google": "js_required",
+                            }},
                             "queries": ["redfall query"],
                             "technical_failures": [],
                             "planned_queries": 1,

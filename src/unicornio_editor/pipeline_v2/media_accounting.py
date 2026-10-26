@@ -90,6 +90,10 @@ def account_visual_media(
     if str(featured_row.get("status") or "").casefold() not in {"valid", "featuredstatus.valid"}:
         featured_row = {}
     featured_status = "absent" if not featured_row else _identity_status(featured_row)
+    try:
+        featured_media_id = int(featured_row.get("media_id") or 0) if featured_row else 0
+    except (TypeError, ValueError):
+        featured_media_id = 0
 
     inline_value: Any = media_or_assets if isinstance(media_or_assets, (list, tuple)) else getattr(media_or_assets, "inline", None)
     if inline_value is None:
@@ -124,6 +128,11 @@ def account_visual_media(
             media_id = int(asset.get("media_id") or 0)
         except (TypeError, ValueError):
             media_id = 0
+        if featured_media_id and media_id == featured_media_id:
+            duplicate_count += 1
+            if media_id:
+                duplicate_ids.append(media_id)
+            continue
         status = _identity_status(asset)
         if status == "duplicate":
             duplicate_count += 1

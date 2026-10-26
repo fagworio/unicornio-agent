@@ -4,33 +4,42 @@
 > montar o `media_plan`. A regra editorial é: **nenhuma imagem errada é melhor
 > que uma imagem** — falhe fechado na dúvida.
 
-## Princípio (2026-08)
+## Princípio
 
-Qualquer imagem da web pode ser usada **com CRÉDITO VISÍVEL**. O crédito é a
-evidência. Licenças livres (CC0, CC BY, domínio público, permissão) são
-preferidas; para as demais, usar o marcador **"Uso com crédito"**.
+Crédito visível é obrigatório, mas **não concede permissão**. O pipeline aceita
+somente CC0, domínio público, CC BY ou CC BY-SA sem variantes NC/ND, com a URL
+oficial correspondente. Texto livre como “Uso com crédito” ou “permissão
+concedida” não é uma licença aceita. Além de validar os campos, o upload exige
+que a página original contenha Schema.org `ImageObject` com `contentUrl` igual
+ao URL direto da imagem e `license` apontando para os mesmos termos oficiais
+declarados. Uma licença genérica da página, uma declaração do agente ou a
+licença de outra imagem não comprovam os direitos. Fontes sem essa evidência
+estruturada são rejeitadas para upload; não contorne a rejeição nem preencha
+licença por inferência. A verificação automatizada é evidência técnica da
+declaração da origem, não parecer jurídico independente.
 
-O Google Images é **somente índice de descoberta** — a fonte é a página
-**ORIGINAL** da imagem (o preview do Google não é fonte).
+Provedores de busca são **somente índices de descoberta** — a fonte é a página
+**ORIGINAL** da imagem (preview, thumbnail ou resultado do buscador não são
+fonte de proveniência nem de direitos).
 
-## Ordem de busca (regra 2026-08-21)
+## Ordem de busca
 
-1. **KEY ART CACHE FIRST**: `work/keyart_cache.json` (obra -> imagens
-   verificadas) e `unicornio-editor media-search TERMO --limit N` (reuso da
-   Media Library). Busque na web só se nenhum dos dois servir. Imagem nova
-   verificada -> REGISTRE no cache.
-2. **Busca web com rotação Bing/Yandex** (determinístico):
-   `unicornio-editor media-search-web TERMO --size xga --ratio w --limit N`.
-   Rotaciona ~50/50 Bing/Yandex por query (Google só como último fallback),
-   filtro 1024x768, e devolve candidatos com URL direta + página de origem + a
-   `query` usada — sem você montar URL de busca nem parsear resultados
-   (economia de tokens). O buscador é apenas ÍNDICE: a fonte é a página
-   ORIGINAL. Use `license: "Uso com
-   crédito"` com `license_url` = a página original.
-3. **Query como evidência**: registre `search_query` no media_plan (a busca
-   que retornou a imagem). O gate de relevância aceita quando a query contém
-   a obra — espelha o fluxo manual do editor. Declare a query real; nunca
-   invente uma para decorar imagem errada (URL de origem ainda exigida).
+1. **Reuso elegível primeiro**: consulte `media-search` e use apenas entradas
+   do mesmo subject com proveniência e metadados de direitos completos e
+   compatíveis. Registros legados sem licença explícita permanecem úteis para
+   deduplicação, mas não podem ser reutilizados. Busque na web só para cobrir o
+   déficit restante.
+2. **Busca web configurada**: `media-search-web TERMO --size xga --ratio w
+   --limit N` executa a ordem de `EDITOR_MEDIA_SEARCH_PROVIDERS` (por padrão:
+   DuckDuckGo, Bing, Yandex e Google HTML). DuckDuckGo é um backend não oficial;
+   pode falhar e não é presumido independente do Bing. Bing/Yandex formam o
+   plano obrigatório padrão para `EXHAUSTED_VERIFIED`; DDG e Google HTML são
+   oportunísticos. Nenhum provider dispensa a validação da página ORIGINAL.
+   Não contorne CAPTCHA, consentimento ou bloqueios.
+3. **Query como contexto**: registre `search_query` no media_plan (a busca
+   que retornou a imagem). O gate de relevância usa esse contexto junto às
+   evidências da imagem e da página; declare a query real, sem inventá-la para
+   justificar uma imagem sem relação.
 4. **Wikimedia Commons é FALLBACK** (pouca key art oficial e rate-limit 429):
    não trave re-tentando Wikimedia; troque para fontes web imediatamente.
 
@@ -72,20 +81,26 @@ O Google Images é **somente índice de descoberta** — a fonte é a página
   "source_page_url": "https://pagina-original/",
   "direct_image_url": "https://cdn/pagina/header.jpg",
   "author": "Autor/Estudio",
-  "license": "Uso com crédito",
-  "license_url": "https://pagina-original/",
+  "license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
   "captured_at": "2026-08-21",
-  "credit_text": "Crédito da imagem: Autor. Obra. Uso com crédito.",
+  "credit_text": "Crédito da imagem: Autor. Obra. Licença CC BY 4.0.",
   "alt_text": "Obra key art",
   "is_featured": false
 }
 ```
 
+O exemplo só pode ser aplicado se a página de origem também vincular essa
+licença ao `ImageObject` cujo `contentUrl` seja exatamente a imagem indicada.
+O agente não deve inventar campos de licença para tentar passar a validação.
+
 ## Reuso da Media Library
 
-`media-search` retorna candidatos com `tem_credito` (attachment carrega o
-bloco "Crédito da imagem" no title/caption). **Sem crédito visível no
-attachment, a imagem NÃO pode ser reutilizada** (falta evidência de licença).
+`media-search` retorna candidatos do acervo. **Sem subject exato, página de
+origem, licença compatível, URL oficial da licença, autoria, data de captura,
+crédito e alt text explícitos, a imagem NÃO pode ser reutilizada**. Registros
+legados incompletos continuam disponíveis para deduplicação, mas não para uso
+editorial.
 O reuso nunca edita o attachment original — baixa e re-envia como NOVO
 attachment.
 

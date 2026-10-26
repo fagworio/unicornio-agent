@@ -1,4 +1,4 @@
-"""Discovery of image candidates via multiple search engines (Bing, Google, Yandex).
+"""Discovery of image candidates via multiple search engines.
 
 Deterministic and read-only: builds the search URL for each engine and returns
 image candidates so the LLM does not have to reason about search URLs or parse
@@ -13,13 +13,18 @@ correto para páginas de resultado; o que mudou é o que o servidor manda. Por i
 a falha é CLASSIFICADA (``failure_kind``) antes de alimentar o circuit breaker:
 ``parser_schema_drift``/``js_required``/``captcha`` NÃO são indisponibilidade
 transitória e não podem renovar cooldown (era o que deixava o Google fora do ar
-para sempre, contado como 18 "falhas" seguidas). Google HTML é opt-in e uma
-resposta ``js_required`` permanece uma falha técnica, nunca exaustão verificada.
+para sempre, contado como 18 "falhas" seguidas). Google HTML pode ser usado como
+fallback opcional, mas uma resposta ``js_required`` nunca prova ausência de
+resultados. Ela bloqueia ``EXHAUSTED_VERIFIED`` se Google estiver configurado
+como obrigatório; no plano padrão, Bing/Yandex são os providers que precisam
+fornecer prova completa.
 
-O modo ``auto`` usa Bing e Yandex por padrão. A estratégia completa pode ser
-configurada em ``EDITOR_MEDIA_SEARCH_PROVIDERS``; Google Browser também exige
-``EDITOR_GOOGLE_BROWSER_ENABLED=true``. Todos os providers configurados devem
-ser realmente executados e verificados antes de ``EXHAUSTED_VERIFIED``.
+O modo ``auto`` tenta DuckDuckGo, Bing, Yandex e Google HTML, nessa ordem. A
+estratégia e seu subconjunto obrigatório são configurados por
+``EDITOR_MEDIA_SEARCH_PROVIDERS`` e
+``EDITOR_MEDIA_SEARCH_REQUIRED_PROVIDERS``. Por padrão, Bing e Yandex são
+obrigatórios; falhas nos fallbacks opcionais não contaminam sua prova de
+exaustão. Google Browser/Playwright não faz parte da estratégia suportada.
 
 IMPORTANT policy: the search engine is only a DISCOVERY INDEX, never the source.
 The direct_image_url returned is the real image URL found in the result
@@ -63,67 +68,119 @@ _UA = (
 _MAX_BYTES = 3 * 1024 * 1024
 _MAX_BATCH_QUERIES = 20
 _BATCH_WORKERS = 4
-_SEARCH_ENGINES = ("google_browser", "bing", "yandex", "google")
-_DEFAULT_AUTO_ENGINES = ("bing", "yandex")
+_SEARCH_ENGINES = ("duckduckgo", "bing", "yandex", "google")
+_RETIRED_SEARCH_ENGINES = ("google_browser",)
+_DEFAULT_AUTO_ENGINES = ("duckduckgo", "bing", "yandex", "google")
+_DEFAULT_REQUIRED_ENGINES = ("bing", "yandex")
 _HTTP_REQUESTS = 0
 _HTTP_REQUESTS_LOCK = Lock()
 
 
 def search_engine_strategy(engine: str = "auto") -> dict[str, Any]:
-    """Return the executable and required providers for one search strategy.
+    """Return one ordered provider plan and the set required for exhaustion.
 
-    Production does not install Playwright/Chromium and the Google HTML parser
-    often receives a JavaScript interstitial.  Auto mode therefore defaults to
-    the providers currently supported without a browser.  Additional engines
-    can be explicitly configured with ``EDITOR_MEDIA_SEARCH_PROVIDERS``; a
-    Google Browser entry still requires ``EDITOR_GOOGLE_BROWSER_ENABLED=true``.
-    A configured provider that reports ``js_required`` remains a failed
-    provider and cannot prove exhaustion.
+    ``expected_engines`` remains the compatibility name consumed by the V2
+    coverage proof; it now means *required* providers, while
+    ``execution_engines`` includes optional fallbacks in attempt order. When a
+    custom provider list omits both default core providers, all configured
+    providers become required unless the operator explicitly sets a required
+    list. This preserves the old single/custom-provider behavior.
     """
     requested_engine = str(engine or "auto").strip().casefold()
     if requested_engine != "auto":
+        if requested_engine in _RETIRED_SEARCH_ENGINES:
+            return {
+                "expected_engines": [],
+                "required_engines": [], "optional_engines": [],
+                "configured_engines": [], "execution_engines": [],
+                "disabled_engines": [requested_engine],
+                "invalid_engines": [requested_engine],
+                "valid": False,
+            }
         if requested_engine not in _SEARCH_ENGINES:
             return {
                 "expected_engines": [], "disabled_engines": [],
+                "required_engines": [], "optional_engines": [],
+                "configured_engines": [], "execution_engines": [],
                 "invalid_engines": [requested_engine], "valid": False,
-            }
-        if (
-            requested_engine == "google_browser"
-            and os.environ.get("EDITOR_GOOGLE_BROWSER_ENABLED", "false")
-            .strip().casefold() in {"0", "false", "no", "off", ""}
-        ):
-            return {
-                "expected_engines": [], "disabled_engines": [requested_engine],
-                "invalid_engines": [], "valid": False,
             }
         return {
             "expected_engines": [requested_engine], "disabled_engines": [],
+            "required_engines": [requested_engine],
+            "optional_engines": [],
+            "configured_engines": [requested_engine],
+            "execution_engines": [requested_engine],
             "invalid_engines": [], "valid": True,
         }
 
     raw = os.environ.get("EDITOR_MEDIA_SEARCH_PROVIDERS", ",".join(_DEFAULT_AUTO_ENGINES))
     requested = [part.strip().casefold() for part in raw.split(",") if part.strip()]
-    invalid = sorted(set(requested) - set(_SEARCH_ENGINES))
-    # An unknown provider makes the configured strategy unverifiable. Do not
-    # silently drop it and issue a smaller, falsely complete coverage proof.
+    invalid = sorted(set(requested) - set(_SEARCH_ENGINES) - set(_RETIRED_SEARCH_ENGINES))
+    retired_requested = sorted(set(requested).intersection(_RETIRED_SEARCH_ENGINES))
+    # Unknown providers make the strategy unverifiable. The retired browser
+    # alias is a known unsupported legacy setting: it is reported as disabled,
+    # while full verification remains required for every supported provider.
     if not requested or invalid:
         return {
             "expected_engines": [],
-            "disabled_engines": list(_SEARCH_ENGINES),
-            "invalid_engines": invalid or ["empty_strategy"],
+            "required_engines": [], "optional_engines": [],
+            "configured_engines": [], "execution_engines": [],
+            "disabled_engines": [*list(_SEARCH_ENGINES), *retired_requested],
+            "invalid_engines": sorted(set(invalid)) or ["empty_strategy"],
             "valid": False,
         }
     requested = list(dict.fromkeys(requested))
-    browser_enabled = os.environ.get(
-        "EDITOR_GOOGLE_BROWSER_ENABLED", "false"
-    ).strip().casefold() not in {"0", "false", "no", "off", ""}
-    active = [
-        name for name in requested
-        if name != "google_browser" or browser_enabled
-    ]
+    active = [name for name in requested if name in _SEARCH_ENGINES]
+    if not active:
+        return {
+            "expected_engines": [],
+            "required_engines": [], "optional_engines": [],
+            "configured_engines": [], "execution_engines": [],
+            "disabled_engines": [*list(_SEARCH_ENGINES), *retired_requested],
+            "invalid_engines": ["no_supported_engines"],
+            "valid": False,
+        }
+    raw_required = os.environ.get("EDITOR_MEDIA_SEARCH_REQUIRED_PROVIDERS")
+    if raw_required is None:
+        required = [name for name in active if name in _DEFAULT_REQUIRED_ENGINES]
+        if not required:
+            required = list(active)
+        invalid_required: list[str] = []
+    else:
+        requested_required = [
+            part.strip().casefold() for part in raw_required.split(",") if part.strip()
+        ]
+        requested_required = list(dict.fromkeys(requested_required))
+        invalid_required = sorted(
+            set(requested_required) - set(_SEARCH_ENGINES)
+            | (set(requested_required) - set(active))
+        )
+        required = [name for name in active if name in requested_required]
+        if not requested_required:
+            invalid_required = ["empty_required_strategy"]
+    if invalid_required:
+        return {
+            "expected_engines": [],
+            "required_engines": [], "optional_engines": [],
+            "configured_engines": active, "execution_engines": [],
+            "disabled_engines": [
+                *[name for name in _SEARCH_ENGINES if name not in active],
+                *retired_requested,
+            ],
+            "invalid_engines": invalid_required,
+            "valid": False,
+        }
+    optional = [name for name in active if name not in required]
     return {
-        "expected_engines": active,
-        "disabled_engines": [name for name in _SEARCH_ENGINES if name not in active],
+        "expected_engines": required,
+        "required_engines": required,
+        "optional_engines": optional,
+        "configured_engines": active,
+        "execution_engines": active,
+        "disabled_engines": [
+            *[name for name in _SEARCH_ENGINES if name not in active],
+            *[name for name in retired_requested if name not in active],
+        ],
         "invalid_engines": [],
         "valid": bool(active),
     }
@@ -180,13 +237,9 @@ FAILURE_KINDS = (
     "js_required",            # página exige JavaScript: sem resultados no HTML
     "parser_schema_drift",    # página de resultados com schema novo (nossas chaves sumiram)
     "no_results_legitimate",  # página de resultados, realmente sem resultado para a query
-    # Diagnósticos específicos do navegador Google, mantidos separados para
-    # não colapsar indisponibilidade, captcha e pareamento em um só motivo.
-    "google_browser_unavailable",
-    "google_captcha",
-    "google_unusual_traffic",
-    "google_consent_required",
-    "google_pair_unresolved",
+    "provider_unavailable",   # dependência opcional não instalada
+    "provider_error",         # erro não classificado por provider externo
+    "bot_challenge_suspected", # HTTP 202 no bootstrap VQD do DDG; causa não confirmada
 )
 FAILURE_KINDS_TRANSITORIOS = frozenset({"network_error", "rate_limited", "http_error"})
 FAILURE_KINDS_VERIFICADOS = frozenset({"ok", "no_results_legitimate"})
@@ -207,10 +260,10 @@ _ULTIMO_RELATORIO: dict[str, dict[str, Any]] = {}
 # O nome da engine no relatório não precisa ser a chave operacional do
 # circuit breaker. Bing Images e Bing Web Search são serviços independentes.
 _PROVIDER_KEYS = {
+    "duckduckgo": "duckduckgo_images",
     "bing": "bing_images",
     "yandex": "yandex_images",
     "google": "google_images",
-    "google_browser": "google_browser",
 }
 
 
@@ -286,6 +339,7 @@ def summarize_engine_reports(
     reports: dict[str, dict[str, Any]] | None,
     *,
     expected_engines: list[str] | tuple[str, ...] | None = None,
+    configured_engines: list[str] | tuple[str, ...] | None = None,
     completion_reason: str = "",
 ) -> dict[str, Any]:
     """Resume a saúde dos providers de uma consulta sem perder os detalhes.
@@ -297,6 +351,11 @@ def summarize_engine_reports(
     """
     normalized = reports if isinstance(reports, dict) else {}
     expected = [str(name) for name in (expected_engines or ()) if str(name)]
+    configured = [
+        str(name) for name in (configured_engines if configured_engines is not None else expected)
+        if str(name)
+    ]
+    optional = [name for name in configured if name not in expected]
     reported = [str(name) for name in normalized if str(name)]
     def _report_for(name: str) -> dict[str, Any]:
         value = normalized.get(name)
@@ -322,23 +381,39 @@ def summarize_engine_reports(
         if str(_report_for(name).get("failure_kind") or "unknown")
         not in FAILURE_KINDS_VERIFICADOS
     ]
+    required_failures = [name for name in non_verified if name in expected]
+    optional_failures = [name for name in non_verified if name in optional]
     reason = str(completion_reason or "INCOMPLETE_PROVIDER")
     missing = [name for name in expected if name not in normalized]
+    unresolved = [
+        name for name in expected
+        if name not in normalized
+        or str(_report_for(name).get("failure_kind") or "unknown")
+        not in FAILURE_KINDS_VERIFICADOS
+    ]
+    not_attempted = [name for name in configured if name not in normalized]
     return {
         "version": 1,
         "completion_reason": reason,
         "expected_engines": expected,
+        "required_engines": expected,
+        "optional_engines": optional,
+        "configured_engines": configured,
         "reported_engines": reported,
         "completed_engines": completed,
         "missing_engines": missing,
-        "not_attempted_engines": missing if reason == "TARGET_REACHED" else [],
-        "unresolved_engines": missing if reason == "INCOMPLETE_PROVIDER" else [],
+        "not_attempted_engines": not_attempted if reason == "TARGET_REACHED" else [],
+        "unresolved_engines": unresolved if reason == "INCOMPLETE_PROVIDER" else [],
         "provider_failures": len(non_verified),
+        "required_provider_failures": len(required_failures),
+        "optional_provider_failures": len(optional_failures),
         "transient_failures": len(transient),
         "capacity_reached": reason == "TARGET_REACHED",
         "provider_strategy_complete": reason == "EXHAUSTED_VERIFIED",
         "failure_kinds": dict(sorted(failure_kinds.items())),
         "failure_engines": non_verified,
+        "required_failure_engines": required_failures,
+        "optional_failure_engines": optional_failures,
         "candidates_discovered": sum(
             int((report or {}).get("candidates") or 0)
             for report in normalized.values()
@@ -346,6 +421,21 @@ def summarize_engine_reports(
         ),
         "objects_parsed": sum(
             int((report or {}).get("objects_parsed") or 0)
+            for report in normalized.values()
+            if isinstance(report, dict)
+        ),
+        "unique_image_urls": sum(
+            int((report or {}).get("unique_image_urls") or 0)
+            for report in normalized.values()
+            if isinstance(report, dict)
+        ),
+        "duplicate_image_urls": sum(
+            int((report or {}).get("duplicate_image_urls") or 0)
+            for report in normalized.values()
+            if isinstance(report, dict)
+        ),
+        "candidates_with_page_reference": sum(
+            int((report or {}).get("candidates_with_page_reference") or 0)
             for report in normalized.values()
             if isinstance(report, dict)
         ),
@@ -920,6 +1010,7 @@ def _engine_state_path() -> Path:
     return Path(tempfile.gettempdir()) / f"unicornio_media_engines_{project_key}.json"
 _COOLDOWN_SEGUNDOS = 12 * 60   # após 3 falhas seguidas: 10-15 min fora
 _BACKOFF_SEGUNDOS = (4.0, 20.0)  # 1ª falha: ~3-8 s · 2ª: 15-30 s (com jitter)
+_DDG_BOT_CHALLENGE_COOLDOWN_SEGUNDOS = 60 * 60
 
 
 def _em_teste() -> bool:
@@ -957,7 +1048,7 @@ def _ler_estado_engines() -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
+def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> bool:
     try:
         caminho = _engine_state_path()
         caminho.parent.mkdir(parents=True, exist_ok=True)
@@ -967,8 +1058,9 @@ def _gravar_estado_engines(dados: dict[str, dict[str, Any]]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporario, caminho)
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 @contextmanager
@@ -980,12 +1072,12 @@ def _engine_state_update():
     except OSError:
         # Provider health is operational telemetry; inability to persist it
         # must not abort a media search.
-        yield
+        yield False
         return
     with lock_context as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            yield True
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -1003,8 +1095,7 @@ def engine_falhou(nome: str) -> float:
     """Registra a falha e devolve quantos segundos a engine deve esperar.
 
     1ª falha -> backoff curto com jitter; a partir da 3ª, a engine entra em
-    cooldown e o pipeline passa a usar as outras fontes (Bing cai, Yandex e
-    Google continuam).
+    cooldown e o pipeline passa a usar os demais providers configurados.
     """
     if not _breaker_ativo():
         return 0.0
@@ -1050,6 +1141,56 @@ def engine_degradada(nome: str, kind: str) -> None:
         _gravar_estado_engines(dados)
 
 
+def engine_cooldown(nome: str, kind: str, seconds: float) -> float:
+    """Pause one provider for a bounded interval, preserving the reason."""
+    if not _breaker_ativo():
+        return 0.0
+    duration = max(0.0, float(seconds))
+    if duration <= 0:
+        engine_degradada(nome, kind)
+        return 0.0
+    now = time.time()
+    with _engine_state_update():
+        dados = _ler_estado_engines()
+        dados[nome] = {
+            "failures": 0,
+            "blocked_until": now + duration,
+            "last_failure": now,
+            "failure_kind": kind,
+            "non_transient": True,
+        }
+        _gravar_estado_engines(dados)
+    return duration
+
+
+def engine_reservar_recuperacao_ddg(nome: str, lease_seconds: float) -> str:
+    """Atomically allow only one probe after a DDG challenge cooldown expires."""
+    if not _breaker_ativo():
+        return "not_recovery"
+    try:
+        duration = max(30.0, min(900.0, float(lease_seconds)))
+    except (TypeError, ValueError, OverflowError):
+        return "state_unavailable"
+    now = time.time()
+    with _engine_state_update() as locked:
+        if not locked:
+            return "state_unavailable"
+        dados = _ler_estado_engines()
+        atual = dados.get(nome) or {}
+        if atual.get("failure_kind") != "bot_challenge_suspected":
+            return "not_recovery"
+        if float(atual.get("blocked_until") or 0) > now:
+            return "cooldown"
+        if float(atual.get("attempt_until") or 0) > now:
+            return "attempt_in_progress"
+        atual["attempt_until"] = now + duration
+        atual["last_recovery_attempt"] = now
+        dados[nome] = atual
+        if not _gravar_estado_engines(dados):
+            return "state_unavailable"
+    return "reserved"
+
+
 def engine_ok(nome: str) -> None:
     """Sucesso zera o contador (circuit breaker fechado)."""
     if not _breaker_ativo():
@@ -1075,8 +1216,6 @@ def search_web_images(
     timeout: float = 30.0,
     engine: str = "auto",
     accept: Any = None,
-    remote_url_policy: str = "audit",
-    audit: Any = None,
     reports: dict[str, dict[str, Any]] | None = None,
     deadline: float | None = None,
 ) -> list[dict[str, Any]]:
@@ -1087,8 +1226,7 @@ def search_web_images(
     a busca parava ali e o pipeline seguia com menos material do que a web
     oferecia — sem saber.
 
-    Agora consulta as engines em ordem determinística (Google Browser, Bing,
-    Yandex e Google HTML), acumula candidatos com
+    Agora consulta as engines na ordem do plano configurado, acumula candidatos com
     dedupe por URL e PARA quando ja existem ``limit`` candidatos UTILIZAVEIS
     (com pagina de origem). Engine concreta usa apenas aquela.
 
@@ -1097,14 +1235,16 @@ def search_web_images(
     query = (query or "").strip()
     if not query:
         return []
-    order = search_engine_strategy(engine)["expected_engines"]
-    from .google_browser import search_google_browser_images
+    order = search_engine_strategy(engine)["execution_engines"]
+    if not order:
+        return []
+    from .duckduckgo_images import search_duckduckgo_images
 
     _fns = {
+        "duckduckgo": search_duckduckgo_images,
         "bing": search_bing_images,
         "yandex": search_yandex_images,
         "google": search_google_images,
-        "google_browser": search_google_browser_images,
     }
     alvo = max(1, int(limit or 1))
     acumulado: list[dict[str, Any]] = []
@@ -1126,10 +1266,18 @@ def search_web_images(
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
         if not engine_disponivel(breaker_name):
+            previous_state = engines_status().get(breaker_name) or {}
             relatorio = {
                 "http_status": 0, "html_bytes": 0, "objects_parsed": 0, "candidates": 0,
                 "failure_kind": "cooldown_skip", "parser_version": PARSER_VERSION,
             }
+            if previous_state.get("failure_kind") == "bot_challenge_suspected":
+                relatorio["cooldown_reason"] = "bot_challenge_suspected"
+                try:
+                    remaining = float(previous_state.get("blocked_until") or 0) - time.time()
+                except (TypeError, ValueError, OverflowError):
+                    remaining = 0
+                relatorio["cooldown_remaining_seconds"] = max(0, min(86400, int(remaining)))
             if reports is not None:
                 reports[name] = dict(relatorio)
             continue
@@ -1144,45 +1292,107 @@ def search_web_images(
                 "timeout": effective_timeout,
                 "report": relatorio,
             }
-            if name == "google_browser":
-                kwargs.update(remote_url_policy=remote_url_policy, audit=audit)
+            if name == "duckduckgo":
+                recovery_status = engine_reservar_recuperacao_ddg(
+                    breaker_name, effective_timeout * 2 + 30
+                )
+                if recovery_status not in {"not_recovery", "reserved"}:
+                    previous_state = engines_status().get(breaker_name) or {}
+                    relatorio.update({
+                        "http_status": 0,
+                        "html_bytes": 0,
+                        "objects_parsed": 0,
+                        "candidates": 0,
+                        "failure_kind": (
+                            "provider_unavailable"
+                            if recovery_status == "state_unavailable"
+                            else "cooldown_skip"
+                        ),
+                        "skip_reason": recovery_status,
+                        "parser_version": PARSER_VERSION,
+                    })
+                    if recovery_status in {"cooldown", "attempt_in_progress"}:
+                        relatorio["cooldown_reason"] = "bot_challenge_suspected"
+                    if recovery_status == "cooldown":
+                        try:
+                            remaining = float(previous_state.get("blocked_until") or 0) - time.time()
+                        except (TypeError, ValueError, OverflowError):
+                            remaining = 0
+                        relatorio["cooldown_remaining_seconds"] = max(
+                            0, min(86400, int(remaining))
+                        )
+                    elif recovery_status == "attempt_in_progress":
+                        try:
+                            remaining = float(previous_state.get("attempt_until") or 0) - time.time()
+                        except (TypeError, ValueError, OverflowError):
+                            remaining = 0
+                        relatorio["recovery_probe_remaining_seconds"] = max(
+                            0, min(900, int(remaining))
+                        )
+                    if reports is not None:
+                        reports[name] = dict(relatorio)
+                    continue
             lote = _fns[name](query, **kwargs)
         except Exception:  # noqa: BLE001 - rotate on any failure
             lote = []
             relatorio.setdefault("failure_kind", "network_error")
-        if reports is not None:
-            reports[name] = dict(relatorio)
         if not lote:
+            relatorio.setdefault("unique_image_urls", 0)
+            relatorio.setdefault("duplicate_image_urls", 0)
             kind = str(relatorio.get("failure_kind") or "network_error")
-            if kind not in FAILURE_KINDS_TRANSITORIOS:
+            if name == "duckduckgo" and kind == "bot_challenge_suspected":
+                duration = engine_cooldown(
+                    breaker_name, kind, _DDG_BOT_CHALLENGE_COOLDOWN_SEGUNDOS
+                )
+                relatorio["cooldown_seconds"] = int(duration)
+                relatorio["cooldown_reason"] = kind
+            elif kind not in FAILURE_KINDS_TRANSITORIOS:
                 # Motivo PERMANENTE (schema mudou, página exige JS, captcha):
                 # cooldown de 12 min aqui só esconderia a engine para sempre.
                 # Registra o motivo e segue — ela continua na arquitetura.
                 engine_degradada(breaker_name, kind)
-                continue
-            # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
-            # cooldown da engine (Bing degradado não deve segurar o ciclo).
-            espera = engine_falhou(breaker_name)
-            if espera:
-                try:
-                    pausa = min(float(espera), 8.0)
-                    if deadline is not None:
-                        pausa = min(pausa, max(0.0, float(deadline) - time.monotonic()))
-                    if pausa > 0:
-                        time.sleep(pausa)
-                except Exception:  # noqa: BLE001 - sleep interrompido não quebra
-                    pass
+            else:
+                # Vazio/erro transitório conta como falha: backoff curto e, na 3ª,
+                # cooldown da engine (Bing degradado não deve segurar o ciclo).
+                espera = engine_falhou(breaker_name)
+                if espera:
+                    try:
+                        pausa = min(float(espera), 8.0)
+                        if deadline is not None:
+                            pausa = min(pausa, max(0.0, float(deadline) - time.monotonic()))
+                        if pausa > 0:
+                            time.sleep(pausa)
+                    except Exception:  # noqa: BLE001 - sleep interrompido não quebra
+                        pass
+            if reports is not None:
+                reports[name] = dict(relatorio)
             continue
         engine_ok(breaker_name)
         novos: list[dict[str, Any]] = []
+        duplicates = 0
         for cand in lote or []:
             url = str(cand.get("direct_image_url") or "")
-            if not url or url in vistos:
+            if not url:
+                continue
+            if url in vistos:
+                duplicates += 1
                 continue
             vistos.add(url)
             cand.setdefault("engine", name)
             acumulado.append(cand)
             novos.append(cand)
+        relatorio["unique_image_urls"] = len(novos)
+        relatorio["duplicate_image_urls"] = duplicates
+        relatorio.setdefault(
+            "usable_candidates",
+            sum(bool(candidate.get("usable")) for candidate in lote if isinstance(candidate, dict)),
+        )
+        relatorio.setdefault(
+            "candidates_with_page_reference",
+            sum(bool(candidate.get("source_page_url")) for candidate in lote if isinstance(candidate, dict)),
+        )
+        if reports is not None:
+            reports[name] = dict(relatorio)
         # Capacidade que encerra a busca: se o chamador fornece `accept`, o
         # critério é o número de candidatos ACEITOS (origem verificada +
         # subject + frame distinto) — nunca "usable" estrutural. Sem isso o
@@ -1212,8 +1422,6 @@ def search_web_images_batch(
     timeout: float = 30.0,
     engine: str = "auto",
     accept: Any = None,
-    remote_url_policy: str = "audit",
-    audit: Any = None,
     budget_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Discover candidates for several distinct works concurrently.
@@ -1242,6 +1450,7 @@ def search_web_images_batch(
 
     strategy = search_engine_strategy(engine)
     expected_engines = list(strategy["expected_engines"])
+    configured_engines = list(strategy["execution_engines"])
 
     def _search(
         query: str,
@@ -1263,8 +1472,6 @@ def search_web_images_batch(
             query, size=size, ratio=ratio, limit=limit, timeout=timeout,
             engine=engine,
             accept=_accept_do_item if accept is not None else None,
-            remote_url_policy=remote_url_policy,
-            audit=audit,
             deadline=deadline,
             reports=relatorios,
         )
@@ -1275,13 +1482,12 @@ def search_web_images_batch(
         ) >= max(1, int(limit or 1)):
             stop_reason = "TARGET_REACHED"
         if not stop_reason:
-            if any(
-                str(report.get("failure_kind") or "") == "budget_exhausted"
+            budget_reported = any(
+                isinstance(report, dict)
+                and str(report.get("failure_kind") or "") == "budget_exhausted"
                 for report in relatorios.values()
-                if isinstance(report, dict)
-            ):
-                stop_reason = "STOPPED_BY_BUDGET"
-            elif (
+            )
+            required_plan_verified = bool(
                 strategy["valid"]
                 and expected_engines
                 and all(name in relatorios for name in expected_engines)
@@ -1290,7 +1496,10 @@ def search_web_images_batch(
                     not in FAILURE_KINDS_VERIFICADOS
                     for name in expected_engines
                 )
-            ):
+            )
+            if budget_reported and not required_plan_verified:
+                stop_reason = "STOPPED_BY_BUDGET"
+            elif required_plan_verified:
                 stop_reason = "EXHAUSTED_VERIFIED"
             else:
                 stop_reason = "INCOMPLETE_PROVIDER"
@@ -1322,6 +1531,7 @@ def search_web_images_batch(
                 **summarize_engine_reports(
                     relatorios_por_query.get(query, {}),
                     expected_engines=expected_engines,
+                    configured_engines=configured_engines,
                     completion_reason=motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
                 ),
                 "disabled_engines": list(strategy["disabled_engines"]),
@@ -1330,11 +1540,7 @@ def search_web_images_batch(
             },
             "completion_reason": motivos_por_query.get(query, "INCOMPLETE_PROVIDER"),
             "provider_config_valid": bool(strategy["valid"]),
-            "budget_exhausted": any(
-                str(report.get("failure_kind") or "") == "budget_exhausted"
-                for report in (relatorios_por_query.get(query, {}) or {}).values()
-                if isinstance(report, dict)
-            ),
+            "budget_exhausted": motivos_por_query.get(query) == "STOPPED_BY_BUDGET",
         }
         for query in unique
     ]

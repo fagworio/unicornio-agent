@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -13,7 +15,12 @@ from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
 from .model import LifecycleState
 from .production import ProductionCandidateReader
-from .runtime import _media_effect_evidence, recover_interrupted_journal, run_v2
+from .runtime import (
+    _media_effect_evidence,
+    _verify_acquisition_checkpoint_for_resume,
+    recover_interrupted_journal,
+    run_v2,
+)
 
 
 def _request_dict(request: CycleRoundRequest) -> dict[str, Any]:
@@ -127,7 +134,13 @@ def _selection_mismatch_evidence(
     }
 
 
-def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | None:
+def _round_authorized_at(
+    root: Path,
+    cycle_id: str,
+    round_number: int,
+    *,
+    authorization_id: str | None = None,
+) -> str | None:
     path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
     if not path.is_file():
         return None
@@ -144,9 +157,73 @@ def _round_authorized_at(root: Path, cycle_id: str, round_number: int) -> str | 
             event.get("event") == "round_authorized"
             and str(event.get("cycle_id") or "") == str(cycle_id)
             and int(event.get("round_number", -1)) == int(round_number)
+            and (
+                authorization_id is None
+                or str(event.get("authorization_id") or "") == str(authorization_id)
+            )
         ):
             return str(event.get("at") or "") or None
     return None
+
+
+def _parse_registry_timestamp(value: Any) -> datetime | None:
+    """Parse Registry timestamps into UTC-aware datetimes.
+
+    Historical Registry rows are naive UTC strings; new rows may use ISO-8601
+    offsets or ``Z``. Invalid and missing values remain unknown, never zero.
+    """
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _timestamp_resolution_overlaps_authorization(
+    value: Any, authorized_at: datetime
+) -> bool:
+    """Return true when a coarse timestamp in the same second is ambiguous.
+
+    Legacy SQLite timestamps commonly have only whole-second precision. If
+    authorization happened within that same second, the stored value cannot
+    establish whether the event preceded or followed it.
+    """
+    parsed = _parse_registry_timestamp(value)
+    if parsed is None or parsed.replace(microsecond=0) != authorized_at.replace(microsecond=0):
+        return False
+    raw = str(value).strip()
+    fractional = re.search(r"\d{2}:\d{2}:\d{2}\.(\d+)", raw)
+    return fractional is None or len(fractional.group(1)) < 6
+
+
+def _registry_timestamp_audit(
+    rows: list[tuple[str, Any, Any]], *, authorized_at: str | None
+) -> dict[str, Any] | None:
+    authorized = _parse_registry_timestamp(authorized_at)
+    if authorized is None:
+        return None
+    missing_or_invalid = [
+        {"table": table, "post_id": int(post_id), "timestamp": timestamp}
+        for table, post_id, timestamp in rows
+        if _parse_registry_timestamp(timestamp) is None
+    ]
+    current_rows = [
+        {"table": table, "post_id": int(post_id), "timestamp": str(timestamp)}
+        for table, post_id, timestamp in rows
+        if (parsed := _parse_registry_timestamp(timestamp)) is not None
+        and parsed >= authorized
+    ]
+    return {
+        "authorized_at_utc": authorized.isoformat(),
+        "missing_or_invalid_timestamps": missing_or_invalid,
+        "current_round_rows": current_rows,
+        "proof_of_absence": not missing_or_invalid and not current_rows,
+    }
 
 
 def _registry_has_round_evidence(
@@ -154,47 +231,246 @@ def _registry_has_round_evidence(
     selected_ids: list[int],
     *,
     authorized_at: str | None,
+    expected_cycle_id: str | None = None,
+    expected_cycle_round: int | None = None,
+    expected_authorization_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find media-registry effects created after this round was authorized."""
+    """Classify Registry evidence without treating accepted media as applied.
+
+    Legacy rows deliberately remain temporally unknown when they have no
+    operation identity.  ``applied_at`` is authoritative only for an
+    ``applied`` usage; an accepted usage with ``applied_at=NULL`` is retained
+    as ``accepted_not_applied`` plus ``evidence_temporally_unavailable``.
+    """
     path = Path(root) / "work" / "media_registry.sqlite"
     if not path.is_file():
         return None
     placeholders = ",".join("?" for _ in selected_ids)
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
-            rows: list[tuple[str, Any, Any]] = []
-            for table, timestamp in (
-                ("media_runs", "created_at"),
-                ("media_decisions", "created_at"),
-                ("media_usage", "applied_at"),
-            ):
-                try:
-                    rows.extend(
-                        (table, row[0], row[1])
-                        for row in db.execute(
-                            f"SELECT post_id, {timestamp} FROM {table} WHERE post_id IN ({placeholders})",
-                            selected_ids,
-                        ).fetchall()
-                    )
-                except sqlite3.OperationalError:
+            db.row_factory = sqlite3.Row
+            tables = {
+                str(row[0])
+                for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            required_columns = {
+                "media_runs": {"run_id", "post_id", "created_at"},
+                "media_decisions": {"run_id", "post_id", "created_at"},
+                "media_usage": {
+                    "post_id", "status", "applied_at", "run_id", "cycle_id",
+                    "cycle_round", "authorization_id", "accepted_at",
+                },
+                "media_operations": {
+                    "post_id", "run_id", "cycle_id", "cycle_round",
+                    "authorization_id", "started_at",
+                },
+            }
+            if set(required_columns) - tables:
+                return None
+            for table, required in required_columns.items():
+                columns = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+                if required - columns:
                     return None
+            runs = [dict(row) for row in db.execute(
+                f"SELECT * FROM media_runs WHERE post_id IN ({placeholders})", selected_ids
+            ).fetchall()]
+            decisions = [dict(row) for row in db.execute(
+                f"SELECT * FROM media_decisions WHERE post_id IN ({placeholders})", selected_ids
+            ).fetchall()]
+            usages = [dict(row) for row in db.execute(
+                f"SELECT * FROM media_usage WHERE post_id IN ({placeholders})", selected_ids
+            ).fetchall()]
+            operations = [dict(row) for row in db.execute(
+                f"SELECT * FROM media_operations WHERE post_id IN ({placeholders})", selected_ids
+            ).fetchall()]
     except (OSError, sqlite3.Error):
         return None
-    if not rows:
-        return {"media_registry_checked": True, "media_registry_rows": 0}
-    if not authorized_at:
+    parsed_authorized = _parse_registry_timestamp(authorized_at)
+    if parsed_authorized is None:
+        if not (runs or decisions or usages or operations):
+            return {
+                "media_registry_checked": True,
+                "media_registry_rows": 0,
+                "media_registry_current_round_rows": 0,
+                "media_registry_timestamp_audit": {
+                    "authorized_at_utc": None,
+                    "missing_or_invalid_timestamps": [],
+                    "current_round_rows": [],
+                    "proof_of_absence": True,
+                },
+                "temporal_classification": {
+                    "accepted_not_applied": [],
+                    "applied_readback_required": [],
+                    "historical_operation": [],
+                    "current_round_operation": [],
+                    "evidence_temporally_unavailable": [],
+                },
+                "proof_of_absence": True,
+            }
         return None
-    current_rows = [
-        {"table": table, "post_id": int(post_id), "at": str(timestamp or "")}
-        for table, post_id, timestamp in rows
-        if timestamp and str(timestamp) >= str(authorized_at).replace("T", " ")[:19]
-    ]
-    if current_rows:
-        return None
+    classification: dict[str, list[int]] = {
+        "accepted_not_applied": [],
+        "applied_readback_required": [],
+        "historical_operation": [],
+        "current_round_operation": [],
+        "evidence_temporally_unavailable": [],
+    }
+    current_rows: list[dict[str, Any]] = []
+    missing_or_invalid: list[dict[str, Any]] = []
+    has_expected_identity = bool(
+        expected_cycle_id
+        and expected_cycle_round is not None
+        and expected_authorization_id
+    )
+    current_run_ids = {
+        str(row.get("run_id") or "")
+        for row in operations
+        if has_expected_identity
+        and str(row.get("run_id") or "").strip()
+        and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
+        and row.get("cycle_round") == expected_cycle_round
+        and str(row.get("authorization_id") or "") == str(expected_authorization_id or "")
+    }
+    identity_conflict_run_ids = {
+        str(row.get("run_id") or "")
+        for row in operations
+        if str(row.get("run_id") or "").strip()
+        and str(row.get("authorization_id") or "") == str(expected_authorization_id or "")
+        and (
+            not has_expected_identity
+            or str(row.get("cycle_id") or "") != str(expected_cycle_id or "")
+            or row.get("cycle_round") != expected_cycle_round
+        )
+    }
+    def add_once(key: str, post_id: int) -> None:
+        if post_id not in classification[key]:
+            classification[key].append(post_id)
+    for table_name, rows in (("media_runs", runs), ("media_decisions", decisions)):
+        for row in rows:
+            post_id = int(row.get("post_id") or 0)
+            timestamp = row.get("created_at")
+            parsed = _parse_registry_timestamp(timestamp)
+            if str(row.get("run_id") or "") in current_run_ids:
+                current_rows.append({"table": table_name, "post_id": post_id, "timestamp": str(timestamp or "")})
+                add_once("current_round_operation", post_id)
+                if parsed is None:
+                    missing_or_invalid.append({"table": table_name, "post_id": post_id, "timestamp": timestamp})
+                    add_once("evidence_temporally_unavailable", post_id)
+            elif str(row.get("run_id") or "") in identity_conflict_run_ids:
+                add_once("evidence_temporally_unavailable", post_id)
+            elif parsed is None:
+                missing_or_invalid.append({"table": table_name, "post_id": post_id, "timestamp": timestamp})
+                add_once("evidence_temporally_unavailable", post_id)
+            elif _timestamp_resolution_overlaps_authorization(timestamp, parsed_authorized):
+                add_once("evidence_temporally_unavailable", post_id)
+            elif parsed >= parsed_authorized:
+                current_rows.append({"table": table_name, "post_id": post_id, "timestamp": str(timestamp)})
+                add_once("current_round_operation", post_id)
+            else:
+                add_once("historical_operation", post_id)
+    for row in usages:
+        post_id = int(row.get("post_id") or 0)
+        status = str(row.get("status") or "").casefold()
+        usage_identity_matches = bool(
+            has_expected_identity
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+            and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
+            and (expected_cycle_round is None or row.get("cycle_round") == expected_cycle_round)
+        )
+        usage_authorization_matches = bool(
+            expected_authorization_id
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+        )
+        usage_identity_conflicts = usage_authorization_matches and not usage_identity_matches
+        if status == "accepted":
+            add_once("accepted_not_applied", post_id)
+            if not str(row.get("run_id") or "").strip():
+                add_once("evidence_temporally_unavailable", post_id)
+            else:
+                accepted_at = _parse_registry_timestamp(row.get("accepted_at"))
+                if usage_identity_matches:
+                    add_once("current_round_operation", post_id)
+                    current_rows.append({
+                        "table": "media_usage",
+                        "post_id": post_id,
+                        "timestamp": str(row.get("accepted_at") or ""),
+                    })
+                elif usage_identity_conflicts:
+                    add_once("evidence_temporally_unavailable", post_id)
+                elif accepted_at is not None and _timestamp_resolution_overlaps_authorization(
+                    row.get("accepted_at"), parsed_authorized
+                ):
+                    add_once("evidence_temporally_unavailable", post_id)
+                elif accepted_at is not None and accepted_at >= parsed_authorized:
+                    current_rows.append({
+                        "table": "media_usage",
+                        "post_id": post_id,
+                        "timestamp": str(row.get("accepted_at") or ""),
+                    })
+                    add_once("current_round_operation", post_id)
+                elif accepted_at is None:
+                    add_once("evidence_temporally_unavailable", post_id)
+                else:
+                    add_once("historical_operation", post_id)
+        elif status == "applied":
+            add_once("applied_readback_required", post_id)
+            parsed = _parse_registry_timestamp(row.get("applied_at"))
+            if parsed is None:
+                missing_or_invalid.append({"table": "media_usage", "post_id": post_id, "timestamp": row.get("applied_at")})
+                add_once("evidence_temporally_unavailable", post_id)
+            elif usage_identity_matches:
+                current_rows.append({"table": "media_usage", "post_id": post_id, "timestamp": str(row.get("applied_at"))})
+                add_once("current_round_operation", post_id)
+            elif usage_identity_conflicts:
+                add_once("evidence_temporally_unavailable", post_id)
+            elif _timestamp_resolution_overlaps_authorization(row.get("applied_at"), parsed_authorized):
+                add_once("evidence_temporally_unavailable", post_id)
+            elif parsed >= parsed_authorized:
+                current_rows.append({"table": "media_usage", "post_id": post_id, "timestamp": str(row.get("applied_at"))})
+                add_once("current_round_operation", post_id)
+            else:
+                add_once("historical_operation", post_id)
+    for row in operations:
+        post_id = int(row.get("post_id") or 0)
+        started = _parse_registry_timestamp(row.get("started_at"))
+        identity_matches = bool(
+            has_expected_identity
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+            and str(row.get("cycle_id") or "") == str(expected_cycle_id or "")
+            and (expected_cycle_round is None or row.get("cycle_round") == expected_cycle_round)
+        )
+        authorization_matches = bool(
+            expected_authorization_id
+            and str(row.get("authorization_id") or "") == str(expected_authorization_id)
+        )
+        if identity_matches:
+            current_rows.append({"table": "media_operations", "post_id": post_id, "timestamp": str(row.get("started_at") or "")})
+            add_once("current_round_operation", post_id)
+            if started is None:
+                add_once("evidence_temporally_unavailable", post_id)
+        elif authorization_matches:
+            add_once("evidence_temporally_unavailable", post_id)
+        elif started is None:
+            add_once("evidence_temporally_unavailable", post_id)
+        elif _timestamp_resolution_overlaps_authorization(row.get("started_at"), parsed_authorized):
+            add_once("evidence_temporally_unavailable", post_id)
+        elif started < parsed_authorized:
+            add_once("historical_operation", post_id)
+        else:
+            add_once("evidence_temporally_unavailable", post_id)
+    proof = not current_rows and not missing_or_invalid and not classification["evidence_temporally_unavailable"]
     return {
         "media_registry_checked": True,
-        "media_registry_rows": len(rows),
-        "media_registry_current_round_rows": 0,
+        "media_registry_rows": len(runs) + len(decisions) + len(usages) + len(operations),
+        "media_registry_current_round_rows": len(current_rows),
+        "media_registry_timestamp_audit": {
+            "authorized_at_utc": parsed_authorized.isoformat(),
+            "missing_or_invalid_timestamps": missing_or_invalid,
+            "current_round_rows": current_rows,
+            "proof_of_absence": proof,
+        },
+        "temporal_classification": classification,
+        "proof_of_absence": proof,
     }
 
 
@@ -250,12 +526,23 @@ def _confirm_round_has_no_write(
         if status != "pending":
             return None
         wordpress_statuses[str(int(post_id))] = status
+    authorized_at = _round_authorized_at(
+        root,
+        cycle_id,
+        round_number,
+        authorization_id=authorization_id,
+    )
+    if authorization_id and not authorized_at:
+        return None
     registry_evidence = _registry_has_round_evidence(
         root,
         selected_ids,
-        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+        authorized_at=authorized_at,
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=round_number,
+        expected_authorization_id=authorization_id,
     )
-    if registry_evidence is None:
+    if registry_evidence is None or registry_evidence.get("proof_of_absence") is not True:
         return None
     return {
         "journal_files_absent": not historical_journal_ids,
@@ -277,6 +564,7 @@ def _post_no_write_evidence(
     *,
     cycle_id: str,
     round_number: int,
+    authorization_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Prove that one post has no effect belonging to the current round."""
     try:
@@ -285,18 +573,56 @@ def _post_no_write_evidence(
         return None
     if not isinstance(post, dict) or str(post.get("status") or "") != "pending":
         return None
+    authorized_at = _round_authorized_at(
+        root,
+        cycle_id,
+        round_number,
+        authorization_id=authorization_id,
+    )
+    if authorization_id and not authorized_at:
+        return None
     registry_evidence = _registry_has_round_evidence(
         root,
         [int(post_id)],
-        authorized_at=_round_authorized_at(root, cycle_id, round_number),
+        authorized_at=authorized_at,
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=round_number,
+        expected_authorization_id=authorization_id,
     )
-    if registry_evidence is None:
+    if registry_evidence is None or registry_evidence.get("proof_of_absence") is not True:
         return None
     return {
         "post_id": int(post_id),
+        "cycle_id": str(cycle_id),
+        "cycle_round": int(round_number),
+        "authorization_id": str(authorization_id or ""),
         "wordpress_status": "pending",
         **registry_evidence,
     }
+
+
+def _registry_diagnosis_for_post(
+    root: Path,
+    post_id: int,
+    *,
+    cycle_id: str,
+    round_number: int,
+    authorization_id: str | None,
+) -> dict[str, Any] | None:
+    authorized_at = _round_authorized_at(
+        root,
+        cycle_id,
+        round_number,
+        authorization_id=authorization_id,
+    )
+    return _registry_has_round_evidence(
+        root,
+        [int(post_id)],
+        authorized_at=authorized_at,
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=round_number,
+        expected_authorization_id=authorization_id,
+    )
 
 
 def _historical_journal_evidence(
@@ -333,14 +659,19 @@ def _historical_journal_evidence(
         return None
     if not row or not row[1]:
         return None
-    run_created_at = str(row[1]).replace("T", " ")[:19]
-    current_authorized_at = str(authorized_at).replace("T", " ")[:19]
-    if run_created_at >= current_authorized_at:
+    run_created_at = _parse_registry_timestamp(row[1])
+    current_authorized_at = _parse_registry_timestamp(authorized_at)
+    if (
+        run_created_at is None
+        or current_authorized_at is None
+        or _timestamp_resolution_overlaps_authorization(row[1], current_authorized_at)
+        or run_created_at >= current_authorized_at
+    ):
         return None
     return {
         "historical_run_id": str(journal["run_id"]),
-        "historical_run_created_at": run_created_at,
-        "current_authorized_at": current_authorized_at,
+        "historical_run_created_at_utc": run_created_at.isoformat(),
+        "current_authorized_at_utc": current_authorized_at.isoformat(),
         "post_id": int(post_id),
     }
 
@@ -512,6 +843,7 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is not None:
                 details.append({
@@ -549,7 +881,10 @@ def _reconcile_completed_round(
                 int(post_id),
                 journal,
                 authorized_at=_round_authorized_at(
-                    root, expected_cycle_id, expected_cycle_round
+                    root,
+                    expected_cycle_id,
+                    expected_cycle_round,
+                    authorization_id=expected_authorization_id,
                 ),
             )
             if historical is None:
@@ -561,12 +896,20 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is None:
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "historical_effect_uncertain",
                     "historical_journal_evidence": historical,
+                    "registry_evidence": _registry_diagnosis_for_post(
+                        root,
+                        int(post_id),
+                        cycle_id=expected_cycle_id,
+                        round_number=expected_cycle_round,
+                        authorization_id=expected_authorization_id,
+                    ),
                 })
                 continue
             details.append({
@@ -592,6 +935,7 @@ def _reconcile_completed_round(
                 int(post_id),
                 cycle_id=expected_cycle_id,
                 round_number=expected_cycle_round,
+                authorization_id=expected_authorization_id,
             )
             if no_write is not None:
                 details.append({
@@ -609,19 +953,93 @@ def _reconcile_completed_round(
                     "no_write_evidence": no_write,
                 })
             else:
-                unresolved.append({"post_id": int(post_id), "reason": "historical_effect_uncertain"})
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "historical_effect_uncertain",
+                    "registry_evidence": _registry_diagnosis_for_post(
+                        root,
+                        int(post_id),
+                        cycle_id=expected_cycle_id,
+                        round_number=expected_cycle_round,
+                        authorization_id=expected_authorization_id,
+                    ),
+                })
             continue
         if journal.get("status") in {"running", "validated"} and (
             journal.get("writer_started") is False
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("evidence_status") != "no_effects_detected":
+            media_resume = None
+            recovery = None
+            if media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated":
+                handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                    root, [int(post_id)], lock_ttl=lock_ttl
+                )
+                if locked_post_id is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_busy",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                try:
+                    media_resume = _verify_acquisition_checkpoint_for_resume(
+                        client, root, int(post_id), journal, context or {}
+                    )
+                    if media_resume is not None:
+                        handle = handles[int(post_id)]
+                        recovery = recover_interrupted_journal(
+                            root,
+                            int(post_id),
+                            apply=True,
+                            lock_held=True,
+                            lock_handle=handle,
+                            expected_identity={
+                                "run_id": str(journal.get("run_id") or ""),
+                                "cycle_id": str(journal.get("cycle_id") or ""),
+                                "cycle_round": str(journal.get("cycle_round") or ""),
+                                "authorization_id": str(journal.get("authorization_id") or ""),
+                            },
+                            media_checkpoint_resume=media_resume,
+                        )
+                finally:
+                    _release_post_lock_batch(handles)
+                if media_resume is None:
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "media_checkpoint_readback_unverified",
+                        "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                        "media_effect_evidence": media_evidence,
+                    })
+                    continue
+                if recovery is None or recovery.get("locked"):
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": str((recovery or {}).get("reason") or "post_lock_lost"),
+                            "locked_post_id": int(post_id),
+                            "lock_error": str((recovery or {}).get("error") or ""),
+                        },
+                    )
+                if not recovery.get("recovered"):
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "journal_not_recoverable",
+                        "recovery": recovery,
+                    })
+                    continue
+            elif media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
                     "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
                     "media_effect_evidence": media_evidence,
                 })
+                continue
             else:
                 recovery = recover_interrupted_journal(
                     root, int(post_id), apply=True, lock_ttl=lock_ttl
@@ -643,30 +1061,39 @@ def _reconcile_completed_round(
                         "recovery": recovery,
                     })
                     continue
-                journal = json.loads(journal_path.read_text(encoding="utf-8"))
-                wp_post = context.get("post") if isinstance(context, Mapping) else None
-                detail = _reconciled_detail(
-                    int(post_id), journal, state,
-                    wordpress_status=str(wp_post.get("status") or "")
-                    if isinstance(wp_post, Mapping) else "",
-                )
-                if detail is None:
-                    unresolved.append({
-                        "post_id": int(post_id),
-                        "reason": "state_readback_invalid",
-                    })
-                    continue
-                detail.update({
-                    "outcome": "retry",
-                    "ready_verified": False,
-                    "progress": True,
-                    "write_replayed": False,
-                    "recovery_status": "interrupted_pre_writer",
-                    "recovery_classification": "INTERRUPTED_PRE_WRITER",
-                    "failure_class": "process_interrupted",
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            wp_post = context.get("post") if isinstance(context, Mapping) else None
+            detail = _reconciled_detail(
+                int(post_id), journal, state,
+                wordpress_status=str(wp_post.get("status") or "")
+                if isinstance(wp_post, Mapping) else "",
+            )
+            if detail is None:
+                unresolved.append({
+                    "post_id": int(post_id),
+                    "reason": "state_readback_invalid",
                 })
-                details.append(detail)
-                executed_ids.append(int(post_id))
+                continue
+            detail.update({
+                "outcome": "retry",
+                "ready_verified": False,
+                "progress": True,
+                "write_replayed": False,
+                "recovery_status": "interrupted_pre_writer",
+                "recovery_classification": (
+                    "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+                    if media_resume is not None
+                    else "INTERRUPTED_PRE_WRITER"
+                ),
+                "failure_class": "process_interrupted",
+            })
+            if media_resume is not None:
+                detail.update({
+                    "accepted_media_ids": list(media_resume["wordpress_readback_media_ids"]),
+                    "media_application": "not_attempted",
+                })
+            details.append(detail)
+            executed_ids.append(int(post_id))
             continue
         if journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"} and (
             journal.get("resumable") is True
@@ -674,7 +1101,36 @@ def _reconcile_completed_round(
             and journal.get("readback") is not True
         ):
             media_evidence = _media_effect_evidence(root, int(post_id), journal)
-            if media_evidence.get("evidence_status") != "no_effects_detected":
+            media_resume = None
+            if media_evidence.get("evidence_status") == "acquisition_checkpoint_correlated":
+                handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                    root, [int(post_id)], lock_ttl=lock_ttl
+                )
+                if locked_post_id is not None:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        locked=True,
+                        reconciliation_blocking_info={
+                            "reason": "post_lock_busy",
+                            "locked_post_id": locked_post_id,
+                            "lock_error": lock_error,
+                        },
+                    )
+                try:
+                    media_resume = _verify_acquisition_checkpoint_for_resume(
+                        client, root, int(post_id), journal, context or {}
+                    )
+                finally:
+                    _release_post_lock_batch(handles)
+                if media_resume is None:
+                    unresolved.append({
+                        "post_id": int(post_id),
+                        "reason": "media_checkpoint_readback_unverified",
+                        "recovery_classification": "MEDIA_EFFECTS_PRE_WRITER",
+                        "media_effect_evidence": media_evidence,
+                    })
+                    continue
+            elif media_evidence.get("evidence_status") != "no_effects_detected":
                 unresolved.append({
                     "post_id": int(post_id),
                     "reason": "media_effects_pre_writer",
@@ -700,6 +1156,12 @@ def _reconcile_completed_round(
                 "recovery_status": str(journal.get("status")),
                 "failure_class": str(journal.get("failure_class") or "process_interrupted"),
             })
+            if media_resume is not None:
+                detail.update({
+                    "recovery_classification": "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE",
+                    "accepted_media_ids": list(media_resume["wordpress_readback_media_ids"]),
+                    "media_application": "not_attempted",
+                })
             details.append(detail)
             executed_ids.append(int(post_id))
             continue

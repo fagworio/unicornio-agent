@@ -151,10 +151,18 @@ class ScoreTests(unittest.TestCase):
     def test_penalidades_objetivas(self):
         sem_source = evidence_score("metroid", filename="metroid.jpg", source_page_present=False)
         self.assertIn("missing_source", sem_source["penalties"])
-        nao_listada = evidence_score("metroid", filename="metroid.jpg", image_in_source=False)
+        nao_listada = evidence_score(
+            "metroid", filename="metroid.jpg", image_in_source=False,
+            source_verification_reason="source_mismatch", source_comparison_proved=True,
+        )
         self.assertIn("not_in_source", nao_listada["penalties"])
         dup = evidence_score("metroid", filename="metroid.jpg", duplicate_frame=True)
         self.assertIn("duplicate_frame", dup["penalties"])
+
+    def test_absence_of_comparison_is_not_source_mismatch(self):
+        out = evidence_score("metroid", filename="metroid.jpg", image_in_source=False)
+        self.assertEqual(out["verdict"], "unresolved_source")
+        self.assertTrue(out["recoverable"])
 
     def test_alt_do_agente_nao_e_evidencia(self):
         """Fase 6: alt/caption escritos pelo agente não contam como prova.
@@ -188,6 +196,19 @@ class SourceContextTests(unittest.TestCase):
     def test_contexto_vazio_para_html_vazio(self):
         self.assertEqual(source_context("", "https://x/a.jpg"), {})
 
+    def test_duplicate_url_uses_richer_article_occurrence(self):
+        html = (
+            '<meta property="og:image" content="https://cdn.test/opaque.jpg">'
+            '<article><h2>Metroid Prime 4</h2><figure>'
+            '<img src="https://cdn.test/opaque.jpg" alt="Metroid Prime 4 key art">'
+            '<figcaption>Arte oficial de Metroid Prime 4</figcaption>'
+            '</figure></article>'
+        )
+        ctx = source_context(html, "https://cdn.test/opaque.jpg", base_url="https://source.test/story")
+        self.assertEqual(ctx["alt_original"], "Metroid Prime 4 key art")
+        self.assertEqual(ctx["figcaption"], "Arte oficial de Metroid Prime 4")
+        self.assertEqual(ctx["heading"], "Metroid Prime 4")
+
 
 class GateTests(unittest.TestCase):
     """Proveniência é GATE (hard), não penalidade: nenhuma soma de relevância
@@ -212,7 +233,10 @@ class GateTests(unittest.TestCase):
         self.assertFalse(out["needs_vision"])
 
     def test_imagem_ausente_da_pagina_e_source_mismatch(self):
-        out = evidence_score("metroid", filename="metroid.jpg", image_in_source=False)
+        out = evidence_score(
+            "metroid", filename="metroid.jpg", image_in_source=False,
+            source_verification_reason="source_mismatch", source_comparison_proved=True,
+        )
         self.assertEqual(out["verdict"], "source_mismatch")
         self.assertEqual(out["gate"], "provenance")
 
@@ -297,7 +321,9 @@ class DedupePhashTests(unittest.TestCase):
             return []
 
         # as duas URLs servem o MESMO frame visual (hash idêntico)
-        with mock.patch.object(
+        with mock.patch.dict(
+            "os.environ", {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google"}
+        ), mock.patch.object(
             visual_hash, "image_hashes",
             return_value={"https://cdn.bing/a.jpg": "3f2a", "https://cdn.ya/a.jpg": "3f2a"},
         ), mock.patch("unicornio_editor.media.search.search_bing_images", bing), \

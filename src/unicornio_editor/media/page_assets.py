@@ -183,6 +183,9 @@ class _AssetParser(HTMLParser):
             self._figcaption_text = []
         elif tag == "figure":
             self._figure_assets = None
+            # A heading from a completed figure must not bleed into a later
+            # sibling image such as an author avatar.
+            self._heading = ""
         if tag != "script" or self._script_type != "application/ld+json":
             self._pop_scope(tag)
             return
@@ -218,14 +221,11 @@ def extract_page_assets(html: str, base_url: str = "") -> list[PageAsset]:
         parser.feed(html)
     except Exception:  # malformed HTML remains best-effort
         pass
-    out: list[PageAsset] = []
-    seen: set[str] = set()
-    for asset in parser.assets:
-        if not asset.url or asset.url in seen:
-            continue
-        seen.add(asset.url)
-        out.append(asset)
-    return out
+    # Keep DOM occurrences instead of collapsing by URL. A metadata declaration
+    # can precede the same image in an article figure; discarding the later
+    # occurrence loses its ALT, caption and section heading. Callers that need
+    # unique URLs can deduplicate after ranking the contextual occurrences.
+    return [asset for asset in parser.assets if asset.url]
 
 
 def rank_page_assets(

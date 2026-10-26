@@ -33,6 +33,25 @@ def test_inline_media_round_trips_persisted_phash():
     assert restored.phash == "0123abcd"
 
 
+def test_featured_repeat_evidence_round_trips_without_changing_legacy_defaults():
+    featured = FeaturedProgress(
+        status="valid", media_id=7, media_url="https://wp.test/featured.webp",
+        sha256="f" * 64, phash="f" * 16, visual_group_id="visual:featured",
+        visual_verification={"decision": "INITIAL"}, alt_text="Key art",
+        credit_text="Crédito da imagem: Fonte oficial", width=1280, height=720,
+    )
+    marker = {
+        "role": "closing_featured_repeat", "placement": "after_editorial_body",
+        "media_id": 7, "body_sha256": "body", "placement_plan_sha256": "plan",
+    }
+    state = WorkState(media=MediaProgress(featured=featured, closing_featured_repeat=marker))
+    restored = WorkState.from_dict(state.to_dict())
+    assert restored == state
+    legacy = FeaturedProgress.from_dict({"status": "valid", "media_id": 7})
+    assert legacy.alt_text == legacy.credit_text == ""
+    assert legacy.width == legacy.height == 0
+
+
 def test_work_state_allows_valid_assets_above_current_requirement():
     progress = MediaProgress(required=2, inline=tuple(InlineMedia(i, f"https://wp.test/{i}.webp", i) for i in (1, 2, 3)))
     assert progress.accepted == 3

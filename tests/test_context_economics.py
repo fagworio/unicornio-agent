@@ -360,6 +360,11 @@ class LibraryFirstTests(unittest.TestCase):
                 "phash": "abc", "source_url": "https://cdn/original.jpg",
                 "source_page": "https://pagina/original", "subject": "Redfall",
                 "media_id": 77, "uses": 1,
+                "author": "Test Author", "license": "CC BY 4.0",
+                "license_url": "https://creativecommons.org/licenses/by/4.0/",
+                "captured_at": "2026-10-22T00:00:00Z",
+                "credit_text": "Crédito da imagem: Test Author (CC BY 4.0)",
+                "alt_text": "Redfall key art",
             }])
             client = mock.Mock()
             reuso = _reuse_from_library(client, root, "Redfall", limit=2)
@@ -396,8 +401,8 @@ class LibraryFirstTests(unittest.TestCase):
             reuso = _reuse_from_library(client, root, "Redfall", limit=2)
         self.assertEqual(reuso, [])
 
-    def test_reuse_finds_legacy_entries_through_the_media_library(self):
-        """Entradas antigas não têm subject, mas a Media Library acha a imagem."""
+    def test_reuse_does_not_execute_legacy_entries_without_rights_evidence(self):
+        """A Media Library não transforma proveniência antiga em licença."""
         from unicornio_editor.cli import _reuse_from_library
 
         with tempfile.TemporaryDirectory() as directory:
@@ -410,9 +415,7 @@ class LibraryFirstTests(unittest.TestCase):
             client = mock.Mock()
             client.search_media.return_value = [{"id": 114361, "title": "Redfall key art"}]
             reuso = _reuse_from_library(client, root, "Redfall", limit=2)
-        self.assertEqual(len(reuso), 1)
-        self.assertEqual(reuso[0]["url"], "https://cdn/legado.jpg")
-        self.assertEqual(reuso[0]["media_id"], 114361)
+        self.assertEqual(reuso, [])
 
     def test_reuse_ignores_media_without_indexed_provenance(self):
         from unicornio_editor.cli import _reuse_from_library
@@ -488,13 +491,14 @@ class EnrichmentMemoTests(unittest.TestCase):
             "unicornio_editor.media.evidence.dedupe_by_phash",
             side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
         ):
-            approved, rejected, _deferred = cli._enriquecer_candidatos(
+            approved, rejected, deferred = cli._enriquecer_candidatos(
                 [candidate], subject="Redfall", termo="redfall"
             )
 
         assert not approved
-        assert len(rejected) == 1
-        evidence = rejected[0]["evidence"]
+        assert not rejected
+        assert len(deferred) == 1
+        evidence = deferred[0]["evidence"]
         assert evidence["verdict"] == "unresolved_source"
         assert evidence["reason_code"] == "source_page_unavailable"
         assert evidence["recoverable"] is True
@@ -575,7 +579,8 @@ class EnrichmentMemoTests(unittest.TestCase):
     def test_candidate_terminal_keeps_post_context(self):
         from unicornio_editor import cli
 
-        candidate = self._candidate("https://a/1.jpg")
+        candidate = self._candidate("https://cdn.example/1.jpg?token=private-image-token")
+        candidate["source_page_url"] = "https://publisher.example/article?signature=private-source-signature"
         candidate["candidate_id"] = "candidate-1"
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
@@ -597,6 +602,12 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert events[0]["query"] == "Redfall jogo"
         assert events[0]["subject"] == "Redfall"
         assert events[0]["candidate_id"] == "candidate-1"
+        assert isinstance(events[0]["evidence_score"], int)
+        assert "query" in events[0]["matched_fields"]
+        serialized = json.dumps(events)
+        assert "private-image-token" not in serialized
+        assert "private-source-signature" not in serialized
+        assert candidate["direct_image_url"] not in serialized
 
     def test_invariant_telemetry_exposes_identity_collisions(self):
         from unicornio_editor import cli

@@ -128,6 +128,13 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
                 "candidate_id": "new-image", "direct_image_url": "https://source.test/new.jpg",
                 "source_page_url": "https://source.test/article",
                 "evidence": {"verdict": "deterministic_match"},
+                "valid": True,
+                "author": "Test Author",
+                "license": "CC BY 4.0",
+                "license_url": "https://creativecommons.org/licenses/by/4.0/",
+                "captured_at": "2026-10-22T00:00:00Z",
+                "credit_text": "Crédito da imagem: Test Author (CC BY 4.0)",
+                "alt_text": "Artwork do jogo",
                 **({"media_id": 115305} if second_run else {}),
             }]
         return {"posts": [{"audit_candidates": candidates, "search": {
@@ -136,6 +143,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
 
     monkeypatch.setattr(cli, "_resolve_media_batch", discover)
     monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(stages, "required_image_count_for_content", lambda *_args, **_kwargs: 4)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Jogo"}])
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
     monkeypatch.setattr(visual_media, "materialize_media_identity", lambda _c, _cfg, _r, media, **_kw: media)
@@ -144,6 +152,11 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     monkeypatch.setattr(workflow, "download_image", lambda *_a, **_kw: tmp_path / "image.jpg")
     monkeypatch.setattr(workflow, "convert_to_webp", lambda *_a: tmp_path / "image.webp")
     monkeypatch.setattr(workflow, "verify_downloaded_against_source", lambda **_kw: (True, "verified"))
+    monkeypatch.setattr(workflow, "source_page_html", lambda *_a, **_kw: "<html>fixture</html>")
+    monkeypatch.setattr(
+        "unicornio_editor.media.license.attest_source_rights",
+        lambda *_a, **_kw: {"version": 1, "signature": "0" * 64},
+    )
     monkeypatch.setattr(workflow, "image_dimensions", lambda *_a: (1280, 720))
     monkeypatch.setattr(workflow, "image_has_transparency", lambda *_a: False)
     monkeypatch.setattr(visual_hash, "phash_from_path", lambda *_a: "f0" * 8)

@@ -1,13 +1,17 @@
 import json
+import socket
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from unittest import mock
 
 from unicornio_editor.editorial_provider import (
     _OUTPUT_SCHEMA,
     _normalize_output,
+    EditorialProviderError,
     generate_editorial_batch,
 )
 
@@ -160,6 +164,8 @@ class EditorialProviderTests(unittest.TestCase):
         )
         assert result["results"][0]["status"] == "needs_retry"
         assert result["results"][0]["retry_kind"] == "text"
+        assert result["results"][0]["failure_class"] == "editorial_schema_invalid"
+        assert result["results"][0]["retryable"] is True
         assert "localizacao_pt_br_incompleta" in result["results"][0]["reason"]
 
     def _run(self, root, retry_mode="", **kwargs):
@@ -240,8 +246,47 @@ class EditorialProviderTests(unittest.TestCase):
             result = self._run(Path(directory))
             payload = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
             self.assertEqual(payload["results"][0]["status"], "needs_retry")
+            self.assertEqual(payload["results"][0]["failure_class"], "invalid_response")
+            self.assertTrue(payload["results"][0]["retryable"])
             self.assertIn("nao e JSON", payload["results"][0]["reason"])
             self.assertEqual(payload["results"][1]["status"], "needs_retry")
+
+    def test_provider_http_and_timeout_failures_are_classified_without_changing_retry_policy(self):
+        cases = [
+            (429, True),
+            (401, False),
+        ]
+        for status, retryable in cases:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                error = HTTPError(self.base, status, "provider error", hdrs=None, fp=None)
+                with mock.patch(
+                    "unicornio_editor.editorial_provider.urlopen", side_effect=error
+                ), self.assertRaises(EditorialProviderError) as raised:
+                    self._run(Path(directory))
+                self.assertEqual(raised.exception.failure_class, "api_http_error")
+                self.assertEqual(raised.exception.http_status, status)
+                self.assertIs(raised.exception.retryable, retryable)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen",
+                side_effect=URLError(socket.timeout("timed out")),
+            ), self.assertRaises(EditorialProviderError) as raised:
+                self._run(Path(directory))
+            self.assertEqual(raised.exception.failure_class, "timeout")
+            self.assertTrue(raised.exception.retryable)
+
+    def test_invalid_http_response_body_is_classified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = b"not-json"
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", return_value=response
+            ), self.assertRaises(EditorialProviderError) as raised:
+                self._run(Path(directory))
+            self.assertEqual(raised.exception.failure_class, "invalid_response")
+            self.assertTrue(raised.exception.retryable)
 
     def test_prompt_forbids_media_work_in_the_editorial_call(self):
         from unicornio_editor.editorial_provider import _SYSTEM_PROMPT

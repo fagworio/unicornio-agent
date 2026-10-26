@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unicornio-editor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agente editorial seguro para posts WordPress pending"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8.0,<9"]
-browser = ["playwright>=1.45,<2"]
+media-search = ["ddgs==9.16.0"]
 
 [project.scripts]
 unicornio-editor = "unicornio_editor.cli:main"
@@ -25,3 +25,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["integration: uses an isolated live service such as ephemeral WordPress"]

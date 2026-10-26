@@ -77,6 +77,17 @@ class Fase14BingParserTests(unittest.TestCase):
 
 
 class Fase3AgregacaoTests(unittest.TestCase):
+    def setUp(self):
+        # Keep this orchestration test independent of operator configuration.
+        # In particular, do not let an installed DuckDuckGo fallback perform
+        # a real HTTP request while the Bing/Yandex/Google calls are mocked.
+        self._provider_config = mock.patch.dict(
+            "os.environ",
+            {"EDITOR_MEDIA_SEARCH_PROVIDERS": "bing,yandex,google"},
+        )
+        self._provider_config.start()
+        self.addCleanup(self._provider_config.stop)
+
     def _cand(self, url, page):
         return {"direct_image_url": url, "source_page_url": page,
                 "usable": True, "discovery_only": False, "engine": "x"}

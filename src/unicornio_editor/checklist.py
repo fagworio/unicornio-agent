@@ -36,7 +36,10 @@ _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
 _HEADING_RE = re.compile(r"<h([1-4])\b[^>]*>", re.IGNORECASE)
-_EMPTY_PARAGRAPH_RE = re.compile(r"<p\b[^>]*>\s*(?:&nbsp;)?\s*</p>", re.IGNORECASE)
+_EMPTY_PARAGRAPH_RE = re.compile(
+    r"<p\b[^>]*>(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*</p>",
+    re.IGNORECASE,
+)
 
 
 def _canonical_image_url(value: str) -> str:
@@ -273,6 +276,12 @@ def run_pre_publish_checklist(
         supplied_quota = media_context.get("quota_content")
         if isinstance(supplied_quota, str) and supplied_quota.strip():
             quota_content = supplied_quota
+    layout_policy = media_context.get("layout_policy") if isinstance(media_context, Mapping) else None
+    canonical_editorial_body = str(editorial.get("cleaned_html") or "")
+    if layout_policy and canonical_editorial_body.strip():
+        # The 2/4/6 band is based on source editorial copy, not media captions
+        # or composed template blocks that are absent from that source.
+        quota_content = canonical_editorial_body
     words = word_count(quota_content)
     raw_title = post.get("title")
     if isinstance(raw_title, Mapping):
@@ -288,6 +297,40 @@ def run_pre_publish_checklist(
         raw_required = inline_context.get("required") if isinstance(inline_context, Mapping) else None
         if isinstance(raw_required, int) and not isinstance(raw_required, bool) and raw_required >= 0:
             required = raw_required
+    required_ideal = required
+    from .list_quality import detect_list_format
+
+    categories = editorial.get("categories") or post.get("categories") or ()
+    is_list = detect_list_format(title_str, content, categories) is not None
+    layout_validation: dict[str, Any] = {"valid": False, "present": False, "reason": "not_provided"}
+    if layout_policy:
+        from .pipeline_v2.media_layout import validate_normal_article_layout_policy
+
+        layout_body = str(editorial.get("cleaned_html") or "")
+        layout_validation = validate_normal_article_layout_policy(
+            layout_body,
+            layout_policy,
+            target_ideal=required_ideal,
+            media=media_context,
+            listicle=is_list,
+        )
+        check(
+            "media_layout_policy",
+            bool(layout_validation.get("valid")),
+            (
+                "redução de layout estrutural comprovada: "
+                f"ideal={required_ideal}, efetivo={layout_validation.get('target_effective')}"
+                if layout_validation.get("valid") and layout_validation.get("target_effective") != required_ideal
+                else "capacidade de layout verificada"
+                if layout_validation.get("valid")
+                else "política de layout ausente, divergente ou inválida: "
+                + str(layout_validation.get("reason") or "invalid")
+            ),
+            blocker="structure" if not layout_validation.get("valid") else None,
+            phase="editorial" if not layout_validation.get("valid") else None,
+        )
+        if layout_validation.get("valid"):
+            required = int(layout_validation["target_effective"])
     from .media.relevance import iter_content_images
 
     img_items = iter_content_images(content)
@@ -348,10 +391,7 @@ def run_pre_publish_checklist(
     # para dispensar o mínimo é o waiver de busca esgotada (abaixo).
     required_effective = required
 
-    from .list_quality import detect_list_format
     search_progress = media_context.get("search") if isinstance(media_context, Mapping) else None
-    categories = editorial.get("categories") or post.get("categories") or ()
-    is_list = detect_list_format(title_str, content, categories) is not None
     enrichment_round = 0
     if isinstance(media_context, Mapping):
         try:
@@ -389,6 +429,62 @@ def run_pre_publish_checklist(
     from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 
     content_images = iter_content_images(content)
+    closing_repeat_valid = False
+    post_featured_id = post.get("featured_media")
+    if not is_list and isinstance(media_context, Mapping) and layout_validation.get("valid"):
+        repeat_claim = media_context.get("closing_featured_repeat")
+        featured_payload = media_context.get("featured")
+        policy_repeat = layout_policy.get("closing_featured_repeat") if isinstance(layout_policy, Mapping) else None
+        placement_plan = layout_policy.get("placement_plan") if isinstance(layout_policy, Mapping) else None
+        search_proof = media_context.get("search")
+        waiver_proof = media_context.get("waiver")
+        if (
+            isinstance(repeat_claim, Mapping)
+            and isinstance(featured_payload, Mapping)
+            and isinstance(policy_repeat, Mapping)
+            and isinstance(placement_plan, list)
+            and placement_plan
+            and featured_payload.get("status") == "valid"
+            and isinstance(post_featured_id, int)
+            and not isinstance(post_featured_id, bool)
+            and post_featured_id > 0
+            and featured_payload.get("media_id") == post_featured_id
+            and isinstance(search_proof, Mapping)
+            and search_proof.get("completed") is True
+            and search_proof.get("exhausted") is True
+            and search_proof.get("completion_reason") == "EXHAUSTED_VERIFIED"
+            and isinstance(waiver_proof, Mapping)
+            and waiver_proof.get("applied") is True
+            and repeat_claim.get("role") == "closing_featured_repeat"
+            and repeat_claim.get("placement") == "after_editorial_body"
+            and repeat_claim.get("media_id") == post_featured_id
+            and repeat_claim.get("media_url") == policy_repeat.get("media_url")
+            and repeat_claim.get("asset_sha256") == policy_repeat.get("asset_sha256") == featured_payload.get("sha256")
+            and repeat_claim.get("asset_phash") == policy_repeat.get("asset_phash") == featured_payload.get("phash")
+            and repeat_claim.get("visual_group_id") == policy_repeat.get("visual_group_id") == featured_payload.get("visual_group_id")
+            and repeat_claim.get("body_sha256") == policy_repeat.get("body_sha256") == layout_policy.get("body_sha256")
+            and repeat_claim.get("placement_plan_sha256") == policy_repeat.get("placement_plan_sha256") == layout_policy.get("placement_plan_sha256")
+            and repeat_claim.get("paragraph_index") == placement_plan[-1].get("paragraph_index")
+            and placement_plan[-1].get("anchor") == "after_editorial_body"
+            and len(content_images) >= 1
+        ):
+            from .media.text import plain_text
+
+            feature_url = _canonical_image_url(str(featured_payload.get("media_url") or ""))
+            repeated_positions = [
+                index for index, image in enumerate(content_images)
+                if _canonical_image_url(str(image.get("src") or "")) == feature_url
+            ]
+            last_image = content_images[-1]
+            expected_credit = plain_text(str(featured_payload.get("credit_text") or ""))
+            expected_alt = plain_text(str(featured_payload.get("alt_text") or ""))
+            closing_repeat_valid = bool(
+                repeat_claim.get("media_url") == feature_url
+                and repeated_positions == [len(content_images) - 1]
+                and plain_text(str(last_image.get("alt") or "")) == expected_alt
+                and plain_text(str(last_image.get("caption") or "")) == expected_credit
+                and expected_credit.casefold().startswith("crédito da imagem:")
+            )
     # Policy v4: media accepted after visual-identity rollout must carry a
     # durable identity and a positive (INITIAL/DIFFERENT) verification.  The
     # marker keeps historical serialized states backward compatible until the
@@ -444,6 +540,47 @@ def run_pre_publish_checklist(
             if evidence_matches_current_media
             else "evidência visual ausente, inválida ou divergente do conjunto atual de mídia",
         )
+        application_contract = media_context.get("media_application_contract")
+        if isinstance(application_contract, Mapping):
+            accepted_contract = {
+                int(value) for value in (application_contract.get("accepted") or [])
+                if str(value).isdigit()
+            }
+            applied_contract = {
+                int(value) for value in (application_contract.get("applied") or [])
+                if str(value).isdigit()
+            }
+            surplus_contract = {
+                int(value) for value in (application_contract.get("accepted_working_not_applied") or [])
+                if str(value).isdigit()
+            }
+            body_applied_ids = {
+                int(str(asset.get("media_id")))
+                for asset in inline_assets
+                if str(asset.get("media_id") or "").isdigit()
+                and _canonical_image_url(str(asset.get("media_url") or ""))
+                in {_canonical_image_url(url) for url in inline_images}
+            }
+            contract_valid = (
+                accepted_contract == applied_contract | surplus_contract
+                and applied_contract <= body_applied_ids
+                and (
+                    not surplus_contract
+                    or (
+                        application_contract.get("layout_reduction_authorized") is True
+                        and application_contract.get("journal_readback_proven") is True
+                    )
+                )
+            )
+            check(
+                "media_application_contract",
+                contract_valid,
+                "mídia aceita/aplicada reconciliada com readback e layout"
+                if contract_valid
+                else "contrato aceito/aplicado ausente, divergente ou sem prova de layout/readback",
+                blocker="media_invalid" if not contract_valid else None,
+                phase="media" if not contract_valid else None,
+            )
 
         check(
             "media_duplicate_confirmed",
@@ -779,6 +916,11 @@ def run_pre_publish_checklist(
             len(repeated_featured_indexes) == 1
             and repeated_featured_indexes[0] == len(content_images) - 1
         )
+    elif repeated_featured_indexes and closing_repeat_valid:
+        featured_inline_ok = (
+            len(repeated_featured_indexes) == 1
+            and repeated_featured_indexes[0] == len(content_images) - 1
+        )
     check(
         "featured_inline_position",
         featured_inline_ok,
@@ -786,7 +928,9 @@ def run_pre_publish_checklist(
             "featured não se repete no corpo"
             if not repeated_featured_indexes else
             "featured repetida uma vez ao final da lista"
-            if featured_inline_ok else
+            if is_list and featured_inline_ok else
+            "featured repetida uma vez no fechamento normal com identidade e layout comprovados"
+            if closing_repeat_valid and featured_inline_ok else
             f"featured repetida no corpo nas posições {repeated_featured_indexes}"
         ),
     )
@@ -1101,6 +1245,10 @@ def run_pre_publish_checklist(
     active_queries = active_coverage.get("queries") if isinstance(active_coverage, Mapping) else None
     active_results = active_coverage.get("engine_results") if isinstance(active_coverage, Mapping) else None
     expected_engines = active_coverage.get("expected_engines") if isinstance(active_coverage, Mapping) else None
+    configured_engines = active_coverage.get("configured_engines", expected_engines) if isinstance(active_coverage, Mapping) else None
+    optional_engines = active_coverage.get("optional_engines", []) if isinstance(active_coverage, Mapping) else None
+    provider_results = active_coverage.get("provider_results") if isinstance(active_coverage, Mapping) else None
+    optional_engine_failures = active_coverage.get("optional_engine_failures") if isinstance(active_coverage, Mapping) else None
     planned_coverage_queries = active_coverage.get("planned_queries") if isinstance(active_coverage, Mapping) else None
     completed_coverage_queries = active_coverage.get("completed_queries") if isinstance(active_coverage, Mapping) else None
     coverage_valid = bool(
@@ -1113,6 +1261,13 @@ def run_pre_publish_checklist(
         and isinstance(expected_engines, list)
         and bool(expected_engines)
         and all(isinstance(engine, str) and engine for engine in expected_engines)
+        and len(set(expected_engines)) == len(expected_engines)
+        and isinstance(configured_engines, list)
+        and all(isinstance(engine, str) and engine for engine in configured_engines)
+        and set(expected_engines) <= set(configured_engines)
+        and isinstance(optional_engines, list)
+        and all(isinstance(engine, str) and engine for engine in optional_engines)
+        and set(optional_engines) == set(configured_engines) - set(expected_engines)
         and isinstance(active_queries, list)
         and bool(active_queries)
         and all(isinstance(query, str) and query for query in active_queries)
@@ -1133,6 +1288,35 @@ def run_pre_publish_checklist(
         and all(isinstance(engine, str) and engine for engine in active_coverage.get("reported_engines"))
         and set(expected_engines) <= set(active_coverage.get("reported_engines"))
         and not (active_coverage.get("technical_failures") or ())
+        and (
+            provider_results is None
+            or (
+                isinstance(provider_results, Mapping)
+                and set(provider_results) == set(active_queries)
+                and all(
+                    isinstance(provider_results.get(query), Mapping)
+                    and all(
+                        provider_results[query].get(engine) == active_results[query].get(engine)
+                        for engine in expected_engines
+                    )
+                    for query in active_queries
+                )
+            )
+        )
+        # Optional fallback failures stay visible, but do not invalidate a
+        # verified proof for the required provider plan.
+        and (
+            optional_engine_failures is None
+            or (
+                isinstance(optional_engine_failures, Mapping)
+                and set(optional_engine_failures) <= set(active_queries)
+                and all(
+                    isinstance(failures, Mapping)
+                    and set(failures) <= set(optional_engines)
+                    for failures in optional_engine_failures.values()
+                )
+            )
+        )
         and isinstance(planned_coverage_queries, int)
         and not isinstance(planned_coverage_queries, bool)
         and planned_coverage_queries == len(active_queries)

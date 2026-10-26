@@ -1,0 +1,49 @@
+name: WordPress Writer V2 E2E
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wordpress-e2e:
+    name: Ephemeral WordPress REST homologation
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact code under test
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[test,media-search]'
+      - name: Run real WordPress E2E and full test suite
+        env:
+          WP_E2E_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python scripts/wordpress_e2e.py
+      - name: Upload auditable homologation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wordpress-writer-v2-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/wordpress-e2e-report.json
+          if-no-files-found: error
+          retention-days: 90

@@ -121,3 +121,55 @@ def test_low_and_high_each_consume_global_call_budget(monkeypatch):
     result = compare_visual_assets("data:image/png;base64,AA==", "data:image/png;base64,AA==", api_key="x", base_url="https://api.test", model="x", call_budget=budget, max_calls=2)
     assert result.decision == "DIFFERENT"
     assert budget == [2]
+
+
+def test_default_budget_covers_featured_plus_six_inline_pairs(monkeypatch, tmp_path: Path):
+    import unicornio_editor.media.visual_identity as identity_module
+
+    config = Config(
+        "x", "https://example.test", "https://example.test/wp-json/wp/v2",
+        vision_enabled=True, vision_api_key="test",
+    )
+    assert config.visual_comparison_max_calls == 42
+    paths = []
+    for index in range(7):
+        path = tmp_path / f"asset-{index}.webp"
+        path.write_bytes(f"asset-{index}".encode())
+        paths.append(path)
+
+    def fingerprint(path):
+        index = int(Path(path).stem.split("-")[-1])
+        sha = f"{index + 1:064x}"
+        return identity_module.VisualIdentity(sha, f"{index + 1:016x}", f"visual:{sha[:24]}")
+
+    calls = []
+
+    def compare(*_args, call_budget=None, **_kwargs):
+        call_budget[0] += 1
+        calls.append(1)
+        return VisualComparison("DIFFERENT", 0.99, "baseline", "candidate", "distinct")
+
+    monkeypatch.setattr(identity_module, "fingerprint_path", fingerprint)
+    monkeypatch.setattr(identity_module, "hamming", lambda *_args: 8)
+    monkeypatch.setattr(identity_module, "prepare_vision_image_input_from_path", lambda *_args: "data:image/webp;base64,AA==")
+    monkeypatch.setattr(identity_module, "compare_visual_assets", compare)
+    baseline = [{
+        "media_id": 0,
+        "sha256": "f" * 64,
+        "phash": "0" * 16,
+        "local_path": str(paths[0]),
+    }]
+    budget = [0]
+    for index, path in enumerate(paths[1:], start=1):
+        identity, decision = verify_candidate_identity(
+            path,
+            candidate_id=f"asset-{index}",
+            baseline=baseline,
+            config=config,
+            root=tmp_path,
+            comparison_budget=budget,
+        )
+        assert decision.verified
+        baseline.append(identity.to_dict() | {"media_id": index, "local_path": str(path)})
+    assert budget == [21]
+    assert len(calls) == 21

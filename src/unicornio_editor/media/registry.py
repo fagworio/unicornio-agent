@@ -10,11 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+def _utc_timestamp() -> str:
+    """Return a sortable UTC instant with microsecond precision for new evidence."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class RegistryError(RuntimeError):
@@ -41,7 +47,11 @@ def connect(root: str | Path) -> sqlite3.Connection:
     db.execute("PRAGMA foreign_keys = ON")
     db.execute("PRAGMA busy_timeout = 30000")
     db.execute("PRAGMA journal_mode = WAL")
-    _migrate(db)
+    try:
+        _migrate(db)
+    except Exception:
+        db.close()
+        raise
     return db
 
 
@@ -134,6 +144,24 @@ def _migrate(db: sqlite3.Connection) -> None:
             detail TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS media_operations (
+            operation_id INTEGER PRIMARY KEY,
+            post_id INTEGER NOT NULL,
+            run_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL DEFAULT '',
+            cycle_round INTEGER,
+            authorization_id TEXT NOT NULL DEFAULT '',
+            phase TEXT NOT NULL DEFAULT '',
+            operation_status TEXT NOT NULL DEFAULT 'started',
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            write_started INTEGER NOT NULL DEFAULT 0,
+            readback_confirmed INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_operations_run ON media_operations(run_id);
+        CREATE INDEX IF NOT EXISTS idx_media_operations_post ON media_operations(post_id);
+        CREATE INDEX IF NOT EXISTS idx_media_operations_round ON media_operations(cycle_id, cycle_round, authorization_id);
         CREATE INDEX IF NOT EXISTS idx_media_decisions_post ON media_decisions(post_id);
         CREATE INDEX IF NOT EXISTS idx_media_decisions_candidate ON media_decisions(candidate_id);
         """
@@ -176,6 +204,20 @@ def _migrate(db: sqlite3.Connection) -> None:
             db.execute(
                 "ALTER TABLE media_usage ADD COLUMN subject TEXT NOT NULL DEFAULT ''"
             )
+        usage_columns_after = {
+            row[1] for row in db.execute("PRAGMA table_info(media_usage)")
+        }
+        usage_additions = {
+            "run_id": "TEXT NOT NULL DEFAULT ''",
+            "cycle_id": "TEXT NOT NULL DEFAULT ''",
+            "cycle_round": "INTEGER",
+            "authorization_id": "TEXT NOT NULL DEFAULT ''",
+            "accepted_at": "TEXT",
+            "readback_confirmed_at": "TEXT",
+        }
+        for name, definition in usage_additions.items():
+            if name not in usage_columns_after:
+                db.execute(f"ALTER TABLE media_usage ADD COLUMN {name} {definition}")
         # The legacy table may have carried an index with this name.  SQLite
         # binds index names globally, so recreating it must happen only after
         # the legacy table (and its indexes) has been removed.
@@ -288,6 +330,12 @@ def record_v2_observation(
     outcome: str = "",
     checkpoint_reference: str = "",
     applied: bool = False,
+    cycle_id: str = "",
+    cycle_round: int | None = None,
+    authorization_id: str = "",
+    operation_status: str = "observed",
+    write_started: bool = False,
+    readback_confirmed: bool = False,
 ) -> None:
     """Persist a best-effort V2 observation without affecting pipeline state.
 
@@ -302,7 +350,35 @@ def record_v2_observation(
         "phase": phase,
         "queries_attempted": int(getattr(getattr(media, "search", None), "queries_attempted", 0) or 0),
     }
+    observed_at = _utc_timestamp()
     with connect(root) as db:
+        if str(run_id or "").strip():
+            db.execute(
+                """INSERT INTO media_operations
+                (post_id, run_id, cycle_id, cycle_round, authorization_id, phase,
+                 operation_status, started_at, completed_at, write_started,
+                 readback_confirmed, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                        CASE WHEN ? IN ('completed', 'failed') THEN ? ELSE NULL END,
+                        ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    cycle_id=CASE WHEN excluded.cycle_id <> '' THEN excluded.cycle_id ELSE media_operations.cycle_id END,
+                    cycle_round=COALESCE(excluded.cycle_round, media_operations.cycle_round),
+                    authorization_id=CASE WHEN excluded.authorization_id <> '' THEN excluded.authorization_id ELSE media_operations.authorization_id END,
+                    phase=CASE WHEN excluded.phase <> '' THEN excluded.phase ELSE media_operations.phase END,
+                    operation_status=excluded.operation_status,
+                    completed_at=COALESCE(excluded.completed_at, media_operations.completed_at),
+                    write_started=MAX(media_operations.write_started, excluded.write_started),
+                    readback_confirmed=MAX(media_operations.readback_confirmed, excluded.readback_confirmed),
+                    outcome=CASE WHEN excluded.outcome <> '' THEN excluded.outcome ELSE media_operations.outcome END""",
+                (
+                    int(post_id), str(run_id), str(cycle_id or ""),
+                    cycle_round, str(authorization_id or ""), str(phase or ""),
+                    str(operation_status or "observed"), observed_at,
+                    str(operation_status or ""), observed_at,
+                    int(bool(write_started)), int(bool(readback_confirmed)), str(outcome or ""),
+                ),
+            )
         previous = db.execute(
             "SELECT planned_deficits FROM media_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
@@ -326,7 +402,7 @@ def record_v2_observation(
         db.execute(
             """INSERT INTO media_runs
             (run_id, post_id, planned_deficits, queries_attempted, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 planned_deficits=excluded.planned_deficits,
                 queries_attempted=excluded.queries_attempted,
@@ -334,7 +410,7 @@ def record_v2_observation(
                 checkpoint_reference=excluded.checkpoint_reference,
                 completion_reason=excluded.completion_reason""",
             (run_id, int(post_id), json.dumps(planned, sort_keys=True), queries_attempted, outcome,
-             checkpoint_reference, "readback_confirmed" if applied else phase),
+             checkpoint_reference, "readback_confirmed" if applied else phase, observed_at),
         )
         assets = []
         inline = getattr(media, "inline", ()) if media is not None else ()
@@ -372,23 +448,35 @@ def record_v2_observation(
             db.execute(
                 """INSERT INTO media_usage
                 (post_id, asset_id, wordpress_media_id, role, section_slot,
-                 subject, identity_evidence, status, applied_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                 subject, identity_evidence, status, applied_at, run_id,
+                 cycle_id, cycle_round, authorization_id, accepted_at,
+                 readback_confirmed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN ? ELSE NULL END,
+                        ?, ?, ?, ?, ?,
+                        CASE WHEN ? THEN ? ELSE NULL END)
                 ON CONFLICT(post_id, asset_id, role, COALESCE(section_slot, -1)) DO UPDATE SET
                     status=CASE WHEN media_usage.status = 'applied' THEN 'applied' ELSE excluded.status END,
                     applied_at=COALESCE(excluded.applied_at, media_usage.applied_at),
                     wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_usage.wordpress_media_id),
                     subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_usage.subject END,
-                    identity_evidence=CASE WHEN excluded.identity_evidence <> '{}' THEN excluded.identity_evidence ELSE media_usage.identity_evidence END""",
+                    identity_evidence=CASE WHEN excluded.identity_evidence <> '{}' THEN excluded.identity_evidence ELSE media_usage.identity_evidence END,
+                    run_id=CASE WHEN media_usage.run_id <> '' THEN media_usage.run_id ELSE excluded.run_id END,
+                    cycle_id=CASE WHEN media_usage.cycle_id <> '' THEN media_usage.cycle_id ELSE excluded.cycle_id END,
+                    cycle_round=COALESCE(media_usage.cycle_round, excluded.cycle_round),
+                    authorization_id=CASE WHEN media_usage.authorization_id <> '' THEN media_usage.authorization_id ELSE excluded.authorization_id END,
+                    accepted_at=COALESCE(media_usage.accepted_at, excluded.accepted_at),
+                    readback_confirmed_at=COALESCE(excluded.readback_confirmed_at, media_usage.readback_confirmed_at)""",
                 (int(post_id), asset_id, getattr(item, "media_id", None), role,
                  getattr(item, "section_slot", None), str(getattr(item, "subject", "") or ""),
-                 identity_evidence, "applied" if applied else "accepted", applied),
+                 identity_evidence, "applied" if applied else "accepted", applied, observed_at,
+                 str(run_id or ""), str(cycle_id or ""), cycle_round, str(authorization_id or ""),
+                 observed_at, bool(readback_confirmed), observed_at),
             )
         db.execute(
             """INSERT INTO media_decisions
             (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
-            VALUES (?, ?, '', 'run', '', ?, ?, 'post', ?, CURRENT_TIMESTAMP)""",
-            (int(post_id), run_id, phase, outcome or phase, checkpoint_reference),
+            VALUES (?, ?, '', 'run', '', ?, ?, 'post', ?, ?)""",
+            (int(post_id), run_id, phase, outcome or phase, checkpoint_reference, observed_at),
         )
         db.commit()
 
@@ -493,6 +581,7 @@ def record_v2_candidate_decision(
     }, sort_keys=True)
     allowed_reason_codes = {
         "candidate_accepted", "transient_provider_failure", "candidate_rejected",
+        "source_verification_inconclusive",
         "unresolved_source", "reject",
         "incomplete_provenance", "ambiguous", "vision_input_unavailable",
         "source_mismatch", "source_bytes_mismatch",
@@ -508,13 +597,14 @@ def record_v2_candidate_decision(
     safe_reason_code = str(reason_code or "").casefold().strip()
     if safe_reason_code not in allowed_reason_codes:
         safe_reason_code = "candidate_rejected"
+    created_at = _utc_timestamp()
     with connect(root) as db:
         db.execute(
             """INSERT INTO media_decisions
             (post_id, run_id, candidate_id, role, subject, reason_code, disposition, scope, evidence_reference, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, CURRENT_TIMESTAMP)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)""",
             (int(post_id), run_id, candidate_id, role, str(candidate.get("subject") or ""),
-             safe_reason_code, disposition, reference),
+             safe_reason_code, disposition, reference, created_at),
         )
         db.commit()
 
