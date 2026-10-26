@@ -322,7 +322,7 @@ def _human_required_evidence(root: Path, post: dict[str, Any], client: Any | Non
                 media_reconciled = all(client.get_media(int(row["wordpress_media_id"])) for row in usage_rows if row.get("wordpress_media_id"))
             except Exception:
                 media_reconciled = False
-    external = bool(uncertain_present or journal_uncertain or operation_rows or (registry_rows.get("media_usage", 0) and not media_reconciled) or markers)
+    external = bool(uncertain_present or journal_uncertain or operation_rows or (registry_rows.get("media_usage", 0) and not media_reconciled))
     return {
         "artifacts": artifacts,
         "journal": journal_present,
