@@ -28,6 +28,11 @@ def test_active_epoch_protects_pending_post_and_allows_other(tmp_path):
     assert [row[0] for row in chosen] == [12]
 
 
+def test_missing_active_epoch_fails_closed(tmp_path):
+    with pytest.raises(EpochProtectionError, match="missing"):
+        load_epoch_protection(tmp_path)
+
+
 def test_malformed_active_epoch_fails_closed(tmp_path):
     active = tmp_path / "work/v2-epochs/active"
     active.mkdir(parents=True)

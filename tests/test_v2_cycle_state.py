@@ -6,6 +6,12 @@ from unicornio_editor.pipeline_v2.cycle import CycleConfig, CycleRoundResult, ru
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
 
 
+def _epoch(tmp_path):
+    path = tmp_path / "work" / "v2-epochs" / "active" / "epoch.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema_version": 1, "epoch_id": "test-epoch", "protected_transaction_ids": [115757]}), encoding="utf-8")
+
+
 def retry_detail(post_id, *, progress=True):
     return {
         "post_id": post_id,
@@ -16,6 +22,7 @@ def retry_detail(post_id, *, progress=True):
 
 
 def test_cycle_state_store_writes_atomic_checkpoint_and_append_only_journal(tmp_path):
+    _epoch(tmp_path)
     store = CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="cycle-test")
     store.start_round(state, round_number=1, request={"batch_size": 1})
@@ -125,6 +132,7 @@ def test_cycle_store_does_not_charge_pause_between_cron_invocations(tmp_path):
 
 
 def test_cycle_store_invalidates_authorization_as_distinct_audit_event(tmp_path):
+    _epoch(tmp_path)
     store = CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="invalidate")
     store.start_round(state, round_number=4, request={"max_new_posts": 0})

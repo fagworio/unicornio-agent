@@ -34,7 +34,7 @@ class EpochProtection:
 def load_epoch_protection(root: str | Path) -> EpochProtection:
     path = Path(root) / "work" / "v2-epochs" / "active" / "epoch.json"
     if not path.exists():
-        return EpochProtection(None, frozenset(), path)
+        raise EpochProtectionError(f"active epoch protection missing: {path}")
     try:
         raw_bytes = path.read_bytes()
         payload: Any = json.loads(raw_bytes)
