@@ -179,6 +179,7 @@ def _registry_projection(source: Path, target: Path, epoch_id: str) -> dict[str,
     if target.exists():
         target.unlink()
     target_conn = sqlite3.connect(str(target))
+    target_conn.execute("PRAGMA journal_mode=WAL")
     target_conn.execute("PRAGMA foreign_keys=ON")
     tables = [row[0] for row in source_conn.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name")]
     copied: dict[str, int] = {}
@@ -190,7 +191,7 @@ def _registry_projection(source: Path, target: Path, epoch_id: str) -> dict[str,
         if table == "media_decisions" and "scope" in columns:
             rows = source_conn.execute(
                 "select " + ",".join(columns) + " from media_decisions "
-                "where lower(coalesce(scope,'')) in ('asset','global','library')"
+                "where lower(coalesce(scope,'')) in ('asset','candidate','global','library')"
             ).fetchall()
         else:
             rows = source_conn.execute(f"select {','.join(columns)} from {table}").fetchall()
@@ -258,6 +259,35 @@ def _reset_transition_path(root: Path, operation_id: str) -> Path:
     return root / "work" / "v2-epochs" / "transitions" / f"{operation_id}.json"
 
 
+def _human_required_audit(posts: list[dict[str, Any]], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> list[dict[str, Any]]:
+    audit: list[dict[str, Any]] = []
+    for post in posts:
+        state, error = _state_from_post(post)
+        if error or not state or state.state is not LifecycleState.HUMAN_REQUIRED:
+            continue
+        pid = int(post["id"])
+        if pid in quarantine or pid in protected:
+            classification = "protected_uncertain"
+        elif post.get("status") == "awaiting_human":
+            classification = "human_review_aligned"
+        elif post.get("status") == "pending":
+            classification = "administrative_status_mismatch"
+        else:
+            classification = "status_out_of_scope"
+        audit.append({
+            "post_id": pid,
+            "wordpress_status": post.get("status"),
+            "canonical_state": state.state.value,
+            "phase": state.phase.value,
+            "blocker": state.blocker,
+            "classification": classification,
+            "quarantine": pid in quarantine,
+            "protected": pid in protected,
+            "content_sha256": _post_fingerprint(post)["content_sha256"],
+        })
+    return sorted(audit, key=lambda row: row["post_id"])
+
+
 def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: bool = False, preview_evidence: Path | None = None, operator_authorization: str | None = None, report_dir: Path | None = None) -> dict[str, Any]:
     if preview == apply:
         raise ResetEpochError("choose exactly one of --preview or --apply")
@@ -273,6 +303,8 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         row = _classify(root, post, quarantine, protected)
         row["snapshot"] = _post_fingerprint(post)
         classifications.append(row)
+    human_required_audit = _human_required_audit(posts, quarantine, protected)
+    _write_json(report_dir / "human-required-audit.json", human_required_audit)
     snapshot = {
         "schema_version": 1,
         "operation_id": uuid.uuid4().hex,
@@ -300,10 +332,28 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         if not operation_id:
             raise ResetEpochError("preview evidence has no operation identity")
         resume_transition = _read_json(_reset_transition_path(root, operation_id), {}) or {}
+        if resume_transition:
+            if resume_transition.get("operation_id") != operation_id:
+                raise ResetEpochError("transition operation identity mismatch")
+            if resume_transition.get("preview_hash") != evidence.get("snapshot_hash"):
+                raise ResetEpochError("transition preview hash mismatch")
+            if resume_transition.get("new_epoch_id") != evidence.get("new_epoch_id"):
+                raise ResetEpochError("transition epoch identity mismatch")
+            if resume_transition.get("authorization") and resume_transition.get("authorization") != str(operator_authorization or ""):
+                raise ResetEpochError("authorization identity mismatch on resume")
         if evidence.get("snapshot_hash") != snapshot["snapshot_hash"]:
             if resume_transition.get("phase") not in {"APPLYING", "READBACK_VERIFIED"}:
                 raise ResetEpochError("preview evidence is stale or does not match current production snapshot")
             snapshot["resume"] = True
+            frozen = evidence.get("posts")
+            if not isinstance(frozen, list) or not frozen:
+                raise ResetEpochError("resume evidence has no frozen post scope")
+            current_by_id = {int(item["id"]): item for item in posts}
+            missing = [int(row["post_id"]) for row in frozen if int(row["post_id"]) not in current_by_id]
+            if missing:
+                raise ResetEpochError(f"frozen post scope no longer readable: {missing[:10]}")
+            classifications = [dict(row) for row in frozen]
+            posts = [current_by_id[int(row["post_id"])] for row in frozen]
         snapshot["operation_id"] = operation_id
         snapshot["old_epoch_id"] = str(evidence.get("old_epoch_id") or "legacy-unversioned")
         snapshot["new_epoch_id"] = str(evidence.get("new_epoch_id") or "")
@@ -322,11 +372,17 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
             return result
     if _active_processes():
         raise ResetEpochError("active V2/Publisher process prevents reset")
-    reset_lock = RunSessionLock(root / "work" / "v2-reset-epoch.lock")
+    reset_lock = RunSessionLock(root / "work" / "v2-reset-epoch.lock", allow_maintenance=True)
     if not reset_lock.acquire():
         raise ResetEpochError("reset lock unavailable")
     maintenance_path = root / "work" / "v2-maintenance.lock"
     run_lock = RunSessionLock(root / "work" / "v2-run.lock", allow_maintenance=True)
+    mutation_started = bool(
+        resume_transition
+        and resume_transition.get("phase") in {"APPLYING", "READBACK_VERIFIED"}
+        and (resume_transition.get("reset_post_ids") or maintenance_path.exists())
+    )
+    completed = False
     try:
         _write_json(maintenance_path, {"operation_id": snapshot["operation_id"], "phase": "APPLYING", "created_at": _now()})
         if not run_lock.acquire():
@@ -365,6 +421,10 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
             post_journal = post_journal_dir / f"{pid}.json"
             prior = _read_json(post_journal, {}) or {}
             if prior.get("phase") == "READBACK_VERIFIED":
+                current = client.get_post(pid)
+                confirmed_after = prior.get("after") or {}
+                if _post_fingerprint(current) != confirmed_after or current.get("status") != "pending" or _state_from_post(current)[0] != _initial_state():
+                    raise ResetEpochError(f"post {pid} completed readback diverged during resume")
                 if pid not in changed:
                     changed.append(pid)
                 continue
@@ -385,6 +445,7 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
                 if key in old_meta:
                     payload_meta[key] = None
             _post_reset_journal(post_journal, {**before, "phase": "APPLYING", "write": payload_meta})
+            mutation_started = True
             if current.get("status") == "awaiting_human":
                 client.move_to_status(pid, "pending")
             client.update_post(pid, {"meta": payload_meta})
@@ -398,6 +459,7 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
             _write_json(archive / "post-readbacks" / f"{pid}.json", {"post_id": pid, "before": row["snapshot"], "after": after})
             if pid not in changed: changed.append(pid)
         transition.update({"phase": "READBACK_VERIFIED", "reset_post_ids": sorted(changed), "updated_at": _now()}); _write_json(transition_path, transition)
+        mutation_started = True
         for source, name in ((root / "work" / "v2-cycle", "active-v2-cycle"), (root / "work" / "v2-journal", "active-v2-journal"), (root / "backups", "active-root-backups"), (root / "work" / "backups", "active-work-backups")):
             if source.exists():
                 target = archive / name
@@ -413,11 +475,13 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         _write_json(root / "work" / "v2-epochs" / "active" / "epoch.json", epoch)
         result = {"status": "EDITORIAL_RESET_COMPLETE", "operation_id": snapshot["operation_id"], "epoch_id": snapshot["new_epoch_id"], "cycle_id": new_cycle.cycle_id, "reset_post_ids": sorted(changed), "protected_ids": sorted(protected), "counts": snapshot["counts"], "registry_projection": copied, "wordpress_writes": len(changed), "archive": str(archive)}
         transition.update({"phase": "ACTIVATED", "cycle_id": new_cycle.cycle_id, "registry_projection": copied, "readback_count": len(changed), "result": result, "updated_at": _now()}); _write_json(transition_path, transition)
+        completed = True
         return result
     finally:
         run_lock.release()
-        try:
-            maintenance_path.unlink()
-        except FileNotFoundError:
-            pass
+        if completed or not mutation_started:
+            try:
+                maintenance_path.unlink()
+            except FileNotFoundError:
+                pass
         reset_lock.release()

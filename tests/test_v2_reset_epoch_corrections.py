@@ -3,11 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
-from unicornio_editor.pipeline_v2.reset_epoch import (
-    _active_artifact_roots,
-    _initial_state,
-    _registry_projection,
-)
+from unicornio_editor.pipeline_v2.reset_epoch import _active_artifact_roots, _classify, _human_required_audit, _initial_state, _registry_projection
 
 
 def test_active_artifact_roots_include_real_root_backups(tmp_path):
@@ -29,7 +25,7 @@ def test_registry_projection_excludes_post_scoped_decisions(tmp_path):
       insert into media_decisions values(1,12,'run','c',1,'inline','subject','match','accepted','post',null,'e','2026-01-01');
       insert into media_decisions values(2,0,'','c',1,'asset','subject','match','accepted','asset',null,'e','2026-01-01');
     """)
-    con.commit(); con.close()
+    con.commit(); con.execute("pragma journal_mode=wal"); con.commit(); con.close()
     copied = _registry_projection(source, target, "epoch")
     out = sqlite3.connect(target)
     assert out.execute("select count(*) from media_assets").fetchone()[0] == 1
