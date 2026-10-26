@@ -299,6 +299,66 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
         return candidate
     return candidate
+def search_wikimedia_commons_candidates(
+   query: str, *, limit: int = 12, audit=None, url_policy: str = "audit"
+) -> list[dict[str, Any]]:
+   """Discover Commons file pages with rights metadata in one authoritative call."""
+   api = (
+       "https://commons.wikimedia.org/w/api.php?action=query&format=json"
+       "&generator=search&gsrnamespace=6&gsrsearch=" + quote(str(query), safe="")
+       + f"&gsrlimit={max(1, min(int(limit), 50))}"
+       + "&prop=imageinfo&iiprop=url|extmetadata"
+   )
+   payload = _fetch(api, "application/json", _PAGE_MAX_BYTES, [_VERIFY_TOTAL_MAX_BYTES], audit, url_policy)
+   if not payload:
+       return []
+   try:
+       pages = (json.loads(payload.decode("utf-8", "ignore")).get("query") or {}).get("pages") or {}
+   except (TypeError, ValueError, json.JSONDecodeError):
+       return []
+   from .license import attest_wikimedia_rights
+   result: list[dict[str, Any]] = []
+   for page in pages.values():
+       info = (page.get("imageinfo") or [None])[0] or {}
+       metadata = info.get("extmetadata") or {}
+       def value(name: str) -> str:
+           item = metadata.get(name) or {}
+           return str(item.get("value") if isinstance(item, dict) else item or "").strip()
+       title = str(page.get("title") or "").strip()
+       direct = str(info.get("url") or "").strip()
+       license_name = value("LicenseShortName")
+       license_url = value("LicenseUrl")
+       author = " ".join(re.sub(r"<[^>]+>", " ", value("Artist")).split())
+       if not title or not direct or not license_name or not license_url or not author:
+           continue
+       candidate = {
+           "source_page_url": "https://commons.wikimedia.org/wiki/" + quote(title.removeprefix("File:"), safe=":/()'!,._-"),
+           "direct_image_url": direct,
+           "author": author,
+           "license": license_name,
+           "license_url": license_url,
+           "captured_at": __import__("datetime").date.today().isoformat(),
+           "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
+           "alt_text": title.removeprefix("File: ") or str(query),
+           "rights_evidence": {
+               "provider": "wikimedia_commons_api",
+               "file_title": title,
+               "image_url": direct,
+               "license": license_name,
+               "license_url": license_url,
+               "author": author,
+           },
+           "rights_checked": True,
+           "origin_type": "wikimedia_commons",
+           "subject": str(query),
+       }
+       attestation = attest_wikimedia_rights(candidate)
+       if not attestation:
+           continue
+       candidate["source_rights_attestation"] = attestation
+       candidate["rights_verified"] = True
+       result.append(candidate)
+   return result
 
 
 def _fetch(

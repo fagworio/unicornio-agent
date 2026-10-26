@@ -2290,7 +2290,14 @@ class ProductionMediaResolver:
                 candidate["section_heading"] = metadata.get("heading") or subject
                 candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
-            from ..media.source_verify import enrich_wikimedia_rights
+            from ..media.source_verify import enrich_wikimedia_rights, search_wikimedia_commons_candidates
+            if not any(candidate.get("rights_verified") is True for candidate in candidates):
+                candidates.extend(
+                    search_wikimedia_commons_candidates(
+                        f"{subject} {query}", limit=max(needed * 2, 8),
+                        url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
+                    )
+                )
             candidates = [
                 enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
                 for candidate in candidates
