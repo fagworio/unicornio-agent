@@ -388,7 +388,7 @@ class SourceVerifyTests(unittest.TestCase):
         }]}}}}).encode()
         candidate = {
             "source_page_url": "https://commons.wikimedia.org/wiki/File:Game.jpg",
-            "direct_image_url": "https://upload.wikimedia.org/old.jpg",
+            "direct_image_url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
             "subject": "Game",
         }
         with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload):
@@ -397,6 +397,27 @@ class SourceVerifyTests(unittest.TestCase):
         self.assertEqual(enriched["direct_image_url"], "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg")
         self.assertEqual(enriched["license"], "CC BY-SA 4.0")
         self.assertEqual(enriched["source_rights_attestation"]["provider"], "wikimedia_commons_api")
+
+    def test_wikimedia_api_rejects_different_discovered_representation(self):
+        payload = json.dumps({"query": {"pages": {"1": {"imageinfo": [{
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
+            "extmetadata": {
+                "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
+                "Artist": {"value": "Author"},
+            },
+        }]}}}}).encode()
+        candidate = {
+            "source_page_url": "https://commons.wikimedia.org/wiki/File:Game.jpg",
+            "direct_image_url": "https://upload.wikimedia.org/discovered.jpg",
+            "subject": "Game",
+        }
+        with mock.patch(
+            "unicornio_editor.media.source_verify._fetch",
+            side_effect=[payload, _png_bytes((200, 30, 30)), _png_bytes((30, 30, 200))],
+        ):
+            enriched = enrich_wikimedia_rights(candidate)
+        self.assertNotIn("rights_verified", enriched)
 
 
 if __name__ == "__main__":

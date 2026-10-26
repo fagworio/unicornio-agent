@@ -3426,6 +3426,16 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
         "engine": "duckduckgo",
         "candidate_id": "ddg-wolverine-1",
     }
+    item["rights_evidence"] = {
+        "provider": "wikimedia_commons_api",
+        "image_url": item["direct_image_url"],
+        "author": item["author"],
+        "license": item["license"],
+        "license_url": item["license_url"],
+    }
+    from unicornio_editor.media.license import attest_wikimedia_rights
+    item["rights_verified"] = True
+    item["source_rights_attestation"] = attest_wikimedia_rights(item)
     editorial = {"seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"}, "cleaned_html": "<p>Wolverine videogame.</p>", "media_plan": [item]}
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
     with _mock_source_rights(), \

@@ -2481,7 +2481,7 @@ def _execute_media_plan(
                 position, item = pair
                 vision_evidence_record: dict[str, Any] | None = None
                 evidence = {
-                    name: item[name]
+                    name: item.get(name)
                     for name in (
                         "source_page_url",
                         "direct_image_url",
@@ -2491,6 +2491,9 @@ def _execute_media_plan(
                         "captured_at",
                         "credit_text",
                         "alt_text",
+                        "rights_verified",
+                        "rights_evidence",
+                        "source_rights_attestation",
                     )
                 }
                 license_error = _media_license_rejection(evidence)
@@ -2571,8 +2574,29 @@ def _execute_media_plan(
                     ),
                 )
                 rights_attestation = evidence.get("source_rights_attestation") if evidence.get("rights_verified") else None
+                if evidence.get("rights_verified"):
+                    from .media.license import LicenseError, validate_upload_candidate
+                    try:
+                        validate_upload_candidate(evidence)
+                    except LicenseError as exc:
+                        detail = f"atestação de direitos inválida: {exc}"
+                        _funnel("license_source_proof", "rejected", item, position, detail)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "rejected",
+                            "detail": detail[:200],
+                            "reason_code": "image_rights_attestation_invalid",
+                            "recoverable": False,
+                        }
                 if not isinstance(rights_attestation, dict):
-                    rights_attestation = attest_source_rights(evidence, page_html or "")
+                    rights_candidate = {
+                        key: evidence.get(key)
+                        for key in (
+                            "source_page_url", "direct_image_url", "author", "license",
+                            "license_url", "captured_at", "credit_text", "alt_text",
+                        )
+                    }
+                    rights_attestation = attest_source_rights(rights_candidate, page_html or "")
                 if rights_attestation is None:
                     detail = "a origem não comprova licença compatível vinculada a esta imagem"
                     _funnel("license_source_proof", "rejected", item, position, detail)

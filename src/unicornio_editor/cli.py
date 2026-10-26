@@ -2378,11 +2378,25 @@ def _enriquecer_candidatos(
                 pass
         return hashes_locais.get(chave)
 
+    def _rights_proven_for_capacity(candidate: dict[str, Any]) -> bool:
+        if candidate.get("rights_verified") is not True:
+            return False
+        try:
+            from .media.license import validate_upload_candidate
+            validate_upload_candidate(candidate)
+        except Exception:
+            return False
+        return True
+
     def _fortes_distintos() -> int:
         fortes = [
             dict(forte)
             for forte in aprovados
             if (forte.get("evidence") or {}).get("verdict") == "deterministic_match"
+            and (
+                not forte.get("rights_checked")
+                or _rights_proven_for_capacity(forte)
+            )
         ]
         if not fortes:
             return 0

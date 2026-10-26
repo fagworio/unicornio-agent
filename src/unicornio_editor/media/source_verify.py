@@ -261,6 +261,16 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
         direct = str(info.get("url") or "").strip()
         if not direct or not license_name or not license_url or not author:
             return candidate
+        discovered = str(candidate.get("direct_image_url") or "").strip()
+        if discovered and discovered != direct:
+            budget = [_VERIFY_TOTAL_MAX_BYTES]
+            discovered_bytes = _fetch(discovered, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+            authorized_bytes = _fetch(direct, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+            if not discovered_bytes or not authorized_bytes:
+                return candidate
+            equivalent, _identity_reason = verify_image_identity(discovered_bytes, authorized_bytes)
+            if not equivalent:
+                return candidate
         enriched = dict(candidate)
         enriched.update({
             "source_page_url": source,
