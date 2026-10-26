@@ -4309,7 +4309,7 @@ def run_v2(
         from ..workflow import _guard_post_client
 
         for post_id, context in selected:
-            post_client = _guard_post_client(client, post_lock_handles[int(post_id)])
+            post_client = _guard_post_client(client, post_lock_handles[int(post_id)], root=root, post_id=int(post_id))
             stages = {
                 "editorial": ProductionEditorialStage(post_client, config, root),
                 "media": ProductionMediaStage(

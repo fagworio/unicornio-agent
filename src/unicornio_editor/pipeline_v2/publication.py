@@ -290,7 +290,7 @@ def repair_lost_ready_hash(
             continue
         try:
             with _acquire_post_lock(root, config, post_id) as lock_handle:
-                guarded_client = _guard_post_client(client, lock_handle)
+                guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
                 current = _lost_ready_hash_report(
                     guarded_client, root, post_id, policy_version=config.policy_version
                 )
@@ -400,7 +400,7 @@ def reconcile_published_v2(
             continue
         try:
             with _acquire_post_lock(root, config, post_id) as lock_handle:
-                guarded_client = _guard_post_client(client, lock_handle)
+                guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
                 current = audit_publication_post(guarded_client, post_id, policy_version=config.policy_version)
                 if current.get("precondition_signature") != report.get("precondition_signature"):
                     skipped.append({"post_id": post_id, "reason": "changed_after_scan"})

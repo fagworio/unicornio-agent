@@ -196,11 +196,14 @@ class CycleStateStore:
         authorization_id: str | None = None,
     ) -> str:
         authorization_id = str(authorization_id or uuid.uuid4().hex)
+        protection = load_epoch_protection(self.root)
         state.pending_round = {
             "round_number": int(round_number),
             "request": dict(request),
             "preview_selected_ids": None,
             "authorization_id": authorization_id,
+            "epoch_id": protection.epoch_id,
+            "epoch_policy_fingerprint": protection.policy_fingerprint,
         }
         self.save(
             state,
@@ -215,6 +218,10 @@ class CycleStateStore:
         if not state.pending_round:
             raise RuntimeError("cannot authorize a round without a pending round")
         protection = load_epoch_protection(self.root)
+        if (
+            pending_epoch := str(state.pending_round.get("epoch_id") or "")
+        ) != str(protection.epoch_id or "") or str(state.pending_round.get("epoch_policy_fingerprint") or "") != protection.policy_fingerprint:
+            raise RuntimeError("epoch policy changed since round start")
         protected = sorted(set(int(value) for value in selected_ids).intersection(protection.protected_ids))
         if protected:
             raise RuntimeError(f"epoch-protected posts cannot be authorized: {protected}")

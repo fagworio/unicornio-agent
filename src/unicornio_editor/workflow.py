@@ -148,9 +148,11 @@ class _PostLockGuardedClient:
 
     _MUTATING_METHODS = {"update_post", "move_to_status", "publish", "upload_media"}
 
-    def __init__(self, client: Any, lock_handle: Any):
+    def __init__(self, client: Any, lock_handle: Any, *, root: Path | None = None, post_id: int | None = None):
         self._client = client
         self._lock_handle = lock_handle
+        self._root = Path(root) if root is not None else None
+        self._post_id = int(post_id) if post_id is not None else None
 
     def __getattr__(self, name: str):
         method = getattr(self._client, name)
@@ -159,6 +161,8 @@ class _PostLockGuardedClient:
 
         def guarded_write(*args, **kwargs):
             self._lock_handle.assert_owned()
+            if self._root is not None and self._post_id is not None:
+                load_epoch_protection(self._root).assert_writable(self._post_id, effect=name)
             scope = getattr(self._client, "post_write_guard", None)
             if callable(scope):
                 with scope(self._lock_handle.assert_owned):
@@ -169,8 +173,8 @@ class _PostLockGuardedClient:
         return guarded_write
 
 
-def _guard_post_client(client: Any, lock_handle: Any) -> _PostLockGuardedClient:
-    return _PostLockGuardedClient(client, lock_handle)
+def _guard_post_client(client: Any, lock_handle: Any, *, root: Path | None = None, post_id: int | None = None) -> _PostLockGuardedClient:
+    return _PostLockGuardedClient(client, lock_handle, root=root, post_id=post_id)
 
 
 def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str, Any]:
@@ -296,7 +300,7 @@ def apply_editorial(
     """Apply an editorial result while exclusively owning the post."""
     assert_post_not_quarantined(root, post_id, operation="apply")
     with _acquire_post_lock(root, config, post_id) as lock_handle:
-        guarded_client = _guard_post_client(client, lock_handle)
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
         return _apply_editorial_unlocked(guarded_client, config, root, post_id, payload)
 
 
@@ -3278,7 +3282,7 @@ def publish_post(
     """Publish one post while excluding a concurrent editorial mutation."""
     assert_post_not_quarantined(root, post_id, operation="publish")
     with _acquire_post_lock(root, config, post_id) as lock_handle:
-        guarded_client = _guard_post_client(client, lock_handle)
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
         return _publish_post_unlocked(guarded_client, config, root, post_id)
 
 
@@ -4505,6 +4509,7 @@ def publish_ready_posts(
     awaiting_human/uncertain/skipped são ignorados sem custo (sem checklist).
     ``limit`` conta somente publicados; ``limit=0`` = sem cota.
     """
+    protection = load_epoch_protection(root)
     outcomes: list[dict[str, Any]] = _reconcile_persisted_uncertain_publications(
         client, config, root,
     )
@@ -4525,6 +4530,9 @@ def publish_ready_posts(
     for candidate in posts:
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, int):
+            continue
+        if protection.is_protected(candidate_id):
+            outcomes.append({"post_id": candidate_id, "wordpress_changed": False, "status": "blocked", "reason": "epoch_protected_transaction", "epoch_protected": True})
             continue
         v2_state = _read_v2_work_state(candidate)
         if v2_state is not None:
@@ -4608,14 +4616,18 @@ def _reconcile_persisted_uncertain_publications(
     if not marker_dir.is_dir():
         return []
     outcomes: list[dict[str, Any]] = []
+    protection = load_epoch_protection(root)
     for marker in sorted(marker_dir.glob("*.json")):
         try:
             post_id = int(marker.stem)
         except ValueError:
             continue
+        if protection.is_protected(post_id):
+            outcomes.append({"post_id": post_id, "wordpress_changed": False, "status": "blocked", "reason": "epoch_protected_transaction", "epoch_protected": True})
+            continue
         try:
             with _acquire_post_lock(root, config, post_id) as lock_handle:
-                guarded_client = _guard_post_client(client, lock_handle)
+                guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
                 post = guarded_client.get_post(post_id)
                 if config.dry_run:
                     outcomes.append({
@@ -5791,7 +5803,7 @@ def retry_post(
 ) -> dict[str, Any]:
     """Reopen a post while sharing the per-post writer lock with the pipeline."""
     with _acquire_post_lock(root, config, post_id) as lock_handle:
-        guarded_client = _guard_post_client(client, lock_handle)
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
         return _retry_post_unlocked(guarded_client, config, root, post_id)
 
 
@@ -5883,7 +5895,7 @@ def discard_post(
 ) -> dict[str, Any]:
     """Discard a post under the same cross-process lock as pipeline writes."""
     with _acquire_post_lock(root, config, post_id) as lock_handle:
-        guarded_client = _guard_post_client(client, lock_handle)
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
         return _discard_post_unlocked(guarded_client, config, root, post_id, reason=reason)
 
 

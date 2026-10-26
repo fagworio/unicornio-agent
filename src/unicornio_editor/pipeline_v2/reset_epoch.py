@@ -18,6 +18,7 @@ from typing import Any
 
 from ..backup import atomic_write_text
 from ..pipeline_v2.cycle_state import CycleStateStore
+from ..pipeline_v2.epoch_protection import load_epoch_protection
 from ..pipeline_v2.lock import RunSessionLock
 from ..pipeline_v2.model import CURRENT_RETRY_POLICY_VERSION, LifecycleState, Phase, RetryInfo, WorkState
 
@@ -357,11 +358,12 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
     if preview == apply:
         raise ResetEpochError("choose exactly one of --preview or --apply")
     root = Path(root).resolve()
+    active_protection = load_epoch_protection(root)
     report_dir = Path(report_dir or (root / "work" / "v2-epochs" / "reports" / uuid.uuid4().hex)).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
     quarantine, quarantine_hash = _quarantine(root)
     posts = _all_posts(client)
-    protected = _protected_ids(root)
+    protected = _protected_ids(root) | set(active_protection.protected_ids)
     cycle = _cycle_snapshot(root)
     classifications = []
     for post in posts:
@@ -386,13 +388,15 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         "new_epoch_id": uuid.uuid4().hex,
         "generated_at": _now(),
         "production_sha": os.popen(f"git -C {root} rev-parse HEAD").read().strip(),
+        "active_epoch_id": active_protection.epoch_id,
+        "active_epoch_policy_fingerprint": active_protection.policy_fingerprint,
         "quarantine_sha256": quarantine_hash,
         "cycle": cycle,
         "registry_sha256": _file_sha(root / "work" / "media_registry.sqlite"),
         "posts": classifications,
         "counts": {name: sum(1 for row in classifications if row["classification"] == name) for name in sorted({row["classification"] for row in classifications})},
     }
-    snapshot["snapshot_hash"] = _sha(_json({key: snapshot[key] for key in ("production_sha", "quarantine_sha256", "cycle", "registry_sha256", "posts", "counts")}).encode())
+    snapshot["snapshot_hash"] = _sha(_json({key: snapshot[key] for key in ("production_sha", "active_epoch_id", "active_epoch_policy_fingerprint", "quarantine_sha256", "cycle", "registry_sha256", "posts", "counts")}).encode())
     evidence = None
     resume_transition = None
     if not preview:
