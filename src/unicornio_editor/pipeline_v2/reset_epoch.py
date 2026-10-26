@@ -27,8 +27,8 @@ LEGACY_KEYS = (
     "_hermes_last_error", "_hermes_partial_kind", "_hermes_media_required",
     "_hermes_media_completed", "_hermes_media_missing", "_hermes_no_progress_attempts",
     "_hermes_ready_manifest", "_hermes_ready_hash",
-    "_hermes_human_reopened_at", "_hermes_human_reopened_from",
 )
+HUMAN_REOPEN_KEYS = ("_hermes_human_reopened_at", "_hermes_human_reopened_from")
 PROTECTED_POST_ID = 115757
 
 
@@ -106,7 +106,7 @@ def _cycle_snapshot(root: Path) -> dict[str, Any]:
 
 def _post_fingerprint(post: dict[str, Any]) -> dict[str, Any]:
     meta = post.get("meta") or {}
-    relevant_meta = {key: meta.get(key) for key in sorted(set(LEGACY_KEYS + ("_hermes_work_state",)))}
+    relevant_meta = {key: meta.get(key) for key in sorted(set(LEGACY_KEYS + HUMAN_REOPEN_KEYS + ("_hermes_work_state",)))}
     content = (post.get("content") or {}).get("raw", (post.get("content") or {}).get("rendered", ""))
     return {
         "id": int(post["id"]), "status": post.get("status"),
@@ -528,7 +528,19 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         copied = _registry_projection(root / "work" / "media_registry.sqlite", projection, snapshot["new_epoch_id"])
         os.replace(projection, root / "work" / "media_registry.sqlite")
         store = CycleStateStore(root); new_cycle = store.create({}, cycle_id=uuid.uuid4().hex)
-        epoch = {"schema_version": 1, "epoch_id": snapshot["new_epoch_id"], "old_epoch_id": snapshot["old_epoch_id"], "operation_id": snapshot["operation_id"], "cycle_id": new_cycle.cycle_id, "protected_transaction_ids": sorted(protected), "reset_post_ids": sorted(changed), "preserved_post_ids": [int(row["post_id"]) for row in classifications if row["classification"] == "preserve_published"], "activated_at": _now()}
+        invalidated_reopen_ids = sorted(
+            int(row["post_id"])
+            for row in classifications
+            if row["classification"] == "reset"
+            and any(row.get("snapshot", {}).get("meta", {}).get(key) for key in HUMAN_REOPEN_KEYS)
+        )
+        _write_json(archive / "human-reopen-invalidations.json", {
+            "schema_version": 1,
+            "operation_id": snapshot["operation_id"],
+            "post_ids": invalidated_reopen_ids,
+            "reason": "prior-generation-human-reopen-markers-archived-not-authorizations",
+        })
+        epoch = {"schema_version": 1, "epoch_id": snapshot["new_epoch_id"], "old_epoch_id": snapshot["old_epoch_id"], "operation_id": snapshot["operation_id"], "cycle_id": new_cycle.cycle_id, "protected_transaction_ids": sorted(protected), "invalidated_human_reopen_ids": invalidated_reopen_ids, "reset_post_ids": sorted(changed), "preserved_post_ids": [int(row["post_id"]) for row in classifications if row["classification"] == "preserve_published"], "activated_at": _now()}
         (root / "work" / "v2-epochs" / "active").mkdir(parents=True, exist_ok=True)
         _write_json(root / "work" / "v2-epochs" / "active" / "epoch.json", epoch)
         result = {"status": "EDITORIAL_RESET_COMPLETE", "operation_id": snapshot["operation_id"], "epoch_id": snapshot["new_epoch_id"], "cycle_id": new_cycle.cycle_id, "reset_post_ids": sorted(changed), "protected_ids": sorted(protected), "counts": snapshot["counts"], "registry_projection": copied, "wordpress_writes": len(changed), "archive": str(archive)}
