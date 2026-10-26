@@ -5,12 +5,16 @@ from pathlib import Path
 
 
 class RunSessionLock:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, allow_maintenance: bool = False):
         self.path = Path(path)
+        self.allow_maintenance = allow_maintenance
         self._handle = None
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        maintenance = self.path.parent / "v2-maintenance.lock"
+        if maintenance.exists() and not self.allow_maintenance:
+            return False
         self._handle = self.path.open("a+")
         try:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -167,6 +167,12 @@ def _all_posts(client: Any) -> list[dict[str, Any]]:
     return [unique[key] for key in sorted(unique)]
 
 
+def _active_artifact_roots(root: Path) -> list[Path]:
+    """Return only the roots that production readers treat as active."""
+    roots = [Path(root) / "backups", Path(root) / "work" / "backups"]
+    return [path for path in roots if path.exists()]
+
+
 def _registry_projection(source: Path, target: Path, epoch_id: str) -> dict[str, int]:
     source_conn = sqlite3.connect(str(source))
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +187,13 @@ def _registry_projection(source: Path, target: Path, epoch_id: str) -> dict[str,
         target_conn.execute(ddl)
     for table in ("media_assets", "media_decisions", "schema_meta"):
         columns = [row[1] for row in source_conn.execute(f"pragma table_info({table})")]
-        rows = source_conn.execute(f"select {','.join(columns)} from {table}").fetchall()
+        if table == "media_decisions" and "scope" in columns:
+            rows = source_conn.execute(
+                "select " + ",".join(columns) + " from media_decisions "
+                "where lower(coalesce(scope,'')) in ('asset','global','library')"
+            ).fetchall()
+        else:
+            rows = source_conn.execute(f"select {','.join(columns)} from {table}").fetchall()
         if rows:
             marks = ",".join("?" for _ in columns)
             target_conn.executemany(f"insert into {table} ({','.join(columns)}) values ({marks})", rows)
@@ -207,6 +219,43 @@ def _active_processes() -> list[str]:
         if any(token in cmd for token in ("v2-cycle", "v2-run", "publish-ready", "unicorniohater-publish.sh")):
             found.append(cmd)
     return found
+
+
+def _copy_tree_verified(source: Path, target: Path) -> dict[str, str]:
+    if not source.exists():
+        return {}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    expected: dict[str, str] = {}
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            relative = str(path.relative_to(source))
+            copied = target / relative
+            if not copied.is_file() or _file_sha(path) != _file_sha(copied):
+                raise ResetEpochError(f"archive copy verification failed: {path}")
+            expected[relative] = _file_sha(path)
+    return expected
+
+
+def _archive_active_artifacts(root: Path, archive: Path) -> dict[str, Any]:
+    roots = _active_artifact_roots(root)
+    manifest: dict[str, Any] = {"roots": {}, "space_required": 0}
+    for source in roots:
+        size = sum(path.stat().st_size for path in source.rglob("*") if path.is_file())
+        manifest["space_required"] += size
+        target = archive / ("root-backups" if source == root / "backups" else "work-backups")
+        manifest["roots"][str(source)] = _copy_tree_verified(source, target)
+    if shutil.disk_usage(archive).free < int(manifest["space_required"] * 1.1) + 1024 * 1024:
+        raise ResetEpochError("insufficient disk space for verified artifact archive")
+    return manifest
+
+
+def _post_reset_journal(path: Path, payload: dict[str, Any]) -> None:
+    _write_json(path, payload)
+
+
+def _reset_transition_path(root: Path, operation_id: str) -> Path:
+    return root / "work" / "v2-epochs" / "transitions" / f"{operation_id}.json"
 
 
 def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: bool = False, preview_evidence: Path | None = None, operator_authorization: str | None = None, report_dir: Path | None = None) -> dict[str, Any]:
@@ -239,18 +288,27 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
     }
     snapshot["snapshot_hash"] = _sha(_json({key: snapshot[key] for key in ("production_sha", "quarantine_sha256", "cycle", "registry_sha256", "posts", "counts")}).encode())
     evidence = None
+    resume_transition = None
     if not preview:
         evidence_path = Path(preview_evidence or "")
         if evidence_path.is_dir():
             evidence_path /= "preview.json"
         evidence = _read_json(evidence_path)
-        if not isinstance(evidence, dict) or evidence.get("snapshot_hash") != snapshot["snapshot_hash"]:
-            raise ResetEpochError("preview evidence is stale or does not match current production snapshot")
-        snapshot["operation_id"] = str(evidence.get("operation_id") or "")
+        if not isinstance(evidence, dict):
+            raise ResetEpochError("preview evidence is missing or invalid")
+        operation_id = str(evidence.get("operation_id") or "")
+        if not operation_id:
+            raise ResetEpochError("preview evidence has no operation identity")
+        resume_transition = _read_json(_reset_transition_path(root, operation_id), {}) or {}
+        if evidence.get("snapshot_hash") != snapshot["snapshot_hash"]:
+            if resume_transition.get("phase") not in {"APPLYING", "READBACK_VERIFIED"}:
+                raise ResetEpochError("preview evidence is stale or does not match current production snapshot")
+            snapshot["resume"] = True
+        snapshot["operation_id"] = operation_id
         snapshot["old_epoch_id"] = str(evidence.get("old_epoch_id") or "legacy-unversioned")
         snapshot["new_epoch_id"] = str(evidence.get("new_epoch_id") or "")
-        if not snapshot["operation_id"] or not snapshot["new_epoch_id"]:
-            raise ResetEpochError("preview evidence has no operation or new epoch identity")
+        if not snapshot["new_epoch_id"]:
+            raise ResetEpochError("preview evidence has no new epoch identity")
     _write_json(report_dir / "preview.json", snapshot)
     if preview:
         return {"status": "RESET_PREVIEW_ONLY", "preview": str(report_dir / "preview.json"), **snapshot}
@@ -258,67 +316,108 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         raise ResetEpochError("operator authorization is required")
     if evidence is None:
         raise ResetEpochError("preview evidence is required")
+    if resume_transition and resume_transition.get("phase") == "ACTIVATED":
+        result = resume_transition.get("result")
+        if result and resume_transition.get("authorization") == str(operator_authorization):
+            return result
     if _active_processes():
         raise ResetEpochError("active V2/Publisher process prevents reset")
     reset_lock = RunSessionLock(root / "work" / "v2-reset-epoch.lock")
-    run_lock = RunSessionLock(root / "work" / "v2-run.lock")
-    if not reset_lock.acquire() or not run_lock.acquire():
-        reset_lock.release(); run_lock.release()
-        raise ResetEpochError("reset or V2 run lock unavailable")
+    if not reset_lock.acquire():
+        raise ResetEpochError("reset lock unavailable")
+    maintenance_path = root / "work" / "v2-maintenance.lock"
+    run_lock = RunSessionLock(root / "work" / "v2-run.lock", allow_maintenance=True)
     try:
+        _write_json(maintenance_path, {"operation_id": snapshot["operation_id"], "phase": "APPLYING", "created_at": _now()})
+        if not run_lock.acquire():
+            raise ResetEpochError("V2 run lock unavailable")
         transition_root = root / "work" / "v2-epochs" / "transitions"
+        transition_root.mkdir(parents=True, exist_ok=True)
         archive = root / "work" / "v2-epochs" / "archives" / snapshot["old_epoch_id"] / snapshot["operation_id"]
         archive.mkdir(parents=True, exist_ok=True)
-        transition = {"schema_version": 1, "operation_id": snapshot["operation_id"], "phase": "BACKUP_VERIFIED", "preview_hash": snapshot["snapshot_hash"], "authorization": str(operator_authorization), "new_epoch_id": snapshot["new_epoch_id"], "archive": str(archive), "updated_at": _now()}
-        _write_json(transition_root / f"{snapshot['operation_id']}.json", transition)
-        for source_name in ("v2-cycle", "v2-journal", "backups"):
-            source = root / "work" / source_name
-            if source.exists():
-                shutil.copytree(source, archive / source_name, dirs_exist_ok=True)
-        _write_json(archive / "preview.json", snapshot)
-        _write_json(archive / "wordpress-scope.json", {"captured_at": _now(), "posts": posts})
-        registry_backup = archive / "media_registry.sqlite.backup"
-        source_conn = sqlite3.connect(str(root / "work" / "media_registry.sqlite")); dest_conn = sqlite3.connect(str(registry_backup)); source_conn.backup(dest_conn); dest_conn.close(); source_conn.close()
-        transition["phase"] = "PREPARED"; transition["registry_backup"] = str(registry_backup); _write_json(transition_root / f"{snapshot['operation_id']}.json", transition)
+        transition_path = _reset_transition_path(root, snapshot["operation_id"])
+        transition = resume_transition or {"schema_version": 1, "operation_id": snapshot["operation_id"], "phase": "BACKUP_VERIFIED", "preview_hash": evidence["snapshot_hash"], "authorization": str(operator_authorization), "new_epoch_id": snapshot["new_epoch_id"], "archive": str(archive), "updated_at": _now()}
+        _write_json(transition_path, transition)
+        if transition.get("phase") == "BACKUP_VERIFIED":
+            for source_name in ("v2-cycle", "v2-journal"):
+                source = root / "work" / source_name
+                if source.exists():
+                    _copy_tree_verified(source, archive / source_name)
+            archive_manifest = _archive_active_artifacts(root, archive)
+            _write_json(archive / "preview.json", evidence)
+            _write_json(archive / "wordpress-scope.json", {"captured_at": _now(), "posts": posts})
+            _write_json(archive / "artifact-manifest.json", archive_manifest)
+            registry_backup = archive / "media_registry.sqlite.backup"
+            source_conn = sqlite3.connect(str(root / "work" / "media_registry.sqlite")); dest_conn = sqlite3.connect(str(registry_backup)); source_conn.backup(dest_conn); dest_conn.close(); source_conn.close()
+            transition.update({"phase": "PREPARED", "registry_backup": str(registry_backup), "artifact_manifest": str(archive / "artifact-manifest.json"), "updated_at": _now()})
+            _write_json(transition_path, transition)
+        transition["phase"] = "APPLYING"
+        _write_json(transition_path, transition)
         initial = _initial_state().to_dict()
-        changed: list[int] = []
+        changed = list(transition.get("reset_post_ids") or [])
+        post_journal_dir = archive / "post-reset-journals"
+        post_journal_dir.mkdir(parents=True, exist_ok=True)
+        (archive / "post-readbacks").mkdir(parents=True, exist_ok=True)
         for row in classifications:
             if row["classification"] != "reset":
                 continue
-            pid = int(row["post_id"]); current = client.get_post(pid)
-            if _post_fingerprint(current) != row["snapshot"]:
-                raise ResetEpochError(f"post {pid} changed after preview")
+            pid = int(row["post_id"])
+            post_journal = post_journal_dir / f"{pid}.json"
+            prior = _read_json(post_journal, {}) or {}
+            if prior.get("phase") == "READBACK_VERIFIED":
+                if pid not in changed:
+                    changed.append(pid)
+                continue
+            current = client.get_post(pid)
+            current_fp = _post_fingerprint(current)
+            if current_fp != row["snapshot"]:
+                read_state = _state_from_post(current)[0]
+                if current.get("status") == "pending" and read_state == _initial_state():
+                    _post_reset_journal(post_journal, {"post_id": pid, "phase": "READBACK_VERIFIED", "before": row["snapshot"], "after": current_fp, "resumed": True})
+                    if pid not in changed: changed.append(pid)
+                    continue
+                raise ResetEpochError(f"post {pid} changed after preview without verified reset state")
+            before = {"post_id": pid, "phase": "PREPARED", "before": row["snapshot"], "updated_at": _now()}
+            _post_reset_journal(post_journal, before)
             old_meta = current.get("meta") or {}
             payload_meta: dict[str, Any] = {"_hermes_work_state": json.dumps(initial, ensure_ascii=False, separators=(",", ":"))}
             for key in LEGACY_KEYS:
                 if key in old_meta:
                     payload_meta[key] = None
+            _post_reset_journal(post_journal, {**before, "phase": "APPLYING", "write": payload_meta})
             if current.get("status") == "awaiting_human":
                 client.move_to_status(pid, "pending")
             client.update_post(pid, {"meta": payload_meta})
             readback = client.get_post(pid)
             read_state = _state_from_post(readback)[0]
             if readback.get("status") != "pending" or read_state != _initial_state():
+                _post_reset_journal(post_journal, {**before, "phase": "READBACK", "after": _post_fingerprint(readback), "error": "readback_mismatch"})
                 raise ResetEpochError(f"post {pid} reset readback mismatch")
-            _write_json(archive / "post-readbacks" / f"{pid}.json", {"post_id": pid, "before": row["snapshot"], "after": _post_fingerprint(readback)})
-            changed.append(pid)
-        transition["phase"] = "APPLYING"; transition["reset_post_ids"] = changed; _write_json(transition_root / f"{snapshot['operation_id']}.json", transition)
-        old_cycle = root / "work" / "v2-cycle"; old_journal = root / "work" / "v2-journal"; old_backups = root / "work" / "backups"
-        for source, name in ((old_cycle, "v2-cycle"), (old_journal, "v2-journal"), (old_backups, "backups")):
+            after = _post_fingerprint(readback)
+            _post_reset_journal(post_journal, {"post_id": pid, "phase": "READBACK_VERIFIED", "before": row["snapshot"], "after": after, "updated_at": _now()})
+            _write_json(archive / "post-readbacks" / f"{pid}.json", {"post_id": pid, "before": row["snapshot"], "after": after})
+            if pid not in changed: changed.append(pid)
+        transition.update({"phase": "READBACK_VERIFIED", "reset_post_ids": sorted(changed), "updated_at": _now()}); _write_json(transition_path, transition)
+        for source, name in ((root / "work" / "v2-cycle", "active-v2-cycle"), (root / "work" / "v2-journal", "active-v2-journal"), (root / "backups", "active-root-backups"), (root / "work" / "backups", "active-work-backups")):
             if source.exists():
-                shutil.move(str(source), str(archive / f"active-{name}"))
-        (root / "work" / "v2-cycle").mkdir(parents=True, exist_ok=True)
-        (root / "work" / "v2-journal").mkdir(parents=True, exist_ok=True)
-        (root / "work" / "backups").mkdir(parents=True, exist_ok=True)
+                target = archive / name
+                if target.exists(): shutil.rmtree(target)
+                shutil.move(str(source), str(target))
+        (root / "work" / "v2-cycle").mkdir(parents=True, exist_ok=True); (root / "work" / "v2-journal").mkdir(parents=True, exist_ok=True); (root / "backups").mkdir(parents=True, exist_ok=True); (root / "work" / "backups").mkdir(parents=True, exist_ok=True)
         projection = root / "work" / "media_registry.epoch-projection.sqlite"
         copied = _registry_projection(root / "work" / "media_registry.sqlite", projection, snapshot["new_epoch_id"])
         os.replace(projection, root / "work" / "media_registry.sqlite")
-        store = CycleStateStore(root)
-        config_values = (cycle.get("config") or {})
-        new_cycle = store.create(config_values, cycle_id=uuid.uuid4().hex)
-        epoch = {"schema_version": 1, "epoch_id": snapshot["new_epoch_id"], "old_epoch_id": snapshot["old_epoch_id"], "operation_id": snapshot["operation_id"], "cycle_id": new_cycle.cycle_id, "protected_transaction_ids": sorted(protected), "reset_post_ids": changed, "preserved_post_ids": [int(row["post_id"]) for row in classifications if row["classification"] == "preserve_published"], "activated_at": _now()}
+        store = CycleStateStore(root); new_cycle = store.create({}, cycle_id=uuid.uuid4().hex)
+        epoch = {"schema_version": 1, "epoch_id": snapshot["new_epoch_id"], "old_epoch_id": snapshot["old_epoch_id"], "operation_id": snapshot["operation_id"], "cycle_id": new_cycle.cycle_id, "protected_transaction_ids": sorted(protected), "reset_post_ids": sorted(changed), "preserved_post_ids": [int(row["post_id"]) for row in classifications if row["classification"] == "preserve_published"], "activated_at": _now()}
+        (root / "work" / "v2-epochs" / "active").mkdir(parents=True, exist_ok=True)
         _write_json(root / "work" / "v2-epochs" / "active" / "epoch.json", epoch)
-        transition.update({"phase": "ACTIVATED", "cycle_id": new_cycle.cycle_id, "registry_projection": copied, "readback_count": len(changed), "updated_at": _now()}); _write_json(transition_root / f"{snapshot['operation_id']}.json", transition)
-        return {"status": "EDITORIAL_RESET_COMPLETE", "operation_id": snapshot["operation_id"], "epoch_id": snapshot["new_epoch_id"], "cycle_id": new_cycle.cycle_id, "reset_post_ids": changed, "protected_ids": sorted(protected), "counts": snapshot["counts"], "registry_projection": copied, "wordpress_writes": len(changed), "archive": str(archive)}
+        result = {"status": "EDITORIAL_RESET_COMPLETE", "operation_id": snapshot["operation_id"], "epoch_id": snapshot["new_epoch_id"], "cycle_id": new_cycle.cycle_id, "reset_post_ids": sorted(changed), "protected_ids": sorted(protected), "counts": snapshot["counts"], "registry_projection": copied, "wordpress_writes": len(changed), "archive": str(archive)}
+        transition.update({"phase": "ACTIVATED", "cycle_id": new_cycle.cycle_id, "registry_projection": copied, "readback_count": len(changed), "result": result, "updated_at": _now()}); _write_json(transition_path, transition)
+        return result
     finally:
-        run_lock.release(); reset_lock.release()
+        run_lock.release()
+        try:
+            maintenance_path.unlink()
+        except FileNotFoundError:
+            pass
+        reset_lock.release()

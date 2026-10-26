@@ -25,6 +25,11 @@ set -a
 source .env
 set +a
 
+if [[ -f "$ROOT/work/v2-maintenance.lock" ]]; then
+  echo "Publicacao bloqueada: reset administrativo V2 em andamento" >&2
+  exit 75
+fi
+
 if [[ "${PUBLISH_ENABLED:-false}" != "true" ]]; then
   echo "Publicacao desabilitada: PUBLISH_ENABLED precisa ser true" >&2
   exit 0
