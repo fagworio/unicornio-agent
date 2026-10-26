@@ -22,6 +22,7 @@ from ..media.visual_identity import fingerprint_path, verify_candidate_identity
 from ..observability import append_telemetry
 from ..workflow import validate_media_plan
 from .media_accounting import account_visual_media
+from .epoch_protection import load_epoch_protection
 from .model import BlockerCode, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Phase, WorkState
 
 
@@ -180,6 +181,7 @@ def recover_historical_attachment(
     if apply and bool(getattr(config, "dry_run", True)):
         raise ValueError("recovery apply requires EDITOR_DRY_RUN=false")
     if apply:
+        load_epoch_protection(root).assert_writable(post_id, effect="media_recovery")
         from .quarantine import assert_post_not_quarantined
 
         assert_post_not_quarantined(root, post_id, operation="media_recovery")

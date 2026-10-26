@@ -27,6 +27,7 @@ LEGACY_KEYS = (
     "_hermes_last_error", "_hermes_partial_kind", "_hermes_media_required",
     "_hermes_media_completed", "_hermes_media_missing", "_hermes_no_progress_attempts",
     "_hermes_ready_manifest", "_hermes_ready_hash",
+    "_hermes_human_reopened_at", "_hermes_human_reopened_from",
 )
 PROTECTED_POST_ID = 115757
 
@@ -259,30 +260,78 @@ def _reset_transition_path(root: Path, operation_id: str) -> Path:
     return root / "work" / "v2-epochs" / "transitions" / f"{operation_id}.json"
 
 
-def _human_required_audit(posts: list[dict[str, Any]], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> list[dict[str, Any]]:
+def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]:
+    pid = int(post["id"])
+    directory = root / "backups" / str(pid)
+    artifacts = sorted(path.name for path in directory.glob("*") if path.is_file()) if directory.is_dir() else []
+    journal_paths = [
+        root / "work" / "v2-journal" / f"{pid}.json",
+        root / "work" / "v2-epochs" / "active" / f"{pid}.json",
+    ]
+    journal_present = [str(path.relative_to(root)) for path in journal_paths if path.is_file()]
+    uncertain_markers = [
+        root / "work" / "v2-publication-uncertain" / f"{pid}.json",
+        root / "work" / "v2-uncertain" / f"{pid}.json",
+    ]
+    uncertain_present = [str(path.relative_to(root)) for path in uncertain_markers if path.is_file()]
+    registry_rows: dict[str, int] = {}
+    registry = root / "work" / "media_registry.sqlite"
+    if registry.is_file():
+        try:
+            with sqlite3.connect(f"file:{registry}?mode=ro", uri=True) as db:
+                for table, column in (("media_runs", "post_id"), ("media_decisions", "post_id"), ("media_usage", "post_id"), ("media_operations", "post_id")):
+                    exists = db.execute("select 1 from sqlite_master where type='table' and name=?", (table,)).fetchone()
+                    if exists:
+                        registry_rows[table] = int(db.execute(f"select count(*) from {table} where {column}=?", (pid,)).fetchone()[0])
+        except sqlite3.Error:
+            return {"registry_read": "error", "artifacts": artifacts, "journal": journal_present, "uncertain": uncertain_present, "classification": "REVIEW_REQUIRED"}
+    meta = post.get("meta") or {}
+    markers = {key: meta.get(key) for key in ("_hermes_human_reopened_at", "_hermes_human_reopened_from", "_hermes_ready_manifest", "_hermes_ready_hash") if meta.get(key)}
+    external = bool(uncertain_present or journal_present or any(registry_rows.values()) or markers)
+    return {
+        "artifacts": artifacts,
+        "journal": journal_present,
+        "uncertain": uncertain_present,
+        "registry": registry_rows,
+        "markers": markers,
+        "external_effects_evidence": external,
+    }
+
+
+def _human_required_classification(root: Path, post: dict[str, Any], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> tuple[str, str, dict[str, Any]]:
+    pid = int(post["id"])
+    evidence = _human_required_evidence(root, post)
+    if pid in protected:
+        return "PROTECTED_TRANSACTION", "epoch_or_uncertain_transaction", evidence
+    if pid in quarantine:
+        return "PROTECTED_QUARANTINE", "active_quarantine", evidence
+    if post.get("status") == "publish":
+        return "PRESERVE_PUBLISHED", "wordpress_publish", evidence
+    if post.get("status") != "pending":
+        return "REVIEW_REQUIRED", "status_not_pending", evidence
+    if evidence.get("registry_read") == "error":
+        return "REVIEW_REQUIRED", "registry_read_failed", evidence
+    if evidence.get("external_effects_evidence"):
+        return "REVIEW_REQUIRED", "external_effect_evidence_present", evidence
+    return "SAFE_RESET", "pending_human_required_without_external_effect_evidence", evidence
+
+
+def _human_required_audit(root: Path, posts: list[dict[str, Any]], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> list[dict[str, Any]]:
     audit: list[dict[str, Any]] = []
     for post in posts:
         state, error = _state_from_post(post)
         if error or not state or state.state is not LifecycleState.HUMAN_REQUIRED:
             continue
-        pid = int(post["id"])
-        if pid in quarantine or pid in protected:
-            classification = "protected_uncertain"
-        elif post.get("status") == "awaiting_human":
-            classification = "human_review_aligned"
-        elif post.get("status") == "pending":
-            classification = "administrative_status_mismatch"
-        else:
-            classification = "status_out_of_scope"
+        classification, reason, evidence = _human_required_classification(root, post, quarantine, protected)
         audit.append({
-            "post_id": pid,
+            "post_id": int(post["id"]),
             "wordpress_status": post.get("status"),
             "canonical_state": state.state.value,
             "phase": state.phase.value,
-            "blocker": state.blocker,
+            "blocker": state.blocker.value if state.blocker else None,
             "classification": classification,
-            "quarantine": pid in quarantine,
-            "protected": pid in protected,
+            "reason": reason,
+            "evidence": evidence,
             "content_sha256": _post_fingerprint(post)["content_sha256"],
         })
     return sorted(audit, key=lambda row: row["post_id"])
@@ -303,7 +352,16 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         row = _classify(root, post, quarantine, protected)
         row["snapshot"] = _post_fingerprint(post)
         classifications.append(row)
-    human_required_audit = _human_required_audit(posts, quarantine, protected)
+    human_required_audit = _human_required_audit(root, posts, quarantine, protected)
+    audit_by_id = {int(row["post_id"]): row for row in human_required_audit}
+    for row in classifications:
+        audit = audit_by_id.get(int(row["post_id"]))
+        if audit and audit["classification"] == "SAFE_RESET":
+            row["classification"] = "reset"
+            row["reason"] = "safe_human_required_reset"
+            row["human_required_audit"] = audit
+        elif audit:
+            row["human_required_audit"] = audit
     _write_json(report_dir / "human-required-audit.json", human_required_audit)
     snapshot = {
         "schema_version": 1,

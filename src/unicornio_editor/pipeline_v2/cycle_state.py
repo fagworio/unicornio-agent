@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..backup import atomic_write_text
+from .epoch_protection import load_epoch_protection
 
 
 SCHEMA_VERSION = 1
@@ -213,6 +214,10 @@ class CycleStateStore:
     def authorize_round(self, state: CycleState, selected_ids: list[int] | tuple[int, ...]) -> None:
         if not state.pending_round:
             raise RuntimeError("cannot authorize a round without a pending round")
+        protection = load_epoch_protection(self.root)
+        protected = sorted(set(int(value) for value in selected_ids).intersection(protection.protected_ids))
+        if protected:
+            raise RuntimeError(f"epoch-protected posts cannot be authorized: {protected}")
         state.pending_round["preview_selected_ids"] = [int(value) for value in selected_ids]
         self.save(
             state,

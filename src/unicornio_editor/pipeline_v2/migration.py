@@ -18,6 +18,7 @@ from ..editorial_schema import EditorialValidationError, validate_editorial
 from ..media.inserter import MediaInsertionError, normalize_normal_article_paragraphs
 from .lock import RunSessionLock
 from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedStatus, LifecycleState, Phase, RetryInfo, WorkState
+from .epoch_protection import load_epoch_protection
 from .quarantine import assert_post_not_quarantined
 
 
@@ -119,7 +120,9 @@ def _journal_state_matches(journal: dict[str, Any], state: WorkState | None) -> 
 
 def _guard_migration_writes(root: Path | str, post_ids: list[int] | tuple[int, ...], operation: str) -> None:
     """Validate the full write set before an administrative migration starts applying."""
+    protection = load_epoch_protection(root)
     for post_id in post_ids:
+        protection.assert_writable(post_id, effect=operation)
         assert_post_not_quarantined(root, post_id, operation=operation)
 
 

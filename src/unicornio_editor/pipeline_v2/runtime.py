@@ -29,6 +29,7 @@ from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
 from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase, WorkState
 from .media_accounting import account_visual_media, reconcile_working_visual_media
+from .epoch_protection import EpochProtectionError, load_epoch_protection
 from .quarantine import load_quarantine
 from .production import ProductionCandidateReader, validation_matches_candidate
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
@@ -3220,6 +3221,7 @@ class WordPressWriterV2:
         self.client, self.root, self.policy_version = client, Path(root), policy_version
 
     def commit(self, post_id: int, context: dict[str, Any], proposed_state, outcome):
+        load_epoch_protection(self.root).assert_writable(post_id, effect="writer_commit")
         journal_dir = self.root / "work" / "v2-journal"
         journal_dir.mkdir(parents=True, exist_ok=True)
         candidate_path = self.root / "backups" / str(post_id) / "editorial.candidate.json"
@@ -3922,6 +3924,15 @@ def run_v2(
     try:
         reader = ProductionCandidateReader(client, root)
         snapshot = reader.snapshot(page_size=max(10, limit))
+        try:
+            epoch_protection = load_epoch_protection(root)
+        except EpochProtectionError as exc:
+            return {"selected": 0, "locked": False, "details": [], "blocked": True, "reason": str(exc), "epoch_protection_fail_closed": True}
+        protected_epoch_ids = set(epoch_protection.protected_ids)
+        snapshot = [
+            (post_id, context) for post_id, context in snapshot
+            if int(post_id) not in protected_epoch_ids
+        ]
         now = datetime.now(timezone.utc)
         cohort_path = getattr(config, "v2_historical_cohort_file", None)
         historical_cohort, cohort_error = load_historical_cohort(cohort_path)
@@ -4058,6 +4069,8 @@ def run_v2(
         queue = {
             "scanned": len(snapshot),
             "pending_total": len(snapshot),
+            "epoch_protected_ids": sorted(protected_epoch_ids),
+            "epoch_protected_count": len(protected_epoch_ids),
             "candidate_load_errors": list(reader.load_errors),
             "admitted_pending": len(admitted_pending),
             "admitted_total": len(admitted),
@@ -4123,7 +4136,9 @@ def run_v2(
             queue["requested_eligible"] = requested_eligible
             queue["requested_quarantine"] = requested_quarantine
             queue["request_reason"] = (
-                "quarantine_policy_invalid"
+                "epoch_protected_transaction"
+                if post_id in protected_epoch_ids
+                else "quarantine_policy_invalid"
                 if quarantine_error
                 else "quarantined"
                 if requested_quarantine

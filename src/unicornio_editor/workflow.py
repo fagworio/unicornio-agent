@@ -102,6 +102,7 @@ from .pipeline_v2.quarantine import (
     filter_quarantined_posts,
 )
 from .pipeline_v2.lock import RunSessionLock
+from .pipeline_v2.epoch_protection import EpochProtectionError, load_epoch_protection
 
 META_PUBLISH_OPERATION_ID = "_ai_editor_publish_operation_id"
 
@@ -2248,6 +2249,8 @@ def _execute_media_plan(
     for a game vampire) are rejected before any download/insert — the
     editorial rule is "no image beats a wrong image".
     """
+    if post_id is not None:
+        load_epoch_protection(root).assert_writable(post_id, effect="media_upload")
     vision_editorial = {**editorial, **({"title": post_title} if post_title else {})}
     vision_context_key = featured_vision_context_key(vision_editorial)
     plan = editorial.get("media_plan") or []
@@ -3937,6 +3940,10 @@ def _publish_post_unlocked(
     agente re-aplicar). Estados blocked/awaiting_human/uncertain/skipped
     nunca são tocados aqui — pertencem à fila de rework/do agente.
     """
+    try:
+        load_epoch_protection(root).assert_writable(post_id, effect="publisher")
+    except EpochProtectionError as exc:
+        return {"post_id": int(post_id), "wordpress_changed": False, "status": "blocked", "reason": str(exc), "epoch_protected": True}
     post = client.get_post(post_id)
     post_meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
     uncertain_outcome = _reconcile_uncertain_publication(
