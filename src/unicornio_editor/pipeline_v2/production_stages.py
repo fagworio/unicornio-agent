@@ -535,7 +535,11 @@ class ProductionEditorialStage:
                     )
                     _write_json(self.root, post_id, "editorial.structure.json", structure_audit)
                     if structure_error:
-                        _write_json(self.root, post_id, "editorial.draft.json", repaired)
+                        # Never replace a usable draft with an empty structure
+                        # artifact; an empty body causes a false media-structure
+                        # failure on the next retry and destroys recovery input.
+                        if str(repaired.get("cleaned_html") or "").strip():
+                            _write_json(self.root, post_id, "editorial.draft.json", repaired)
                         raise StageError(
                             BlockerCode.STRUCTURE,
                             Phase.EDITORIAL,

@@ -414,7 +414,10 @@ class SourceVerifyTests(unittest.TestCase):
                 "extmetadata": {},
             }]},
         }}}).encode()
-        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload):
+        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload), mock.patch(
+            "unicornio_editor.media.source_verify._validate_discovered_candidate",
+            return_value={"valid": True, "source_verified": True, "reason": "source_reference_found: test"},
+        ):
             candidates = search_wikimedia_commons_candidates("Game", limit=8)
         self.assertEqual(len(candidates), 1)
         self.assertTrue(candidates[0]["rights_verified"])

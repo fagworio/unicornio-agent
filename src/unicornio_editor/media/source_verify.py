@@ -37,6 +37,11 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
+_WIKIMEDIA_UA = "unicornio-agent/2.0 (https://github.com/fagworio/unicornio-agent)"
+_WIKIMEDIA_LOCK = Lock()
+_WIKIMEDIA_CACHE: dict[str, bytes | None] = {}
+_WIKIMEDIA_RETRY_UNTIL = 0.0
+_WIKIMEDIA_RATE_LIMITED = "WIKIMEDIA_RATE_LIMITED"
 _IMG_EXT = re.compile(r"\.(?:jpe?g|png|webp|gif|avif|bmp)(?:\?|#|$)", re.IGNORECASE)
 
 SOURCE_VERIFICATION_RETRYABLE_CODES = frozenset({
@@ -331,8 +336,12 @@ def search_wikimedia_commons_candidates(
        author = " ".join(re.sub(r"<[^>]+>", " ", value("Artist")).split())
        if not title or not direct or not license_name or not license_url or not author:
            continue
+       source_page = str(info.get("descriptionurl") or "").strip()
+       if not source_page:
+           source_page = "https://commons.wikimedia.org/wiki/" + quote(title, safe=":/()'!,._-")
        candidate = {
-           "source_page_url": "https://commons.wikimedia.org/wiki/" + quote(title.removeprefix("File:"), safe=":/()'!,._-"),
+           "source_page_url": source_page,
+           "discovery_image_url": direct,
            "direct_image_url": direct,
            "author": author,
            "license": license_name,
@@ -350,8 +359,18 @@ def search_wikimedia_commons_candidates(
            },
            "rights_checked": True,
            "origin_type": "wikimedia_commons",
+           "source_origin_type": "wikimedia_commons",
            "subject": str(query),
        }
+       verified = _validate_discovered_candidate(
+           candidate, subject=str(query), audit=audit, url_policy=url_policy,
+       )
+       candidate["valid"] = bool(verified.get("valid"))
+       candidate["source_verified"] = bool(verified.get("source_verified"))
+       candidate["source_verification"] = verified.get("reason") or "WIKIMEDIA_RATE_LIMITED"
+       candidate["verification"] = verified
+       if not candidate["valid"]:
+           continue
        attestation = attest_wikimedia_rights(candidate)
        if not attestation:
            continue
@@ -371,20 +390,44 @@ def _fetch(
 ) -> bytes | None:
     if budget[0] <= 0:
         return None
+    host = (urlparse(url).hostname or "").casefold()
+    if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
+        global _WIKIMEDIA_RETRY_UNTIL
+        now = monotonic()
+        with _WIKIMEDIA_LOCK:
+            if url in _WIKIMEDIA_CACHE:
+                return _WIKIMEDIA_CACHE[url]
+            if now < _WIKIMEDIA_RETRY_UNTIL:
+                return None
     try:
         request = Request(
             url,
-            headers={"User-Agent": _UA, "Accept": accept},
+            headers={"User-Agent": _WIKIMEDIA_UA if host.endswith("wikimedia.org") else _UA, "Accept": accept},
         )
         with urlopen_remote(
             request, timeout=_FETCH_TIMEOUT, mode=url_policy, audit=audit
         ) as response:
             data = response.read(min(max_bytes, budget[0]) + 1)
             if len(data) > max_bytes:
-                return None
-            budget[0] -= len(data)
+                data = None
+            else:
+                budget[0] -= len(data)
+            if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
+                with _WIKIMEDIA_LOCK:
+                    _WIKIMEDIA_CACHE[url] = data
             return data
-    except (HTTPError, URLError, OSError, ValueError, InvalidURL):
+    except HTTPError as exc:
+        if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"} and exc.code == 429:
+            retry = exc.headers.get("Retry-After", "60") if exc.headers else "60"
+            try:
+                delay = max(1.0, min(float(retry), 3600.0))
+            except ValueError:
+                delay = 60.0
+            with _WIKIMEDIA_LOCK:
+                _WIKIMEDIA_RETRY_UNTIL = monotonic() + delay
+                _WIKIMEDIA_CACHE[url] = None
+        return None
+    except (URLError, OSError, ValueError, InvalidURL):
         return None
 
 
