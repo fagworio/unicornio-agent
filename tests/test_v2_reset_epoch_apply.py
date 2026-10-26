@@ -1,6 +1,4 @@
 import json
-import shutil
-import sqlite3
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.reset_epoch import reset_epoch
@@ -42,9 +40,9 @@ def _root(tmp_path, posts):
     (tmp_path / "work" / "v2-journal").mkdir(parents=True)
     (tmp_path / "backups" / str(posts[0]["id"])).mkdir(parents=True)
     (tmp_path / "backups" / str(posts[0]["id"]) / "editorial.draft.json").write_text('{"old":true}')
-    (tmp_path / "work" / "media_registry.sqlite").parent.mkdir(parents=True, exist_ok=True)
-    source = Path("/www/wwwroot/hermes/unicornio-agent/work/media_registry.sqlite")
-    src = sqlite3.connect(source); dst = sqlite3.connect(tmp_path / "work" / "media_registry.sqlite"); src.backup(dst); dst.close(); src.close()
+    from unicornio_editor.media.registry import connect
+    db = connect(tmp_path)
+    db.close()
 
 
 def test_apply_archives_active_backups_and_readback(tmp_path):
