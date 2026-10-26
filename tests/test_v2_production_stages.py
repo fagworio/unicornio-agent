@@ -724,6 +724,84 @@ def test_compose_keeps_quota_body_separate_from_composed_media_html(tmp_path, mo
     assert candidate["media"]["layout_policy"] == audit["media_layout_policy"]
 
 
+def test_compose_revalidates_prepared_layout_when_featured_arrives_later(tmp_path, monkeypatch):
+    post_id = 115784
+    title = "Notícia sobre videogame"
+    body = _long_single_sentence_body(11)
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.post_subjects",
+        lambda **_kwargs: [{"subject": "videogame"}],
+    )
+    prepared, audit, error = _prepare_editorial_media_structure(
+        {"title": title, "cleaned_html": body, "seo": {}},
+        WorkState(
+            phase=Phase.EDITORIAL,
+            media=MediaProgress(
+                required=4,
+                featured=FeaturedProgress(FeaturedStatus.MISSING),
+            ),
+        ),
+        title=title,
+    )
+    assert error is None
+    persisted_policy = audit["media_layout_policy"]
+    assert "closing_featured_repeat" not in persisted_policy
+    assert persisted_policy["placement_plan"][-1]["anchor"] == "after_editorial_body"
+
+    directory = tmp_path / "backups" / str(post_id)
+    directory.mkdir(parents=True)
+    structure_path = directory / "editorial.structure.json"
+    structure_path.write_text(json.dumps(audit), encoding="utf-8")
+    (directory / "editorial.draft.json").write_text(
+        json.dumps(prepared), encoding="utf-8",
+    )
+    original_structure = structure_path.read_bytes()
+
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        399,
+        "https://media.example/featured-399.webp",
+        "f" * 64,
+        "f" * 16,
+        "visual:featured-399",
+        {"decision": "INITIAL"},
+        "Arte de capa do videogame",
+        "Crédito da imagem: Fonte oficial",
+        1280,
+        720,
+    )
+    inline = (
+        _verified_inline(301, "https://media.example/inline-301.webp", 0),
+        _verified_inline(302, "https://media.example/inline-302.webp", 1),
+    )
+    media = MediaProgress(
+        required=4,
+        inline=inline,
+        featured=featured,
+        search=MediaSearchProgress(
+            completed=True,
+            exhausted=True,
+            completion_reason="EXHAUSTED_VERIFIED",
+        ),
+        waiver_applied=True,
+        waiver_reason="search_exhausted",
+        layout_policy=persisted_policy,
+    )
+    context = {"post_id": post_id, "title": title, "original_link": None}
+    stage = ProductionComposeStage(Config(), tmp_path)
+    candidate = stage.compose_candidate(context, dict(prepared), media)
+    candidate_retry = stage.compose_candidate(context, dict(prepared), media)
+
+    assert candidate["editorial"]["cleaned_html"] == prepared["cleaned_html"]
+    assert candidate["media"]["layout_policy"] == persisted_policy
+    assert "closing_featured_repeat" not in candidate["media"]
+    assert candidate["content"].count("<img") == 2
+    assert "featured-399.webp" not in candidate["content"]
+    assert candidate_retry["content"] == candidate["content"]
+    assert candidate_retry["media"]["layout_policy"] == persisted_policy
+    assert structure_path.read_bytes() == original_structure
+
+
 def test_layout_capacity_caps_candidate_and_preserves_excess_working_media(tmp_path, monkeypatch):
     post_id = 115790
     run_id = "run-layout-capacity-115790"
