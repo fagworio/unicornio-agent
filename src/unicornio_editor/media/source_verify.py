@@ -371,6 +371,21 @@ def search_wikimedia_commons_candidates(
        candidate["verification"] = verified
        if not candidate["valid"]:
            continue
+       from .evidence import evidence_score
+       parsed_title = title.removeprefix("File:").removesuffix(".jpg")
+       candidate["evidence"] = evidence_score(
+           str(query),
+           filename=parsed_title,
+           page_title=title,
+           page_url=source_page,
+           query=str(query),
+           source_page_present=True,
+           image_in_source=True,
+           source_verification_reason=str(verified.get("reason_code") or "source_reference_found"),
+           source_comparison_proved=bool(verified.get("source_comparison_proved")),
+       )
+       if candidate["evidence"].get("verdict") != "deterministic_match":
+           continue
        attestation = attest_wikimedia_rights(candidate)
        if not attestation:
            continue
@@ -425,7 +440,7 @@ def _fetch(
                 delay = 60.0
             with _WIKIMEDIA_LOCK:
                 _WIKIMEDIA_RETRY_UNTIL = monotonic() + delay
-                _WIKIMEDIA_CACHE[url] = None
+                _WIKIMEDIA_CACHE.pop(url, None)
         return None
     except (URLError, OSError, ValueError, InvalidURL):
         return None

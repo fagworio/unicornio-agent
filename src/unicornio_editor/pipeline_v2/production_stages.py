@@ -322,7 +322,7 @@ def _ensure_prepared_media_structure(
         if persist:
             _write_json(Path(root), post_id, "editorial.structure.json", audit)
         if error:
-            if persist:
+            if persist and str(prepared.get("cleaned_html") or "").strip():
                 _write_json(Path(root), post_id, "editorial.draft.json", prepared)
             raise StageError(
                 BlockerCode.STRUCTURE,
@@ -685,7 +685,8 @@ class ProductionEditorialStage:
             )
             _write_json(self.root, post_id, "editorial.structure.json", structure_audit)
             if structure_error:
-                _write_json(self.root, post_id, "editorial.draft.json", editorial)
+                if str(editorial.get("cleaned_html") or "").strip():
+                    _write_json(self.root, post_id, "editorial.draft.json", editorial)
                 raise StageError(
                     BlockerCode.STRUCTURE,
                     Phase.EDITORIAL,

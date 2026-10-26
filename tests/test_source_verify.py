@@ -422,6 +422,7 @@ class SourceVerifyTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertTrue(candidates[0]["rights_verified"])
         self.assertEqual(candidates[0]["source_rights_attestation"]["provider"], "wikimedia_commons_api")
+        self.assertEqual(candidates[0]["evidence"]["verdict"], "deterministic_match")
 
     def test_wikimedia_api_rejects_different_discovered_representation(self):
         payload = json.dumps({"query": {"pages": {"1": {"imageinfo": [{

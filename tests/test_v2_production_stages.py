@@ -687,6 +687,44 @@ def test_media_stage_uses_audited_effective_target_before_provider_resolution(tm
     assert result.layout_policy == observed["policy"]
 
 
+def test_empty_structure_error_does_not_replace_valid_draft(tmp_path):
+    post_id = 115792
+    directory = tmp_path / "backups" / str(post_id)
+    directory.mkdir(parents=True)
+    valid = {"cleaned_html": _long_single_sentence_body(4), "seo": {"title": "Rascunho válido"}}
+    draft_path = directory / "editorial.draft.json"
+    draft_path.write_text(json.dumps(valid), encoding="utf-8")
+
+    with pytest.raises(StageError) as raised:
+        _ensure_prepared_media_structure(
+            tmp_path,
+            post_id,
+            {"cleaned_html": ""},
+            WorkState(phase=Phase.EDITORIAL),
+            title="Título sem conteúdo",
+        )
+
+    assert raised.value.blocker == BlockerCode.STRUCTURE
+    assert json.loads(draft_path.read_text(encoding="utf-8")) == valid
+
+
+def test_valid_structure_error_persists_verifiable_editorial(tmp_path):
+    post_id = 115793
+    body = "<p>" + ("palavra " * 80) + "</p>"
+    with pytest.raises(StageError):
+        _ensure_prepared_media_structure(
+            tmp_path,
+            post_id,
+            {"cleaned_html": body},
+            WorkState(phase=Phase.EDITORIAL),
+            title="Título válido",
+        )
+    persisted = json.loads(
+        (tmp_path / "backups" / str(post_id) / "editorial.draft.json").read_text(encoding="utf-8")
+    )
+    assert persisted["cleaned_html"] == body
+
+
 def test_compose_keeps_quota_body_separate_from_composed_media_html(tmp_path, monkeypatch):
     body = _long_single_sentence_body(10)
     monkeypatch.setattr(
