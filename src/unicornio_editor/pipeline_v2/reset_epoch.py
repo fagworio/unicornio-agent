@@ -261,7 +261,7 @@ def _reset_transition_path(root: Path, operation_id: str) -> Path:
     return root / "work" / "v2-epochs" / "transitions" / f"{operation_id}.json"
 
 
-def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]:
+def _human_required_evidence(root: Path, post: dict[str, Any], client: Any | None = None) -> dict[str, Any]:
     pid = int(post["id"])
     directory = root / "backups" / str(pid)
     artifacts = sorted(path.name for path in directory.glob("*") if path.is_file()) if directory.is_dir() else []
@@ -276,6 +276,8 @@ def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]
     ]
     uncertain_present = [str(path.relative_to(root)) for path in uncertain_markers if path.is_file()]
     registry_rows: dict[str, int] = {}
+    usage_rows: list[dict[str, Any]] = []
+    operation_rows: list[dict[str, Any]] = []
     registry = root / "work" / "media_registry.sqlite"
     if registry.is_file():
         try:
@@ -284,6 +286,12 @@ def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]
                     exists = db.execute("select 1 from sqlite_master where type='table' and name=?", (table,)).fetchone()
                     if exists:
                         registry_rows[table] = int(db.execute(f"select count(*) from {table} where {column}=?", (pid,)).fetchone()[0])
+                        if table == "media_usage":
+                            cols = [row[1] for row in db.execute("pragma table_info(media_usage)")]
+                            usage_rows = [dict(zip(cols, row)) for row in db.execute("select * from media_usage where post_id=?", (pid,)).fetchall()]
+                        elif table == "media_operations":
+                            cols = [row[1] for row in db.execute("pragma table_info(media_operations)")]
+                            operation_rows = [dict(zip(cols, row)) for row in db.execute("select * from media_operations where post_id=?", (pid,)).fetchall()]
         except sqlite3.Error:
             return {"registry_read": "error", "artifacts": artifacts, "journal": journal_present, "uncertain": uncertain_present, "classification": "REVIEW_REQUIRED"}
     journal_details: list[dict[str, Any]] = []
@@ -303,21 +311,33 @@ def _human_required_evidence(root: Path, post: dict[str, Any]) -> dict[str, Any]
     )
     meta = post.get("meta") or {}
     markers = {key: meta.get(key) for key in (*HUMAN_REOPEN_KEYS, "_hermes_ready_manifest", "_hermes_ready_hash") if meta.get(key)}
-    external = bool(uncertain_present or journal_uncertain or registry_rows.get("media_operations", 0) or registry_rows.get("media_usage", 0) or markers)
+    media_reconciled = False
+    if usage_rows and not operation_rows and all(
+        row.get("status") == "accepted" and not row.get("applied_at") and not row.get("readback_confirmed_at")
+        for row in usage_rows
+    ):
+        media_reconciled = True
+        if client is not None:
+            try:
+                media_reconciled = all(client.get_media(int(row["wordpress_media_id"])) for row in usage_rows if row.get("wordpress_media_id"))
+            except Exception:
+                media_reconciled = False
+    external = bool(uncertain_present or journal_uncertain or operation_rows or (registry_rows.get("media_usage", 0) and not media_reconciled) or markers)
     return {
         "artifacts": artifacts,
         "journal": journal_present,
         "journal_details": journal_details,
         "uncertain": uncertain_present,
         "registry": registry_rows,
+        "media_reconciled": media_reconciled,
         "markers": markers,
         "external_effects_evidence": external,
     }
 
 
-def _human_required_classification(root: Path, post: dict[str, Any], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> tuple[str, str, dict[str, Any]]:
+def _human_required_classification(root: Path, post: dict[str, Any], quarantine: dict[int, dict[str, Any]], protected: set[int], client: Any | None = None) -> tuple[str, str, dict[str, Any]]:
     pid = int(post["id"])
-    evidence = _human_required_evidence(root, post)
+    evidence = _human_required_evidence(root, post, client)
     if pid in protected:
         return "PROTECTED_TRANSACTION", "epoch_or_uncertain_transaction", evidence
     if pid in quarantine:
@@ -330,16 +350,18 @@ def _human_required_classification(root: Path, post: dict[str, Any], quarantine:
         return "REVIEW_REQUIRED", "registry_read_failed", evidence
     if evidence.get("external_effects_evidence"):
         return "REVIEW_REQUIRED", "external_effect_evidence_present", evidence
+    if evidence.get("media_reconciled"):
+        return "SAFE_RESET_RECONCILED", "known_media_effect_reconciled_and_not_applied", evidence
     return "SAFE_RESET", "pending_human_required_without_external_effect_evidence", evidence
 
 
-def _human_required_audit(root: Path, posts: list[dict[str, Any]], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> list[dict[str, Any]]:
+def _human_required_audit(root: Path, posts: list[dict[str, Any]], quarantine: dict[int, dict[str, Any]], protected: set[int], client: Any | None = None) -> list[dict[str, Any]]:
     audit: list[dict[str, Any]] = []
     for post in posts:
         state, error = _state_from_post(post)
         if error or not state or state.state is not LifecycleState.HUMAN_REQUIRED:
             continue
-        classification, reason, evidence = _human_required_classification(root, post, quarantine, protected)
+        classification, reason, evidence = _human_required_classification(root, post, quarantine, protected, client)
         audit.append({
             "post_id": int(post["id"]),
             "wordpress_status": post.get("status"),
@@ -370,11 +392,11 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         row = _classify(root, post, quarantine, protected)
         row["snapshot"] = _post_fingerprint(post)
         classifications.append(row)
-    human_required_audit = _human_required_audit(root, posts, quarantine, protected)
+    human_required_audit = _human_required_audit(root, posts, quarantine, protected, client)
     audit_by_id = {int(row["post_id"]): row for row in human_required_audit}
     for row in classifications:
         audit = audit_by_id.get(int(row["post_id"]))
-        if audit and audit["classification"] == "SAFE_RESET":
+        if audit and audit["classification"] in {"SAFE_RESET", "SAFE_RESET_RECONCILED"}:
             row["classification"] = "reset"
             row["reason"] = "safe_human_required_reset"
             row["human_required_audit"] = audit
