@@ -229,11 +229,13 @@ class MediaPipelineTests(unittest.TestCase):
                 '<script type="application/ld+json">'
                 '{"@context":"https://schema.org","@type":"ImageObject",'
                 '"contentUrl":"https://source.example/image.webp",'
-                '"license":"https://creativecommons.org/publicdomain/zero/1.0/"}'
+                '"license":"https://creativecommons.org/publicdomain/zero/1.0/",'
+                '"creator":{"@type":"Person","name":"Autor"}}'
                 "</script>",
+                root=directory,
             )
             result = upload_image(
-                FakeClient(), source, evidence,
+                FakeClient(), source, evidence, root=directory,
             )
             self.assertEqual(result["id"], 7)
 

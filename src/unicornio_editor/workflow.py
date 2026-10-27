@@ -2656,14 +2656,15 @@ def _execute_media_plan(
                     }
                 evidence["source_rights_attestation"] = rights_attestation
                 evidence["rights_verified"] = True
-                evidence["rights_evidence"] = {
-                    "provider": "schema_org_image_object",
-                    "image_url": evidence.get("direct_image_url"),
-                    "license": evidence.get("license"),
-                    "license_url": evidence.get("license_url"),
-                    "author": evidence.get("author"),
-                    "evidence_sha256": rights_attestation.get("evidence_sha256"),
-                }
+                if rights_provider != "wikimedia_commons_api":
+                    evidence["rights_evidence"] = {
+                        "provider": "schema_org_image_object",
+                        "image_url": evidence.get("direct_image_url"),
+                        "license": evidence.get("license"),
+                        "license_url": evidence.get("license_url"),
+                        "author": evidence.get("author"),
+                        "evidence_sha256": rights_attestation.get("evidence_sha256"),
+                    }
                 from .media.license import LicenseError, validate_upload_candidate
                 try:
                     validate_upload_candidate(evidence, root=root)

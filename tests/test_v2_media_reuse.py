@@ -996,6 +996,70 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
     assert result.accepted == 1
 
 
+def test_media_resolver_persists_recoverable_visual_identity_pending(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    candidate = _attested_candidate({
+        "candidate_id": "visual-pending",
+        "direct_image_url": "https://cdn.test/new.webp",
+        "source_page_url": "https://source.test/article",
+        "subject": "Test",
+        "author": "Test",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: Test",
+        "alt_text": "Test",
+        "valid": True,
+        "evidence": {"verdict": "deterministic_match", "score": 9},
+    }, root=tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_resolve_media_batch",
+        lambda *_args, **_kwargs: {"posts": [{
+            "reuse": [],
+            "audit_candidates": [candidate],
+            "search": {
+                "completed": True,
+                "completion_reason": "TARGET_REACHED",
+                "queries_planned": 1,
+                "queries_completed": 1,
+            },
+        }]},
+    )
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(
+        runtime,
+        "validate_media_plan",
+        lambda *_args, **_kwargs: {"valid": True, "rejected": [], "featured_vision": []},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_execute_media_plan",
+        lambda *_args, **_kwargs: ([{
+            "status": "deferred",
+            "reason_code": "visual_identity_pending",
+            "recoverable": True,
+        }], None, None),
+    )
+
+    previous = MediaProgress(
+        required=2,
+        inline=(InlineMedia(77, "https://cdn.test/old.webp", 0, phash="baseline"),),
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115088, "title": "Test"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    assert result.visual_identity_pending is True
+
+
 def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime

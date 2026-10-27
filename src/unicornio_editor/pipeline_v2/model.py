@@ -328,6 +328,9 @@ class MediaProgress:
     waiver_reason: str = ""
     layout_policy: dict[str, Any] = field(default_factory=dict)
     closing_featured_repeat: dict[str, Any] = field(default_factory=dict)
+    # A recoverable visual-comparison outage is not a completed no-progress
+    # attempt. This additive flag is absent/false in older V2 checkpoints.
+    visual_identity_pending: bool = False
 
     def __post_init__(self) -> None:
         if self.required < 0:
@@ -346,6 +349,8 @@ class MediaProgress:
             raise ValueError("layout_policy must be an object")
         if not isinstance(self.closing_featured_repeat, dict):
             raise ValueError("closing_featured_repeat must be an object")
+        if not isinstance(self.visual_identity_pending, bool):
+            raise ValueError("visual_identity_pending must be a boolean")
 
     @property
     def accepted(self) -> int:
@@ -391,6 +396,8 @@ class MediaProgress:
             value["layout_policy"] = dict(self.layout_policy)
         if self.closing_featured_repeat:
             value["closing_featured_repeat"] = dict(self.closing_featured_repeat)
+        if self.visual_identity_pending:
+            value["visual_identity_pending"] = True
         return value
 
     @classmethod
@@ -416,6 +423,7 @@ class MediaProgress:
             str(waiver.get("reason", value.get("waiver_reason", "")) or ""),
             dict(value.get("layout_policy") or {}),
             dict(value.get("closing_featured_repeat") or {}),
+            value.get("visual_identity_pending") is True,
         )
 
 

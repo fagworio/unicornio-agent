@@ -849,6 +849,12 @@ class ProductionMediaStage:
                     featured=fp,
                     search=previous.search,
                     layout_policy=layout_policy,
+                    visual_identity_pending=any(
+                        isinstance(row, dict)
+                        and row.get("status") == "deferred"
+                        and row.get("reason_code") == "visual_identity_pending"
+                        for row in results
+                    ),
                 )
             if getattr(state, "phase", None) is Phase.MEDIA and media.enrichment_round <= previous.enrichment_round:
                 media = replace(
@@ -905,6 +911,10 @@ class ProductionMediaStage:
             featured=featured,
             search=search,
             layout_policy=dict(layout_policy or {}),
+            visual_identity_pending=(
+                isinstance(result, dict)
+                and result.get("visual_identity_pending") is True
+            ),
         )
 
 

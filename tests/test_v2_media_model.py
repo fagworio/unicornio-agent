@@ -65,3 +65,13 @@ def test_media_progress_round_trips_enrichment_round_and_waiver():
         waiver_reason="enrichment_retries_exhausted",
     )
     assert MediaProgress.from_dict(progress.to_dict()) == progress
+
+
+def test_visual_identity_pending_is_additive_and_round_trips():
+    legacy = MediaProgress.from_dict({"inline": {"required": 2, "accepted": []}})
+    assert legacy.visual_identity_pending is False
+
+    pending = MediaProgress(required=2, visual_identity_pending=True)
+    restored = MediaProgress.from_dict(pending.to_dict())
+    assert restored == pending
+    assert restored.to_dict()["visual_identity_pending"] is True

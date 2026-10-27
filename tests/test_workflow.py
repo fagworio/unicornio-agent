@@ -221,6 +221,7 @@ class WorkflowTests(unittest.TestCase):
                 "@type": "ImageObject",
                 "contentUrl": candidate.get("direct_image_url"),
                 "license": candidate.get("license_url"),
+                "creator": {"@type": "Person", "name": candidate.get("author")},
             }
             return _attest_source_rights(
                 candidate,
@@ -3467,17 +3468,46 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
     }
     item["rights_evidence"] = {
         "provider": "wikimedia_commons_api",
+        "file_title": "File:Wolverine.jpg",
         "image_url": item["direct_image_url"],
         "author": item["author"],
         "license": item["license"],
         "license_url": item["license_url"],
     }
-    from unicornio_editor.media.license import attest_wikimedia_rights
+    from unicornio_editor.media.license import (
+        attest_wikimedia_rights,
+        validate_upload_candidate as validate_rights,
+    )
     item["rights_verified"] = True
-    item["source_rights_attestation"] = attest_wikimedia_rights(item)
+    item["source_rights_attestation"] = attest_wikimedia_rights(item, root=tmp_path)
     editorial = {"seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"}, "cleaned_html": "<p>Wolverine videogame.</p>", "media_plan": [item]}
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+
+    def refresh_wikimedia(candidate, *, root=None, **_kwargs):
+        refreshed = dict(candidate)
+        refreshed["rights_evidence"] = {
+            "provider": "wikimedia_commons_api",
+            "file_title": "File:Wolverine.jpg",
+            "image_url": candidate["direct_image_url"],
+            "author": candidate["author"],
+            "license": candidate["license"],
+            "license_url": candidate["license_url"],
+        }
+        proof = attest_wikimedia_rights(refreshed, root=root)
+        refreshed["rights_evidence"]["evidence_sha256"] = proof["evidence_sha256"]
+        refreshed["source_rights_attestation"] = proof
+        refreshed["rights_verified"] = True
+        return refreshed
+
+    validated_rights = []
+
+    def capture_validated_rights(evidence, *, root=None):
+        validated_rights.append(dict(evidence))
+        return validate_rights(evidence, root=root)
+
     with _mock_source_rights(), \
+         mock.patch("unicornio_editor.media.source_verify.enrich_wikimedia_rights", side_effect=refresh_wikimedia), \
+         mock.patch("unicornio_editor.media.license.validate_upload_candidate", side_effect=capture_validated_rights), \
          mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
@@ -3492,6 +3522,8 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
         results, _, _ = _execute_media_plan(editorial, config, object(), tmp_path, preflight={"rejected": [], "featured_vision": []}, post_id=115088, previous_inline_phashes=("ccc04d9fb063ed1c",))
     upload.assert_called_once()
     assert results[0]["media_id"] == 115094
+    assert validated_rights[0]["rights_evidence"]["provider"] == "wikimedia_commons_api"
+    assert validated_rights[0]["rights_evidence"]["evidence_sha256"] == validated_rights[0]["source_rights_attestation"]["evidence_sha256"]
     index = json.loads((tmp_path / "work" / "media_index.json").read_text())
     assert index["entries"][-1]["phash"] == "1111111111111111"
     funnel = [

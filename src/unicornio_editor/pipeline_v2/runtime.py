@@ -2198,6 +2198,7 @@ class ProductionMediaResolver:
             )
 
         search_runs: list[dict[str, Any]] = []
+        visual_identity_pending = False
         # One shared allowance for every query/plan of this post.  The visual
         # comparator itself increments per HTTP call (LOW and optional HIGH).
         visual_comparison_budget = [0]
@@ -2341,7 +2342,7 @@ class ProductionMediaResolver:
 
         def execute_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Execute one candidate batch and merge only final accepted media."""
-            nonlocal current_featured, current_inline
+            nonlocal current_featured, current_inline, visual_identity_pending
             if not plan:
                 return []
             checked = validate_media_plan(
@@ -2390,6 +2391,12 @@ class ProductionMediaResolver:
                 featured_visual_asset=baseline_featured_asset,
                 visual_comparison_budget=visual_comparison_budget,
                 on_accepted=lambda result: accept_result(result, plan[0]),
+            )
+            visual_identity_pending = visual_identity_pending or any(
+                isinstance(row, dict)
+                and row.get("status") == "deferred"
+                and row.get("reason_code") == "visual_identity_pending"
+                for row in results
             )
             for result in results:
                 accept_result(result, plan[0])
@@ -3042,6 +3049,7 @@ class ProductionMediaResolver:
             enrichment_round=enrichment_round,
             layout_policy=previous.layout_policy,
             closing_featured_repeat=previous.closing_featured_repeat,
+            visual_identity_pending=visual_identity_pending,
         )
 
     @staticmethod

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from unicornio_editor.pipeline_v2.classifier import classify
-from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaProgress, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, InlineMedia, MediaProgress, MediaSearchProgress, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
 from unicornio_editor.pipeline_v2.scheduler import select
 
@@ -72,6 +72,42 @@ def test_runner_escalates_after_two_real_media_no_progress_attempts():
     second = runner.run_one(42, context)
     assert second.type.value == "human_required"
     assert store.state.retry.no_progress == 2
+
+
+def test_runner_preserves_no_progress_for_recoverable_visual_identity_pending():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(no_progress=1),
+        relevance_approved=True,
+        media=MediaProgress(required=2, enrichment_round=1),
+    )
+    store = Store(previous)
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: MediaProgress(
+            required=2,
+            search=MediaSearchProgress(
+                completed=True,
+                queries_planned=1,
+                queries_completed=1,
+                completion_reason="TARGET_REACHED",
+            ),
+            visual_identity_pending=True,
+        ),
+        "compose": lambda *_: {},
+        "validate": lambda *_: {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+        },
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(
+        42, {"editorial": {"decision": "process"}},
+    )
+
+    assert outcome.type.value == "retry"
+    assert store.state.retry.no_progress == 1
 
 
 def test_listicle_can_terminalize_after_second_completed_enrichment_round():

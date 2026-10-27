@@ -462,12 +462,18 @@ def _rights_key(root: str | Path | None) -> bytes:
 
 def _matching_source_evidence_hash(
     documents: list[Any], *, source_page_url: str, direct_image_url: str,
-    license_name: str, license_url: str,
+    author: str, license_name: str, license_url: str,
 ) -> str:
     image_url = _normalized_url(direct_image_url, source_page_url)
     declared_license = _normalized_url(license_url, source_page_url)
-    if not image_url or not declared_license:
+    declared_author = " ".join(str(author or "").split())
+    if not image_url or not declared_license or not declared_author:
         return ""
+    evidence_hashes: list[str] = []
+    authors: set[str] = set()
+    licenses: set[tuple[str, str]] = set()
+    unsupported_evidence = False
+    incompatible_license = False
     for document in documents:
         for node, has_schema_context in _jsonld_nodes(document):
             if not _is_image_object(node, has_schema_context):
@@ -476,15 +482,57 @@ def _matching_source_evidence_hash(
             if image_url not in {_normalized_url(value, source_page_url) for value in content_urls}:
                 continue
             license_values = _schema_values(node.get("license"), ("@id", "url"))
-            if any(
-                _normalized_url(value, source_page_url) == declared_license
-                and _license_reference_matches(license_name, value)
-                for value in license_values
-            ):
-                return hashlib.sha256(
+            # Keep the existing rule that an unlicensed duplicate object does
+            # not invalidate a separate, explicitly licensed object. Every
+            # license declaration on a licensed object, however, is checked.
+            if not license_values:
+                continue
+            names = list(dict.fromkeys(
+                _schema_name_values(node.get("creator"))
+                + _schema_name_values(node.get("author"))
+            ))
+            current_author = " ".join(", ".join(names).split())
+            if not current_author:
+                unsupported_evidence = True
+            else:
+                authors.add(current_author)
+                if current_author != declared_author:
+                    unsupported_evidence = True
+
+            node_matches_candidate = False
+            for raw_license_url in license_values:
+                license_data = _license_from_schema_url(raw_license_url, source_page_url)
+                if license_data is None:
+                    incompatible_license = incompatible_license or _is_known_incompatible_license_url(
+                        raw_license_url, source_page_url
+                    )
+                    unsupported_evidence = True
+                    continue
+                current_name, current_url = license_data
+                licenses.add((current_name, _normalized_url(current_url, source_page_url)))
+                if (
+                    _normalized_url(raw_license_url, source_page_url) == declared_license
+                    and _license_reference_matches(license_name, raw_license_url)
+                ):
+                    node_matches_candidate = True
+            if node_matches_candidate:
+                evidence_hashes.append(hashlib.sha256(
                     json.dumps(node, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-                ).hexdigest()
-    return ""
+                ).hexdigest())
+
+    current_license_url = next(iter(licenses), ("", ""))[1]
+    if (
+        incompatible_license
+        or unsupported_evidence
+        or len(authors) != 1
+        or len(licenses) != 1
+        or not hmac.compare_digest(next(iter(authors), ""), declared_author)
+        or not hmac.compare_digest(current_license_url, declared_license)
+        or not _license_reference_matches(license_name, current_license_url)
+        or not evidence_hashes
+    ):
+        return ""
+    return evidence_hashes[0]
 
 
 def _attestation_payload(candidate: Mapping[str, Any], evidence_reference: str) -> bytes:
@@ -529,6 +577,7 @@ def attest_source_rights(
         parser.documents,
         source_page_url=normalized["source_page_url"],
         direct_image_url=normalized["direct_image_url"],
+        author=normalized["author"],
         license_name=normalized["license"],
         license_url=normalized["license_url"],
     )

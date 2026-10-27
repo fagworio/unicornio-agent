@@ -387,6 +387,7 @@ class ProductionCandidateReader:
                 closing_featured_repeat=(
                     current_media.closing_featured_repeat if layout_policy else {}
                 ),
+                visual_identity_pending=current_media.visual_identity_pending,
             )
         if not active_journal:
             return WorkState(
@@ -498,6 +499,7 @@ class ProductionCandidateReader:
                     waiver_reason=candidate.waiver_reason,
                     layout_policy=layout_policy,
                     closing_featured_repeat=candidate.closing_featured_repeat,
+                    visual_identity_pending=candidate.visual_identity_pending,
                 )
             except ValueError:
                 continue

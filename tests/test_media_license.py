@@ -31,20 +31,21 @@ def candidate():
 
 class LicenseTests(unittest.TestCase):
     def test_wikimedia_api_attestation_requires_exact_metadata(self):
-        value = candidate()
-        value["rights_evidence"] = {
-            "provider": "wikimedia_commons_api",
-            "image_url": value["direct_image_url"],
-            "author": value["author"],
-            "license": value["license"],
-            "license_url": value["license_url"],
-        }
-        attestation = attest_wikimedia_rights(value)
-        self.assertIsNotNone(attestation)
-        value["source_rights_attestation"] = attestation
-        validate_upload_candidate(value)
-        value["rights_evidence"]["image_url"] = "https://upload.wikimedia.org/other.jpg"
-        self.assertIsNone(attest_wikimedia_rights(value))
+        with tempfile.TemporaryDirectory() as directory:
+            value = candidate()
+            value["rights_evidence"] = {
+                "provider": "wikimedia_commons_api",
+                "image_url": value["direct_image_url"],
+                "author": value["author"],
+                "license": value["license"],
+                "license_url": value["license_url"],
+            }
+            attestation = attest_wikimedia_rights(value, root=directory)
+            self.assertIsNotNone(attestation)
+            value["source_rights_attestation"] = attestation
+            validate_upload_candidate(value, root=directory)
+            value["rights_evidence"]["image_url"] = "https://upload.wikimedia.org/other.jpg"
+            self.assertIsNone(attest_wikimedia_rights(value, root=directory))
 
     def test_accepts_verifiable_creative_commons_candidate(self):
         result = validate_candidate(candidate())
@@ -169,6 +170,7 @@ class LicenseTests(unittest.TestCase):
             "@type": "ImageObject",
             "contentUrl": value["direct_image_url"],
             "license": value["license_url"],
+            "creator": {"@type": "Person", "name": value["author"]},
         }
         return '<script type="application/ld+json">' + json.dumps(image_object) + "</script>"
 
@@ -178,12 +180,15 @@ class LicenseTests(unittest.TestCase):
             validate_upload_candidate(value)
 
     def test_attests_license_only_for_exact_image_object(self):
-        value = candidate()
-        html = self._licensed_image_html(value)
-        attestation = attest_source_rights(value, html)
-        self.assertIsNotNone(attestation)
-        validated = validate_upload_candidate({**value, "source_rights_attestation": attestation})
-        self.assertEqual(validated["direct_image_url"], value["direct_image_url"])
+        with tempfile.TemporaryDirectory() as directory:
+            value = candidate()
+            html = self._licensed_image_html(value)
+            attestation = attest_source_rights(value, html, root=directory)
+            self.assertIsNotNone(attestation)
+            validated = validate_upload_candidate(
+                {**value, "source_rights_attestation": attestation}, root=directory,
+            )
+            self.assertEqual(validated["direct_image_url"], value["direct_image_url"])
 
     def test_rejects_page_level_license_without_image_binding(self):
         value = candidate()
@@ -240,11 +245,14 @@ class LicenseTests(unittest.TestCase):
         self.assertIsNone(attest_source_rights(value, self._licensed_image_html(value)))
 
     def test_attestation_cannot_be_reused_for_another_image(self):
-        value = candidate()
-        proof = attest_source_rights(value, self._licensed_image_html(value))
-        changed = {**value, "direct_image_url": "https://upload.wikimedia.org/other.jpg"}
-        with self.assertRaisesRegex(LicenseError, "does not match"):
-            validate_upload_candidate({**changed, "source_rights_attestation": proof})
+        with tempfile.TemporaryDirectory() as directory:
+            value = candidate()
+            proof = attest_source_rights(value, self._licensed_image_html(value), root=directory)
+            changed = {**value, "direct_image_url": "https://upload.wikimedia.org/other.jpg"}
+            with self.assertRaisesRegex(LicenseError, "does not match"):
+                validate_upload_candidate(
+                    {**changed, "source_rights_attestation": proof}, root=directory,
+                )
 
     def test_rights_attestation_survives_an_independent_process_and_interruption(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -305,6 +313,30 @@ class LicenseTests(unittest.TestCase):
             }
             with self.assertRaises(LicenseError):
                 validate_upload_candidate(changed_candidate, root=directory)
+
+    def test_source_author_change_is_not_reauthorized(self):
+        value = candidate()
+        changed_html = self._licensed_image_html(value).replace(
+            "Author Name", "Different Author",
+        )
+        self.assertIsNone(attest_source_rights(value, changed_html))
+
+    def test_conflicting_license_declarations_cannot_be_attested(self):
+        import json
+
+        value = candidate()
+        declarations = {
+            "@context": "https://schema.org",
+            "@type": "ImageObject",
+            "contentUrl": value["direct_image_url"],
+            "license": [
+                value["license_url"],
+                "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+            ],
+            "creator": {"@type": "Person", "name": value["author"]},
+        }
+        html = '<script type="application/ld+json">' + json.dumps(declarations) + "</script>"
+        self.assertIsNone(attest_source_rights(value, html))
 
     def test_attestation_rejects_changed_author_credit_and_alt(self):
         with tempfile.TemporaryDirectory() as directory:
