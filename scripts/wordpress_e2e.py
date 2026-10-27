@@ -236,6 +236,7 @@ def main() -> int:
         "media_acquisition": {
             "source": "controlled local HTTP with exact Schema.org ImageObject rights",
             "visual_provider": "controlled local OpenAI-compatible endpoint",
+            "trailer_waiver": "synthetic audited official_not_found fixture; no live trailer search",
             "wordpress": "real ephemeral REST API and database",
         },
         "e2e_suite": {},

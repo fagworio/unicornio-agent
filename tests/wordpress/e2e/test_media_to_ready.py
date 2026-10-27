@@ -281,6 +281,13 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "needs_trailer": False,
             "trailer_url": None,
             "game_name": "Hollow Knight Silksong",
+            "trailer_unavailable": True,
+            "trailer_search_evidence": {
+                "query": "Hollow Knight Silksong trailer official",
+                "provider": "controlled-e2e-fixture",
+                "searched_at": "2026-10-27T00:00:00+00:00",
+                "result": "official_not_found",
+            },
         }
         preflight = validate_media_plan(
             case.client, editorial, config=config, root=root,
@@ -324,7 +331,21 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             for item in inline_results
         ]
         body_with_images = insert_media(body, inline_plan)
-        editorial_with_media = {**editorial, "cleaned_html": body_with_images}
+        schema_media_fields = {
+            "paragraph_index", "source_page_url", "direct_image_url", "author",
+            "license", "license_url", "captured_at", "credit_text", "alt_text",
+            "is_featured", "media_library_id", "subject", "search_query",
+            "phash", "evidence_score", "evidence_verdict", "candidate_id",
+            "decision_id", "decision",
+        }
+        editorial_with_media = {
+            **editorial,
+            "cleaned_html": body_with_images,
+            "media_plan": [
+                {key: value for key, value in item.items() if key in schema_media_fields}
+                for item in editorial["media_plan"]
+            ],
+        }
         content, _trailer, _trailer_status = compose_final_content(
             editorial_with_media, config, source_url, root=root,
         )
