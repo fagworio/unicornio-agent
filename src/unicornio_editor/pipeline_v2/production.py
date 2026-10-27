@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,9 +43,28 @@ def _payload_editorial(payload: dict[str, Any]) -> dict[str, Any] | None:
     return editorial if editorial_has_substantive_text(editorial) else None
 
 
+def _editorial_identity_hash(html: str) -> str:
+    normalized = re.sub(r"<!--\s*wc:\s*\d+\s*-->", "", str(html or ""), flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", strip_canonical_footer(normalized)).strip()
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
 def _recover_draft_metadata(draft: dict[str, Any], directory: Path, post_id: int) -> dict[str, Any]:
     """Restore verified editorial metadata without replacing the draft body."""
     merged = dict(draft)
+    draft_body_hash = _editorial_identity_hash(str(draft.get("cleaned_html") or ""))
+    prepared_path = directory / "prepared.json"
+    prepared_body_hash = ""
+    try:
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8")) if prepared_path.is_file() else {}
+        prepared_html = str(prepared.get("cleaned_html") or "") if isinstance(prepared, dict) else ""
+        if editorial_has_substantive_text(prepared_html):
+            prepared_body_hash = _editorial_identity_hash(prepared_html)
+    except (OSError, ValueError):
+        prepared_body_hash = ""
+    body_compatible = bool(draft_body_hash and prepared_body_hash and draft_body_hash == prepared_body_hash)
+    if not body_compatible:
+        return merged
     sources = [
         directory.parent.parent / "work" / "v2-editorial" / f"{int(post_id)}.json",
         directory / "editorial.candidate.json",
@@ -61,9 +81,6 @@ def _recover_draft_metadata(draft: dict[str, Any], directory: Path, post_id: int
             payload = record.get("editorial") if isinstance(record, dict) and isinstance(record.get("editorial"), dict) else {}
         editorial = payload.get("editorial") if isinstance(payload, dict) and isinstance(payload.get("editorial"), dict) else payload
         if not isinstance(editorial, dict):
-            continue
-        source_title = str(editorial.get("title") or (payload.get("title") if isinstance(payload, dict) else "") or "").strip()
-        if source_title and source_title not in draft_html:
             continue
         for key in ("title", "site_relevance", "media_plan", "needs_trailer", "trailer_url", "game_name", "seo", "original_link"):
             value = editorial.get(key)

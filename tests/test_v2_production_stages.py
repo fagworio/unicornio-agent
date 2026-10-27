@@ -408,10 +408,11 @@ def test_recover_editorial_prefers_fresh_valid_draft_over_wordpress(tmp_path):
 
 
 def test_recover_editorial_preserves_verified_metadata_with_body_only_draft(tmp_path):
-    body = "<h2>Título validado</h2><p>" + ("texto editorial " * 40) + "</p>"
+    body = "<p>" + ("texto editorial " * 40) + "</p>"
     directory = tmp_path / "backups" / "115237"
     directory.mkdir(parents=True)
     (directory / "editorial.draft.json").write_text(json.dumps({"cleaned_html": body}), encoding="utf-8")
+    (directory / "prepared.json").write_text(json.dumps({"cleaned_html": body + "\n<!-- wc: 40 -->"}), encoding="utf-8")
     work = tmp_path / "work" / "v2-editorial"
     work.mkdir(parents=True)
     (work / "115237.json").write_text(json.dumps({"results": [{"post_id": 115237, "editorial": {
@@ -1359,6 +1360,11 @@ def test_media_structure_counts_only_positions_not_already_present_and_verified(
     assert audit["media_positions_needed"] == 2
     assert audit["paragraphs_after"] == 8
     assert prepared["cleaned_html"].count("<img") == 2
+
+
+def test_checklist_editorial_failure_without_phase_is_left_for_gate_mapping():
+    failures = _checklist_failures({"items": [{"name": "qualidade_texto", "status": "fail", "detail": "invalid"}]})
+    assert failures == [{"gate": "qualidade_texto", "detail": "invalid"}]
 
 
 def test_checklist_error_is_propagated_as_media_provider_failure():

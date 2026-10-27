@@ -1279,9 +1279,8 @@ def _checklist_failures(checklist: dict[str, Any]) -> list[dict[str, Any]]:
         phase = item.get("phase")
         if phase == "media_validation":
             phase = "media"
-        if phase not in valid_phases:
-            phase = "media" if item.get("blocker") == "provider_error" else "validate"
-        failure["phase"] = phase
+        if phase in valid_phases:
+            failure["phase"] = phase
         failures.append(failure)
     return failures
 
