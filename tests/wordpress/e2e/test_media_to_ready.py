@@ -381,7 +381,10 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             client=case.client,
             media_context=media_progress.to_dict(),
         )
-        assert checklist["all_passed"], checklist["items"]
+        failed_checklist_items = [
+            item for item in checklist["items"] if item.get("status") != "pass"
+        ]
+        assert checklist["all_passed"], json.dumps(failed_checklist_items, ensure_ascii=False)
         assert checklist["media_decision"]["accepted"] == 2
 
         run_id = f"wp-e2e-media-ready-{post_id}"
