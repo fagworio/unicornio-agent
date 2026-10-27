@@ -8,7 +8,7 @@
 4. Rode a suíte completa antes do commit:
 
 ```bash
-python -m unittest discover -s tests -q
+python -m pytest -q
 python -m compileall -q src tests scripts
 python scripts/check_repository.py
 git diff --check

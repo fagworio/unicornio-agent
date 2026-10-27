@@ -38,6 +38,7 @@ SCENARIOS = (
     "test_media_registry_v5_matches_confirmed_writer_transaction",
     "test_legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes",
     "test_controlled_source_acquisition_composes_checklists_and_commits_ready_media",
+    "test_visual_identity_retry_persists_and_resumes_after_cooldown",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -51,6 +52,9 @@ SCENARIO_OPERATIONS = {
     "media_registry_v5_matches_confirmed_writer_transaction": ["registry"],
     "legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes": ["prewriter_isolation"],
     "controlled_source_acquisition_composes_checklists_and_commits_ready_media": ["media_to_ready"],
+    "visual_identity_retry_persists_and_resumes_after_cooldown": [
+        "visual_retry_waiting", "visual_retry_still_waiting", "visual_retry_resumed",
+    ],
 }
 POST_FIXTURES = {
     "pending_transition": ("pending", False),
@@ -63,6 +67,8 @@ POST_FIXTURES = {
     "historical": ("awaiting_human", False),
     "registry": ("pending", False),
     "media_ready": ("pending", False),
+    "visual_retry": ("pending", False),
+    "visual_retry_new": ("pending", False),
     "isolation_target": ("pending", True),
     "isolation_committed_a": ("pending", True),
     "isolation_committed_b": ("pending", True),

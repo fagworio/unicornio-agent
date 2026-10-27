@@ -1016,11 +1016,10 @@ _DDG_BOT_CHALLENGE_COOLDOWN_SEGUNDOS = 60 * 60
 def _em_teste() -> bool:
     """Estamos num runner de testes (pytest OU unittest discover)?
 
-    O CI oficial roda ``python -m unittest discover``, onde ``PYTEST_CURRENT_TEST``
-    NÃO existe. Detectar só o pytest deixava o breaker ATIVO no CI: o estado em
-    /tmp era compartilhado entre os casos, uma engine entrava em cooldown numa
-    falha simulada e os testes seguintes dependiam da ORDEM — verde no pytest
-    (com sleeps de backoff), vermelho no GitHub Actions.
+    ``unittest discover`` não define ``PYTEST_CURRENT_TEST``. Detectar só o
+    pytest deixaria o breaker ATIVO nesse runner: o estado em /tmp seria
+    compartilhado entre os casos, uma engine poderia entrar em cooldown numa
+    falha simulada e os testes seguintes dependeriam da ORDEM.
     """
     if os.environ.get("UNICORNIO_TESTING"):
         return True

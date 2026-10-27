@@ -110,6 +110,63 @@ def test_runner_preserves_no_progress_for_recoverable_visual_identity_pending():
     assert store.state.retry.no_progress == 1
 
 
+def test_editorial_failure_is_classified_after_visual_identity_recovers():
+    first = InlineMedia(
+        10,
+        "https://wp.test/first.webp",
+        0,
+        sha256="1" * 64,
+        phash="1111111111111111",
+        visual_group_id="visual:first",
+        visual_verification={"decision": "DIFFERENT"},
+    )
+    second = InlineMedia(
+        11,
+        "https://wp.test/second.webp",
+        1,
+        sha256="2" * 64,
+        phash="2222222222222222",
+        visual_group_id="visual:second",
+        visual_verification={"decision": "DIFFERENT"},
+    )
+    store = Store(WorkState(
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        retry=RetryInfo(attempts=5, no_progress=2),
+        relevance_approved=True,
+        media=MediaProgress(required=3, inline=(first,)),
+    ))
+    media_results = iter((
+        MediaProgress(required=3, inline=(first,), visual_identity_pending=True),
+        MediaProgress(required=3, inline=(first, second)),
+    ))
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: next(media_results),
+        "compose": lambda *_: {},
+        "validate": lambda *_: {
+            "passed": False,
+            "failures": [
+                {"gate": "imagens_no_corpo"},
+                {"gate": "qualidade_texto", "detail": "keyword is missing"},
+            ],
+        },
+    }
+    runner = PipelineRunner(store, stages)
+    context = {"editorial": {"decision": "process"}}
+
+    outage = runner.run_one(42, context)
+    assert outage.type.value == "retry"
+    assert outage.blocker is BlockerCode.PROVIDER_ERROR
+    assert store.state.retry.no_progress == 2
+
+    recovered = runner.run_one(42, context)
+    assert recovered.type.value == "retry"
+    assert recovered.phase is Phase.EDITORIAL
+    assert recovered.blocker is BlockerCode.TEXT_QUALITY
+    assert store.state.retry.no_progress == 0
+
+
 def test_listicle_can_terminalize_after_second_completed_enrichment_round():
     previous = WorkState(
         phase=Phase.MEDIA,
