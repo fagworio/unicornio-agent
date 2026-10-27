@@ -34,6 +34,20 @@ class PipelineRunner:
         }
 
     @staticmethod
+    def _media_attempt_incomplete(media: MediaProgress) -> bool:
+        search = getattr(media, "search", None)
+        if search is None:
+            return False
+        coverage = search.coverage if isinstance(search.coverage, dict) else {}
+        source_discovery = coverage.get("source_discovery")
+        if isinstance(source_discovery, dict) and source_discovery.get("retryable") is True:
+            return True
+        return bool(
+            not search.completed
+            and int(search.queries_planned or 0) > int(search.queries_completed or 0)
+        )
+
+    @staticmethod
     def _editorial_preflight(editorial: dict[str, Any], context: dict[str, Any]) -> None:
         """Reject an invalid focus keyword before any media side effect."""
         raw_seo = editorial.get("seo")
@@ -166,12 +180,8 @@ class PipelineRunner:
                     except Exception:  # noqa: BLE001 - telemetry cannot change lifecycle
                         pass
                 progress = self._media_progressed(previous.media, media) if media_completed else False
-                search_incomplete = bool(
-                    media_completed
-                    and getattr(media, "search", None) is not None
-                    and not media.search.completed
-                    and int(media.search.queries_planned or 0)
-                    > int(media.search.queries_completed or 0)
+                search_incomplete = (
+                    media_completed and self._media_attempt_incomplete(media)
                 )
                 current_no_progress = (
                     (0 if progress else media_base_no_progress + 1)
@@ -226,12 +236,8 @@ class PipelineRunner:
             effective_media = media
         # Only a completed acquisition/validation attempt consumes this budget.
         # Operational failures retain both progress and the existing counter.
-        search_incomplete = bool(
-            media_completed
-            and getattr(media, "search", None) is not None
-            and not media.search.completed
-            and int(media.search.queries_planned or 0)
-            > int(media.search.queries_completed or 0)
+        search_incomplete = (
+            media_completed and self._media_attempt_incomplete(media)
         )
         media_attempt = media_completed and not technical_media_error and not search_incomplete
         progress = self._media_progressed(previous.media, effective_media) if media_attempt else False

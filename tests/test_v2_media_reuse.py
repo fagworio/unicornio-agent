@@ -2514,6 +2514,138 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
     assert result.inline[0].media_id == 44
 
 
+def test_article_source_fetch_failure_is_preserved_in_state_and_summary(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.source_verify as source_verify
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    from unicornio_editor.observability import read_telemetry_summary
+
+    def unavailable(_url, *, stats, **_kwargs):
+        stats.update({
+            "source_status": "unavailable",
+            "reason_code": "source_page_unavailable",
+            "retryable": True,
+        })
+        return []
+
+    monkeypatch.setattr(source_verify, "discover_article_source_candidates", unavailable)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+
+    def empty_search(_client, _config, _root, batch, **_kwargs):
+        return {"posts": [{
+            "reuse": [],
+            "audit_candidates": [],
+            "search": {
+                "completed": True,
+                "completion_reason": "EXHAUSTED_VERIFIED",
+                "queries_planned": 1,
+                "queries_attempted": 1,
+                "queries_completed": 1,
+                "engines_attempted": ["bing"],
+                "engines_disabled": [],
+                "candidates_seen": 0,
+                "candidates_rejected": 0,
+                "coverage": {"verified": True, "active_coverage": {}},
+            },
+        }]}
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", empty_search)
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID, 90, "https://cdn.test/featured.webp"
+        ),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115900, "title": "Test", "original_link": "https://source.test/article"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(6), "seo": {}},
+        previous,
+    )
+
+    assert result.search.coverage["source_discovery"] == {
+        "status": "unavailable",
+        "reason_code": "source_page_unavailable",
+        "retryable": True,
+    }
+    assert result.to_dict()["search"]["coverage"]["source_discovery"]["retryable"] is True
+    assert result.search.queries_attempted > 0
+    assert "bing" in result.search.engines_attempted
+    summary = read_telemetry_summary(tmp_path)
+    source_summary = next(
+        item for item in summary["media_source_summary"]
+        if item["post_id"] == 115900
+    )
+    assert source_summary["source_status"] == "unavailable"
+    assert source_summary["source_reason_code"] == "source_page_unavailable"
+    assert source_summary["source_retryable"] is True
+    assert "source_page_url" not in source_summary
+
+
+def test_inline_article_source_rejection_is_recorded_in_registry(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.source_verify as source_verify
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    from unicornio_editor.media.registry import connect
+
+    rejected = {
+        "candidate_id": "inline-source-mismatch",
+        "direct_image_url": "https://cdn.test/not-the-article.webp",
+        "source_page_url": "https://source.test/article",
+        "subject": "Test",
+        "reason_code": "source_mismatch",
+        "evidence": {"verdict": "source_mismatch", "gate": "provenance"},
+    }
+
+    def discover(_url, *, stats, **_kwargs):
+        stats.update({
+            "source_status": "available",
+            "reason_code": "source_page_fetched",
+            "retryable": False,
+            "raw_assets": 1,
+            "editorial_assets": 1,
+            "filtered_assets": 0,
+        })
+        return [dict(rejected)]
+
+    monkeypatch.setattr(source_verify, "discover_article_source_candidates", discover)
+    monkeypatch.setattr(source_verify, "enrich_wikimedia_rights", lambda candidate, **_kwargs: candidate)
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(
+        cli,
+        "_resolve_media_batch",
+        lambda *_args, **_kwargs: {"posts": [{
+            "reuse": [], "audit_candidates": [],
+            "search": {"completed": False, "completion_reason": "SEARCH_INCOMPLETE"},
+        }]},
+    )
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID, 90, "https://cdn.test/featured.webp"
+        ),
+    )
+
+    ProductionMediaResolver(object(), Config(), tmp_path)(
+        {"post_id": 115901, "title": "Test", "original_link": "https://source.test/article"},
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(6), "seo": {}},
+        previous,
+    )
+
+    with connect(tmp_path) as db:
+        rows = db.execute(
+            "SELECT role, disposition, reason_code FROM media_decisions "
+            "WHERE post_id=? AND candidate_id=?",
+            (115901, "inline-source-mismatch"),
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("inline", "reject_final", "source_mismatch")
+    ]
+
+
 def test_featured_missing_searches_article_source_even_when_inline_is_complete(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.source_verify as source_verify

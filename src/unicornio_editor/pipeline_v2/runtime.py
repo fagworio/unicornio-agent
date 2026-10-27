@@ -2558,8 +2558,11 @@ class ProductionMediaResolver:
                 if isinstance(post, dict)
                 else ""
             )
-        source_stats: dict[str, int] = {}
+        source_stats: dict[str, Any] = {}
         source_candidates_cache: list[dict[str, Any]] | None = None
+        source_attempted = 0
+        source_accepted = 0
+        source_reused = 0
 
         def article_source_candidates() -> list[dict[str, Any]]:
             nonlocal source_candidates_cache
@@ -2588,6 +2591,11 @@ class ProductionMediaResolver:
             except Exception as exc:
                 from ..observability import record_unexpected_error, append_telemetry
 
+                source_stats.update({
+                    "source_status": "error",
+                    "reason_code": "source_extractor_error",
+                    "retryable": True,
+                })
                 record_unexpected_error(
                     self.root, exc, post_id=int(context["post_id"]),
                     run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
@@ -2597,6 +2605,8 @@ class ProductionMediaResolver:
                     self.root, "media_source_discovery_failed",
                     post_id=int(context["post_id"]),
                     failure_kind="source_extractor_error",
+                    reason_code="source_extractor_error",
+                    retryable=True,
                     candidates_found=int(source_stats.get("raw_assets") or 0),
                 )
                 source_candidates_cache = []
@@ -2711,9 +2721,6 @@ class ProductionMediaResolver:
             # assets already have provenance by construction; they still pass
             # through the regular executable media-plan gates below.
             if source_url:
-                source_attempted = 0
-                source_accepted = 0
-                source_reused = 0
                 from ..media.source_verify import enrich_wikimedia_rights
                 source_candidates = [
                     enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
@@ -2753,6 +2760,9 @@ class ProductionMediaResolver:
                         context_key=vision_context_key,
                     )
                     approved = self._approved_unique([candidate])
+                    record_non_executable_candidates(
+                        [candidate], approved, role="inline"
+                    )
                     for source_candidate in approved:
                         if inline_remaining() <= 0:
                             break
@@ -2776,24 +2786,6 @@ class ProductionMediaResolver:
                             if current_inline[-1].media_id in current_valid_ids:
                                 used_slots.add(slot)
                                 covered_item_keys.add(str(subject).casefold())
-                from ..observability import append_telemetry
-
-                append_telemetry(
-                    self.root,
-                    "media_source_summary",
-                    post_id=int(context["post_id"]),
-                    source_domain=(urlsplit(source_url).hostname or "").casefold(),
-                    source_page_url_sha256=(
-                        hashlib.sha256(source_url.encode()).hexdigest() if source_url else ""
-                    ),
-                    source_raw_found=int(source_stats.get("raw_assets") or 0),
-                    source_after_dom_filter=int(source_stats.get("editorial_assets") or 0),
-                    source_filtered=int(source_stats.get("filtered_assets") or 0),
-                    source_attempted=source_attempted,
-                    source_accepted=source_accepted,
-                    reused=source_reused,
-                    uploaded=max(0, source_accepted - source_reused),
-                )
             # External acquisition is only used for the residual deficit.
             for subject, query in subject_queries:
                 remaining = inline_remaining()
@@ -2850,6 +2842,26 @@ class ProductionMediaResolver:
                         covered_item_keys.add(candidate_key)
                         if not is_listicle:
                             used_slots.add(slot)
+        if source_url and source_candidates_cache is not None:
+            append_telemetry(
+                self.root,
+                "media_source_summary",
+                post_id=int(context["post_id"]),
+                source_domain=(urlsplit(source_url).hostname or "").casefold(),
+                source_page_url_sha256=(
+                    hashlib.sha256(source_url.encode()).hexdigest() if source_url else ""
+                ),
+                source_status=str(source_stats.get("source_status") or "unknown"),
+                source_reason_code=str(source_stats.get("reason_code") or ""),
+                source_retryable=source_stats.get("retryable") is True,
+                source_raw_found=int(source_stats.get("raw_assets") or 0),
+                source_after_dom_filter=int(source_stats.get("editorial_assets") or 0),
+                source_filtered=int(source_stats.get("filtered_assets") or 0),
+                source_attempted=source_attempted,
+                source_accepted=source_accepted,
+                reused=source_reused,
+                uploaded=max(0, source_accepted - source_reused),
+            )
         if search_runs:
             capacity_reached = inline_remaining() <= 0
             queries_planned = len(search_runs) if capacity_reached else len(subject_queries)
@@ -2984,6 +2996,27 @@ class ProductionMediaResolver:
             )
         else:
             search_progress = previous.search
+        source_coverage = (
+            dict(search_progress.coverage)
+            if isinstance(search_progress.coverage, dict)
+            else {}
+        )
+        had_source_marker = "source_discovery" in source_coverage
+        if source_stats:
+            source_coverage["source_discovery"] = {
+                "status": str(source_stats.get("source_status") or "unknown"),
+                "reason_code": str(source_stats.get("reason_code") or ""),
+                "retryable": source_stats.get("retryable") is True,
+            }
+        else:
+            # A prior retryable source failure must not poison a later attempt
+            # when the article no longer has a source URL to fetch.
+            source_coverage.pop("source_discovery", None)
+        if source_stats or had_source_marker:
+            search_progress = replace(
+                search_progress,
+                coverage=source_coverage,
+            )
         final_accounting = account_visual_media(
             current_inline,
             required_inline=total_required,

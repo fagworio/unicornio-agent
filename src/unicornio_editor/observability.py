@@ -700,7 +700,8 @@ def read_telemetry_summary(
                     for key in (
                         "post_id", "source_domain", "source_page_url_sha256", "source_raw_found",
                         "source_after_dom_filter", "source_filtered", "source_attempted",
-                        "source_accepted", "reused", "uploaded",
+                        "source_accepted", "reused", "uploaded", "source_status",
+                        "source_reason_code", "source_retryable",
                     )
                     if key in record
                 })

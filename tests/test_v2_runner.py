@@ -313,6 +313,52 @@ def test_incomplete_media_search_does_not_exhaust_no_progress_budget():
     assert store.state.media.search.completion_reason == "SOURCE_VERIFICATION_INCOMPLETE"
 
 
+def test_retryable_article_source_failure_does_not_consume_media_no_progress():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(no_progress=2),
+        relevance_approved=True,
+        media=MediaProgress(required=2),
+    )
+    store = MemoryStore(previous)
+    media = MediaProgress(
+        required=2,
+        search=MediaSearchProgress(
+            completed=True,
+            queries_attempted=1,
+            queries_planned=1,
+            queries_completed=1,
+            completion_reason="EXHAUSTED_VERIFIED",
+            coverage={
+                "source_discovery": {
+                    "status": "unavailable",
+                    "reason_code": "source_page_unavailable",
+                    "retryable": True,
+                },
+            },
+        ),
+    )
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+        },
+    }
+
+    outcome = PipelineRunner(store, stages).run_one(
+        115633, {"editorial": {"decision": "process"}}
+    )
+
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+    assert "source_page_unavailable" in (outcome.detail or "")
+    assert store.state.retry.no_progress == 2
+
+
 def test_provider_retry_preserves_three_images_and_next_run_requests_only_one():
     existing = tuple(
         InlineMedia(

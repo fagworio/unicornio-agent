@@ -243,21 +243,42 @@ def classify(
     blockers = [blocker for blocker, _, _, _ in failures]
     search = getattr(media, "search", None)
     search_reason = str(getattr(search, "completion_reason", "") or "")
-    if (
-        blockers[0] in MEDIA_BLOCKERS
-        and search is not None
+    search_coverage = getattr(search, "coverage", None)
+    search_coverage = search_coverage if isinstance(search_coverage, dict) else {}
+    source_discovery = search_coverage.get("source_discovery")
+    source_retryable = (
+        isinstance(source_discovery, dict)
+        and source_discovery.get("retryable") is True
+    )
+    source_reason = (
+        str(source_discovery.get("reason_code") or "")
+        if isinstance(source_discovery, dict)
+        else ""
+    )
+    provider_search_incomplete = bool(
+        search is not None
         and not bool(getattr(search, "completed", False))
         and int(getattr(search, "queries_planned", 0) or 0)
         > int(getattr(search, "queries_completed", 0) or 0)
+    )
+    if (
+        blockers[0] in MEDIA_BLOCKERS
+        and search is not None
+        and (provider_search_incomplete or source_retryable)
     ):
         # Missing media after an incomplete provider/source-verification run is
         # operationally unresolved, not proof that the article is impossible.
+        detail = (
+            f"article source discovery retryable ({source_reason})"
+            if source_retryable
+            else f"media acquisition incomplete ({search_reason or 'unknown'})"
+        )
         return _retry(
             previous,
             Phase.MEDIA,
             BlockerCode.PROVIDER_ERROR,
             now=now,
-            detail=f"media acquisition incomplete ({search_reason or 'unknown'})",
+            detail=detail,
             cooldown_minutes=cooldown_minutes,
         )
     operational_failure = next(
