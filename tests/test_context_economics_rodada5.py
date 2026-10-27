@@ -331,13 +331,28 @@ class ResolverMemoAliasTests(unittest.TestCase):
             }
 
         def rodada(candidatos):
+            def verifier(cand, **kwargs):
+                metadata = {
+                    "@context": "https://schema.org",
+                    "@type": "ImageObject",
+                    "contentUrl": cand["direct_image_url"],
+                    "license": "https://creativecommons.org/licenses/by/4.0/",
+                    "creator": {"@type": "Person", "name": "Test Author"},
+                }
+                cache_html = kwargs.get("cache_html")
+                if isinstance(cache_html, dict):
+                    cache_html[cand["source_page_url"]] = (
+                        '<script type="application/ld+json">'
+                        + json.dumps(metadata)
+                        + "</script>"
+                    )
+                return {"valid": True, "reason": "ok", "images_in_page": 1}
+
             with mock.patch(
                 "unicornio_editor.media.source_resolver._buscador_padrao", side_effect=busca_falsa
             ), mock.patch(
                 "unicornio_editor.media.source_verify.validate_discovered_candidate",
-                side_effect=lambda cand, **kw: {
-                    "valid": True, "reason": "ok", "images_in_page": 1
-                },
+                side_effect=verifier,
             ), mock.patch(
                 "unicornio_editor.media.visual_hash.image_hashes",
                 side_effect=lambda urls: {u: f"hash-{u}" for u in urls if u},

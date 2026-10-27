@@ -87,7 +87,7 @@ def discover_article_source_candidates(
     subjects: list[str] | tuple[str, ...] | None = None,
     limit: int = 32,
     audit=None,
-    stats: dict[str, int] | None = None,
+    stats: dict[str, Any] | None = None,
     url_policy: str = "audit",
     is_listicle: bool | None = None,
 ) -> list[dict[str, Any]]:
@@ -97,12 +97,30 @@ def discover_article_source_candidates(
     media-plan gates still validate and execute every candidate.
     """
     if not _valid_http(page_url):
+        if stats is not None:
+            stats.update({
+                "source_status": "invalid",
+                "reason_code": "source_page_unavailable",
+                "retryable": False,
+            })
         return []
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
     if payload is None:
+        if stats is not None:
+            stats.update({
+                "source_status": "unavailable",
+                "reason_code": "source_page_unavailable",
+                "retryable": True,
+            })
         return []
     html = payload.decode("utf-8", "ignore")
+    if stats is not None:
+        stats.update({
+            "source_status": "available",
+            "reason_code": "source_page_fetched",
+            "retryable": False,
+        })
     if is_listicle is None:
         from ..list_quality import extract_list_items
 
@@ -201,7 +219,7 @@ def discover_article_source_candidates(
             source_page_present=True,
             image_in_source=True,
         )
-        result.append({
+        candidate = {
             "candidate_id": candidate_id,
             "discovery_image_url": url,
             "direct_image_url": url,
@@ -226,7 +244,10 @@ def discover_article_source_candidates(
             "subjects": list(editorial_subjects),
             "source_context_kind": asset.context_kind,
             "role": "inline",
-        })
+        }
+        from .license import enrich_source_image_object_rights
+
+        result.append(enrich_source_image_object_rights(candidate, html))
     return result
 
 
@@ -300,6 +321,16 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
         if attestation:
             enriched["source_rights_attestation"] = attestation
             enriched["rights_verified"] = True
+            from .license import RightsDecision
+
+            evidence_reference = hashlib.sha256(
+                json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            enriched["rights_evidence"]["evidence_sha256"] = evidence_reference
+            enriched["rights_decision"] = RightsDecision(
+                "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
+                evidence_reference=evidence_reference,
+            ).to_dict()
             return enriched
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
         return candidate
@@ -391,6 +422,16 @@ def search_wikimedia_commons_candidates(
            continue
        candidate["source_rights_attestation"] = attestation
        candidate["rights_verified"] = True
+       from .license import RightsDecision
+
+       evidence_reference = hashlib.sha256(
+           json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+       ).hexdigest()
+       candidate["rights_evidence"]["evidence_sha256"] = evidence_reference
+       candidate["rights_decision"] = RightsDecision(
+           "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
+           evidence_reference=evidence_reference,
+       ).to_dict()
        result.append(candidate)
    return result
 

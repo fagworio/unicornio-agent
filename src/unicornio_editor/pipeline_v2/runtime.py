@@ -2490,27 +2490,52 @@ class ProductionMediaResolver:
                         continue
                     evidence = candidate.get("evidence")
                     evidence = evidence if isinstance(evidence, dict) else {}
+                    rights = candidate.get("rights_decision")
+                    rights = rights if isinstance(rights, dict) else {}
+                    rights_status = str(rights.get("status") or "").upper()
                     verdict = str(evidence.get("verdict") or "").casefold()
-                    rejected_reason = str(candidate.get("rejected_reason") or "").casefold()
                     gate = str(evidence.get("gate") or "").casefold()
-                    signal = rejected_reason or verdict or gate
-                    definitive_signals = (
-                        "source_mismatch", "duplicate", "unrelated", "width_below_minimum",
-                        "resolution", "source_bytes_mismatch", "identity_mismatch",
+                    reason_code = str(
+                        rights.get("reason_code")
+                        or candidate.get("source_verification_reason_code")
+                        or candidate.get("reason_code")
+                        or evidence.get("reason_code")
+                        or candidate.get("rejected_reason")
+                        or ""
+                    ).casefold().strip()
+                    rejected_reason = str(candidate.get("rejected_reason") or "").casefold().strip()
+                    retryable = (
+                        rights.get("retryable") is True
+                        or candidate.get("source_verification_recoverable") is True
+                        or evidence.get("recoverable") is True
                     )
                     definitive_verdicts = {
                         "reject", "source_mismatch", "duplicate_existing_frame",
                         "duplicate_frame", "unrelated",
                     }
-                    is_definitive = verdict in definitive_verdicts or any(
-                        value in signal for value in definitive_signals
+                    definitive_reason_codes = {
+                        "source_mismatch", "source_bytes_mismatch", "duplicate_existing_frame",
+                        "duplicate_frame", "unrelated", "width_below_minimum",
+                        "resolution", "identity_mismatch", "media_rights_unproven",
+                        "media_rights_incompatible", "media_rights_unsupported_evidence",
+                    }
+                    is_definitive = (
+                        verdict in definitive_verdicts
+                        or reason_code in definitive_reason_codes
+                        or rights_status in {"UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE"}
                     )
-                    disposition = "reject_final" if is_definitive else "defer_retry"
+                    signal = reason_code or verdict or gate or "incomplete_provenance"
+                    disposition = "defer_retry" if retryable else (
+                        "reject_final" if is_definitive or rights_status in {
+                            "UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE",
+                        } else "defer_retry"
+                    )
                     if verdict == "deterministic_match" and not rejected_reason:
                         # The evidence matched, but the candidate was not executable;
                         # missing contract/provenance data is not a permanent rejection.
-                        disposition = "defer_retry"
-                        signal = "incomplete_provenance"
+                        if not rights.get("reason_code"):
+                            disposition = "defer_retry"
+                            signal = "incomplete_provenance"
                     elif not signal:
                         signal = "incomplete_provenance"
                     record_v2_candidate_decision(
@@ -2989,18 +3014,16 @@ class ProductionMediaResolver:
             (candidate.get("evidence") or {}).get("verdict") != "deterministic_match"
             or candidate.get("valid") is not True
             or not cls._has_provenance(candidate)
+            or candidate.get("rights_verified") is not True
         ):
             return False
-        from ..media.license import LicenseError, validate_candidate
+        from ..media.license import LicenseError, RightsDecision, validate_upload_candidate
 
         try:
-            validate_candidate({
-                key: candidate.get(key)
-                for key in (
-                    "source_page_url", "direct_image_url", "author", "license",
-                    "license_url", "captured_at", "credit_text", "alt_text",
-                )
-            })
+            decision = RightsDecision.from_value(candidate.get("rights_decision"))
+            if decision.status != "VERIFIED":
+                return False
+            validate_upload_candidate(candidate)
         except LicenseError:
             return False
         return True
@@ -3036,6 +3059,8 @@ class ProductionMediaResolver:
     ) -> None:
         vision_candidates = []
         for index, candidate in enumerate(candidates):
+            if candidate.get("rights_checked") is True and candidate.get("rights_verified") is not True:
+                continue
             url = candidate.get("direct_image_url") or candidate.get("image_url")
             verdict = (candidate.get("evidence") or {}).get("verdict")
             if url and verdict in {

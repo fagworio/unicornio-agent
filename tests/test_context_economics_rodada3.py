@@ -85,6 +85,20 @@ class SourceResolverContractTests(unittest.TestCase):
             return [{"source_page_url": f"https://site/pagina{indice + 1}"}]
 
         def verifier_falso(cand, **kwargs):
+            metadata = {
+                "@context": "https://schema.org",
+                "@type": "ImageObject",
+                "contentUrl": cand["direct_image_url"],
+                "license": "https://creativecommons.org/licenses/by/4.0/",
+                "creator": {"@type": "Person", "name": "Test Author"},
+            }
+            cache_html = kwargs.get("cache_html")
+            if isinstance(cache_html, dict):
+                cache_html[cand["source_page_url"]] = (
+                    '<script type="application/ld+json">'
+                    + json.dumps(metadata)
+                    + "</script>"
+                )
             return {"valid": True, "reason": "ok", "images_in_page": 1}
 
         def hashes_falsos(urls):

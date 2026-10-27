@@ -524,14 +524,42 @@ def record_v2_candidate_decision(
         return
     evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
     vision = evidence.get("vision_decision") if isinstance(evidence.get("vision_decision"), dict) else {}
+    rights = candidate.get("rights_decision") if isinstance(candidate.get("rights_decision"), dict) else {}
     direct_url = str(candidate.get("direct_image_url") or "").strip()
     source_page_url = str(candidate.get("source_page_url") or "").strip()
     matched_fields = {
         "filename", "og_title", "page_title", "alt_original", "figcaption",
         "heading", "page_url", "query",
     }
+    allowed_reason_codes = {
+        "candidate_accepted", "transient_provider_failure", "candidate_rejected",
+        "source_verification_inconclusive",
+        "unresolved_source", "reject",
+        "incomplete_provenance", "ambiguous", "vision_input_unavailable",
+        "source_mismatch", "source_bytes_mismatch",
+        "source_page_unavailable", "source_asset_unavailable",
+        "source_scan_incomplete", "source_decode_failed",
+        "candidate_asset_unavailable", "insufficient_source_context",
+        "subject_mismatch", "role_unsuitable", "visual_identity_unverified",
+        "baseline_identity_unavailable",
+        "duplicate_existing_frame", "duplicate_frame", "unrelated",
+        "width_below_minimum", "resolution", "identity_mismatch",
+        "vision_provider_error", "media_rights_unproven", "media_rights_incompatible",
+        "media_rights_unavailable", "media_rights_unsupported_evidence",
+    }
     matched = evidence.get("matched")
     penalties = evidence.get("penalties")
+    decision_causes = list(dict.fromkeys(
+        str(value or "").casefold().strip()
+        for value in (
+            rights.get("reason_code"),
+            candidate.get("source_verification_reason_code"),
+            candidate.get("reason_code"),
+            evidence.get("reason_code"),
+            evidence.get("verdict"),
+        )
+        if str(value or "").casefold().strip() in allowed_reason_codes
+    ))
     reference = json.dumps({
         "verdict": str(evidence.get("verdict") or ""),
         "gate": str(evidence.get("gate") or "") if str(evidence.get("gate") or "") in {
@@ -578,22 +606,16 @@ def record_v2_candidate_decision(
             if key in vision
         },
         "vision_policy_version": str(evidence.get("vision_policy_version") or ""),
+        "rights_decision": {
+            key: rights[key]
+            for key in (
+                "status", "reason_code", "basis", "retryable", "policy_version", "stage",
+                "evidence_reference",
+            )
+            if key in rights
+        },
+        "decision_causes": decision_causes,
     }, sort_keys=True)
-    allowed_reason_codes = {
-        "candidate_accepted", "transient_provider_failure", "candidate_rejected",
-        "source_verification_inconclusive",
-        "unresolved_source", "reject",
-        "incomplete_provenance", "ambiguous", "vision_input_unavailable",
-        "source_mismatch", "source_bytes_mismatch",
-        "source_page_unavailable", "source_asset_unavailable",
-        "source_scan_incomplete", "source_decode_failed",
-        "candidate_asset_unavailable", "insufficient_source_context",
-        "subject_mismatch", "role_unsuitable", "visual_identity_unverified",
-        "baseline_identity_unavailable",
-        "duplicate_existing_frame", "duplicate_frame", "unrelated",
-        "width_below_minimum", "resolution", "identity_mismatch",
-        "visual_identity_unverified", "vision_provider_error",
-    }
     safe_reason_code = str(reason_code or "").casefold().strip()
     if safe_reason_code not in allowed_reason_codes:
         safe_reason_code = "candidate_rejected"

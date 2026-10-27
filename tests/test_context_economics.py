@@ -440,6 +440,26 @@ class EnrichmentMemoTests(unittest.TestCase):
             "engine": "bing",
         }
 
+    @staticmethod
+    def _verified_source_candidate(candidate, **kwargs):
+        page_url = candidate["source_page_url"]
+        image_url = candidate["direct_image_url"]
+        metadata = {
+            "@context": "https://schema.org",
+            "@type": "ImageObject",
+            "contentUrl": image_url,
+            "license": "https://creativecommons.org/licenses/by/4.0/",
+            "creator": {"@type": "Person", "name": "Test Author"},
+        }
+        cache_html = kwargs.get("cache_html")
+        if isinstance(cache_html, dict):
+            cache_html[page_url] = (
+                '<script type="application/ld+json">'
+                + json.dumps(metadata)
+                + "</script>"
+            )
+        return {"valid": True, "reason": "ok", "images_in_page": 1}
+
     def test_memo_avoids_reprocessing_the_same_candidate(self):
         from unicornio_editor import cli
 
@@ -447,7 +467,7 @@ class EnrichmentMemoTests(unittest.TestCase):
 
         def fake_validate(cand, **kwargs):
             chamadas.append(cand["direct_image_url"])
-            return {"valid": True, "reason": "ok", "images_in_page": 1}
+            return self._verified_source_candidate(cand, **kwargs)
 
         memo: dict = {}
         vereditos = []
@@ -509,7 +529,7 @@ class EnrichmentMemoTests(unittest.TestCase):
         memo: dict = {}
         with mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
-            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+            side_effect=self._verified_source_candidate,
         ), mock.patch(
             "unicornio_editor.media.evidence.dedupe_by_phash",
             side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
@@ -553,7 +573,7 @@ class EnrichmentMemoTests(unittest.TestCase):
             side_effect=fake_resolver,
         ), mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
-            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+            side_effect=self._verified_source_candidate,
         ), mock.patch(
             # A capacidade agora conta FORTE + frame distinto (rodada 4): o
             # candidato 1 é forte de verdade (é ele que atende a capacidade).
@@ -584,7 +604,7 @@ class EnrichmentMemoTests(unittest.TestCase):
         candidate["candidate_id"] = "candidate-1"
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
-            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+            side_effect=self._verified_source_candidate,
         ), mock.patch(
             "unicornio_editor.media.evidence.dedupe_by_phash",
             side_effect=lambda aprovados, rejeitados, **kwargs: (aprovados, rejeitados),
@@ -619,7 +639,7 @@ class EnrichmentMemoTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
-            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+            side_effect=self._verified_source_candidate,
         ), mock.patch(
             "unicornio_editor.media.evidence.evidence_score",
             side_effect=lambda subject, **_kwargs: {
@@ -662,7 +682,7 @@ class EnrichmentMemoTests(unittest.TestCase):
         ]
         with mock.patch(
             "unicornio_editor.media.source_verify.validate_discovered_candidate",
-            return_value={"valid": True, "reason": "ok", "images_in_page": 1},
+            side_effect=self._verified_source_candidate,
         ), mock.patch(
             "unicornio_editor.media.evidence.evidence_score",
             side_effect=lambda subject, **_kwargs: {

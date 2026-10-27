@@ -236,7 +236,11 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         self.assertIn("https://cdn.example/frame-a.webp", urls)
         self.assertIn("https://cdn.example/frame-b.webp", urls)
         self.assertNotIn("https://cdn.example/logo.png", urls)
-        self.assertEqual(stats, {"raw_assets": 4, "editorial_assets": 4, "filtered_assets": 0})
+        self.assertEqual(
+            {key: stats[key] for key in ("raw_assets", "editorial_assets", "filtered_assets")},
+            {"raw_assets": 4, "editorial_assets": 4, "filtered_assets": 0},
+        )
+        self.assertEqual(stats["source_status"], "available")
         self.assertTrue(all(item["source_origin_type"] == "article_source" for item in candidates))
         self.assertTrue(all(item["evidence"]["verdict"] != "deterministic_match" or item["evidence_score"] < 100 for item in candidates))
 

@@ -8,6 +8,8 @@ the source page and image URL prove provenance, not usage rights.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import hmac
 from html.parser import HTMLParser
@@ -24,6 +26,65 @@ class LicenseError(ValueError):
 
 _RIGHTS_ATTESTATION_KEY = secrets.token_bytes(32)
 _RIGHTS_ATTESTATION_VERSION = 1
+RIGHTS_POLICY_VERSION = "source-rights-v1"
+_RIGHTS_STATUSES = {
+    "VERIFIED", "UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE",
+    "TECHNICAL_FAILURE",
+}
+
+
+@dataclass(frozen=True)
+class RightsDecision:
+    """Serializable, conservative rights result for one exact media asset."""
+
+    status: str
+    reason_code: str
+    basis: str
+    retryable: bool = False
+    evidence_reference: str = ""
+    policy_version: str = RIGHTS_POLICY_VERSION
+    stage: str = "rights"
+
+    def __post_init__(self) -> None:
+        if self.status not in _RIGHTS_STATUSES:
+            raise ValueError(f"unsupported rights status: {self.status}")
+        if not self.reason_code or not self.basis or self.stage != "rights":
+            raise ValueError("rights decision requires a reason, basis, and rights stage")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "basis": self.basis,
+            "retryable": bool(self.retryable),
+            "evidence_reference": self.evidence_reference,
+            "policy_version": self.policy_version,
+            "stage": self.stage,
+        }
+
+    @classmethod
+    def from_value(cls, value: Any) -> "RightsDecision":
+        """Read current decisions while treating absent/unknown legacy data as unproven."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Mapping):
+            try:
+                return cls(
+                    status=str(value.get("status") or "UNPROVEN"),
+                    reason_code=str(value.get("reason_code") or "media_rights_unproven"),
+                    basis=str(value.get("basis") or "legacy_or_missing_evidence"),
+                    retryable=value.get("retryable") is True,
+                    evidence_reference=str(value.get("evidence_reference") or ""),
+                    policy_version=str(value.get("policy_version") or RIGHTS_POLICY_VERSION),
+                    stage=str(value.get("stage") or "rights"),
+                )
+            except (TypeError, ValueError):
+                pass
+        return cls(
+            status="UNPROVEN",
+            reason_code="media_rights_unproven",
+            basis="legacy_or_missing_evidence",
+        )
 
 
 class _JSONLDParser(HTMLParser):
@@ -108,6 +169,217 @@ def _schema_values(value: Any, keys: tuple[str, ...]) -> list[str]:
             for item in _schema_values(child, keys)
         ]
     return []
+
+
+def _schema_name_values(value: Any) -> list[str]:
+    """Read only explicit names/values from schema authors or creators."""
+    if isinstance(value, str):
+        cleaned = " ".join(re.sub(r"<[^>]+>", " ", value).split())
+        if urlparse(cleaned).scheme.casefold() in {"http", "https"}:
+            return []
+        return [cleaned] if cleaned else []
+    if isinstance(value, list):
+        return [name for child in value for name in _schema_name_values(child)]
+    if isinstance(value, dict):
+        names: list[str] = []
+        for key in ("name", "@value"):
+            if key in value:
+                names.extend(_schema_name_values(value[key]))
+        return names
+    return []
+
+
+def _license_from_schema_url(value: str, source_page_url: str) -> tuple[str, str] | None:
+    """Map only known Creative Commons URLs to the existing accepted policy."""
+    license_url = _normalized_url(value, source_page_url)
+    parsed = urlparse(license_url)
+    if parsed.scheme != "https" or (parsed.hostname or "").casefold() not in {
+        "creativecommons.org", "www.creativecommons.org",
+    }:
+        return None
+    path = parsed.path.casefold().rstrip("/")
+    if path.endswith("/legalcode"):
+        path = path[: -len("/legalcode")].rstrip("/")
+    if re.fullmatch(r"/licenses/by-sa/\d+(?:\.\d+)?", path):
+        version = path.rsplit("/", 1)[-1]
+        return f"CC BY-SA {version}", license_url
+    if re.fullmatch(r"/licenses/by/\d+(?:\.\d+)?", path):
+        version = path.rsplit("/", 1)[-1]
+        return f"CC BY {version}", license_url
+    if path == "/publicdomain/zero/1.0":
+        return "CC0 1.0", license_url
+    if path == "/publicdomain/mark/1.0":
+        return "Public Domain Mark 1.0", license_url
+    return None
+
+
+def _is_known_incompatible_license_url(value: str, source_page_url: str) -> bool:
+    normalized = _normalized_url(value, source_page_url)
+    parsed = urlparse(normalized)
+    if parsed.scheme != "https" or (parsed.hostname or "").casefold() not in {
+        "creativecommons.org", "www.creativecommons.org",
+    }:
+        return False
+    path = parsed.path.casefold().rstrip("/")
+    if path.endswith("/legalcode"):
+        path = path[: -len("/legalcode")].rstrip("/")
+    return bool(re.fullmatch(
+        r"/licenses/by-(?:nc(?:-sa)?|nd|nc-nd)(?:/\d+(?:\.\d+)?)?", path
+    ))
+
+
+def _image_object_nodes(html: str) -> list[tuple[dict[str, Any], bool]]:
+    parser = _JSONLDParser()
+    try:
+        parser.feed(str(html or ""))
+    except Exception:  # malformed source metadata is not rights evidence
+        return []
+    return [
+        (node, has_schema_context)
+        for document in parser.documents
+        for node, has_schema_context in _jsonld_nodes(document)
+    ]
+
+
+def _is_image_object(node: Mapping[str, Any], has_schema_context: bool) -> bool:
+    raw_types = node.get("@type")
+    types = raw_types if isinstance(raw_types, list) else [raw_types]
+    return any(
+        (
+            str(value or "").rstrip("/#").casefold() == "imageobject"
+            and has_schema_context
+        )
+        or str(value or "").rstrip("/#").casefold()
+        in {"https://schema.org/imageobject", "http://schema.org/imageobject"}
+        for value in types
+    )
+
+
+def enrich_source_image_object_rights(
+    candidate: Mapping[str, Any], source_page_html: str | None,
+) -> dict[str, Any]:
+    """Attach accepted rights only when the fetched ImageObject binds exact bytes.
+
+    This extracts a deliberately narrow subset of schema.org: exact
+    ``ImageObject.contentUrl``, a supported Creative Commons ``license``, and
+    an explicit ``author``/``creator`` name on that same object. It does not
+    infer permission from the publisher, page-level terms, or visible credit.
+    """
+    result = dict(candidate)
+    if source_page_html is None:
+        result["rights_checked"] = True
+        result["rights_verified"] = False
+        result["rights_decision"] = RightsDecision(
+            "TECHNICAL_FAILURE", "media_rights_unavailable", "source_page_unavailable",
+            retryable=True,
+        ).to_dict()
+        return result
+
+    source_url = str(result.get("source_page_url") or "")
+    direct_url = str(result.get("direct_image_url") or "")
+    normalized_image = _normalized_url(direct_url, source_url)
+    image_objects = [
+        node for node, schema_context in _image_object_nodes(source_page_html)
+        if _is_image_object(node, schema_context)
+        and normalized_image
+        in {
+            _normalized_url(value, source_url)
+            for value in _schema_values(node.get("contentUrl"), ("@id", "url", "contentUrl"))
+        }
+    ]
+    if not image_objects:
+        result["rights_checked"] = True
+        result["rights_verified"] = False
+        result["rights_decision"] = RightsDecision(
+            "UNPROVEN", "media_rights_unproven", "no_exact_image_object",
+        ).to_dict()
+        return result
+
+    unsupported_evidence = False
+    incompatible_license = False
+    supported_evidence: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    for node in image_objects:
+        license_values = _schema_values(node.get("license"), ("@id", "url"))
+        if not license_values:
+            continue
+        names = list(dict.fromkeys(
+            _schema_name_values(node.get("creator"))
+            + _schema_name_values(node.get("author"))
+        ))
+        for raw_license_url in license_values:
+            license_data = _license_from_schema_url(raw_license_url, source_url)
+            if license_data is None:
+                incompatible_license = incompatible_license or _is_known_incompatible_license_url(
+                    raw_license_url, source_url
+                )
+                unsupported_evidence = True
+                continue
+            license_name, license_url = license_data
+            if not names:
+                unsupported_evidence = True
+                continue
+            author = ", ".join(dict.fromkeys(names))
+            captured_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            rights_candidate = {
+                "source_page_url": source_url,
+                "direct_image_url": direct_url,
+                "author": author,
+                "license": license_name,
+                "license_url": license_url,
+                "captured_at": captured_at,
+                "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
+                "alt_text": str(result.get("alt_text") or result.get("subject") or "Imagem editorial"),
+            }
+            attestation = attest_source_rights(rights_candidate, source_page_html)
+            if attestation is None:
+                unsupported_evidence = True
+                continue
+            evidence_reference = hashlib.sha256(
+                json.dumps(node, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            supported_evidence.append((rights_candidate, attestation, evidence_reference))
+
+    if incompatible_license:
+        decision = RightsDecision(
+            "INCOMPATIBLE", "media_rights_incompatible", "unsupported_commercial_or_derivative_terms",
+        )
+    elif unsupported_evidence or (
+        len({(row[0]["license"], row[0]["license_url"]) for row in supported_evidence}) > 1
+        or len({row[0]["author"] for row in supported_evidence}) > 1
+    ):
+        decision = RightsDecision(
+            "UNSUPPORTED_EVIDENCE", "media_rights_unsupported_evidence", "unsupported_or_incomplete_image_object",
+        )
+    elif supported_evidence:
+        rights_candidate, attestation, evidence_reference = supported_evidence[0]
+        result.update(rights_candidate)
+        result["rights_checked"] = True
+        result["rights_verified"] = True
+        result["source_rights_attestation"] = {
+            **attestation,
+            "provider": "schema_org_image_object",
+        }
+        result["rights_evidence"] = {
+            "provider": "schema_org_image_object",
+            "image_url": direct_url,
+            "license": rights_candidate["license"],
+            "license_url": rights_candidate["license_url"],
+            "author": rights_candidate["author"],
+            "evidence_sha256": evidence_reference,
+        }
+        result["rights_decision"] = RightsDecision(
+            "VERIFIED", "image_object_license_match", "schema.org_image_object",
+            evidence_reference=evidence_reference,
+        ).to_dict()
+        return result
+    else:
+        decision = RightsDecision(
+            "UNPROVEN", "media_rights_unproven", "image_object_without_bound_license",
+        )
+    result["rights_checked"] = True
+    result["rights_verified"] = False
+    result["rights_decision"] = decision.to_dict()
+    return result
 
 
 def _image_object_proves_license(

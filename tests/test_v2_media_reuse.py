@@ -22,6 +22,57 @@ class Config:
     remote_url_policy = "audit"
 
 
+def _attested_candidate(candidate: dict) -> dict:
+    """Mark synthetic candidates as already rights-checked by the provider."""
+    from unicornio_editor.media.license import RightsDecision, attest_wikimedia_rights
+
+    result = dict(candidate)
+    result.setdefault("source_page_url", result.get("source"))
+    result.setdefault("direct_image_url", result.get("url"))
+    result["rights_checked"] = True
+    result["rights_verified"] = True
+    result["rights_evidence"] = {
+        "provider": "wikimedia_commons_api",
+        "image_url": result["direct_image_url"],
+        "author": result["author"],
+        "license": result["license"],
+        "license_url": result["license_url"],
+    }
+    result["source_rights_attestation"] = attest_wikimedia_rights(result)
+    result["rights_decision"] = RightsDecision(
+        "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
+        evidence_reference="a" * 64,
+    ).to_dict()
+    return result
+
+
+def _source_attested_candidate(candidate: dict) -> dict:
+    """Exercise source-page rights parsing with exact ImageObject metadata."""
+    from unicornio_editor.media.license import enrich_source_image_object_rights
+
+    metadata = {
+        "@context": "https://schema.org",
+        "@type": "ImageObject",
+        "contentUrl": candidate["direct_image_url"],
+        "license": candidate["license_url"],
+        "creator": {"@type": "Person", "name": candidate["author"]},
+    }
+    html = (
+        '<script type="application/ld+json">'
+        + json.dumps(metadata)
+        + "</script>"
+    )
+    return enrich_source_image_object_rights(candidate, html)
+
+
+@pytest.fixture(autouse=True)
+def disable_live_commons_search(monkeypatch):
+    """Keep resolver unit tests offline; Commons is covered in source_verify tests."""
+    import unicornio_editor.media.source_verify as source_verify
+
+    monkeypatch.setattr(source_verify, "search_wikimedia_commons_candidates", lambda *_args, **_kwargs: [])
+
+
 def _article_html(paragraphs: int = 6) -> str:
     body = (
         "A equipe confirmou uma atualização importante nesta semana, com detalhes "
@@ -196,6 +247,7 @@ def test_featured_without_url_is_resolved_from_attachment_id(monkeypatch, tmp_pa
 def test_resolver_plans_reference_case_using_visual_deficit(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
+    import unicornio_editor.media.source_verify as source_verify
 
     planned = []
 
@@ -215,6 +267,7 @@ def test_resolver_plans_reference_case_using_visual_deficit(monkeypatch, tmp_pat
         }]}
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(source_verify, "search_wikimedia_commons_candidates", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 4)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Jogo"}])
     monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
@@ -331,7 +384,7 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         item = batch["posts"][0]
         queries.append({"batch_id": batch["batch_id"], "query": item["query"]})
-        return {"posts": [{"audit_candidates": [{
+        return {"posts": [{"audit_candidates": [_attested_candidate({
             "candidate_id": item["query"],
             "direct_image_url": "https://cdn.test/" + ("featured" if "featured" in batch["batch_id"] else "inline") + ".webp",
             "source_page_url": "https://source.test/article",
@@ -341,7 +394,7 @@ def test_resolver_contextualizes_normal_article_query(monkeypatch, tmp_path):
             "credit_text": "Crédito da imagem: Test. Licença CC BY 4.0.",
             "alt_text": item["subject"], "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
-        }], "reuse": []}]}
+        })], "reuse": []}]}
 
     monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
     monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
@@ -597,15 +650,16 @@ def test_media_resolver_normalizes_library_reuse(monkeypatch, tmp_path):
         return original_context_key(editorial, **kwargs)
 
     def fake_resolve(*_args, **_kwargs):
-        return {"posts": [{"reuse": [{
+        return {"posts": [{"reuse": [_attested_candidate({
             "url": "https://cdn.test/existing.webp", "source": "https://source.test/page",
+            "direct_image_url": "https://cdn.test/existing.webp",
             "media_id": 77, "author": "Test", "license": "CC BY 4.0",
             "license_url": "https://creativecommons.org/licenses/by/4.0/",
             "captured_at": "2026-01-01T00:00:00Z",
             "credit_text": "Crédito da imagem: Test. Licença CC BY 4.0.",
             "alt_text": "Existing", "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
-        }], "audit_candidates": []}]}
+        })], "audit_candidates": []}]}
 
     def fake_validate(_client, editorial, **kwargs):
         seen["plans"].append(editorial["media_plan"])
@@ -796,7 +850,7 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
     seen = {"plans": []}
 
     def candidate(url, subject, candidate_id):
-        return {
+        return _attested_candidate({
             "candidate_id": candidate_id,
             "direct_image_url": url,
             "source_page_url": f"https://source.test/{candidate_id}",
@@ -809,7 +863,7 @@ def test_media_resolver_keeps_featured_and_inline_roles_separate(monkeypatch, tm
             "alt_text": subject,
             "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
-        }
+        })
 
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         calls.append(batch["posts"][0]["query"])
@@ -896,7 +950,7 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
 
     captured = {}
 
-    candidate = {
+    candidate = _attested_candidate({
         "candidate_id": "new-frame",
         "direct_image_url": "https://cdn.test/new.webp",
         "source_page_url": "https://source.test/page",
@@ -909,7 +963,7 @@ def test_media_resolver_passes_baseline_phashes_to_final_executor(monkeypatch, t
         "alt_text": "Test",
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
 
     def fake_resolve(*_args, **_kwargs):
         return {"posts": [{"reuse": [], "audit_candidates": [candidate]}]}
@@ -947,7 +1001,7 @@ def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_pa
     import unicornio_editor.pipeline_v2.runtime as runtime
     import unicornio_editor.workflow as workflow
 
-    candidate = {
+    candidate = _attested_candidate({
         "candidate_id": "new-frame",
         "direct_image_url": "https://source.test/new.jpg",
         "source_page_url": "https://source.test/page",
@@ -960,7 +1014,7 @@ def test_media_resolver_blocks_final_duplicate_before_upload(monkeypatch, tmp_pa
         "alt_text": "Test",
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
 
     monkeypatch.setattr(
         cli,
@@ -1048,12 +1102,19 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
 
     monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex,google")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
-    candidate = {
+    candidate = _attested_candidate({
         "direct_image_url": "https://cdn.test/accepted.webp",
         "source_page_url": "https://source.test/article",
+        "author": "Test",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: Test",
+        "alt_text": "Test",
+        "valid": True,
         "phash": "a" * 16,
         "evidence": {"verdict": "deterministic_match"},
-    }
+    })
     monkeypatch.setattr(
         cli,
         "_enriquecer_candidatos",
@@ -1063,6 +1124,14 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     def fake_search(_queries, *, accept, **_kwargs):
         # The search layer stops once it has a deterministic candidate meeting
         # the requested visual capacity; another provider may remain transient.
+        forged = {
+            **candidate,
+            "source_rights_attestation": {
+                "version": 1,
+                "signature": "0" * 64,
+            },
+        }
+        assert accept([forged], "target reached query") == 0
         assert accept([candidate], "target reached query") == 1
         return [{
             "query": "target reached query",
@@ -1115,13 +1184,19 @@ def test_media_search_preserves_verified_exhaustion_when_candidate_quota_is_met(
 
     monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex")
     monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
-    candidate = {
+    candidate = _attested_candidate({
         "direct_image_url": "https://cdn.test/exhausted-approved.webp",
         "source_page_url": "https://source.test/article",
+        "author": "Test",
+        "license": "CC BY 4.0",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "credit_text": "Crédito da imagem: Test",
+        "alt_text": "Test",
         "phash": "a" * 16,
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
     monkeypatch.setattr(
         cli,
         "_enriquecer_candidatos",
@@ -1687,7 +1762,7 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     import unicornio_editor.pipeline_v2.runtime as runtime
 
     def candidate(url, candidate_id):
-        return {
+        return _attested_candidate({
             "candidate_id": candidate_id,
             "direct_image_url": url,
             "source_page_url": f"https://source.test/{candidate_id}",
@@ -1700,7 +1775,7 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
             "alt_text": "Test",
             "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
-        }
+        })
 
     queries = []
 
@@ -1780,7 +1855,7 @@ def test_media_resolver_uses_approved_candidate_fallback_before_target(monkeypat
     import unicornio_editor.cli as cli
     import unicornio_editor.pipeline_v2.runtime as runtime
 
-    candidate = {
+    candidate = _attested_candidate({
         "candidate_id": "target-1",
         "direct_image_url": "https://cdn.test/target.webp",
         "source_page_url": "https://source.test/article",
@@ -1793,13 +1868,17 @@ def test_media_resolver_uses_approved_candidate_fallback_before_target(monkeypat
         "alt_text": "Test",
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
 
-    backup_candidate = {
+    backup_candidate = _attested_candidate({
         **candidate,
         "candidate_id": "target-2",
         "direct_image_url": "https://cdn.test/target-backup.webp",
-    }
+        "rights_evidence": {
+            **candidate["rights_evidence"],
+            "image_url": "https://cdn.test/target-backup.webp",
+        },
+    })
     monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
         "posts": [{
             "reuse": [],
@@ -1868,7 +1947,7 @@ def test_media_resolver_preserves_target_reached_after_mixed_completed_queries(m
     import unicornio_editor.pipeline_v2.runtime as runtime
 
     calls = []
-    candidate = {
+    candidate = _attested_candidate({
         "candidate_id": "target-after-exhaustion",
         "direct_image_url": "https://cdn.test/target-after-exhaustion.webp",
         "source_page_url": "https://source.test/article",
@@ -1881,7 +1960,7 @@ def test_media_resolver_preserves_target_reached_after_mixed_completed_queries(m
         "alt_text": "Test",
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
 
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         query = batch["posts"][0]["query"]
@@ -2070,7 +2149,7 @@ def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
     import unicornio_editor.pipeline_v2.runtime as runtime
 
     def candidate(url, candidate_id):
-        return {
+        return _attested_candidate({
             "candidate_id": candidate_id,
             "direct_image_url": url,
             "source_page_url": f"https://source.test/{candidate_id}",
@@ -2083,7 +2162,7 @@ def test_featured_search_continues_after_final_rejection(monkeypatch, tmp_path):
             "alt_text": "Test",
             "valid": True,
             "evidence": {"verdict": "deterministic_match", "score": 9},
-        }
+        })
 
     queries = []
 
@@ -2183,7 +2262,7 @@ def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeyp
         featured_vision_context_key,
     )
 
-    candidate = {
+    candidate = _attested_candidate({
         "candidate_id": "featured-resolver-auto",
         "direct_image_url": "https://cdn.test/xbox-live-featured.webp",
         "source_page_url": "https://source.test/xbox-live",
@@ -2195,7 +2274,7 @@ def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeyp
         "alt_text": "Arte de Xbox Live",
         "valid": True,
         "evidence": {"verdict": "deterministic_match", "score": 9},
-    }
+    })
     monkeypatch.setattr(
         cli, "_resolve_media_batch",
         lambda *_args, **_kwargs: {"posts": [{"reuse": [], "audit_candidates": [candidate]}]},
@@ -2395,6 +2474,7 @@ def test_media_resolver_uses_article_source_before_external_search(monkeypatch, 
         "evidence": {"verdict": "deterministic_match"},
         "valid": True,
     }
+    source_candidate = _source_attested_candidate(source_candidate)
 
     monkeypatch.setattr(source_verify, "discover_article_source_candidates", lambda *_args, **_kwargs: [dict(source_candidate)])
     monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("external search must not run")))
@@ -2452,6 +2532,7 @@ def test_featured_missing_searches_article_source_even_when_inline_is_complete(m
         "evidence": {"verdict": "deterministic_match"},
         "valid": True,
     }
+    candidate = _source_attested_candidate(candidate)
     source_calls = []
 
     def discover(url, **kwargs):

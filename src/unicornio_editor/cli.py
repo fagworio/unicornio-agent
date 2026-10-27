@@ -1569,10 +1569,23 @@ def _resolve_media_batch(
             attempt_id=attempt_id,
             role=str(spec.get("role") or ""),
         )
+        from .media.license import LicenseError, RightsDecision, validate_upload_candidate
+
+        def _rights_proven(candidate: dict[str, Any]) -> bool:
+            if candidate.get("rights_verified") is not True:
+                return False
+            try:
+                if RightsDecision.from_value(candidate.get("rights_decision")).status != "VERIFIED":
+                    return False
+                validate_upload_candidate(candidate)
+            except LicenseError:
+                return False
+            return True
+
         accepted = [
             candidate for candidate in aprovados
             if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and (not candidate.get("rights_checked") or candidate.get("rights_verified") is True)
+            and _rights_proven(candidate)
         ]
         accepted_candidates_by_query[str(query)] = [dict(candidate) for candidate in accepted]
         from .media.visual_hash import canonical_visual_representatives
@@ -2259,6 +2272,8 @@ def _enriquecer_candidatos(
     from .media.evidence import evidence_score, source_context
     from .media.official_sources import official_source
     from .media.source_verify import enrich_wikimedia_rights, validate_discovered_candidate
+    from .media.license import enrich_source_image_object_rights
+    from .media.license import LicenseError, RightsDecision, validate_upload_candidate
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
@@ -2305,6 +2320,9 @@ def _enriquecer_candidatos(
         "verification_status", "comparisons_attempted", "assets_considered",
         "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
         "sha256", "mime", "width", "height",
+        "rights_checked", "rights_verified", "rights_decision", "rights_evidence",
+        "source_rights_attestation", "author", "license", "license_url", "captured_at",
+        "credit_text", "alt_text",
     )
     _DISCOVERY_IDENTITY_FIELDS = (
         "candidate_id", "discovery_image_url", "engine", "query",
@@ -2327,6 +2345,17 @@ def _enriquecer_candidatos(
         cache_memo[chave or _memo_key(cand)] = {
             campo: cand[campo] for campo in _ENRICHMENT_MEMO_FIELDS if campo in cand
         }
+
+    def _has_valid_rights_attestation(cand: dict) -> bool:
+        if cand.get("rights_verified") is not True:
+            return False
+        try:
+            if RightsDecision.from_value(cand.get("rights_decision")).status != "VERIFIED":
+                return False
+            validate_upload_candidate(cand)
+        except LicenseError:
+            return False
+        return True
 
     pendentes: list[dict] = []
     for cand in candidates:
@@ -2379,24 +2408,14 @@ def _enriquecer_candidatos(
         return hashes_locais.get(chave)
 
     def _rights_proven_for_capacity(candidate: dict[str, Any]) -> bool:
-        if candidate.get("rights_verified") is not True:
-            return False
-        try:
-            from .media.license import validate_upload_candidate
-            validate_upload_candidate(candidate)
-        except Exception:
-            return False
-        return True
+        return _has_valid_rights_attestation(candidate)
 
     def _fortes_distintos() -> int:
         fortes = [
             dict(forte)
             for forte in aprovados
             if (forte.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and (
-                not forte.get("rights_checked")
-                or _rights_proven_for_capacity(forte)
-            )
+            and _rights_proven_for_capacity(forte)
         ]
         if not fortes:
             return 0
@@ -2503,6 +2522,11 @@ def _enriquecer_candidatos(
                 cand["direct_image_url"] = matched
                 cand["canonical_source_asset"] = True
         pagina = str(cand.get("source_page_url") or "")
+        if verify and pagina and not _has_valid_rights_attestation(cand):
+            rights_enriched = enrich_source_image_object_rights(
+                cand, cache_html.get(pagina)
+            )
+            cand.update(rights_enriched)
         nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
         ctx = (
             source_context(cache_html.get(pagina, ""), str(cand.get("direct_image_url") or ""),
@@ -2566,6 +2590,17 @@ def _enriquecer_candidatos(
                     return
         if pontos.get("recoverable"):
             deferidos.append(cand)
+        elif cand.get("rights_checked") and (
+            (cand.get("rights_decision") or {}).get("status") != "VERIFIED"
+        ):
+            rights = cand.get("rights_decision") or {}
+            cand["rejected_reason"] = str(
+                rights.get("reason_code") or "media_rights_unproven"
+            )
+            if rights.get("retryable") is True:
+                deferidos.append(cand)
+            else:
+                rejeitados.append(cand)
         else:
             (aprovados if pontos["verdict"] in (
                 "deterministic_match", "ambiguous", "insufficient_source_context"

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from unicornio_editor.config import Config
+from unicornio_editor.media.license import enrich_source_image_object_rights
 from unicornio_editor.media.registry import connect
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
 from unicornio_editor.pipeline_v2.model import (
@@ -117,6 +118,18 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     client = Client()
     query_calls = []
     second_run = False
+    rights_metadata = {
+        "@context": "https://schema.org",
+        "@type": "ImageObject",
+        "contentUrl": "https://source.test/new.jpg",
+        "license": "https://creativecommons.org/licenses/by/4.0/",
+        "creator": {"@type": "Person", "name": "Test Author"},
+    }
+    source_html = (
+        '<script type="application/ld+json">'
+        + json.dumps(rights_metadata)
+        + "</script>"
+    )
 
     def discover(_client, _config, _root, batch, **_kwargs):
         query_calls.append(batch["posts"][0]["needed"])
@@ -124,7 +137,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
             raise TimeoutError("simulated search timeout")
         candidates = []
         if second_run or len(query_calls) == 1:
-            candidates = [{
+            candidate = {
                 "candidate_id": "new-image", "direct_image_url": "https://source.test/new.jpg",
                 "source_page_url": "https://source.test/article",
                 "evidence": {"verdict": "deterministic_match"},
@@ -136,7 +149,8 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
                 "credit_text": "Crédito da imagem: Test Author (CC BY 4.0)",
                 "alt_text": "Artwork do jogo",
                 **({"media_id": 115305} if second_run else {}),
-            }]
+            }
+            candidates = [enrich_source_image_object_rights(candidate, source_html)]
         return {"posts": [{"audit_candidates": candidates, "search": {
             "completed": True, "queries_attempted": 1, "engines_attempted": ["fixture"],
         }}]}
@@ -152,11 +166,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     monkeypatch.setattr(workflow, "download_image", lambda *_a, **_kw: tmp_path / "image.jpg")
     monkeypatch.setattr(workflow, "convert_to_webp", lambda *_a: tmp_path / "image.webp")
     monkeypatch.setattr(workflow, "verify_downloaded_against_source", lambda **_kw: (True, "verified"))
-    monkeypatch.setattr(workflow, "source_page_html", lambda *_a, **_kw: "<html>fixture</html>")
-    monkeypatch.setattr(
-        "unicornio_editor.media.license.attest_source_rights",
-        lambda *_a, **_kw: {"version": 1, "signature": "0" * 64},
-    )
+    monkeypatch.setattr(workflow, "source_page_html", lambda *_a, **_kw: source_html)
     monkeypatch.setattr(workflow, "image_dimensions", lambda *_a: (1280, 720))
     monkeypatch.setattr(workflow, "image_has_transparency", lambda *_a: False)
     monkeypatch.setattr(visual_hash, "phash_from_path", lambda *_a: "f0" * 8)
