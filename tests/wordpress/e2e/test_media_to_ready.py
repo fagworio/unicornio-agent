@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +42,16 @@ def _artwork(index: int) -> bytes:
 
     image = Image.new("RGB", (1600, 900), ((24 + index * 61) % 220, 34, 92 + index * 37))
     draw = ImageDraw.Draw(image)
+    # A high-contrast, deterministic mosaic makes the synthetic key art
+    # exercise the same anti-flat-image gate as a real detailed asset.
+    rng = random.Random(index)
+    cell = 32
+    for y in range(0, image.height, cell):
+        for x in range(0, image.width, cell):
+            light = 210 if (x // cell + y // cell + index) % 2 else 35
+            tint = rng.randrange(-18, 19)
+            color = tuple(max(0, min(255, light + tint + channel)) for channel in (0, 8, -8))
+            draw.rectangle((x, y, x + cell - 1, y + cell - 1), fill=color)
     for shape in range(1, 9):
         x = (shape * 173 + index * 211) % 1300
         y = (shape * 91 + index * 137) % 650
