@@ -16,7 +16,7 @@ from unicornio_editor.pipeline_v2.production_stages import (
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
 )
-from unicornio_editor.pipeline_v2.production import ProductionContextLoader
+from unicornio_editor.pipeline_v2.production import ProductionContextLoader, recover_editorial, editorial_has_substantive_text
 from unicornio_editor.pipeline_v2.runtime import (
     WordPressWriterV2,
     _embedded_media_urls,
@@ -359,6 +359,59 @@ def test_production_context_loader_normalizes_wordpress_title(tmp_path, title):
 def test_production_context_loader_rejects_invalid_title_type(tmp_path):
     with pytest.raises(ValueError, match="title"):
         ProductionContextLoader(object(), tmp_path).load({"id": 115232, "title": ["ruim"]})
+
+
+
+
+def test_context_loader_recovers_wordpress_content_when_draft_is_empty(tmp_path):
+    body = _long_single_sentence_body(4)
+    post = {"id": 115233, "title": "Título", "content": body, "meta": {}}
+    directory = tmp_path / "backups" / "115233"
+    directory.mkdir(parents=True)
+    (directory / "editorial.draft.json").write_text(json.dumps({"cleaned_html": ""}), encoding="utf-8")
+
+    context = ProductionContextLoader(object(), tmp_path).load(post)
+
+    assert context["editorial"] is not None
+    assert context["editorial"]["cleaned_html"] == body
+    assert context["editorial_recovery"]["source"] == "wordpress_get"
+    assert editorial_has_substantive_text(context["editorial"])
+
+
+def test_recover_editorial_accepts_verified_prepared_source_without_wp_content(tmp_path):
+    body = _long_single_sentence_body(4)
+    directory = tmp_path / "backups" / "115234"
+    directory.mkdir(parents=True)
+    (directory / "prepared.json").write_text(json.dumps({"cleaned_html": body}), encoding="utf-8")
+
+    editorial, recovery = recover_editorial({"id": 115234, "title": "Título"}, directory)
+
+    assert editorial["cleaned_html"] == body
+    assert recovery["source"] == "prepared.json"
+
+
+def test_recover_editorial_rejects_stale_snapshot_after_wp_change(tmp_path):
+    body = _long_single_sentence_body(4)
+    directory = tmp_path / "backups" / "115235"
+    directory.mkdir(parents=True)
+    backup = directory / "snapshot.json"
+    backup.write_text(json.dumps({"modified_gmt": "old"}), encoding="utf-8")
+    (directory / "prepared.json").write_text(
+        json.dumps({"cleaned_html": body, "backup": "snapshot.json"}), encoding="utf-8"
+    )
+
+    editorial, recovery = recover_editorial(
+        {"id": 115235, "title": "Título", "content": "", "modified_gmt": "new"},
+        directory,
+    )
+
+    assert editorial is None
+    assert recovery["reason"] == "no_verifiable_editorial_source"
+
+
+def test_markup_only_and_null_editorial_are_not_recoverable():
+    assert not editorial_has_substantive_text({"cleaned_html": "<p><br /></p><img src=\"x\">"})
+    assert not editorial_has_substantive_text({"cleaned_html": None})
 
 
 def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):

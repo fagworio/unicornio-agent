@@ -48,6 +48,7 @@ from ..workflow import (
     resolve_editorial_defaults,
     validate_media_plan,)
 from .errors import StageError
+from .production import editorial_has_substantive_text
 from .media_accounting import reconcile_working_visual_media
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
 from .model import WorkState
@@ -514,6 +515,16 @@ class ProductionEditorialStage:
             must_localize = bool(isinstance(localization, dict) and localization.get("required"))
             draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
             previous_editorial = _json_object(draft_path) if draft_path.is_file() else None
+            if not editorial_has_substantive_text(previous_editorial):
+                recovered_editorial = context.get("editorial")
+                if editorial_has_substantive_text(recovered_editorial):
+                    if isinstance(previous_editorial, dict):
+                        _write_json(self.root, post_id, "editorial.draft.invalid.json", previous_editorial)
+                    previous_editorial = dict(recovered_editorial)
+                    recovery = context.get("editorial_recovery")
+                    if isinstance(recovery, dict):
+                        _write_json(self.root, post_id, "editorial.recovery.json", recovery)
+                    _write_json(self.root, post_id, "editorial.draft.json", previous_editorial)
             if (
                 not must_localize
                 and

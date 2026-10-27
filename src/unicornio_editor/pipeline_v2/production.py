@@ -22,6 +22,129 @@ from .media_layout import validate_normal_article_layout_policy
 from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
+from ..content_quality import word_count
+
+
+_MIN_RECOVERABLE_EDITORIAL_WORDS = 20
+
+
+def editorial_has_substantive_text(value: Any) -> bool:
+    """Return true only for editorial HTML with visible substantive text."""
+    if isinstance(value, dict):
+        value = value.get("cleaned_html")
+    html = str(value or "")
+    return word_count(html) >= _MIN_RECOVERABLE_EDITORIAL_WORDS
+
+
+def _payload_editorial(payload: dict[str, Any]) -> dict[str, Any] | None:
+    editorial = payload.get("editorial") if isinstance(payload.get("editorial"), dict) else payload
+    return editorial if editorial_has_substantive_text(editorial) else None
+
+
+def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Choose a verifiable editorial source without reviving stale snapshots."""
+    candidates: list[dict[str, Any]] = []
+    content_present = "content" in post
+    wordpress_html = wordpress_text(post.get("content"), field="content")
+    prepared_for_wp: dict[str, Any] = {}
+    prepared_for_wp_path = directory / "prepared.json"
+    if prepared_for_wp_path.is_file():
+        try:
+            loaded_prepared = json.loads(prepared_for_wp_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_prepared, dict):
+                prepared_for_wp = loaded_prepared
+        except (OSError, ValueError):
+            prepared_for_wp = {}
+    if editorial_has_substantive_text(wordpress_html):
+        digest = hashlib.sha256(wordpress_html.encode()).hexdigest()
+        prepared_body = str(prepared_for_wp.get("cleaned_html") or "")
+        base = dict(prepared_for_wp) if hashlib.sha256(prepared_body.encode()).hexdigest() == digest else {}
+        base["cleaned_html"] = wordpress_html
+        return base, {
+            "source": "wordpress_get",
+            "sha256": digest,
+            "word_count": word_count(wordpress_html),
+            "candidates": ["wordpress_get"],
+        }
+    candidates.append({"source": "wordpress_get", "valid": False, "word_count": word_count(wordpress_html)})
+
+    prepared = {}
+    prepared_path = directory / "prepared.json"
+    if prepared_path.is_file():
+        try:
+            prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prepared = {}
+    prepared_html = str(prepared.get("cleaned_html") or "") if isinstance(prepared, dict) else ""
+    backup_path = directory / str(prepared.get("backup") or "")
+    backup = {}
+    if backup_path.is_file():
+        try:
+            backup = json.loads(backup_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            backup = {}
+    snapshot_fresh = bool(
+        isinstance(backup, dict)
+        and post.get("modified_gmt")
+        and backup.get("modified_gmt") == post.get("modified_gmt")
+    )
+    if editorial_has_substantive_text(prepared_html) and (not content_present or snapshot_fresh):
+        digest = hashlib.sha256(prepared_html.encode()).hexdigest()
+        candidates.append({"source": "prepared.json", "valid": True, "sha256": digest, "fresh": snapshot_fresh})
+        return {"cleaned_html": prepared_html, **{k: v for k, v in prepared.items() if k != "cleaned_html"}}, {
+            "source": "prepared.json",
+            "sha256": digest,
+            "word_count": word_count(prepared_html),
+            "snapshot_fresh": snapshot_fresh,
+            "candidates": candidates,
+        }
+    candidates.append({"source": "prepared.json", "valid": False, "fresh": snapshot_fresh, "word_count": word_count(prepared_html)})
+
+    latest = {}
+    latest_path = directory / "editorial.latest.json"
+    if latest_path.is_file():
+        try:
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            latest = {}
+    latest_editorial = _payload_editorial(latest) if isinstance(latest, dict) else None
+    latest_html = str(latest_editorial.get("cleaned_html") or "") if latest_editorial else ""
+    if latest_editorial and (not content_present or snapshot_fresh):
+        latest_digest = hashlib.sha256(latest_html.encode()).hexdigest()
+        return dict(latest_editorial), {
+            "source": "editorial.latest.json",
+            "sha256": latest_digest,
+            "word_count": word_count(latest_html),
+            "snapshot_fresh": snapshot_fresh,
+            "candidates": candidates + [{"source": "editorial.latest.json", "valid": True}],
+        }
+    candidates.append({"source": "editorial.latest.json", "valid": bool(latest_editorial), "fresh": snapshot_fresh})
+
+    candidate_path = directory / "editorial.candidate.json"
+    try:
+        candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+    except (OSError, ValueError):
+        candidate_payload = {}
+    candidate_editorial = _payload_editorial(candidate_payload) if isinstance(candidate_payload, dict) else None
+    prepared_digest = hashlib.sha256(prepared_html.encode()).hexdigest() if editorial_has_substantive_text(prepared_html) else ""
+    candidate_html = str(candidate_editorial.get("cleaned_html") or "") if candidate_editorial else ""
+    candidate_digest = hashlib.sha256(candidate_html.encode()).hexdigest() if candidate_html else ""
+    candidate_integrity = bool(candidate_editorial and candidate_digest == prepared_digest and prepared_digest)
+    if candidate_integrity and (not content_present or snapshot_fresh):
+        chosen_candidate = candidate_editorial or {}
+        return dict(chosen_candidate), {
+            "source": "editorial.candidate.json",
+            "sha256": candidate_digest,
+            "word_count": word_count(candidate_html),
+            "snapshot_fresh": snapshot_fresh,
+            "candidates": candidates + [{"source": "editorial.candidate.json", "valid": True, "integrity": True}],
+        }
+    candidates.append({"source": "editorial.candidate.json", "valid": False, "integrity": candidate_integrity})
+    return None, {
+        "source": None,
+        "reason": "no_verifiable_editorial_source",
+        "candidates": candidates,
+    }
 
 
 def validation_matches_candidate(validation: dict, candidate: dict, run_id: str) -> bool:
@@ -71,8 +194,11 @@ class ProductionContextLoader:
         candidate = self._read_json(directory / "editorial.candidate.json")
         manifest = self._read_json(directory / "editorial.partial.json")
         draft = self._read_json(directory / "editorial.draft.json")
-        if not draft:
-            draft = self._read_json(directory / "editorial.latest.json")
+        recovered, recovery = recover_editorial(post, directory)
+        if recovered is not None:
+            draft = recovered
+        elif not editorial_has_substantive_text(draft):
+            draft = {}
         return {
             "post": post,
             "post_id": post_id,
@@ -82,6 +208,7 @@ class ProductionContextLoader:
             "meta": post.get("meta") if isinstance(post.get("meta"), dict) else {},
             "draft": draft,
             "editorial": draft or None,
+            "editorial_recovery": recovery,
             "candidate": candidate or None,
             "manifest": manifest,
             "original_link": (post.get("meta") or {}).get("original_link") if isinstance(post.get("meta"), dict) else None,
