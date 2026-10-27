@@ -420,6 +420,14 @@ def test_recover_editorial_preserves_verified_metadata_with_body_only_draft(tmp_
         "media_plan": [], "needs_trailer": False, "trailer_url": None, "game_name": "Jogo",
         "seo": {"title": "Título validado", "meta_description": "descrição", "focus_keyword": "Jogo"},
     }}]}), encoding="utf-8")
+    candidate = {"_v2_run_id": "run-verified", "content": body}
+    (directory / "editorial.candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+    journal = tmp_path / "work" / "v2-journal"
+    journal.mkdir(parents=True)
+    (journal / "115237.json").write_text(json.dumps({
+        "post_id": 115237, "candidate_run_id": "run-verified",
+        "candidate_hash": hashlib.sha256(body.encode()).hexdigest(),
+    }), encoding="utf-8")
 
     editorial, recovery = recover_editorial(
         {"id": 115237, "title": "Título", "content": "<p>WordPress posterior</p>", "modified_gmt": "2000-01-01T00:00:00+00:00"},
@@ -430,6 +438,39 @@ def test_recover_editorial_preserves_verified_metadata_with_body_only_draft(tmp_
     assert editorial["cleaned_html"] == body
     assert editorial["site_relevance"]["decision"] == "process"
     assert editorial["needs_trailer"] is False
+
+
+
+
+def test_recover_editorial_rejects_metadata_from_stale_generation(tmp_path):
+    body = "<p>" + ("texto editorial " * 40) + "</p>"
+    directory = tmp_path / "backups" / "115238"
+    directory.mkdir(parents=True)
+    (directory / "editorial.draft.json").write_text(json.dumps({"cleaned_html": body}), encoding="utf-8")
+    (directory / "prepared.json").write_text(json.dumps({"cleaned_html": body}), encoding="utf-8")
+    (directory / "editorial.candidate.json").write_text(json.dumps({
+        "_v2_run_id": "run-old", "content": body,
+    }), encoding="utf-8")
+    work = tmp_path / "work" / "v2-editorial"
+    work.mkdir(parents=True)
+    (work / "115238.json").write_text(json.dumps({"results": [{"post_id": 115238, "editorial": {
+        "title": "Metadado antigo", "site_relevance": {"decision": "process"},
+    }}]}), encoding="utf-8")
+    journal = tmp_path / "work" / "v2-journal"
+    journal.mkdir(parents=True)
+    (journal / "115238.json").write_text(json.dumps({
+        "post_id": 115238, "candidate_run_id": "run-current",
+        "candidate_hash": hashlib.sha256(body.encode()).hexdigest(),
+    }), encoding="utf-8")
+
+    editorial, _recovery = recover_editorial(
+        {"id": 115238, "title": "Título", "content": "", "modified_gmt": "2000-01-01T00:00:00+00:00"},
+        directory,
+    )
+
+    assert editorial["cleaned_html"] == body
+    assert "site_relevance" not in editorial
+    assert "title" not in editorial
 
 
 def test_recover_editorial_rejects_stale_snapshot_after_wp_change(tmp_path):

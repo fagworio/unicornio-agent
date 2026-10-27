@@ -1936,6 +1936,15 @@ def _validate_featured_candidate_vision(
     vision_context_key = featured_vision_context_key(editorial)
     cache_subject = subject
     media_id = item.get("media_library_id")
+    vision_ready, vision_message = vision_config_ready(
+        enabled=bool(getattr(config, "vision_enabled", False)),
+        api_key=str(getattr(config, "vision_api_key", "")),
+    )
+    # An existing attachment is only fetched when the vision gate can actually
+    # validate it. This keeps disabled-vision planning independent of the
+    # client interface while preserving mandatory validation when enabled.
+    if media_id and not vision_ready:
+        return {"status": "skipped", "reason": vision_message}
     attachment: dict[str, Any] | None = None
     if media_id:
         attachment = attachment_cache.get(media_id)
@@ -1963,12 +1972,8 @@ def _validate_featured_candidate_vision(
                 "deterministic": True,
             }
 
-    ready, message = vision_config_ready(
-        enabled=bool(getattr(config, "vision_enabled", False)),
-        api_key=str(getattr(config, "vision_api_key", "")),
-    )
-    if not ready:
-        return {"status": "skipped", "reason": message}
+    if not vision_ready:
+        return {"status": "skipped", "reason": vision_message}
 
     cache_root = root or Path(".")
     try:

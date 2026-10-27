@@ -63,7 +63,22 @@ def _recover_draft_metadata(draft: dict[str, Any], directory: Path, post_id: int
     except (OSError, ValueError):
         prepared_body_hash = ""
     body_compatible = bool(draft_body_hash and prepared_body_hash and draft_body_hash == prepared_body_hash)
-    if not body_compatible:
+    generation_compatible = False
+    candidate_path = directory / "editorial.candidate.json"
+    journal_path = directory.parent.parent / "work" / "v2-journal" / f"{int(post_id)}.json"
+    try:
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+        journal = json.loads(journal_path.read_text(encoding="utf-8")) if journal_path.is_file() else {}
+        candidate_run_id = str(candidate.get("_v2_run_id") or "")
+        journal_run_id = str(journal.get("candidate_run_id") or journal.get("run_id") or "")
+        candidate_hash = hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest()
+        generation_compatible = bool(
+            candidate_run_id and candidate_run_id == journal_run_id
+            and candidate_hash == str(journal.get("candidate_hash") or "")
+        )
+    except (OSError, ValueError):
+        generation_compatible = False
+    if not body_compatible or not generation_compatible:
         return merged
     sources = [
         directory.parent.parent / "work" / "v2-editorial" / f"{int(post_id)}.json",
