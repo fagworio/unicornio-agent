@@ -16,6 +16,7 @@ from typing import Any
 # production execution uses the canonical HTML-aware helper below.
 from ..checklist import required_image_count, required_image_count_for_content
 from ..batch import BatchError, wordpress_text
+from ..builder import strip_canonical_footer
 from .legacy import LegacyStateLoader
 from .media_accounting import account_visual_media
 from .media_layout import validate_normal_article_layout_policy
@@ -45,7 +46,7 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     """Choose a verifiable editorial source without reviving stale snapshots."""
     candidates: list[dict[str, Any]] = []
     content_present = "content" in post
-    wordpress_html = wordpress_text(post.get("content"), field="content")
+    wordpress_html = strip_canonical_footer(wordpress_text(post.get("content"), field="content"))
     prepared_for_wp: dict[str, Any] = {}
     prepared_for_wp_path = directory / "prepared.json"
     if prepared_for_wp_path.is_file():
@@ -59,6 +60,15 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
         digest = hashlib.sha256(wordpress_html.encode()).hexdigest()
         prepared_body = str(prepared_for_wp.get("cleaned_html") or "")
         base = dict(prepared_for_wp) if hashlib.sha256(prepared_body.encode()).hexdigest() == digest else {}
+        candidate_path = directory / "editorial.candidate.json"
+        try:
+            candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+        except (OSError, ValueError):
+            candidate_payload = {}
+        candidate_editorial = _payload_editorial(candidate_payload) if isinstance(candidate_payload, dict) else None
+        candidate_body = str(candidate_editorial.get("cleaned_html") or "") if candidate_editorial else ""
+        if candidate_editorial and hashlib.sha256(candidate_body.encode()).hexdigest() == digest:
+            base.update(candidate_editorial)
         base["cleaned_html"] = wordpress_html
         return base, {
             "source": "wordpress_get",
