@@ -3108,6 +3108,12 @@ def resolve_editorial_defaults(editorial: dict[str, Any], post: dict[str, Any]) 
     derivation fails — the model must provide seo in that rare case.
     """
     resolved = dict(editorial)
+    if "needs_trailer" not in resolved or resolved.get("needs_trailer") is None:
+        resolved["needs_trailer"] = False
+    if "trailer_url" not in resolved:
+        resolved["trailer_url"] = None
+    if resolved.get("needs_trailer") is False:
+        resolved["trailer_url"] = None
     if resolved.get("seo") is None:
         resolved["seo"] = _resolve_seo_from_post(
             post, game_name=editorial.get("game_name")

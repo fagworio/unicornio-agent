@@ -27,7 +27,7 @@ from unicornio_editor.media.registry import (
     invalidate_v2_media,
     record_v2_observation,
 )
-from unicornio_editor.workflow import MediaFunnelInvariantError, _resolve_seo_from_post
+from unicornio_editor.workflow import MediaFunnelInvariantError, _resolve_seo_from_post, resolve_editorial_defaults
 
 
 class Config:
@@ -390,6 +390,22 @@ def test_recover_editorial_accepts_verified_prepared_source_without_wp_content(t
     assert recovery["source"] == "prepared.json"
 
 
+def test_recover_editorial_prefers_fresh_valid_draft_over_wordpress(tmp_path):
+    draft_body = _long_single_sentence_body(4) + "<p>Rascunho editorial preservado.</p>"
+    wp_body = _long_single_sentence_body(4) + "<p>Conteúdo já aplicado.</p>"
+    directory = tmp_path / "backups" / "115236"
+    directory.mkdir(parents=True)
+    (directory / "editorial.draft.json").write_text(json.dumps({"cleaned_html": draft_body}), encoding="utf-8")
+
+    editorial, recovery = recover_editorial(
+        {"id": 115236, "title": "Título", "content": wp_body, "modified_gmt": "2000-01-01T00:00:00+00:00"},
+        directory,
+    )
+
+    assert editorial["cleaned_html"] == draft_body
+    assert recovery["source"] == "editorial.draft.json"
+
+
 def test_recover_editorial_rejects_stale_snapshot_after_wp_change(tmp_path):
     body = _long_single_sentence_body(4)
     directory = tmp_path / "backups" / "115235"
@@ -412,6 +428,17 @@ def test_recover_editorial_rejects_stale_snapshot_after_wp_change(tmp_path):
 def test_markup_only_and_null_editorial_are_not_recoverable():
     assert not editorial_has_substantive_text({"cleaned_html": "<p><br /></p><img src=\"x\">"})
     assert not editorial_has_substantive_text({"cleaned_html": None})
+
+
+
+
+def test_editorial_defaults_fill_optional_trailer_contract():
+    resolved = resolve_editorial_defaults(
+        {"site_relevance": {"decision": "process", "confidence": 0.95, "reason": "ok", "matched_topics": ["games"]}, "media_plan": [], "game_name": None},
+        {"title": {"raw": "Notícia sobre jogos"}, "content": {"raw": "<p>Notícia sobre jogos confirmada. " + ("texto " * 80) + "</p>"}, "meta": {}},
+    )
+    assert resolved["needs_trailer"] is False
+    assert resolved["trailer_url"] is None
 
 
 def test_media_funnel_invariant_maps_to_internal_media_error(tmp_path):

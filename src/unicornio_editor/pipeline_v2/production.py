@@ -46,6 +46,32 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     """Choose a verifiable editorial source without reviving stale snapshots."""
     candidates: list[dict[str, Any]] = []
     content_present = "content" in post
+    draft_path = directory / "editorial.draft.json"
+    try:
+        draft_payload = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else {}
+    except (OSError, ValueError):
+        draft_payload = {}
+    draft_editorial = _payload_editorial(draft_payload) if isinstance(draft_payload, dict) else None
+    draft_fresh = True
+    modified_gmt = str(post.get("modified_gmt") or "").strip()
+    if draft_editorial and modified_gmt:
+        try:
+            modified_at = datetime.fromisoformat(modified_gmt.replace("Z", "+00:00"))
+            if modified_at.tzinfo is None:
+                modified_at = modified_at.replace(tzinfo=timezone.utc)
+            draft_fresh = draft_path.stat().st_mtime >= modified_at.timestamp()
+        except (OSError, ValueError):
+            draft_fresh = False
+    if draft_editorial and draft_fresh:
+        draft_html = str(draft_editorial.get("cleaned_html") or "")
+        return dict(draft_editorial), {
+            "source": "editorial.draft.json",
+            "sha256": hashlib.sha256(draft_html.encode()).hexdigest(),
+            "word_count": word_count(draft_html),
+            "snapshot_fresh": True,
+            "candidates": ["editorial.draft.json"],
+        }
+    candidates.append({"source": "editorial.draft.json", "valid": bool(draft_editorial), "fresh": draft_fresh})
     wordpress_html = strip_canonical_footer(wordpress_text(post.get("content"), field="content"))
     prepared_for_wp: dict[str, Any] = {}
     prepared_for_wp_path = directory / "prepared.json"
