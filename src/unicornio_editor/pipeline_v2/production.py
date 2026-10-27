@@ -42,6 +42,39 @@ def _payload_editorial(payload: dict[str, Any]) -> dict[str, Any] | None:
     return editorial if editorial_has_substantive_text(editorial) else None
 
 
+def _recover_draft_metadata(draft: dict[str, Any], directory: Path, post_id: int) -> dict[str, Any]:
+    """Restore verified editorial metadata without replacing the draft body."""
+    merged = dict(draft)
+    sources = [
+        directory.parent.parent / "work" / "v2-editorial" / f"{int(post_id)}.json",
+        directory / "editorial.candidate.json",
+    ]
+    draft_html = str(draft.get("cleaned_html") or "")
+    for source in sources:
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8")) if source.is_file() else {}
+        except (OSError, ValueError):
+            continue
+        records = payload.get("results") if isinstance(payload, dict) else None
+        if isinstance(records, list):
+            record = next((item for item in records if isinstance(item, dict) and int(item.get("post_id") or 0) == int(post_id)), {})
+            payload = record.get("editorial") if isinstance(record, dict) and isinstance(record.get("editorial"), dict) else {}
+        editorial = payload.get("editorial") if isinstance(payload, dict) and isinstance(payload.get("editorial"), dict) else payload
+        if not isinstance(editorial, dict):
+            continue
+        source_title = str(editorial.get("title") or (payload.get("title") if isinstance(payload, dict) else "") or "").strip()
+        if source_title and source_title not in draft_html:
+            continue
+        for key in ("title", "site_relevance", "media_plan", "needs_trailer", "trailer_url", "game_name", "seo", "original_link"):
+            value = editorial.get(key)
+            if value is None and isinstance(payload, dict):
+                value = payload.get(key)
+            if value is not None and (key not in merged or merged.get(key) is None):
+                merged[key] = value
+    return merged
+
+
+
 def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Choose a verifiable editorial source without reviving stale snapshots."""
     candidates: list[dict[str, Any]] = []
@@ -63,6 +96,7 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
         except (OSError, ValueError):
             draft_fresh = False
     if draft_editorial and draft_fresh:
+        draft_editorial = _recover_draft_metadata(draft_editorial, directory, int(post.get("id") or 0))
         draft_html = str(draft_editorial.get("cleaned_html") or "")
         return dict(draft_editorial), {
             "source": "editorial.draft.json",

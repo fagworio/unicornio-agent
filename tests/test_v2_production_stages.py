@@ -406,6 +406,30 @@ def test_recover_editorial_prefers_fresh_valid_draft_over_wordpress(tmp_path):
     assert recovery["source"] == "editorial.draft.json"
 
 
+def test_recover_editorial_preserves_verified_metadata_with_body_only_draft(tmp_path):
+    body = "<h2>Título validado</h2><p>" + ("texto editorial " * 40) + "</p>"
+    directory = tmp_path / "backups" / "115237"
+    directory.mkdir(parents=True)
+    (directory / "editorial.draft.json").write_text(json.dumps({"cleaned_html": body}), encoding="utf-8")
+    work = tmp_path / "work" / "v2-editorial"
+    work.mkdir(parents=True)
+    (work / "115237.json").write_text(json.dumps({"results": [{"post_id": 115237, "editorial": {
+        "title": "Título validado", "site_relevance": {"decision": "process", "confidence": 0.95},
+        "media_plan": [], "needs_trailer": False, "trailer_url": None, "game_name": "Jogo",
+        "seo": {"title": "Título validado", "meta_description": "descrição", "focus_keyword": "Jogo"},
+    }}]}), encoding="utf-8")
+
+    editorial, recovery = recover_editorial(
+        {"id": 115237, "title": "Título", "content": "<p>WordPress posterior</p>", "modified_gmt": "2000-01-01T00:00:00+00:00"},
+        directory,
+    )
+
+    assert recovery["source"] == "editorial.draft.json"
+    assert editorial["cleaned_html"] == body
+    assert editorial["site_relevance"]["decision"] == "process"
+    assert editorial["needs_trailer"] is False
+
+
 def test_recover_editorial_rejects_stale_snapshot_after_wp_change(tmp_path):
     body = _long_single_sentence_body(4)
     directory = tmp_path / "backups" / "115235"
