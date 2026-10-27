@@ -243,6 +243,40 @@ def test_registry_preserves_recoverable_source_verification_reason(tmp_path):
     assert reason == "source_verification_inconclusive"
 
 
+def test_registry_preserves_visual_identity_pending_retry_reason(tmp_path):
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=14,
+        run_id="run-visual-identity-pending",
+        candidate={
+            "candidate_id": "candidate-visual-identity-pending",
+            "subject": "Game",
+            "source_page_url": "https://source.example/article",
+            "direct_image_url": "https://cdn.example/image.webp",
+            "evidence": {
+                "reason_code": "visual_identity_pending",
+                "recoverable": True,
+            },
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="visual_identity_pending",
+    )
+
+    with connect(tmp_path) as db:
+        row = db.execute(
+            "SELECT reason_code, disposition, evidence_reference "
+            "FROM media_decisions WHERE run_id=?",
+            ("run-visual-identity-pending",),
+        ).fetchone()
+
+    assert row["reason_code"] == "visual_identity_pending"
+    assert row["disposition"] == "defer_retry"
+    reference = json.loads(row["evidence_reference"])
+    assert "visual_identity_pending" in reference["decision_causes"]
+    assert reference["recoverable"] is True
+
+
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
     path = registry_path(tmp_path)
     path.parent.mkdir(parents=True)

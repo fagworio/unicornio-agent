@@ -307,6 +307,18 @@ def classify(
     first_blocker, _, _, first_detail = failures[0]
     detail: str | None = first_detail or None
     effective_no_progress = previous.retry.no_progress if no_progress is None else no_progress
+    if first_blocker in MEDIA_BLOCKERS and getattr(media, "visual_identity_pending", False):
+        # A recoverable visual-identity outage is technical uncertainty, not
+        # evidence that media enrichment has been exhausted. Keep it retryable
+        # even when the editorial no-progress/listicle budgets are already met.
+        return _retry(
+            previous,
+            Phase.MEDIA,
+            BlockerCode.PROVIDER_ERROR,
+            now=now,
+            detail="visual identity verification temporarily unavailable",
+            cooldown_minutes=cooldown_minutes,
+        )
     if (
         first_blocker in MEDIA_BLOCKERS
         and effective_no_progress >= max(1, max_media_no_progress)

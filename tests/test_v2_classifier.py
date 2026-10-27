@@ -1,7 +1,7 @@
 from unicornio_editor.pipeline_v2.classifier import classify, blocker_for_gate
 from datetime import datetime, timezone
 
-from unicornio_editor.pipeline_v2.model import BlockerCode, OutcomeType, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, MediaProgress, OutcomeType, Phase, RetryInfo, WorkState
 
 
 def test_gate_map_is_explicit_not_substring_matching():
@@ -33,6 +33,57 @@ def test_media_only_failure_is_retry_media():
     assert outcome.type is OutcomeType.RETRY
     assert outcome.phase is Phase.MEDIA
     assert outcome.blocker is BlockerCode.FEATURED_VISION
+
+
+def test_visual_identity_outage_retries_after_media_no_progress_budget():
+    media = MediaProgress(required=2, visual_identity_pending=True)
+    previous = WorkState(
+        relevance_approved=True,
+        retry=RetryInfo(attempts=5, no_progress=2),
+    )
+
+    outcome = classify(
+        previous,
+        {"decision": "process"},
+        media,
+        {"passed": False, "failures": [{"gate": "imagens_no_corpo"}]},
+        no_progress=2,
+        max_media_no_progress=2,
+    )
+
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+    assert outcome.detail == "visual identity verification temporarily unavailable"
+
+
+def test_visual_identity_outage_retries_listicle_after_second_enrichment_round():
+    media = MediaProgress(
+        required=2,
+        enrichment_round=2,
+        visual_identity_pending=True,
+    )
+    previous = WorkState(
+        relevance_approved=True,
+        retry=RetryInfo(attempts=5, no_progress=2),
+    )
+
+    outcome = classify(
+        previous,
+        {"decision": "process"},
+        media,
+        {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+            "checklist": {"media_decision": {"is_listicle": True}},
+        },
+        no_progress=2,
+        max_media_no_progress=2,
+    )
+
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
 
 
 

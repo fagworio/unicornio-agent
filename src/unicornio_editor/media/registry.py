@@ -533,7 +533,7 @@ def record_v2_candidate_decision(
     }
     allowed_reason_codes = {
         "candidate_accepted", "transient_provider_failure", "candidate_rejected",
-        "source_verification_inconclusive",
+        "source_verification_inconclusive", "visual_identity_pending",
         "unresolved_source", "reject",
         "incomplete_provenance", "ambiguous", "vision_input_unavailable",
         "source_mismatch", "source_bytes_mismatch",
