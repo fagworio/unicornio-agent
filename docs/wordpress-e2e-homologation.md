@@ -1,4 +1,4 @@
-# Homologação E2E isolada do WordPress Writer V2
+# Homologação E2E isolada de mídia e WordPress Writer V2
 
 O workflow WordPress Writer V2 E2E é uma alternativa oficialmente suportada ao Devilbox local para homologar integrações WordPress. Ele executa em runner Ubuntu e cria WordPress, MySQL, usuário administrador e Application Password locais à execução. Nenhuma credencial, URL, banco de dados, cron ou serviço de produção é usado.
 
@@ -17,12 +17,14 @@ Os testes usam WordPressClient e WordPressWriterV2 reais sobre REST autenticada.
 7. Resposta de readback divergente, sem falsa confirmação.
 8. Aceitação de journal histórico committed sem o campo legado writer_started, validado junto a post real do ambiente.
 9. Coerência do MediaRegistry V5 com o resultado confirmado do Writer.
+10. Isolamento de transação pré-writer legado com readbacks WordPress reais e sem writes.
+11. Extração de três imagens de uma fonte HTTP controlada, prova Schema.org CC0 ligada a cada URL, download, conversão/upload WebP, comparação visual, composição, checklist integral, escrita READY pelo Writer V2 e readback real do WordPress.
 
 O relatório registra snapshots do WordPress antes/depois, eventos REST sanitizados, resumo dos journals, linhas relevantes do Registry, SHA completo, tree SHA, versão do WordPress, PHP, WP-CLI, imagens e resultado da suíte completa. Não inclui Application Password, senha do administrador ou credenciais do banco.
 
 ## Homologação e artefato
 
-O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. classification só será E2E_HOMOLOGADO se os nove cenários passarem sem skip, a suíte completa passar, compilação e identidade SHA esperada forem confirmadas e containers/volumes efêmeros forem removidos. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em E2E_NAO_HOMOLOGADO e falha do job.
+O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os onze cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
 
 Para executar manualmente, use a aba Actions e escolha WordPress Writer V2 E2E → Run workflow. O relatório é para o SHA indicado em tested_sha e tree_sha; não deve ser tratado como homologação de uma árvore diferente.
 
@@ -30,4 +32,4 @@ O orquestrador local também pode ser executado com python scripts/wordpress_e2e
 
 ## Limites operacionais
 
-Esta homologação não executa o pipeline editorial completo, uploads de mídia ou publicação; valida o contrato transacional do Writer com post em revisão humana e o Registry de observabilidade. Não implanta código, não altera agendamentos e não substitui a validação supervisionada de produção. Nenhum gate editorial ou de publicação é relaxado.
+O cenário de mídia exercita os componentes reais de extração, rights attestation, download, conversão, upload REST, composição, checklist, Writer V2, journal e Registry. A fonte e suas declarações CC0 são dados sintéticos servidos apenas no runner; o provedor visual é um endpoint local determinístico que valida o protocolo/fluxo, não a qualidade de um modelo externo. Os demais cenários exercitam falhas e idempotência diretamente contra WordPress real. A homologação não chama providers públicos, não publica posts, não implanta código e não altera agendamentos. Ela não substitui validação supervisionada de produção, e nenhum gate editorial ou de publicação é relaxado.

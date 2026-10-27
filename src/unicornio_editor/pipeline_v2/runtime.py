@@ -2296,10 +2296,15 @@ class ProductionMediaResolver:
                     search_wikimedia_commons_candidates(
                         f"{subject} {query}", limit=max(needed * 2, 8),
                         url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
+                        root=self.root,
                     )
                 )
             candidates = [
-                enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
+                enrich_wikimedia_rights(
+                    candidate,
+                    url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
+                    root=self.root,
+                )
                 for candidate in candidates
             ]
             filtered: list[dict[str, Any]] = []
@@ -2587,6 +2592,7 @@ class ProductionMediaResolver:
                     stats=source_stats,
                     url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
                     is_listicle=is_listicle,
+                    root=self.root,
                 )
             except Exception as exc:
                 from ..observability import record_unexpected_error, append_telemetry
@@ -2646,7 +2652,7 @@ class ProductionMediaResolver:
                 source_feature_candidates, post_id=int(context["post_id"]),
                 context_key=vision_context_key,
             )
-            approved_source_features = self._approved_unique(source_feature_candidates)
+            approved_source_features = self._approved_unique(source_feature_candidates, root=self.root)
             record_non_executable_candidates(
                 source_feature_candidates, approved_source_features, role="featured"
             )
@@ -2684,7 +2690,7 @@ class ProductionMediaResolver:
                 self._resolve_ambiguous_vision(
                     candidates, post_id=int(context["post_id"]), context_key=vision_context_key
                 )
-                approved_candidates = self._approved_unique(candidates)
+                approved_candidates = self._approved_unique(candidates, root=self.root)
                 record_non_executable_candidates(
                     candidates, approved_candidates, role="featured"
                 )
@@ -2723,7 +2729,11 @@ class ProductionMediaResolver:
             if source_url:
                 from ..media.source_verify import enrich_wikimedia_rights
                 source_candidates = [
-                    enrich_wikimedia_rights(candidate, url_policy=str(getattr(self.config, "remote_url_policy", "audit")))
+                    enrich_wikimedia_rights(
+                        candidate,
+                        url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
+                        root=self.root,
+                    )
                     for candidate in article_source_candidates()
                 ]
                 for candidate in source_candidates:
@@ -2759,7 +2769,7 @@ class ProductionMediaResolver:
                         [candidate], post_id=int(context["post_id"]),
                         context_key=vision_context_key,
                     )
-                    approved = self._approved_unique([candidate])
+                    approved = self._approved_unique([candidate], root=self.root)
                     record_non_executable_candidates(
                         [candidate], approved, role="inline"
                     )
@@ -2801,7 +2811,7 @@ class ProductionMediaResolver:
                 self._resolve_ambiguous_vision(
                     candidates, post_id=int(context["post_id"]), context_key=vision_context_key
                 )
-                for candidate in self._approved_unique(candidates):
+                for candidate in self._approved_unique(candidates, root=self.root):
                     if inline_remaining() <= 0:
                         break
                     candidate_key = str(
@@ -3042,7 +3052,9 @@ class ProductionMediaResolver:
         ))
 
     @classmethod
-    def _is_approved(cls, candidate: dict[str, Any]) -> bool:
+    def _is_approved(
+        cls, candidate: dict[str, Any], *, root: str | Path | None = None,
+    ) -> bool:
         if (
             (candidate.get("evidence") or {}).get("verdict") != "deterministic_match"
             or candidate.get("valid") is not True
@@ -3056,18 +3068,20 @@ class ProductionMediaResolver:
             decision = RightsDecision.from_value(candidate.get("rights_decision"))
             if decision.status != "VERIFIED":
                 return False
-            validate_upload_candidate(candidate)
+            validate_upload_candidate(candidate, root=root)
         except LicenseError:
             return False
         return True
 
     @classmethod
-    def _approved_unique(cls, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _approved_unique(
+        cls, candidates: list[dict[str, Any]], *, root: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
         for candidate in candidates:
             key = str(candidate.get("media_library_id") or candidate.get("direct_image_url") or "")
-            if key and key not in seen and cls._is_approved(candidate):
+            if key and key not in seen and cls._is_approved(candidate, root=root):
                 seen.add(key)
                 result.append(candidate)
         return result

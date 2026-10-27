@@ -14,8 +14,11 @@ import hashlib
 import hmac
 from html.parser import HTMLParser
 import json
+import os
+from pathlib import Path
 import re
-import secrets
+import stat
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -24,8 +27,7 @@ class LicenseError(ValueError):
     """Raised when an image credit evidence cannot be validated."""
 
 
-_RIGHTS_ATTESTATION_KEY = secrets.token_bytes(32)
-_RIGHTS_ATTESTATION_VERSION = 1
+_RIGHTS_ATTESTATION_VERSION = 2
 RIGHTS_POLICY_VERSION = "source-rights-v1"
 _RIGHTS_STATUSES = {
     "VERIFIED", "UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE",
@@ -257,6 +259,7 @@ def _is_image_object(node: Mapping[str, Any], has_schema_context: bool) -> bool:
 
 def enrich_source_image_object_rights(
     candidate: Mapping[str, Any], source_page_html: str | None,
+    *, root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Attach accepted rights only when the fetched ImageObject binds exact bytes.
 
@@ -330,13 +333,19 @@ def enrich_source_image_object_rights(
                 "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
                 "alt_text": str(result.get("alt_text") or result.get("subject") or "Imagem editorial"),
             }
-            attestation = attest_source_rights(rights_candidate, source_page_html)
+            attestation = attest_source_rights(rights_candidate, source_page_html, root=root)
             if attestation is None:
                 unsupported_evidence = True
                 continue
-            evidence_reference = hashlib.sha256(
-                json.dumps(node, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            ).hexdigest()
+            evidence_reference = str(attestation["evidence_sha256"])
+            rights_candidate["rights_evidence"] = {
+                "provider": "schema_org_image_object",
+                "image_url": direct_url,
+                "license": license_name,
+                "license_url": license_url,
+                "author": author,
+                "evidence_sha256": evidence_reference,
+            }
             supported_evidence.append((rights_candidate, attestation, evidence_reference))
 
     if incompatible_license:
@@ -382,59 +391,125 @@ def enrich_source_image_object_rights(
     return result
 
 
-def _image_object_proves_license(
-    document: Any,
-    *,
-    source_page_url: str,
-    direct_image_url: str,
-    license_name: str,
-    license_url: str,
-) -> bool:
+def _rights_evidence_reference(evidence: Any) -> str:
+    if not isinstance(evidence, Mapping):
+        return ""
+    supplied = str(evidence.get("evidence_sha256") or "")
+    if str(evidence.get("provider") or "") == "schema_org_image_object":
+        return supplied if re.fullmatch(r"[0-9a-f]{64}", supplied) else ""
+    material = {str(key): value for key, value in evidence.items() if key != "evidence_sha256"}
+    calculated = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    if supplied and not hmac.compare_digest(supplied, calculated):
+        return ""
+    return supplied or calculated
+
+
+def _rights_key(root: str | Path | None) -> bytes:
+    """Load or create a stable, private per-installation HMAC key."""
+    configured_root = root or os.environ.get("UNICORNIO_AGENT_ROOT") or Path.cwd()
+    work_dir = Path(configured_root).expanduser() / "work"
+    if work_dir.is_symlink():
+        raise LicenseError("rights attestation store cannot be a symlink")
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    work_metadata = work_dir.stat()
+    if not work_dir.is_dir() or work_metadata.st_uid != os.geteuid():
+        raise LicenseError("rights attestation store is not owned by the current user")
+    key_path = work_dir / "rights-attestation.key"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+    except FileExistsError:
+        descriptor = -1
+    if descriptor >= 0:
+        try:
+            key = os.urandom(32)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(key)
+                stream.flush()
+                os.fsync(stream.fileno())
+            directory_fd = os.open(
+                work_dir,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return key
+        except Exception:
+            try:
+                key_path.unlink()
+            except OSError:
+                pass
+            raise
+
+    for _ in range(20):
+        try:
+            metadata = key_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise LicenseError("rights attestation key must be a private regular file")
+            descriptor = os.open(key_path, os.O_RDONLY | nofollow)
+            with os.fdopen(descriptor, "rb") as stream:
+                key = stream.read(33)
+            if len(key) == 32:
+                return key
+        except FileNotFoundError:
+            time.sleep(0.01)
+    raise LicenseError("rights attestation key is missing or malformed")
+
+
+def _matching_source_evidence_hash(
+    documents: list[Any], *, source_page_url: str, direct_image_url: str,
+    license_name: str, license_url: str,
+) -> str:
     image_url = _normalized_url(direct_image_url, source_page_url)
     declared_license = _normalized_url(license_url, source_page_url)
     if not image_url or not declared_license:
-        return False
-    for node, has_schema_context in _jsonld_nodes(document):
-        raw_types = node.get("@type")
-        types = raw_types if isinstance(raw_types, list) else [raw_types]
-        if not any(
-            (
-                str(value or "").rstrip("/#").casefold() == "imageobject"
-                and has_schema_context
-            )
-            or str(value or "").rstrip("/#").casefold()
-            in {"https://schema.org/imageobject", "http://schema.org/imageobject"}
-            for value in types
-        ):
-            continue
-        # `contentUrl` identifies the image bytes; generic page-level license
-        # markup or an ImageObject for a different image is not sufficient.
-        content_urls = _schema_values(node.get("contentUrl"), ("@id", "url", "contentUrl"))
-        if image_url not in {_normalized_url(value, source_page_url) for value in content_urls}:
-            continue
-        license_values = _schema_values(node.get("license"), ("@id", "url"))
-        matching_license = next(
-            (value for value in license_values if _normalized_url(value, source_page_url) == declared_license),
-            "",
-        )
-        if matching_license and _license_reference_matches(license_name, matching_license):
-            return True
-    return False
+        return ""
+    for document in documents:
+        for node, has_schema_context in _jsonld_nodes(document):
+            if not _is_image_object(node, has_schema_context):
+                continue
+            content_urls = _schema_values(node.get("contentUrl"), ("@id", "url", "contentUrl"))
+            if image_url not in {_normalized_url(value, source_page_url) for value in content_urls}:
+                continue
+            license_values = _schema_values(node.get("license"), ("@id", "url"))
+            if any(
+                _normalized_url(value, source_page_url) == declared_license
+                and _license_reference_matches(license_name, value)
+                for value in license_values
+            ):
+                return hashlib.sha256(
+                    json.dumps(node, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+    return ""
 
 
-def _attestation_payload(candidate: Mapping[str, Any]) -> bytes:
+def _attestation_payload(candidate: Mapping[str, Any], evidence_reference: str) -> bytes:
     fields = {
         key: str(candidate.get(key) or "")
-        for key in ("source_page_url", "direct_image_url", "author", "license", "license_url")
+        for key in (
+            "source_page_url", "direct_image_url", "author", "license", "license_url",
+            "captured_at", "credit_text", "alt_text",
+        )
     }
     return json.dumps(
-        {"version": _RIGHTS_ATTESTATION_VERSION, **fields},
+        {
+            "version": _RIGHTS_ATTESTATION_VERSION,
+            "evidence_sha256": evidence_reference,
+            **fields,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 
 
-def attest_source_rights(candidate: Mapping[str, Any], source_page_html: str) -> dict[str, Any] | None:
+def attest_source_rights(
+    candidate: Mapping[str, Any], source_page_html: str,
+    *, root: str | Path | None = None,
+) -> dict[str, Any] | None:
     """Seal license evidence only when JSON-LD binds it to this exact image.
 
     The caller must fetch ``source_page_html`` from ``source_page_url`` using
@@ -450,22 +525,37 @@ def attest_source_rights(candidate: Mapping[str, Any], source_page_html: str) ->
         parser.feed(str(source_page_html or ""))
     except Exception:  # malformed markup fails closed
         return None
-    if not any(
-        _image_object_proves_license(
-            document,
-            source_page_url=normalized["source_page_url"],
-            direct_image_url=normalized["direct_image_url"],
-            license_name=normalized["license"],
-            license_url=normalized["license_url"],
-        )
-        for document in parser.documents
-    ):
+    evidence_reference = _matching_source_evidence_hash(
+        parser.documents,
+        source_page_url=normalized["source_page_url"],
+        direct_image_url=normalized["direct_image_url"],
+        license_name=normalized["license"],
+        license_url=normalized["license_url"],
+    )
+    if not evidence_reference:
         return None
-    signature = hmac.new(_RIGHTS_ATTESTATION_KEY, _attestation_payload(normalized), hashlib.sha256).hexdigest()
-    return {"version": _RIGHTS_ATTESTATION_VERSION, "signature": signature}
+    supplied_evidence = candidate.get("rights_evidence")
+    if isinstance(supplied_evidence, Mapping):
+        supplied_reference = str(supplied_evidence.get("evidence_sha256") or "")
+        if supplied_reference and not hmac.compare_digest(supplied_reference, evidence_reference):
+            return None
+    try:
+        key = _rights_key(root)
+    except (OSError, LicenseError):
+        return None
+    signature = hmac.new(
+        key, _attestation_payload(normalized, evidence_reference), hashlib.sha256,
+    ).hexdigest()
+    return {
+        "version": _RIGHTS_ATTESTATION_VERSION,
+        "signature": signature,
+        "evidence_sha256": evidence_reference,
+    }
 
 
-def attest_wikimedia_rights(candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+def attest_wikimedia_rights(
+    candidate: Mapping[str, Any], *, root: str | Path | None = None,
+) -> dict[str, Any] | None:
     """Seal exact-file rights returned by Wikimedia Commons extmetadata."""
     evidence = candidate.get("rights_evidence")
     if not isinstance(evidence, Mapping):
@@ -480,12 +570,28 @@ def attest_wikimedia_rights(candidate: Mapping[str, Any]) -> dict[str, Any] | No
         normalized = validate_candidate({key: candidate.get(key) for key in _REQUIRED})
     except LicenseError:
         return None
-    signature = hmac.new(_RIGHTS_ATTESTATION_KEY, _attestation_payload(normalized), hashlib.sha256).hexdigest()
-    return {"version": _RIGHTS_ATTESTATION_VERSION, "signature": signature, "provider": "wikimedia_commons_api"}
+    evidence_reference = _rights_evidence_reference(evidence)
+    if not evidence_reference:
+        return None
+    try:
+        key = _rights_key(root)
+    except (OSError, LicenseError):
+        return None
+    signature = hmac.new(
+        key, _attestation_payload(normalized, evidence_reference), hashlib.sha256,
+    ).hexdigest()
+    return {
+        "version": _RIGHTS_ATTESTATION_VERSION,
+        "signature": signature,
+        "provider": "wikimedia_commons_api",
+        "evidence_sha256": evidence_reference,
+    }
 
 
-def validate_upload_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate metadata and require a process-local, source-bound rights seal."""
+def validate_upload_candidate(
+    candidate: Mapping[str, Any], *, root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Validate metadata and require a durable, source-bound rights seal."""
     if not isinstance(candidate, Mapping):
         raise LicenseError("media candidate must contain complete license evidence")
     normalized = validate_candidate({key: candidate.get(key) for key in _REQUIRED})
@@ -493,7 +599,21 @@ def validate_upload_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(attestation, Mapping) or attestation.get("version") != _RIGHTS_ATTESTATION_VERSION:
         raise LicenseError("rights are not proven for this exact source image")
     signature = str(attestation.get("signature") or "")
-    expected = hmac.new(_RIGHTS_ATTESTATION_KEY, _attestation_payload(normalized), hashlib.sha256).hexdigest()
+    evidence_reference = _rights_evidence_reference(candidate.get("rights_evidence"))
+    attested_reference = str(attestation.get("evidence_sha256") or "")
+    if not candidate.get("rights_evidence"):
+        # Backward-compatible direct API callers still get a signed evidence
+        # identity. Production acquisition persists the provider record too.
+        evidence_reference = attested_reference
+    if not evidence_reference or not hmac.compare_digest(evidence_reference, attested_reference):
+        raise LicenseError("source rights evidence identity is missing or changed")
+    try:
+        key = _rights_key(root)
+    except (OSError, LicenseError) as exc:
+        raise LicenseError("durable rights attestation key is unavailable") from exc
+    expected = hmac.new(
+        key, _attestation_payload(normalized, evidence_reference), hashlib.sha256,
+    ).hexdigest()
     if len(signature) != 64 or not hmac.compare_digest(signature, expected):
         raise LicenseError("source-bound rights evidence is invalid or does not match this image")
     return normalized

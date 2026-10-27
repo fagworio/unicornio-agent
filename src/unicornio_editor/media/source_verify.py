@@ -90,6 +90,7 @@ def discover_article_source_candidates(
     stats: dict[str, Any] | None = None,
     url_policy: str = "audit",
     is_listicle: bool | None = None,
+    root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Extract candidates directly from the article's ``Fonte`` page.
 
@@ -247,11 +248,14 @@ def discover_article_source_candidates(
         }
         from .license import enrich_source_image_object_rights
 
-        result.append(enrich_source_image_object_rights(candidate, html))
+        result.append(enrich_source_image_object_rights(candidate, html, root=root))
     return result
 
 
-def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy: str = "audit") -> dict[str, Any]:
+def enrich_wikimedia_rights(
+    candidate: dict[str, Any], *, audit=None, url_policy: str = "audit",
+    root: str | Path | None = None,
+) -> dict[str, Any]:
     """Attach rights evidence from Wikimedia Commons' authoritative API.
 
     This never infers permission from a search result. It only enriches a
@@ -268,10 +272,26 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
     title = unquote(urlparse(source).path.split(marker, 1)[1])
     if not title or title.casefold().startswith("special:"):
         return candidate
+    from .license import RightsDecision
+
+    # A proof from a prior process is not an authorization cache. Clear it
+    # before refreshing Commons metadata; an unavailable API must remain a
+    # retryable technical state rather than reusing the old license silently.
+    refreshed = dict(candidate)
+    refreshed.pop("source_rights_attestation", None)
+    refreshed["rights_verified"] = False
+    refreshed["rights_checked"] = True
+
+    def unavailable(reason: str) -> dict[str, Any]:
+        refreshed["rights_decision"] = RightsDecision(
+            "TECHNICAL_FAILURE", "media_rights_unavailable", reason, retryable=True,
+        ).to_dict()
+        return refreshed
+
     api = "https://commons.wikimedia.org/w/api.php?action=query&format=json&titles=" + quote(title, safe="") + "&prop=imageinfo&iiprop=url|extmetadata"
     payload = _fetch(api, "application/json", _PAGE_MAX_BYTES, [_VERIFY_TOTAL_MAX_BYTES], audit, url_policy)
     if not payload:
-        return candidate
+        return unavailable("wikimedia_api_unavailable")
     try:
         pages = (json.loads(payload.decode("utf-8", "ignore")).get("query") or {}).get("pages") or {}
         page = next(iter(pages.values()))
@@ -286,17 +306,17 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
         author = " ".join(author.split())
         direct = str(info.get("url") or "").strip()
         if not direct or not license_name or not license_url or not author:
-            return candidate
+            return unavailable("wikimedia_rights_metadata_incomplete")
         discovered = str(candidate.get("direct_image_url") or "").strip()
         if discovered and discovered != direct:
             budget = [_VERIFY_TOTAL_MAX_BYTES]
             discovered_bytes = _fetch(discovered, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
             authorized_bytes = _fetch(direct, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
             if not discovered_bytes or not authorized_bytes:
-                return candidate
+                return unavailable("wikimedia_image_identity_unavailable")
             equivalent, _identity_reason = verify_image_identity(discovered_bytes, authorized_bytes)
             if not equivalent:
-                return candidate
+                return unavailable("wikimedia_image_identity_mismatch")
         enriched = dict(candidate)
         enriched.update({
             "source_page_url": source,
@@ -317,15 +337,11 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
             },
         })
         from .license import attest_wikimedia_rights
-        attestation = attest_wikimedia_rights(enriched)
+        attestation = attest_wikimedia_rights(enriched, root=root)
         if attestation:
             enriched["source_rights_attestation"] = attestation
             enriched["rights_verified"] = True
-            from .license import RightsDecision
-
-            evidence_reference = hashlib.sha256(
-                json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            ).hexdigest()
+            evidence_reference = str(attestation["evidence_sha256"])
             enriched["rights_evidence"]["evidence_sha256"] = evidence_reference
             enriched["rights_decision"] = RightsDecision(
                 "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
@@ -333,10 +349,11 @@ def enrich_wikimedia_rights(candidate: dict[str, Any], *, audit=None, url_policy
             ).to_dict()
             return enriched
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return candidate
-    return candidate
+        return unavailable("wikimedia_rights_response_invalid")
+    return unavailable("wikimedia_rights_unverified")
 def search_wikimedia_commons_candidates(
-   query: str, *, limit: int = 12, audit=None, url_policy: str = "audit"
+   query: str, *, limit: int = 12, audit=None, url_policy: str = "audit",
+   root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
    """Discover Commons file pages with rights metadata in one authoritative call."""
    api = (
@@ -417,16 +434,14 @@ def search_wikimedia_commons_candidates(
        )
        if candidate["evidence"].get("verdict") != "deterministic_match":
            continue
-       attestation = attest_wikimedia_rights(candidate)
+       attestation = attest_wikimedia_rights(candidate, root=root)
        if not attestation:
            continue
        candidate["source_rights_attestation"] = attestation
        candidate["rights_verified"] = True
        from .license import RightsDecision
 
-       evidence_reference = hashlib.sha256(
-           json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-       ).hexdigest()
+       evidence_reference = str(attestation["evidence_sha256"])
        candidate["rights_evidence"]["evidence_sha256"] = evidence_reference
        candidate["rights_decision"] = RightsDecision(
            "VERIFIED", "image_object_license_match", "wikimedia_commons_api",

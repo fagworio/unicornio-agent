@@ -31,6 +31,7 @@ from unicornio_editor.workflow import (
     _is_final_phash_duplicate,
     _item_entities,
     _media_item_rejection,
+    _next_partial_no_progress,
     _vision_evidence_matches_item,
     apply_editorial,
     build_cards,
@@ -75,7 +76,7 @@ def _vision_result(*, accepted, status="MATCH", confidence=0.91, visual_type="ke
 
 
 def _mock_source_rights():
-    """Keep executor unit tests offline; source-rights behavior has focused tests."""
+    """Isolate workflow unit tests from rights; dedicated tests exercise proof validation."""
     from contextlib import ExitStack
 
     stack = ExitStack()
@@ -84,7 +85,11 @@ def _mock_source_rights():
     ))
     stack.enter_context(mock.patch(
         "unicornio_editor.media.license.attest_source_rights",
-        return_value={"version": 1, "signature": "0" * 64},
+        return_value={"version": 2, "signature": "0" * 64, "evidence_sha256": "a" * 64},
+    ))
+    stack.enter_context(mock.patch(
+        "unicornio_editor.media.license.validate_upload_candidate",
+        return_value=None,
     ))
     return stack
 
@@ -181,8 +186,36 @@ class FakeClient:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_visual_identity_technical_pending_preserves_no_progress(self):
+        result = _next_partial_no_progress(
+            1,
+            progress=False,
+            media_results=[{
+                "status": "deferred",
+                "reason_code": "visual_identity_pending",
+                "recoverable": True,
+            }],
+        )
+        self.assertEqual(result, 1)
+
+    def test_visual_identity_pending_does_not_override_real_progress_or_failures(self):
+        technical_pending = {
+            "status": "deferred", "reason_code": "visual_identity_pending",
+        }
+        self.assertEqual(
+            _next_partial_no_progress(2, progress=True, media_results=[technical_pending]),
+            0,
+        )
+        self.assertEqual(
+            _next_partial_no_progress(
+                1, progress=False,
+                media_results=[{"status": "rejected", "reason_code": "source_mismatch"}],
+            ),
+            2,
+        )
+
     def setUp(self):
-        def attest_test_source(candidate, _html):
+        def attest_test_source(candidate, _html, *, root=None):
             image_object = {
                 "@context": "https://schema.org",
                 "@type": "ImageObject",
@@ -194,6 +227,7 @@ class WorkflowTests(unittest.TestCase):
                 '<script type="application/ld+json">'
                 + json.dumps(image_object)
                 + "</script>",
+                root=root,
             )
 
         self._source_html_patcher = mock.patch(
@@ -1214,7 +1248,7 @@ class WorkflowTests(unittest.TestCase):
             return_value=_verified_media_identity(),
         ), mock.patch(
             "unicornio_editor.workflow.upload_image",
-            side_effect=lambda client, webp, evidence: {
+            side_effect=lambda client, webp, evidence, **_kwargs: {
                 "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
                 "b.jpg": {"id": 51, "source_url": "https://wp.test/51.webp"},
                 "keyart.jpg": {"id": 52, "source_url": "https://wp.test/52.webp"},
@@ -1286,7 +1320,11 @@ class WorkflowTests(unittest.TestCase):
              mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
              mock.patch(
                  "unicornio_editor.media.license.attest_source_rights",
-                 side_effect=[None, {"version": 1, "signature": "0" * 64}],
+                 side_effect=[None, {"version": 2, "signature": "0" * 64, "evidence_sha256": "a" * 64}],
+             ), \
+             mock.patch(
+                 "unicornio_editor.media.license.validate_upload_candidate",
+                 return_value=None,
              ), \
              mock.patch(
                  "unicornio_editor.workflow.upload_image",
@@ -1332,7 +1370,7 @@ class WorkflowTests(unittest.TestCase):
             return_value=_verified_media_identity(),
         ), mock.patch(
             "unicornio_editor.workflow.upload_image",
-            side_effect=lambda client, webp, evidence: {
+            side_effect=lambda client, webp, evidence, **_kwargs: {
                 "a.jpg": {"id": 50, "source_url": "https://wp.test/50.webp"},
                 "b.jpg": {"id": 51, "source_url": "https://wp.test/51.webp"},
                 "keyart.jpg": {"id": 52, "source_url": "https://wp.test/52.webp"},
@@ -1357,7 +1395,7 @@ class WorkflowTests(unittest.TestCase):
         ]
         uploads: list[str] = []
 
-        def upload_once(_client, _webp, evidence):
+        def upload_once(_client, _webp, evidence, **_kwargs):
             name = evidence["direct_image_url"].rsplit("/", 1)[-1]
             uploads.append(name)
             if name == "keyart.jpg":
@@ -3247,6 +3285,7 @@ def test_execute_media_plan_preserves_rejected_preflight_vision_without_upload(t
         )
     upload.assert_not_called()
     assert results[0]["status"] == "rejected"
+    assert results[1]["status"] == "rejected"
     assert "vision_evidence" not in results[0]
     assert results[1]["vision_evidence"] == vision
 
@@ -3504,7 +3543,8 @@ def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp
             preflight={"rejected": [], "featured_vision": []}, post_id=115088,
         )
     upload.assert_not_called()
-    assert results[0]["status"] == "rejected"
+    assert results[0]["status"] == "deferred"
+    assert results[0]["reason_code"] == "visual_identity_pending"
     assert "visual_identity_unverified" in results[0]["detail"]
 
 

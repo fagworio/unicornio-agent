@@ -1,4 +1,10 @@
 import unittest
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 from unicornio_editor.media.license import (
     LicenseError,
@@ -239,6 +245,80 @@ class LicenseTests(unittest.TestCase):
         changed = {**value, "direct_image_url": "https://upload.wikimedia.org/other.jpg"}
         with self.assertRaisesRegex(LicenseError, "does not match"):
             validate_upload_candidate({**changed, "source_rights_attestation": proof})
+
+    def test_rights_attestation_survives_an_independent_process_and_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value = candidate()
+            proof = attest_source_rights(value, self._licensed_image_html(value), root=root)
+            self.assertIsNotNone(proof)
+            persisted = {
+                **value,
+                "rights_evidence": {
+                    "provider": "schema_org_image_object",
+                    "image_url": value["direct_image_url"],
+                    "license": value["license"],
+                    "license_url": value["license_url"],
+                    "author": value["author"],
+                    "evidence_sha256": proof["evidence_sha256"],
+                },
+                "source_rights_attestation": proof,
+            }
+            key_path = root / "work" / "rights-attestation.key"
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+            code = (
+                "import json,sys; "
+                "from unicornio_editor.media.license import validate_upload_candidate; "
+                "payload=json.load(sys.stdin); "
+                "validate_upload_candidate(payload['candidate'], root=payload['root']); "
+                "print('verified')"
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            result = subprocess.run(
+                [sys.executable, "-c", code],
+                input=json.dumps({"candidate": persisted, "root": str(root)}),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "verified")
+
+    def test_source_license_change_after_restart_is_not_reauthorized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            value = candidate()
+            proof = attest_source_rights(
+                value, self._licensed_image_html(value), root=directory,
+            )
+            self.assertIsNotNone(proof)
+            changed_html = self._licensed_image_html(value).replace(
+                "licenses/by-sa/4.0/", "licenses/by-nc/4.0/",
+            )
+            self.assertIsNone(attest_source_rights(value, changed_html, root=directory))
+            changed_candidate = {
+                **value,
+                "license": "CC BY-NC 4.0",
+                "license_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+                "source_rights_attestation": proof,
+            }
+            with self.assertRaises(LicenseError):
+                validate_upload_candidate(changed_candidate, root=directory)
+
+    def test_attestation_rejects_changed_author_credit_and_alt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            value = candidate()
+            proof = attest_source_rights(value, self._licensed_image_html(value), root=directory)
+            for field, replacement in (
+                ("author", "Different Author"),
+                ("credit_text", "Crédito diferente"),
+                ("alt_text", "Outro assunto"),
+            ):
+                with self.subTest(field=field), self.assertRaises(LicenseError):
+                    validate_upload_candidate({
+                        **value, field: replacement, "source_rights_attestation": proof,
+                    }, root=directory)
 
 
 if __name__ == "__main__":

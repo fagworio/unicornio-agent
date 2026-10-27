@@ -37,6 +37,7 @@ SCENARIOS = (
     "test_historical_journal_without_writer_started_remains_compatible",
     "test_media_registry_v5_matches_confirmed_writer_transaction",
     "test_legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes",
+    "test_controlled_source_acquisition_composes_checklists_and_commits_ready_media",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -49,6 +50,7 @@ SCENARIO_OPERATIONS = {
     "historical_journal_without_writer_started_remains_compatible": ["historical_journal_compatibility"],
     "media_registry_v5_matches_confirmed_writer_transaction": ["registry"],
     "legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes": ["prewriter_isolation"],
+    "controlled_source_acquisition_composes_checklists_and_commits_ready_media": ["media_to_ready"],
 }
 POST_FIXTURES = {
     "pending_transition": ("pending", False),
@@ -60,6 +62,7 @@ POST_FIXTURES = {
     "divergent": ("pending", False),
     "historical": ("awaiting_human", False),
     "registry": ("pending", False),
+    "media_ready": ("pending", False),
     "isolation_target": ("pending", True),
     "isolation_committed_a": ("pending", True),
     "isolation_committed_b": ("pending", True),
@@ -230,6 +233,11 @@ def main() -> int:
         "wp_cli": {},
         "images": {},
         "scenarios": [],
+        "media_acquisition": {
+            "source": "controlled local HTTP with exact Schema.org ImageObject rights",
+            "visual_provider": "controlled local OpenAI-compatible endpoint",
+            "wordpress": "real ephemeral REST API and database",
+        },
         "e2e_suite": {},
         "full_suite": {},
         "environment": {"ephemeral": True, "ephemeral_environment_destroyed": False},
@@ -312,7 +320,7 @@ def main() -> int:
             "WP_E2E_OBSERVATIONS_PATH": str(observations_path),
         })
         e2e_run = command(
-            [sys.executable, "-m", "pytest", "-q", "tests/wordpress/e2e/test_writer.py", f"--junitxml={e2e_junit_path}"],
+            [sys.executable, "-m", "pytest", "-q", "tests/wordpress/e2e", f"--junitxml={e2e_junit_path}"],
             env=app_env,
             timeout=600,
             check=False,

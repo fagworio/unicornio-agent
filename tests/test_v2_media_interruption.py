@@ -107,7 +107,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
             assert "content" not in payload and "featured_media" not in payload
             self.post.update(payload)
 
-        def upload(self, *_args):
+        def upload(self, *_args, **_kwargs):
             self.uploads += 1
             return self.get_media(115305)
 
@@ -150,7 +150,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
                 "alt_text": "Artwork do jogo",
                 **({"media_id": 115305} if second_run else {}),
             }
-            candidates = [enrich_source_image_object_rights(candidate, source_html)]
+            candidates = [enrich_source_image_object_rights(candidate, source_html, root=_root)]
         return {"posts": [{"audit_candidates": candidates, "search": {
             "completed": True, "queries_attempted": 1, "engines_attempted": ["fixture"],
         }}]}
@@ -194,7 +194,7 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
     )
     result = run_v2(client, config, tmp_path, post_id=115152)
     assert result["failed"] == 0, result
-    assert client.uploads == 1, [row.get("detail") for row in result["details"]]
+    assert client.uploads == 1, json.dumps(result["details"], ensure_ascii=False)
     assert query_calls[0] == 3
     persisted = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
     assert persisted.state.value == "pending", result["details"][0].get("detail")

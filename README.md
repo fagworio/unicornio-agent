@@ -35,6 +35,8 @@ A instalação local do WordPress está em:
 
 Para a homologação automatizada, consulte [docs/wordpress-e2e-homologation.md](docs/wordpress-e2e-homologation.md). O workflow separado provisiona os MU-plugins usados pelo projeto, executa o WordPressClient e WordPressWriterV2 reais e destrói o ambiente após a execução. Não requer nem utiliza dados, URLs ou credenciais de produção.
 
+As assinaturas de direitos usam uma chave privada por instalação em `work/rights-attestation.key`; a política de backup/restore e revalidação está em [docs/media-rights-attestation.md](docs/media-rights-attestation.md).
+
 ### Cenários de teste no Devilbox
 
 Para cada modificação realizada:

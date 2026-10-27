@@ -31,8 +31,10 @@ def friendly_media_filename(path: Path, candidate: dict[str, Any]) -> str:
     return f"{slug[:90].rstrip('-')}.webp"
 
 
-def upload_image(client: Any, path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
-    evidence = validate_upload_candidate(candidate)
+def upload_image(
+    client: Any, path: Path, candidate: dict[str, Any], *, root=None,
+) -> dict[str, Any]:
+    evidence = validate_upload_candidate(candidate, root=root)
     path = Path(path)
     if path.suffix.lower() != ".webp":
         raise ValueError("only converted WebP files may be uploaded")

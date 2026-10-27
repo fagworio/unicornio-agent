@@ -1577,7 +1577,7 @@ def _resolve_media_batch(
             try:
                 if RightsDecision.from_value(candidate.get("rights_decision")).status != "VERIFIED":
                     return False
-                validate_upload_candidate(candidate)
+                validate_upload_candidate(candidate, root=root)
             except LicenseError:
                 return False
             return True
@@ -2277,7 +2277,7 @@ def _enriquecer_candidatos(
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
-        enriched_candidate = enrich_wikimedia_rights(candidate, url_policy=url_policy)
+        enriched_candidate = enrich_wikimedia_rights(candidate, url_policy=url_policy, root=root)
         if enriched_candidate is not candidate:
             candidate.clear()
             candidate.update(enriched_candidate)
@@ -2352,7 +2352,7 @@ def _enriquecer_candidatos(
         try:
             if RightsDecision.from_value(cand.get("rights_decision")).status != "VERIFIED":
                 return False
-            validate_upload_candidate(cand)
+            validate_upload_candidate(cand, root=root)
         except LicenseError:
             return False
         return True
@@ -2524,7 +2524,7 @@ def _enriquecer_candidatos(
         pagina = str(cand.get("source_page_url") or "")
         if verify and pagina and not _has_valid_rights_attestation(cand):
             rights_enriched = enrich_source_image_object_rights(
-                cand, cache_html.get(pagina)
+                cand, cache_html.get(pagina), root=root
             )
             cand.update(rights_enriched)
         nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])

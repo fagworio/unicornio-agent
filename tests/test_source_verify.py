@@ -443,7 +443,9 @@ class SourceVerifyTests(unittest.TestCase):
             side_effect=[payload, _png_bytes((200, 30, 30)), _png_bytes((30, 30, 200))],
         ):
             enriched = enrich_wikimedia_rights(candidate)
-        self.assertNotIn("rights_verified", enriched)
+        self.assertIs(enriched["rights_verified"], False)
+        self.assertEqual(enriched["rights_decision"]["status"], "TECHNICAL_FAILURE")
+        self.assertTrue(enriched["rights_decision"]["retryable"])
 
 
 if __name__ == "__main__":

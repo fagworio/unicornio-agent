@@ -692,7 +692,11 @@ def _apply_editorial_unlocked(
                 progress = completed > previous_completed or featured_progress
                 state_info = read_state(post)
                 passes = state_info.get("processing_passes", 0) + 1
-                no_progress = 0 if progress else state_info.get("no_progress_attempts", 0) + 1
+                no_progress = _next_partial_no_progress(
+                    state_info.get("no_progress_attempts", 0),
+                    progress=progress,
+                    media_results=media_results,
+                )
                 partial_state = _partial_retry(
                     no_progress,
                     cooldown_minutes=config.rework_cooldown_minutes,
@@ -1724,6 +1728,22 @@ def _media_license_rejection(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _next_partial_no_progress(
+    current: int, *, progress: bool, media_results: list[dict[str, Any]],
+) -> int:
+    """Do not exhaust media retries for a visual-comparison outage."""
+    if progress:
+        return 0
+    if any(
+        isinstance(item, dict)
+        and item.get("status") == "deferred"
+        and item.get("reason_code") == "visual_identity_pending"
+        for item in media_results
+    ):
+        return max(0, int(current or 0))
+    return max(0, int(current or 0)) + 1
+
+
 def _plan_source_key(item: dict[str, Any]) -> str:
     """Chave de fonte de um item do media_plan para deteccao de duplicatas.
 
@@ -2564,8 +2584,6 @@ def _execute_media_plan(
                         ],
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
-                from .media.license import attest_source_rights
-
                 page_html = source_page_html(
                     str(evidence.get("source_page_url") or ""),
                     cache=page_html_cache,
@@ -2578,22 +2596,37 @@ def _execute_media_plan(
                         reason=finding.reason,
                     ),
                 )
-                rights_attestation = evidence.get("source_rights_attestation") if evidence.get("rights_verified") else None
-                if evidence.get("rights_verified"):
-                    from .media.license import LicenseError, validate_upload_candidate
-                    try:
-                        validate_upload_candidate(evidence)
-                    except LicenseError as exc:
-                        detail = f"atestação de direitos inválida: {exc}"
-                        _funnel("license_source_proof", "rejected", item, position, detail)
+                from .media.license import attest_source_rights
+                from .media.source_verify import enrich_wikimedia_rights
+
+                rights_provider = str(
+                    ((evidence.get("rights_evidence") or {}).get("provider") or "")
+                    if isinstance(evidence.get("rights_evidence"), dict)
+                    else ""
+                )
+                if rights_provider == "wikimedia_commons_api":
+                    refreshed = enrich_wikimedia_rights(
+                        dict(evidence),
+                        url_policy=config.remote_url_policy,
+                        root=root,
+                        audit=lambda finding: append_telemetry(
+                            root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
+                        ),
+                    )
+                    decision = refreshed.get("rights_decision") if isinstance(refreshed, dict) else {}
+                    if not isinstance(refreshed, dict) or refreshed.get("rights_verified") is not True:
+                        retryable = bool(isinstance(decision, dict) and decision.get("retryable") is True)
                         return position, {
                             "paragraph_index": item.get("paragraph_index"),
-                            "status": "rejected",
-                            "detail": detail[:200],
-                            "reason_code": "image_rights_attestation_invalid",
-                            "recoverable": False,
+                            "status": "deferred" if retryable else "rejected",
+                            "detail": "revalidação atual dos direitos Wikimedia indisponível"
+                            if retryable else "a origem atual não comprova direitos compatíveis",
+                            "reason_code": str((decision or {}).get("reason_code") or "image_rights_unproven"),
+                            "recoverable": retryable,
                         }
-                if not isinstance(rights_attestation, dict):
+                    evidence.update(refreshed)
+                    rights_attestation = refreshed.get("source_rights_attestation")
+                else:
                     rights_candidate = {
                         key: evidence.get(key)
                         for key in (
@@ -2601,18 +2634,49 @@ def _execute_media_plan(
                             "license_url", "captured_at", "credit_text", "alt_text",
                         )
                     }
-                    rights_attestation = attest_source_rights(rights_candidate, page_html or "")
+                    rights_attestation = attest_source_rights(
+                        rights_candidate, page_html or "", root=root,
+                    )
                 if rights_attestation is None:
                     detail = "a origem não comprova licença compatível vinculada a esta imagem"
+                    retryable = page_html is None
+                    _funnel(
+                        "license_source_proof",
+                        "deferred" if retryable else "rejected",
+                        item,
+                        position,
+                        "source_page_unavailable" if retryable else detail,
+                    )
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "deferred" if retryable else "rejected",
+                        "detail": "a origem não pôde ser revalidada temporariamente" if retryable else detail,
+                        "reason_code": "image_rights_unproven",
+                        "recoverable": retryable,
+                    }
+                evidence["source_rights_attestation"] = rights_attestation
+                evidence["rights_verified"] = True
+                evidence["rights_evidence"] = {
+                    "provider": "schema_org_image_object",
+                    "image_url": evidence.get("direct_image_url"),
+                    "license": evidence.get("license"),
+                    "license_url": evidence.get("license_url"),
+                    "author": evidence.get("author"),
+                    "evidence_sha256": rights_attestation.get("evidence_sha256"),
+                }
+                from .media.license import LicenseError, validate_upload_candidate
+                try:
+                    validate_upload_candidate(evidence, root=root)
+                except LicenseError as exc:
+                    detail = f"atestação de direitos inválida: {exc}"
                     _funnel("license_source_proof", "rejected", item, position, detail)
                     return position, {
                         "paragraph_index": item.get("paragraph_index"),
                         "status": "rejected",
-                        "detail": detail,
-                        "reason_code": "image_rights_unproven",
-                        "recoverable": page_html is None,
+                        "detail": detail[:200],
+                        "reason_code": "image_rights_attestation_invalid",
+                        "recoverable": False,
                     }
-                evidence["source_rights_attestation"] = rights_attestation
                 _funnel("license_source_proof", "passed", item, position, "image_object_license_match")
                 is_featured = bool(item.get("is_featured"))
                 if (
@@ -2672,18 +2736,40 @@ def _execute_media_plan(
                         )
                     except Exception as exc:
                         # A missing baseline is not permission to accept an
-                        # asset without durable identity. Keep this path
-                        # fail-closed so the final checklist cannot be
-                        # guaranteed to fail after an irreversible upload.
-                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{type(exc).__name__}"}
+                        # asset without durable identity. Defer it as a
+                        # technical comparison failure; do not poison the
+                        # candidate's rejection history or exhaust no_progress.
+                        detail = f"visual_identity_unverified:{type(exc).__name__}"
+                        _funnel("visual_identity", "deferred", item, position, detail)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "deferred",
+                            "detail": detail,
+                            "reason_code": "visual_identity_pending",
+                            "recoverable": True,
+                        }
                     if visual_baseline_unavailable:
                         visual = type(visual)("UNVERIFIED", False, reason="baseline_identity_unavailable")
                     if not visual.verified:
-                        _funnel("visual_identity", "rejected", item, position, visual.reason)
-                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": f"visual_identity_unverified:{visual.reason}"}
+                        detail = f"visual_identity_unverified:{visual.reason}"
+                        _funnel("visual_identity", "deferred", item, position, visual.reason)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "deferred",
+                            "detail": detail,
+                            "reason_code": "visual_identity_pending",
+                            "recoverable": True,
+                        }
                     if not identity.sha256 or not identity.phash or not identity.visual_group_id:
-                        _funnel("visual_identity", "rejected", item, position, "identity_incomplete")
-                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "visual_identity_unverified:identity_incomplete"}
+                        detail = "visual_identity_unverified:identity_incomplete"
+                        _funnel("visual_identity", "deferred", item, position, "identity_incomplete")
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "deferred",
+                            "detail": detail,
+                            "reason_code": "visual_identity_pending",
+                            "recoverable": True,
+                        }
                     if visual.decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
                         _funnel("visual_identity", "rejected", item, position, visual.reason)
                         return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "duplicate_existing_frame"}
@@ -2816,7 +2902,7 @@ def _execute_media_plan(
                         "featured_vision_final_bytes", "passed", item, position,
                         "same_sha256_as_preflight" if expected_sha256 == identity.sha256 else "validated_before_upload",
                     )
-                media = upload_image(client, webp, evidence)
+                media = upload_image(client, webp, evidence, root=root)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
