@@ -12,6 +12,7 @@ from unicornio_editor.pipeline_v2.production_stages import (
     ProductionEditorialStage,
     ProductionMediaStage,
     ProductionValidateStage,
+    _checklist_failures,
     _ensure_prepared_media_structure,
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
@@ -1358,6 +1359,17 @@ def test_media_structure_counts_only_positions_not_already_present_and_verified(
     assert audit["media_positions_needed"] == 2
     assert audit["paragraphs_after"] == 8
     assert prepared["cleaned_html"].count("<img") == 2
+
+
+def test_checklist_error_is_propagated_as_media_provider_failure():
+    failures = _checklist_failures({"items": [{
+        "name": "featured_url", "status": "error", "detail": "attachment read failed",
+        "blocker": "provider_error", "phase": "media_validation",
+    }]})
+    assert failures == [{
+        "gate": "featured_url", "detail": "attachment read failed",
+        "blocker": "provider_error", "phase": "media",
+    }]
 
 
 def test_compose_and_validate_are_real_adapters(tmp_path, monkeypatch):

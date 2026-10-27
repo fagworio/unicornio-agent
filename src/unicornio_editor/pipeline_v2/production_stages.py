@@ -1264,6 +1264,28 @@ class ProductionComposeStage:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.COMPOSE, str(exc)) from exc
 
 
+def _checklist_failures(checklist: dict[str, Any]) -> list[dict[str, Any]]:
+    """Preserve both failed and errored checklist gates for classification."""
+    valid_phases = {"relevance", "editorial", "media", "compose", "validate", "publish"}
+    failures: list[dict[str, Any]] = []
+    for item in checklist.get("items", []):
+        if item.get("status") not in {"fail", "error"}:
+            continue
+        failure = {"gate": item["name"], "detail": item.get("detail", "")}
+        if item.get("invalid_media"):
+            failure["invalid_media"] = item["invalid_media"]
+        if item.get("blocker"):
+            failure["blocker"] = item["blocker"]
+        phase = item.get("phase")
+        if phase == "media_validation":
+            phase = "media"
+        if phase not in valid_phases:
+            phase = "media" if item.get("blocker") == "provider_error" else "validate"
+        failure["phase"] = phase
+        failures.append(failure)
+    return failures
+
+
 class ProductionValidateStage:
     def __init__(self, client: Any, config: Any, root: Path):
         self.client, self.config, self.root = client, config, Path(root)
@@ -1394,18 +1416,7 @@ class ProductionValidateStage:
                 }
                 candidate["media"] = candidate_media
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
-            failures = []
-            for item in checklist.get("items", []):
-                if item.get("status") != "fail":
-                    continue
-                failure = {"gate": item["name"], "detail": item.get("detail", "")}
-                if item.get("invalid_media"):
-                    failure["invalid_media"] = item["invalid_media"]
-                if item.get("blocker"):
-                    failure["blocker"] = item["blocker"]
-                if item.get("phase"):
-                    failure["phase"] = item["phase"]
-                failures.append(failure)
+            failures = _checklist_failures(checklist)
             result = {
                 "passed": bool(checklist.get("all_passed")), "failures": failures,
                 "checklist": checklist, "_v2_run_id": str(context.get("v2_run_id") or ""),

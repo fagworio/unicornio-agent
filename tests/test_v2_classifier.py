@@ -35,6 +35,22 @@ def test_media_only_failure_is_retry_media():
     assert outcome.blocker is BlockerCode.FEATURED_VISION
 
 
+
+
+def test_temporary_featured_read_error_retries_provider_not_internal_error():
+    outcome = classify(
+        WorkState(relevance_approved=True, retry=RetryInfo(attempts=9)),
+        {"decision": "process"}, {},
+        {"passed": False, "failures": [{
+            "gate": "featured_url", "blocker": "provider_error", "phase": "media",
+            "detail": "attachment read failed",
+        }]},
+    )
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+
+
 def test_editorial_retry_uses_phase_attempts_not_global_history():
     previous = WorkState(
         phase=Phase.MEDIA,
