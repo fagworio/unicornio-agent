@@ -796,11 +796,19 @@ class ChecklistTests(unittest.TestCase):
             "<p>Texto sobre videogame.</p>"
             '<figure class="aligncenter"><img src="https://media.example/a.webp" width="1280" height="720" alt="Jogo importante" /></figure>'
         )
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=False,
+            vision_api_key="",
+        )
         with mock.patch(
             "unicornio_editor.checklist.verify_image_subject_decision",
             return_value={"accepted": True, "reason": "ok", "status": "MATCH", "confidence": 0.91, "visual_type": "key_art"},
         ) as verify:
-            result = self._run_checklist(content=content)
+            result = self._run_checklist(content=content, config=config)
         item = next(i for i in result["items"] if i["name"] == "imagens_visao")
         self.assertEqual(item["status"], "skip")
         verify.assert_not_called()
@@ -1167,7 +1175,7 @@ class ChecklistTests(unittest.TestCase):
         assert result["media_decision"]["waiver_applied"] is True
         assert result["media_decision"]["waiver_basis"]["accepted"] == 0
 
-    def test_exhausted_search_does_not_waive_featured_vision_skipped_for_inline_deficit(self):
+    def test_exhausted_search_requires_featured_vision_when_enabled(self):
         content = (
             "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
             "<p>Mais informações sobre Redfall para o leitor.</p>"
@@ -1278,6 +1286,39 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(confirmed_statuses["imagens_no_corpo"], "pass")
         self.assertTrue(confirmed_result["media_decision"]["waiver_applied"])
         self.assertTrue(confirmed_result["all_passed"])
+
+        # Disabling vision is an explicit policy choice; enabling it without
+        # a key is a configuration failure and must not become an accepted skip.
+        config_without_vision_key = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=True,
+            vision_api_key="",
+            vision_base_url="http://vision.test/v1",
+            vision_model="vision-m",
+        )
+        with mock.patch("unicornio_editor.checklist.verify_image_subject_decision") as verify_unconfigured:
+            unconfigured_result = self._run_checklist(
+                post=make_post(featured_media=7),
+                editorial=editorial,
+                content=content,
+                media_context=media_context,
+                config=config_without_vision_key,
+            )
+
+        verify_unconfigured.assert_not_called()
+        unconfigured_items = {
+            item["name"]: item for item in unconfigured_result["items"]
+        }
+        self.assertEqual(unconfigured_items["imagens_visao"]["status"], "error")
+        self.assertEqual(unconfigured_items["imagens_visao"]["blocker"], "provider_error")
+        self.assertEqual(unconfigured_items["imagens_visao"]["phase"], "media")
+        self.assertTrue(unconfigured_items["imagens_visao"]["retryable"])
+        self.assertEqual(unconfigured_items["imagens_no_corpo"]["status"], "fail")
+        self.assertFalse(unconfigured_result["media_decision"]["waiver_applied"])
+        self.assertFalse(unconfigured_result["all_passed"])
 
     def test_second_enrichment_round_does_not_waive_normal_article_without_faking_missing(self):
         content = (

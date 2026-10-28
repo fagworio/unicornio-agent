@@ -1087,7 +1087,17 @@ def run_pre_publish_checklist(
         and prior_failures
         and all(item.get("name") == "imagens_no_corpo" for item in prior_failures)
     )
-    if not vision_ready:
+    if config.vision_enabled and not vision_ready:
+        check(
+            "imagens_visao",
+            False,
+            vision_msg,
+            blocker="provider_error",
+            phase="media",
+            retryable=True,
+            error=True,
+        )
+    elif not vision_ready:
         check("imagens_visao", True, vision_msg, skipped=True)
     elif prior_failures and not inline_deficit_is_only_failure:
         check(
