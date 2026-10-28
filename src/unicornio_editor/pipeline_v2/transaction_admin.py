@@ -650,6 +650,7 @@ def _media_artifact_snapshot(root: Path, post_id: int) -> dict[str, Any]:
         )
     return {
         **result,
+        "partial_sha256": result["partial"].get("sha256", ""),
         "partial_media_ids": sorted(partial_ids),
         "partial_parse_errors": partial_parse_errors,
         "sidecar_summary": sidecar_summary,
@@ -779,11 +780,28 @@ def _prewriter_media_isolation_evidence(
         and journal.get("writer_started") is False
         and journal.get("readback") is not True
     )
+    sidecar = artifacts.get("sidecar_summary") or {}
+    sidecar_present = artifacts.get("sidecar", {}).get("present") is True
+    sidecar_media_ids = sidecar.get("media_ids")
+    sidecar_identity_matches = bool(
+        not sidecar_present
+        or (
+            sidecar.get("parse_status") == "valid"
+            and str(sidecar.get("post_id") or "") == str((journal or {}).get("post_id") or "")
+            and str(sidecar.get("run_id") or "") == str(run_id or "")
+            and str(sidecar.get("cycle_id") or "") == str((journal or {}).get("cycle_id") or "")
+            and str(sidecar.get("cycle_round") or "") == str((journal or {}).get("cycle_round") or "")
+            and str(sidecar.get("authorization_id") or "") == str((journal or {}).get("authorization_id") or "")
+            and str(sidecar.get("checkpoint_sha256") or "") == str(artifacts.get("partial_sha256") or "")
+            and isinstance(sidecar_media_ids, list)
+            and set(sidecar_media_ids) == partial_ids
+        )
+    )
     artifacts_valid = bool(
         artifacts.get("partial", {}).get("present") is True
         and artifacts.get("partial", {}).get("parse_status") == "valid"
         and not artifacts.get("partial_parse_errors")
-        and artifacts.get("sidecar", {}).get("present") is False
+        and sidecar_identity_matches
         and partial_ids
     )
     complete_evidence = bool(
@@ -811,6 +829,16 @@ def _prewriter_media_isolation_evidence(
         "initial_media_ids": sorted(initial_ids),
         "registry_current_run_count": len(exact_run_rows),
         "registry_identity_conflicts": registry_identity_conflicts,
+        "sidecar_present": sidecar_present,
+        "sidecar_identity_matches": sidecar_identity_matches,
+        "missing_criteria": [
+            name for name, ok in (
+                ("current_journal_identity", current_identity),
+                ("valid_media_artifacts", artifacts_valid),
+                ("complete_registry_and_attachment_evidence", complete_evidence),
+                ("uncertainty_signal", bool(signals)),
+            ) if not ok
+        ],
         "registry_complete": registry.get("schema_complete") is True,
         "artifacts_valid": artifacts_valid,
         "attachments_complete": attachments.get("status") == "complete",

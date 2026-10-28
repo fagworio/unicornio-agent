@@ -1150,6 +1150,7 @@ def _media_effect_evidence(
     accepted_media_ids: set[int] = set()
     applied_media_ids: set[int] = set()
     accepted_decision_count = 0
+    historical_media_usage_ignored: list[dict[str, Any]] = []
     partial_path = Path(root) / "backups" / str(int(post_id)) / "editorial.partial.json"
     if partial_path.is_file():
         try:
@@ -1185,6 +1186,7 @@ def _media_effect_evidence(
             "accepted_media_ids": sorted(accepted_media_ids),
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
+            "historical_media_usage_ignored": historical_media_usage_ignored,
         }
 
     run_id = str(journal.get("run_id") or "")
@@ -1216,17 +1218,51 @@ def _media_effect_evidence(
                     accepted_decision_count = len(accepted_rows)
                     reasons.append("accepted_media_decision")
             if "media_usage" in table_names:
-                rows = db.execute(
-                    """SELECT wordpress_media_id, status
-                       FROM media_usage WHERE post_id = ?""",
-                    (int(post_id),),
-                ).fetchall()
-                for media_id, status in rows:
+                usage_columns = {
+                    str(row[1]) for row in db.execute("PRAGMA table_info(media_usage)").fetchall()
+                }
+                identity_columns = [
+                    name for name in ("run_id", "cycle_id", "cycle_round", "authorization_id")
+                    if name in usage_columns
+                ]
+                select_identity = ", ".join(identity_columns)
+                usage_query = "SELECT wordpress_media_id, status"
+                if select_identity:
+                    usage_query += ", " + select_identity
+                usage_query += " FROM media_usage WHERE post_id = ?"
+                rows = db.execute(usage_query, (int(post_id),)).fetchall()
+                expected_identity = (
+                    str(journal.get("run_id") or ""),
+                    str(journal.get("cycle_id") or ""),
+                    str(journal.get("cycle_round") or ""),
+                    str(journal.get("authorization_id") or ""),
+                )
+                for row in rows:
+                    media_id, status = row[:2]
+                    identity_values = dict(zip(identity_columns, row[2:]))
+                    usage_run_id = identity_values.get("run_id", "")
+                    usage_cycle_id = identity_values.get("cycle_id", "")
+                    usage_round = identity_values.get("cycle_round", "")
+                    usage_auth = identity_values.get("authorization_id", "")
                     if media_id is None:
                         continue
                     try:
                         media_id = int(media_id)
                     except (TypeError, ValueError):
+                        continue
+                    usage_identity = (
+                        str(usage_run_id or ""),
+                        str(usage_cycle_id or ""),
+                        str(usage_round or ""),
+                        str(usage_auth or ""),
+                    )
+                    if usage_identity != expected_identity:
+                        historical_media_usage_ignored.append({
+                            "media_id": media_id,
+                            "status": str(status or ""),
+                            "identity": usage_identity,
+                            "expected_identity": expected_identity,
+                        })
                         continue
                     if media_id not in initial_ids:
                         accepted_media_ids.add(media_id)
@@ -1267,6 +1303,7 @@ def _media_effect_evidence(
             "accepted_media_ids": sorted(accepted_media_ids),
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
+            "historical_media_usage_ignored": historical_media_usage_ignored,
         }
 
     effect_reasons = [reason for reason in reasons if reason != "media_registry_incomplete"]
@@ -1286,6 +1323,7 @@ def _media_effect_evidence(
             "accepted_media_ids": sorted(accepted_media_ids | set(acquisition_checkpoint["new_media_ids"])),
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
+            "historical_media_usage_ignored": historical_media_usage_ignored,
             "acquisition_checkpoint": acquisition_checkpoint,
         }
     return {
@@ -1300,6 +1338,7 @@ def _media_effect_evidence(
         "accepted_media_ids": sorted(accepted_media_ids),
         "applied_media_ids": sorted(applied_media_ids),
         "accepted_decision_count": accepted_decision_count,
+        "historical_media_usage_ignored": historical_media_usage_ignored,
     }
 
 
