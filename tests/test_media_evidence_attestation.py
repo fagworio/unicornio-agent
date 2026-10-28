@@ -19,11 +19,7 @@ def _candidate():
         "valid": True,
         "source_verification_reason_code": "source_reference_found",
         "source_comparison_proved": False,
-        "author": "Nintendo",
-        "license": "CC BY 4.0",
-        "license_url": "https://creativecommons.org/licenses/by/4.0/",
-        "captured_at": "2026-10-01T00:00:00Z",
-        "credit_text": "Crédito da imagem: Nintendo. Licença CC BY 4.0.",
+        "credit_text": "Legenda editorial opcional",
         "alt_text": "Metroid Prime 4 key art",
         "evidence": {
             "subject": "Metroid Prime 4",
@@ -48,18 +44,32 @@ def test_signed_deterministic_origin_evidence_passes_plan_gate():
     assert _item_evidence_relevant(item, {"metroid prime 4"})
 
 
-def test_attestation_is_bound_to_source_subject_and_role():
+def test_attestation_is_bound_to_technical_source_subject_and_role():
     original = _candidate()
     original["source_evidence_attestation"] = attest_deterministic_media(original)
     for field, value in (
         ("source_page_url", "https://other.test/story"),
         ("subject", "Halo Infinite"),
         ("role", "featured"),
-        ("license_url", "https://other.test/terms"),
-        ("license", "Uso com crédito"),
     ):
         changed = {**original, field: value}
         assert not _item_evidence_relevant(changed, {"metroid prime 4"})
+
+    for field, value in (
+        ("license_url", "https://other.test/terms"),
+        ("license", "legacy terms changed"),
+        ("rights_verified", False),
+    ):
+        changed = {**original, field: value}
+        assert _item_evidence_relevant(changed, {"metroid prime 4"})
+
+
+def test_old_process_seal_version_is_not_accepted():
+    item = _candidate()
+    seal = attest_deterministic_media(item)
+    assert seal is not None
+    item["source_evidence_attestation"] = {**seal, "version": 1}
+    assert not _item_evidence_relevant(item, {"metroid prime 4"})
 
 
 def test_agent_supplied_verdict_without_runtime_seal_does_not_bypass_url_gate():

@@ -43,7 +43,7 @@ class HtmlCleanerTests(unittest.TestCase):
         result = clean_html("<h1>Contexto da notícia</h1><p>Texto do post.</p>", post_title="Título principal")
         self.assertEqual(result, "<h2>Contexto da notícia</h2><p>Texto do post.</p>")
 
-    def test_keeps_image_inside_figure_with_complete_credit(self):
+    def test_keeps_image_inside_figure_with_optional_caption(self):
         result = clean_html(
             '<figure class="aligncenter"><img src="https://s3.example/img.webp" alt="Cena" />'
             "<figcaption>Crédito da imagem: Autor (via Wikimedia Commons). Cena do jogo. "
@@ -53,71 +53,45 @@ class HtmlCleanerTests(unittest.TestCase):
         self.assertIn('<img src="https://s3.example/img.webp" alt="Cena" />', result)
         self.assertIn("Crédito da imagem: Autor", result)
 
-    def test_keeps_image_with_cc0_license(self):
+    def test_keeps_image_without_license_or_credit_metadata(self):
         result = clean_html(
-            '<figure><img src="https://s3.example/foto.webp" alt="Foto" />'
-            "<figcaption>Crédito da imagem: Foto. Licença CC0 "
-            "(http://creativecommons.org/publicdomain/zero/1.0/deed.en).</figcaption></figure>"
+            '<figure><img src="https://s3.example/sem.webp" alt="Cena" />'
+            "<figcaption>Legenda editorial opcional.</figcaption></figure>"
         )
-        self.assertIn('<img src="https://s3.example/foto.webp" alt="Foto" />', result)
+        self.assertIn('<img src="https://s3.example/sem.webp" alt="Cena" />', result)
+        self.assertIn("Legenda editorial opcional.", result)
 
-    def test_keeps_image_with_uso_com_credito(self):
-        # Politica 2026-08: credito visivel e a evidencia (uso com credito) —
-        # figura com esse marcador + URL tambem e preservada, senao o apply
-        # no-rewrite descartaria as imagens e o post entraria em loop de rework.
-        result = clean_html(
-            '<figure class="aligncenter"><img src="https://s3.example/atlantis.webp" alt="Atlantis" />'
-            "<figcaption>Crédito da imagem: Gamingbible. Key art de Disney's Atlantis. "
-            "Uso com crédito (https://www.gamingbible.com/artigo).</figcaption></figure>"
-        )
-        self.assertIn('<img src="https://s3.example/atlantis.webp"', result)
-        self.assertIn("Uso com crédito", result)
-
-    def test_drops_image_when_credit_has_no_license(self):
-        result = clean_html(
-            '<figure><img src="https://s3.example/sem.webp" alt="Sem licença" />'
-            "<figcaption>Crédito da imagem: Autor. Sem informação de licença.</figcaption></figure>"
-        )
-        self.assertNotIn("<img", result)
-        self.assertIn("Crédito da imagem: Autor", result)
-
-    def test_repairs_orphan_img_next_to_credit_figure(self):
-        # Layout quebrado de producao: <figure> de credito seguido de <img>
-        # solto. O reparo move o img para dentro da figura (loop de rework).
+    def test_repairs_orphan_img_next_to_figure_with_optional_caption(self):
         from unicornio_editor.html_cleaner import _repair_orphan_media
 
         broken = (
-            '<p>Texto.</p>'
-            '<figure class="aligncenter"><figcaption>Crédito da imagem: Autor. Cena. '
-            "Uso com crédito (https://src.example/artigo).</figcaption></figure>"
+            '<p>Texto.</p><figure class="aligncenter">'
+            "<figcaption>Legenda editorial opcional.</figcaption></figure>"
             '<img width="1280" height="720" src="https://s3.example/cena.jpg" />'
-            "<p>Mais texto.</p>"
         )
-        repaired = _repair_orphan_media(broken)
-        cleaned = clean_html(repaired)
-        self.assertIn('src="https://s3.example/cena.jpg"', cleaned)
-        # Figura sem credito nao e tocada (img continua solta e e descartada).
-        safe = "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure><img src=\"https://s3.example/y.jpg\" />"
-        self.assertEqual(clean_html(_repair_orphan_media(safe)), "<p>x</p><figure><figcaption>Sem credito.</figcaption></figure>")
+        cleaned = clean_html(_repair_orphan_media(broken))
+        self.assertIn('<figure class="aligncenter"><img width="1280" height="720" src="https://s3.example/cena.jpg" />', cleaned)
+        self.assertIn("Legenda editorial opcional.", cleaned)
 
-    def test_repairs_orphan_img_before_credit_figure(self):
+    def test_repairs_orphan_img_before_figure_without_caption(self):
         from unicornio_editor.html_cleaner import _repair_orphan_media
 
-        broken = (
-            '<img src="https://cdn.example/cena.jpg" />'
-            '<figure><figcaption>Crédito da imagem: Autor. Cena. Uso com crédito '
-            '(https://source.example/page).</figcaption></figure>'
+        cleaned = clean_html(
+            _repair_orphan_media('<img src="https://cdn.example/cena.jpg" /><figure></figure>')
         )
-        repaired = _repair_orphan_media(broken)
-        self.assertIn('<figure><img src="https://cdn.example/cena.jpg" />', repaired)
-        self.assertLess(repaired.index("<img"), repaired.index("<figcaption"))
+        self.assertIn('<figure><img src="https://cdn.example/cena.jpg" /></figure>', cleaned)
 
-    def test_drops_image_when_figure_has_no_figcaption(self):
+    def test_keeps_image_when_figure_has_no_figcaption(self):
         result = clean_html(
             '<figure class="aligncenter"><img src="https://s3.example/x.webp" alt="x" /></figure>'
         )
+        self.assertIn('<img src="https://s3.example/x.webp" alt="x" />', result)
+
+    def test_drops_unsafe_figure_image_url(self):
+        result = clean_html(
+            '<figure><img src="javascript:alert(1)" alt="x" /></figure>'
+        )
         self.assertNotIn("<img", result)
-        self.assertEqual(result, '<figure class="aligncenter"></figure>')
 
     def test_strips_event_attributes_from_kept_image(self):
         result = clean_html(
@@ -157,7 +131,7 @@ class HtmlCleanerTests(unittest.TestCase):
         self.assertIn("<p>Mais texto.</p>", result)
         self.assertIn('<img src="https://s3.example/inline.webp"', result)
 
-    def test_wp_caption_image_uses_safe_attributes_and_url_scheme(self):
+    def test_wp_caption_image_uses_safe_attributes_and_optional_caption(self):
         unsafe = clean_html(
             '[caption]<img src="javascript:alert(1)" onerror="run()" alt="x"> '
             "Crédito da imagem: Autor. Uso com crédito.[/caption]"
@@ -166,10 +140,11 @@ class HtmlCleanerTests(unittest.TestCase):
         self.assertNotIn("javascript:", unsafe)
         safe = clean_html(
             '[caption]<img src="https://cdn.example/a.jpg" onerror="run()" alt="x"> '
-            "Crédito da imagem: Autor. Uso com crédito.[/caption]"
+            "Legenda opcional.[/caption]"
         )
         self.assertIn('<img src="https://cdn.example/a.jpg" alt="x" />', safe)
         self.assertNotIn("onerror", safe)
+        self.assertIn("Legenda opcional.", safe)
 
 
 if __name__ == "__main__":

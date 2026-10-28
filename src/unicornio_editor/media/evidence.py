@@ -20,7 +20,7 @@ O que este módulo resolve:
 Evidência CONFIÁVEL (de origem): filename, og:title, page title, alt original,
 figcaption original, heading próximo, URL da página, query.
 Evidência NÃO confiável (escrita pelo agente): alt/caption/crédito gerados —
-existem para acessibilidade e crédito, jamais como prova de relevância.
+são metadados opcionais de exibição, jamais prova de origem ou relevância.
 """
 
 from __future__ import annotations
@@ -574,7 +574,7 @@ def evidence_score(
         "verdict": veredito,
         "penalties": [],
         # A visão só entra em ambíguo E com proveniência já válida: uma IA
-        # dizendo "parece Metroid" não resolve origem/licenciamento.
+        # dizendo "parece Metroid" não resolve a identidade da origem.
         "needs_vision": veredito in {"ambiguous", "insufficient_source_context"},
         "recovery": (
             "visual_context_limited"

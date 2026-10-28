@@ -50,7 +50,6 @@ from .media.relevance import extract_entities, image_is_relevant, iter_content_i
 from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
 from .media.text import sanitize_title
 from .media.source_verify import (
-    source_page_html,
     verification_result,
     verify_downloaded_against_source,
 )
@@ -1180,9 +1179,9 @@ def _normalize_inline_images(
     """Re-upload de imagens inline não-WebP (relevantes) como WebP local.
 
     Problema técnico (formato/dimensão) não volta ao modelo: imagem já
-    relevante e com crédito é baixada, convertida (transparência achatada,
+    relevante é baixada, convertida (transparência achatada,
     largura limitada a 1280px), re-upload como NOVO attachment preservando
-    alt/credit, e a URL trocada no conteúdo — o WebP publicado nunca é
+    alt e legenda opcional, e a URL trocada no conteúdo — o WebP publicado nunca é
     transparente (política). Imagens irrelevantes ou cujo download falha
     ficam como estão: o gate relevancia_imagens/imagens_webp bloqueia o
     apply e o agente decide (substituir/remover) com o delta do card.
@@ -1616,7 +1615,7 @@ def _media_item_rejection(
 
     Compartilhada pelo ``_execute_media_plan`` (apply) e pelo
     ``validate_media_plan`` (media-validate, 1 chamada antes do apply):
-    reuso da Media Library exige credito visivel no attachment; featured deve
+    reuso da Media Library não depende de legenda no attachment; featured deve
     retratar o assunto citado pela evidencia real (arquivo/pagina de origem);
     inline deve referenciar entidade distintiva do post.
     """
@@ -1640,12 +1639,6 @@ def _media_item_rejection(
         alt = str(attachment.get("alt_text") or "")
         caption = str((attachment.get("caption") or {}).get("rendered") or "")
         url = str(attachment.get("source_url") or "")
-        credit = " ".join(part for part in (title, caption) if part)
-        if "crédito da imagem" not in credit.lower():
-            return (
-                "reuso da midia library exige credito visivel no attachment original "
-                "(title/caption sem 'Crédito da imagem'); nao usar como fonte"
-            )
         source = " ".join(part for part in (url, title, alt, caption) if part)
         if is_featured:
             if not image_is_relevant(
@@ -1707,24 +1700,6 @@ def _media_item_rejection(
     if not _item_evidence_relevant(item, entities, editorial):
         listed = ", ".join(sorted(_item_entities(item, entities, editorial))) or "nenhuma"
         return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
-    return None
-
-
-def _media_license_rejection(item: dict[str, Any]) -> str | None:
-    """Reject missing/unsupported rights before network or WordPress writes."""
-    from .media.license import LicenseError, validate_candidate
-
-    rights = {
-        key: item.get(key)
-        for key in (
-            "source_page_url", "direct_image_url", "author", "license",
-            "license_url", "captured_at", "credit_text", "alt_text",
-        )
-    }
-    try:
-        validate_candidate(rights)
-    except LicenseError as exc:
-        return f"metadados de licença inválidos ou incompletos: {exc}"
     return None
 
 
@@ -1821,9 +1796,7 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_license_rejection(item)
-        if reason is None:
-            reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
+        reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
@@ -2507,28 +2480,8 @@ def _execute_media_plan(
                 vision_evidence_record: dict[str, Any] | None = None
                 evidence = {
                     name: item.get(name)
-                    for name in (
-                        "source_page_url",
-                        "direct_image_url",
-                        "author",
-                        "license",
-                        "license_url",
-                        "captured_at",
-                        "credit_text",
-                        "alt_text",
-                        "rights_verified",
-                        "rights_evidence",
-                        "source_rights_attestation",
-                    )
+                    for name in ("source_page_url", "direct_image_url", "alt_text", "credit_text")
                 }
-                license_error = _media_license_rejection(evidence)
-                if license_error:
-                    _funnel("license", "rejected", item, position, license_error)
-                    return position, {
-                        "paragraph_index": item.get("paragraph_index"),
-                        "status": "rejected",
-                        "detail": license_error[:200],
-                    }
                 suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
                 attachment = _attachment_evidence(item)
                 download_url = (
@@ -2584,101 +2537,6 @@ def _execute_media_plan(
                         ],
                     }
                 _funnel("source_verify", "passed", item, position, verify_reason)
-                page_html = source_page_html(
-                    str(evidence.get("source_page_url") or ""),
-                    cache=page_html_cache,
-                    cache_lock=page_cache_lock,
-                    url_policy=config.remote_url_policy,
-                    audit=lambda finding: append_telemetry(
-                        root,
-                        "remote_url_audit",
-                        url_domain=diagnostic_url_domain(finding.url),
-                        reason=finding.reason,
-                    ),
-                )
-                from .media.license import attest_source_rights
-                from .media.source_verify import enrich_wikimedia_rights
-
-                rights_provider = str(
-                    ((evidence.get("rights_evidence") or {}).get("provider") or "")
-                    if isinstance(evidence.get("rights_evidence"), dict)
-                    else ""
-                )
-                if rights_provider == "wikimedia_commons_api":
-                    refreshed = enrich_wikimedia_rights(
-                        dict(evidence),
-                        url_policy=config.remote_url_policy,
-                        root=root,
-                        audit=lambda finding: append_telemetry(
-                            root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
-                        ),
-                    )
-                    decision = refreshed.get("rights_decision") if isinstance(refreshed, dict) else {}
-                    if not isinstance(refreshed, dict) or refreshed.get("rights_verified") is not True:
-                        retryable = bool(isinstance(decision, dict) and decision.get("retryable") is True)
-                        return position, {
-                            "paragraph_index": item.get("paragraph_index"),
-                            "status": "deferred" if retryable else "rejected",
-                            "detail": "revalidação atual dos direitos Wikimedia indisponível"
-                            if retryable else "a origem atual não comprova direitos compatíveis",
-                            "reason_code": str((decision or {}).get("reason_code") or "image_rights_unproven"),
-                            "recoverable": retryable,
-                        }
-                    evidence.update(refreshed)
-                    rights_attestation = refreshed.get("source_rights_attestation")
-                else:
-                    rights_candidate = {
-                        key: evidence.get(key)
-                        for key in (
-                            "source_page_url", "direct_image_url", "author", "license",
-                            "license_url", "captured_at", "credit_text", "alt_text",
-                        )
-                    }
-                    rights_attestation = attest_source_rights(
-                        rights_candidate, page_html or "", root=root,
-                    )
-                if rights_attestation is None:
-                    detail = "a origem não comprova licença compatível vinculada a esta imagem"
-                    retryable = page_html is None
-                    _funnel(
-                        "license_source_proof",
-                        "deferred" if retryable else "rejected",
-                        item,
-                        position,
-                        "source_page_unavailable" if retryable else detail,
-                    )
-                    return position, {
-                        "paragraph_index": item.get("paragraph_index"),
-                        "status": "deferred" if retryable else "rejected",
-                        "detail": "a origem não pôde ser revalidada temporariamente" if retryable else detail,
-                        "reason_code": "image_rights_unproven",
-                        "recoverable": retryable,
-                    }
-                evidence["source_rights_attestation"] = rights_attestation
-                evidence["rights_verified"] = True
-                if rights_provider != "wikimedia_commons_api":
-                    evidence["rights_evidence"] = {
-                        "provider": "schema_org_image_object",
-                        "image_url": evidence.get("direct_image_url"),
-                        "license": evidence.get("license"),
-                        "license_url": evidence.get("license_url"),
-                        "author": evidence.get("author"),
-                        "evidence_sha256": rights_attestation.get("evidence_sha256"),
-                    }
-                from .media.license import LicenseError, validate_upload_candidate
-                try:
-                    validate_upload_candidate(evidence, root=root)
-                except LicenseError as exc:
-                    detail = f"atestação de direitos inválida: {exc}"
-                    _funnel("license_source_proof", "rejected", item, position, detail)
-                    return position, {
-                        "paragraph_index": item.get("paragraph_index"),
-                        "status": "rejected",
-                        "detail": detail[:200],
-                        "reason_code": "image_rights_attestation_invalid",
-                        "recoverable": False,
-                    }
-                _funnel("license_source_proof", "passed", item, position, "image_object_license_match")
                 is_featured = bool(item.get("is_featured"))
                 if (
                     not is_featured
@@ -2903,7 +2761,7 @@ def _execute_media_plan(
                         "featured_vision_final_bytes", "passed", item, position,
                         "same_sha256_as_preflight" if expected_sha256 == identity.sha256 else "validated_before_upload",
                     )
-                media = upload_image(client, webp, evidence, root=root)
+                media = upload_image(client, webp, evidence)
                 media_id = media.get("id")
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
@@ -2913,7 +2771,7 @@ def _execute_media_plan(
                     "status": "accepted",
                     "paragraph_index": item["paragraph_index"],
                     "media_id": media_id, "media_url": media_url,
-                    "alt_text": item["alt_text"], "credit_text": item["credit_text"],
+                    "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
                     "subject": item.get("subject"), "item_number": item.get("item_number"),
                     "section_heading": item.get("section_heading"), "section_slot": item.get("section_slot"),
                     "featured": is_featured, "width": width, "height": height,
@@ -2946,10 +2804,6 @@ def _execute_media_plan(
                         article_id=int(post_id) if post_id else None,
                         sha256=identity.sha256,
                         visual_group_id=identity.visual_group_id,
-                        author=str(item.get("author") or ""),
-                        license=str(item.get("license") or ""),
-                        license_url=str(item.get("license_url") or ""),
-                        captured_at=str(item.get("captured_at") or ""),
                         credit_text=str(item.get("credit_text") or ""),
                         alt_text=str(item.get("alt_text") or ""),
                     )

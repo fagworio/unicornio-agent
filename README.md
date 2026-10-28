@@ -1,10 +1,10 @@
 # UnicornioHater Editorial Agent
 
-Automacao editorial para WordPress acionada pelo cron do Hermes Agent.
+Automação editorial para WordPress acionada pelo cron do Hermes Agent.
 
 ## Objetivo
 
-Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, remover imagens inline importadas, descobrir imagens via providers configurados, baixar e publicar cópia local em WebP com direitos e crédito explícitos, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
+Processar apenas posts `pending`, corrigir estrutura HTML, melhorar texto, preparar SEO, descobrir imagens via providers configurados, verificar tecnicamente origem, correspondência e integridade, baixar e hospedar cópia local em WebP, adicionar imagem destacada/trailer quando fizer sentido, reconstruir CTA/fonte e manter o post em `pending`.
 
 O sistema usa duas camadas:
 
@@ -35,7 +35,7 @@ A instalação local do WordPress está em:
 
 Para a homologação automatizada, consulte [docs/wordpress-e2e-homologation.md](docs/wordpress-e2e-homologation.md). O workflow separado provisiona os MU-plugins usados pelo projeto, executa o WordPressClient e WordPressWriterV2 reais e destrói o ambiente após a execução. Não requer nem utiliza dados, URLs ou credenciais de produção.
 
-As assinaturas de direitos usam uma chave privada por instalação em `work/rights-attestation.key`; a política de backup/restore e revalidação está em [docs/media-rights-attestation.md](docs/media-rights-attestation.md).
+O pipeline não verifica nem atesta licença, autorização, titularidade ou permissão legal de uso de imagens. A decisão de uso é responsabilidade do operador/editor, fora dos gates automatizados. Controles de origem técnica, relevância editorial, integridade e identidade visual permanecem ativos.
 
 ### Cenários de teste no Devilbox
 
@@ -79,7 +79,7 @@ Se `decision=skip` ou a confianca ficar abaixo do limite configurado, o comando 
 - Fail-closed: se a validacao falhar, nao atualiza.
 - Fail-closed de relevancia: conteudo fora da linha editorial ou incerto nao e editado.
 - Limite de lote pequeno por execucao.
-- Imagens importadas existentes: preservadas so com credito completo; descartadas sem ele.
+- Imagens existentes: preservadas ou reutilizadas somente após os controles técnicos e editoriais de origem, relevância, integridade e identidade visual; legenda é opcional.
 - Estados operacionais persistidos no WordPress (`_hermes_state`): somente READY publica.
 - CTA e Fonte sao gerados de forma canonica.
 - `original_link` e a unica fonte da URL de referencia.
@@ -302,11 +302,10 @@ O Hermes suporta cron jobs com `--skill` e `--workdir`, e cada execucao ocorre e
 - Minimo de 3 paragrafos entre imagens.
 - Converter para WebP antes do upload (normalizacao tecnica e automatica no apply).
 - Google Images é somente índice de descoberta; a fonte é a página ORIGINAL da imagem (preview do Google não é fonte).
-- Política de imagens: crédito visível é obrigatório, mas não concede permissão. O pipeline aceita CC0, domínio público, CC BY e CC BY-SA sem variantes NC/ND, com referência oficial correspondente; não aceita alegações livres de permissão. Antes do upload, a página original precisa declarar um Schema.org `ImageObject` com `contentUrl` igual ao URL direto da imagem e a mesma licença oficial. Licença genérica da página, metadado do agente ou evidência de outro asset não basta; fontes sem essa prova estruturada falham fechadas.
-- Registrar separadamente URL da página original, autoria/crédito, licença, URL explícita dos termos e data da captura. A URL da origem não substitui a referência da licença.
+- Política técnica de imagens: o software não interpreta licenças ou direitos de uso. Antes do upload, valida a URL da página original, a presença e identidade técnica do asset, relevância, segurança de rede, dimensões, integridade e deduplicação. Ver [hermes/references/politica-imagens.md](hermes/references/politica-imagens.md).
+- Registrar a URL da página original e a URL direta do arquivo para revalidação técnica; ALT é obrigatório e a legenda/crédito é opcional.
 - Baixar e hospedar a cópia na Media Library do WordPress, sem bucket/CDN externo.
-- Inserir crédito visível com autor, origem e licença; o crédito é obrigatório em toda imagem.
-- Sem crédito visível, descartar a imagem e procurar outra.
+- Legendas são opcionais e nunca constituem prova de origem, autorização ou relevância.
 
 ### Trailer
 
@@ -362,7 +361,7 @@ Audita e produz relatorio/backup sem alterar WordPress.
 Atualiza o post, mas sempre continua `pending`.
 
 ### Fase 3 - Descoberta e validação de mídia
-Pesquisa candidatos pelos providers configurados, exige proveniência e declaração de licença estruturada vinculada ao `ImageObject` exato, valida identidade/relevância visual, baixa, converte para WebP, envia à Media Library local, registra crédito/licença e insere imagens e featured media. A prova de licença é validada na página de origem antes do upload; uma declaração sem vínculo ao asset é rejeitada.
+Pesquisa candidatos pelos providers configurados, verifica proveniência e identidade técnica do asset, valida relevância visual, baixa, converte para WebP, envia à Media Library local e insere imagens e featured media. O pipeline não declara autorização legal de uso; origem e identidade técnica não equivalem a uma autorização.
 
 ### Fase 4 - Manutencao
 Jobs separados e inicialmente somente `report` para:
@@ -387,7 +386,7 @@ Jobs separados e inicialmente somente `report` para:
 | **Subject por item/H2** + score determinístico de evidência (gates A/B/C) | `media/evidence.py` | ✅ |
 | **Dedupe visual** (pHash antes da seleção/upload) | `media/visual_hash.py` | ✅ |
 | **Índice de mídia** (fingerprint + proveniência; reuso antes de custo novo) | `media/library_index.py` | ✅ |
-| **Conversão WebP + upload** com crédito/licença | `media/converter.py`, `media/wordpress_media.py` | ✅ |
+| **Conversão WebP + upload** após validação técnica | `media/converter.py`, `media/wordpress_media.py` | ✅ |
 | **Vision gate** (só em caso ambíguo, depois da origem validada) | `media/vision_gate.py` | ✅ |
 | **Trailer auditável** (evidência determinística) | `media/` | ✅ |
 | **Estados persistentes** (`_hermes_*`) + `AWAITING_HUMAN` no WordPress | `state.py`, `workflow.py` | ✅ |

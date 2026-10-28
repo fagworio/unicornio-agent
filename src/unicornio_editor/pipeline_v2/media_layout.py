@@ -55,7 +55,6 @@ def _closing_featured_repeat_record(
     verification = verification if isinstance(verification, Mapping) else {}
     decision = str(verification.get("decision") or "").upper()
     url = str(_asset_value(featured, "media_url") or "").strip()
-    credit = str(_asset_value(featured, "credit_text") or "").strip()
     alt = str(_asset_value(featured, "alt_text") or "").strip()
     sha256 = str(_asset_value(featured, "sha256") or "").strip()
     phash = str(_asset_value(featured, "phash") or "").strip()
@@ -67,7 +66,6 @@ def _closing_featured_repeat_record(
     if (
         status not in {"valid", "featuredstatus.valid"}
         or media_id < 1 or parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc or not alt
-        or not credit.casefold().startswith("crédito da imagem:")
         or width != 1280 or height != 720
         or not sha256 or not phash or not visual_group_id
         or decision not in {"INITIAL", "DIFFERENT"}

@@ -39,6 +39,58 @@ from .scheduler import _cooldown_expired, select
 
 _DEFAULT_REQUIRED_IMAGE_COUNT = required_image_count
 
+_LEGACY_MEDIA_RIGHTS_MARKERS = (
+    "media_rights_", "image_rights_", "rights_attestation",
+    "license proof", "license evidence", "direitos de imagem",
+    "crédito visível", "credito visivel", "licença compatível",
+    "licenca compativel", "licença não", "licenca nao",
+)
+_TECHNICAL_MEDIA_REJECTION_MARKERS = (
+    "source_mismatch", "source_bytes_mismatch", "source_page_unavailable",
+    "source_asset_unavailable", "source_scan_incomplete", "source_decode_failed",
+    "duplicate_existing_frame", "duplicate_frame", "width_below_minimum",
+    "resolution", "identity_mismatch", "unrelated",
+)
+
+
+def _is_legacy_rights_only_media_decision(value: Mapping[str, Any]) -> bool:
+    """Identify historical legal-only rejection without masking technical evidence."""
+    fields = (
+        "reason_code", "rejected_reason", "reason", "detail",
+        "original_reason", "original_rejected_reason", "original_gate",
+        "gate", "verdict",
+    )
+    texts: list[str] = []
+
+    def collect(item: Any, depth: int = 0) -> None:
+        if depth > 3:
+            return
+        if isinstance(item, Mapping):
+            for field in fields:
+                field_value = item.get(field)
+                if isinstance(field_value, str):
+                    texts.append(field_value.casefold())
+            for key in ("evidence", "invalid_media"):
+                nested = item.get(key)
+                if isinstance(nested, Mapping):
+                    collect(nested, depth + 1)
+                elif isinstance(nested, list):
+                    for child in nested:
+                        collect(child, depth + 1)
+
+    collect(value)
+    has_legacy_rights = any(
+        marker in text
+        for marker in _LEGACY_MEDIA_RIGHTS_MARKERS
+        for text in texts
+    )
+    has_technical_rejection = any(
+        marker in text
+        for marker in _TECHNICAL_MEDIA_REJECTION_MARKERS
+        for text in texts
+    )
+    return has_legacy_rights and not has_technical_rejection
+
 
 def _canonical_embedded_media_url(value: str) -> str:
     parsed = urlsplit(str(value or "").strip())
@@ -428,6 +480,10 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             derived_rejection = "previously_rejected_candidate" in raw_reason_value or verdict == "previously_rejected_candidate"
             evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
             evidence_verdict = str(evidence.get("verdict") or "").casefold()
+            if _is_legacy_rights_only_media_decision(row):
+                # Historical license-only decisions are retained as audit data,
+                # but no longer blacklist an otherwise technically verifiable asset.
+                continue
             original_cause = " ".join(
                 str(row.get(key) or "")
                 for key in (
@@ -2388,8 +2444,12 @@ class ProductionMediaResolver:
                 candidate["section_heading"] = metadata.get("heading") or subject
                 candidate["section_slot"] = metadata.get("section_slot")
                 candidates.append(candidate)
-            from ..media.source_verify import enrich_wikimedia_rights, search_wikimedia_commons_candidates
-            if not any(candidate.get("rights_verified") is True for candidate in candidates):
+            from ..media.source_verify import search_wikimedia_commons_candidates
+            if not any(
+                candidate.get("valid") is True
+                and (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+                for candidate in candidates
+            ):
                 candidates.extend(
                     search_wikimedia_commons_candidates(
                         f"{subject} {query}", limit=max(needed * 2, 8),
@@ -2397,14 +2457,6 @@ class ProductionMediaResolver:
                         root=self.root,
                     )
                 )
-            candidates = [
-                enrich_wikimedia_rights(
-                    candidate,
-                    url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
-                    root=self.root,
-                )
-                for candidate in candidates
-            ]
             filtered: list[dict[str, Any]] = []
             for candidate in candidates:
                 candidate_url = _canonical_embedded_media_url(
@@ -2599,23 +2651,27 @@ class ProductionMediaResolver:
                         continue
                     evidence = candidate.get("evidence")
                     evidence = evidence if isinstance(evidence, dict) else {}
-                    rights = candidate.get("rights_decision")
-                    rights = rights if isinstance(rights, dict) else {}
-                    rights_status = str(rights.get("status") or "").upper()
                     verdict = str(evidence.get("verdict") or "").casefold()
                     gate = str(evidence.get("gate") or "").casefold()
                     reason_code = str(
-                        rights.get("reason_code")
-                        or candidate.get("source_verification_reason_code")
+                        candidate.get("source_verification_reason_code")
                         or candidate.get("reason_code")
                         or evidence.get("reason_code")
                         or candidate.get("rejected_reason")
                         or ""
                     ).casefold().strip()
                     rejected_reason = str(candidate.get("rejected_reason") or "").casefold().strip()
+                    if _is_legacy_rights_only_media_decision(candidate):
+                        # A legacy legal-only rejection is not technical
+                        # evidence. Re-evaluate the source and image gates.
+                        reason_code = ""
+                        rejected_reason = ""
+                        if gate in {"rights", "license", "licença", "licenca"}:
+                            gate = ""
+                        if verdict == "reject":
+                            verdict = ""
                     retryable = (
-                        rights.get("retryable") is True
-                        or candidate.get("source_verification_recoverable") is True
+                        candidate.get("source_verification_recoverable") is True
                         or evidence.get("recoverable") is True
                     )
                     definitive_verdicts = {
@@ -2625,24 +2681,20 @@ class ProductionMediaResolver:
                     definitive_reason_codes = {
                         "source_mismatch", "source_bytes_mismatch", "duplicate_existing_frame",
                         "duplicate_frame", "unrelated", "width_below_minimum",
-                        "resolution", "identity_mismatch", "media_rights_unproven",
-                        "media_rights_incompatible", "media_rights_unsupported_evidence",
+                        "resolution", "identity_mismatch",
                     }
                     is_definitive = (
                         verdict in definitive_verdicts
                         or reason_code in definitive_reason_codes
-                        or rights_status in {"UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE"}
                     )
                     signal = reason_code or verdict or gate or "incomplete_provenance"
                     disposition = "defer_retry" if retryable else (
-                        "reject_final" if is_definitive or rights_status in {
-                            "UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE",
-                        } else "defer_retry"
+                        "reject_final" if is_definitive else "defer_retry"
                     )
                     if verdict == "deterministic_match" and not rejected_reason:
                         # The evidence matched, but the candidate was not executable;
                         # missing contract/provenance data is not a permanent rejection.
-                        if not rights.get("reason_code"):
+                        if not reason_code:
                             disposition = "defer_retry"
                             signal = "incomplete_provenance"
                     elif not signal:
@@ -2831,15 +2883,7 @@ class ProductionMediaResolver:
             # assets already have provenance by construction; they still pass
             # through the regular executable media-plan gates below.
             if source_url:
-                from ..media.source_verify import enrich_wikimedia_rights
-                source_candidates = [
-                    enrich_wikimedia_rights(
-                        candidate,
-                        url_policy=str(getattr(self.config, "remote_url_policy", "audit")),
-                        root=self.root,
-                    )
-                    for candidate in article_source_candidates()
-                ]
+                source_candidates = article_source_candidates()
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
@@ -3151,9 +3195,8 @@ class ProductionMediaResolver:
 
     @staticmethod
     def _has_provenance(candidate: dict[str, Any]) -> bool:
-        return all(candidate.get(key) for key in (
-            "source_page_url", "direct_image_url", "author", "license",
-            "license_url", "captured_at", "credit_text", "alt_text",
+        return all(str(candidate.get(key) or "").strip() for key in (
+            "source_page_url", "direct_image_url",
         ))
 
     @classmethod
@@ -3164,17 +3207,7 @@ class ProductionMediaResolver:
             (candidate.get("evidence") or {}).get("verdict") != "deterministic_match"
             or candidate.get("valid") is not True
             or not cls._has_provenance(candidate)
-            or candidate.get("rights_verified") is not True
         ):
-            return False
-        from ..media.license import LicenseError, RightsDecision, validate_upload_candidate
-
-        try:
-            decision = RightsDecision.from_value(candidate.get("rights_decision"))
-            if decision.status != "VERIFIED":
-                return False
-            validate_upload_candidate(candidate, root=root)
-        except LicenseError:
             return False
         return True
 
@@ -3211,8 +3244,6 @@ class ProductionMediaResolver:
     ) -> None:
         vision_candidates = []
         for index, candidate in enumerate(candidates):
-            if candidate.get("rights_checked") is True and candidate.get("rights_verified") is not True:
-                continue
             url = candidate.get("direct_image_url") or candidate.get("image_url")
             verdict = (candidate.get("evidence") or {}).get("verdict")
             if url and verdict in {

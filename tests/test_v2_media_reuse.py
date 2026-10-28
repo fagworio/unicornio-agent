@@ -23,46 +23,19 @@ class Config:
 
 
 def _attested_candidate(candidate: dict, *, root=None) -> dict:
-    """Mark synthetic candidates as already rights-checked by the provider."""
-    from unicornio_editor.media.license import RightsDecision, attest_wikimedia_rights
-
+    """Give synthetic candidates only their technical source/relevance evidence."""
     result = dict(candidate)
     result.setdefault("source_page_url", result.get("source"))
     result.setdefault("direct_image_url", result.get("url"))
-    result["rights_checked"] = True
-    result["rights_verified"] = True
-    result["rights_evidence"] = {
-        "provider": "wikimedia_commons_api",
-        "image_url": result["direct_image_url"],
-        "author": result["author"],
-        "license": result["license"],
-        "license_url": result["license_url"],
-    }
-    result["source_rights_attestation"] = attest_wikimedia_rights(result, root=root)
-    result["rights_decision"] = RightsDecision(
-        "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
-        evidence_reference="a" * 64,
-    ).to_dict()
+    result.setdefault("valid", True)
+    result.setdefault("source_verified", True)
+    result.setdefault("evidence", {"gate": "relevance", "verdict": "deterministic_match", "score": 9})
     return result
 
 
 def _source_attested_candidate(candidate: dict, *, root=None) -> dict:
-    """Exercise source-page rights parsing with exact ImageObject metadata."""
-    from unicornio_editor.media.license import enrich_source_image_object_rights
-
-    metadata = {
-        "@context": "https://schema.org",
-        "@type": "ImageObject",
-        "contentUrl": candidate["direct_image_url"],
-        "license": candidate["license_url"],
-        "creator": {"@type": "Person", "name": candidate["author"]},
-    }
-    html = (
-        '<script type="application/ld+json">'
-        + json.dumps(metadata)
-        + "</script>"
-    )
-    return enrich_source_image_object_rights(candidate, html, root=root)
+    """Compatibility helper for old fixtures; rights fields are not consulted."""
+    return _attested_candidate(candidate, root=root)
 
 
 @pytest.fixture(autouse=True)
@@ -765,7 +738,7 @@ def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
     assert result["posts"][0]["reuse"][0]["valid"] is True
 
 
-def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch, tmp_path):
+def test_media_resolve_capacity_reports_reuse_and_web_frames(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
@@ -774,6 +747,8 @@ def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch,
         "source": "https://source.test/reuse",
         "media_id": 81,
         "phash": "0" * 16,
+        "valid": True,
+        "evidence": {"gate": "relevance", "verdict": "deterministic_match", "score": 9},
     }
     web_candidates = [
         {
@@ -796,13 +771,7 @@ def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch,
         for candidate in candidates:
             candidate.update({
                 "valid": True,
-                "rights_checked": True,
-                "rights_verified": True,
-                "rights_decision": {
-                    "status": "VERIFIED",
-                    "basis": "schema.org_image_object",
-                    "reason_code": "image_object_license_match",
-                },
+                "source_verified": True,
                 "evidence": {
                     "gate": "relevance",
                     "verdict": "deterministic_match",
@@ -826,7 +795,7 @@ def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch,
         tmp_path,
         {
             "schema_version": 1,
-            "batch_id": "rights-capacity-reuse-web",
+            "batch_id": "media-capacity-reuse-web",
             "posts": [{
                 "post_id": 115234,
                 "subject": "Test",
@@ -840,16 +809,16 @@ def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch,
     )
 
     summary = result["posts"][0]["candidate_diagnostic_summary"]
-    assert summary["rights_required_total"] == 3
-    assert summary["rights_reuse_verified"] == 1
-    assert summary["rights_required_web"] == 2
-    assert summary["rights_search_requested_web"] == 2
-    assert summary["rights_web_verified"] == 2
-    assert summary["rights_effective_verified"] == 2
-    assert summary["rights_effective_shortfall"] == 1
+    assert summary["media_required_total"] == 3
+    assert summary["media_reuse_distinct_frames"] == 1
+    assert summary["media_required_web"] == 2
+    assert summary["media_search_requested_web"] == 2
+    assert summary["media_web_distinct_frames"] == 2
+    assert summary["media_effective_distinct_frames"] == 2
+    assert summary["media_effective_shortfall"] == 1
 
 
-def test_legacy_library_entry_without_rights_does_not_become_reusable(tmp_path):
+def test_legacy_library_entry_without_legal_metadata_is_reusable_with_technical_source(tmp_path):
     import unicornio_editor.cli as cli
     from unicornio_editor.media.library_index import register
 
@@ -863,12 +832,16 @@ def test_legacy_library_entry_without_rights_does_not_become_reusable(tmp_path):
 
     class Client:
         def get_media(self, media_id):
-            return {"id": media_id}
+            return {"id": media_id, "source_url": "https://cdn.test/legacy.webp"}
 
         def search_media(self, *_args, **_kwargs):
             return []
 
-    assert cli._reuse_from_library(Client(), tmp_path, "Test Subject", limit=1) == []
+    rows = cli._reuse_from_library(Client(), tmp_path, "Test Subject", limit=1)
+    assert len(rows) == 1
+    assert rows[0]["source_page_url"] == "https://source.test/legacy"
+    assert rows[0]["direct_image_url"] == "https://cdn.test/legacy.webp"
+    assert rows[0]["subject"] == "Test Subject"
 
 
 def test_media_resolver_restores_visual_verification_from_registry(monkeypatch, tmp_path):
@@ -1244,7 +1217,7 @@ def test_media_search_transient_engine_failure_is_not_completed(monkeypatch, tmp
     assert result["posts"][0]["search"]["completed"] is False
 
 
-def test_media_search_reaching_visual_target_is_completed_without_exhaustion(monkeypatch, tmp_path):
+def test_media_search_reaching_visual_target_ignores_legacy_rights_fields(monkeypatch, tmp_path):
     import unicornio_editor.cli as cli
     import unicornio_editor.media.search as search
 
@@ -1259,6 +1232,8 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
         "captured_at": "2026-01-01T00:00:00Z",
         "credit_text": "Crédito da imagem: Test",
         "alt_text": "Test",
+        "license": "legacy metadata only",
+        "rights_verified": False,
         "valid": True,
         "phash": "a" * 16,
         "evidence": {"verdict": "deterministic_match"},
@@ -1272,15 +1247,7 @@ def test_media_search_reaching_visual_target_is_completed_without_exhaustion(mon
     def fake_search(_queries, *, accept, **_kwargs):
         # The search layer stops once it has a deterministic candidate meeting
         # the requested visual capacity; another provider may remain transient.
-        forged = {
-            **candidate,
-            "source_rights_attestation": {
-                "version": 1,
-                "signature": "0" * 64,
-            },
-        }
-        assert accept([forged], "target reached query") == 0
-        assert accept([candidate], "target reached query") == 1
+        assert accept([{**candidate, "rights_verified": True}], "target reached query") == 1
         return [{
             "query": "target reached query",
             "candidates": [candidate],
@@ -2022,10 +1989,6 @@ def test_media_resolver_uses_approved_candidate_fallback_before_target(monkeypat
         **candidate,
         "candidate_id": "target-2",
         "direct_image_url": "https://cdn.test/target-backup.webp",
-        "rights_evidence": {
-            **candidate["rights_evidence"],
-            "image_url": "https://cdn.test/target-backup.webp",
-        },
     }, root=tmp_path)
     monkeypatch.setattr(cli, "_resolve_media_batch", lambda *_args, **_kwargs: {
         "posts": [{
@@ -2494,14 +2457,7 @@ def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeyp
     assert evidence["vision_decision"]["role_fit"] == "unsuitable"
     assert evidence["vision_decision"]["policy_version"] == VISION_POLICY_VERSION
 
-    failure_root = tmp_path / "registry-write-failure"
-    failure_root.mkdir()
-    from unicornio_editor.media.license import attest_wikimedia_rights
-
-    failure_candidate = {
-        **candidate,
-        "source_rights_attestation": attest_wikimedia_rights(candidate, root=failure_root),
-    }
+    failure_candidate = dict(candidate)
     monkeypatch.setattr(
         cli, "_resolve_media_batch",
         lambda *_args, **_kwargs: {"posts": [{"reuse": [], "audit_candidates": [failure_candidate]}]},
@@ -2511,6 +2467,7 @@ def test_featured_resolver_persists_actual_execution_and_vision_decision(monkeyp
         raise OSError("token=must-not-leak")
 
     monkeypatch.setattr(registry, "record_v2_candidate_decision", fail_registry_write)
+    failure_root = tmp_path / "registry-write-failure"
     still_accepted = ProductionMediaResolver(object(), Config(), failure_root)(
         {"post_id": 115286, "title": editorial["title"], "v2_run_id": run_id},
         SimpleNamespace(media=previous),
@@ -2768,7 +2725,6 @@ def test_inline_article_source_rejection_is_recorded_in_registry(monkeypatch, tm
         return [dict(rejected)]
 
     monkeypatch.setattr(source_verify, "discover_article_source_candidates", discover)
-    monkeypatch.setattr(source_verify, "enrich_wikimedia_rights", lambda candidate, **_kwargs: candidate)
     monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
     monkeypatch.setattr(

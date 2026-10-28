@@ -54,11 +54,6 @@ _MEDIA_ITEM_SCHEMA = {
         "paragraph_index": {"type": "integer"},
         "source_page_url": {"type": "string"},
         "direct_image_url": {"type": "string"},
-        "author": {"type": "string"},
-        "license": {"type": "string"},
-        "license_url": {"type": "string"},
-        "captured_at": {"type": "string"},
-        "credit_text": {"type": "string"},
         "alt_text": {"type": "string"},
         "is_featured": {"type": "boolean"},
     },
@@ -66,11 +61,6 @@ _MEDIA_ITEM_SCHEMA = {
         "paragraph_index",
         "source_page_url",
         "direct_image_url",
-        "author",
-        "license",
-        "license_url",
-        "captured_at",
-        "credit_text",
         "alt_text",
         "is_featured",
     ],
@@ -158,7 +148,7 @@ the post already carries.
 
 Neither images nor the trailer are resolved in this call: both are handled
 deterministically afterwards by the code. So: always return "media_plan": [];
-never invent image URLs, licenses, credits or provenance; never answer
+never invent image URLs, captions or provenance; never answer
 needs_retry because of missing inline images, a missing featured image or any
 image count; and return needs_trailer=false with trailer_url=null unless the
 envelope already carries a verified trailer URL. Do fill game_name when the
@@ -427,7 +417,7 @@ def generate_editorial_batch(
                 "content": (
                     "Transforme este envelope sem ferramentas. Devolva "
                     '"media_plan": [] — a resolucao de imagens e feita DEPOIS por '
-                    "media-resolve-batch: nao invente URLs, licencas ou creditos e "
+                    "media-resolve-batch: nao invente URLs, legendas ou proveniencia e "
                     "nao responda needs_retry por falta de imagem ou de featured.\n"
                     + json.dumps(
                         {"batch_id": batch_id, "posts": posts}, ensure_ascii=False

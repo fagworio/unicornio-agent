@@ -131,11 +131,10 @@ class WordPressClient:
     def search_media(self, query: str, *, per_page: int = 10) -> list[dict[str, Any]]:
         """Search the local Media Library by title/alt/caption/description.
 
-        Reuse candidates for the editorial pipeline: images already uploaded
-        by previous runs carry their full credit block in the attachment
-        title/caption, which is the license evidence required for reuse. The
-        caller must NEVER edit the original attachment — a reused image is
-        downloaded and re-uploaded as a NEW attachment.
+        Reuse candidates for the editorial pipeline. Attachment title/caption
+        are optional editorial metadata, not permission evidence or a reuse
+        gate. The caller must NEVER edit the original attachment — a reused
+        image is downloaded and re-uploaded as a NEW attachment.
         """
         query = str(query or "").strip()
         if not query:

@@ -49,7 +49,7 @@ def _fixture(tmp_path):
             f"https://media.example/{media_id}.webp",
             index * 3,
             f"Imagem {index}",
-            f"Crédito da imagem: Fonte {index}",
+            "",
             f"assunto {index}",
             width=1280,
             height=720,
@@ -125,7 +125,6 @@ def test_repair_114987_dry_run_reconstructs_without_writing(tmp_path):
     assert result["words"]["before"] == result["words"]["after"]
     assert result["validation"]["all_accepted_media_reconstructed"] is True
     assert result["validation"]["distinct_accepted_img_elements"] == 4
-    assert result["validation"]["credits_present"] is True
     assert result["validation"]["featured_valid"] is True
     assert result["validation"]["language_ok"] is True
     assert client.updates == []

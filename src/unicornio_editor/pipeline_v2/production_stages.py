@@ -1115,7 +1115,6 @@ class ProductionComposeStage:
                         feature.status is FeaturedStatus.VALID
                         and feature.media_id and feature.media_url
                         and feature.alt_text.strip()
-                        and feature.credit_text.strip().casefold().startswith("crédito da imagem:")
                         and 1200 <= feature.width <= 1600 and feature.height > 0
                         and feature.sha256 and feature.phash and feature.visual_group_id
                         and feature_decision in {"INITIAL", "DIFFERENT"}

@@ -95,7 +95,6 @@ class ControlledSource:
                 path = urlparse(self.path).path
                 if path == "/article":
                     base = f"http://127.0.0.1:{self.server.server_port}"
-                    nodes = []
                     figures = []
                     for name in owner.images:
                         image_url = f"{base}/images/{name}"
@@ -113,19 +112,11 @@ class ControlledSource:
                             f'<figure><img src="{image_url}" alt="{alt}" width="1600" height="900">'
                             f"<figcaption>{caption}</figcaption></figure>"
                         )
-                        nodes.append({
-                            "@type": "ImageObject",
-                            "contentUrl": image_url,
-                            "license": "https://creativecommons.org/publicdomain/zero/1.0/",
-                            "creator": {"@type": "Person", "name": "E2E Artist"},
-                        })
                     document = (
                         "<!doctype html><html><head><title>Hollow Knight Silksong imagens</title></head>"
                         "<body><article><h1>Hollow Knight Silksong e o mundo de Pharloom</h1>"
                         + "".join(figures)
-                        + "<script type='application/ld+json'>"
-                        + json.dumps({"@context": "https://schema.org", "@graph": nodes})
-                        + "</script></article></body></html>"
+                        + "</article></body></html>"
                     ).encode()
                     return self._send(200, "text/html; charset=utf-8", document)
                 prefix = "/images/"
@@ -230,7 +221,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             root=root,
         )
         assert len(candidates) == 3, source_stats
-        assert all(item.get("rights_verified") is True for item in candidates)
+        assert all(item.get("source_verified") is True for item in candidates)
         by_name = {str(item["direct_image_url"]).rsplit("/", 1)[-1]: item for item in candidates}
         assert set(by_name) == set(source.images)
 
@@ -240,8 +231,8 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "A continuação mantém a leitura cuidadosa dos cenários, mas troca o ritmo da jornada e apresenta ferramentas que mudam a forma de enfrentar cada área.",
             "As imagens da fonte mostram ambientes distintos. A primeira destaca a direção de arte, enquanto as capturas seguintes registram momentos diferentes da exploração.",
             "Esse contraste ajuda a entender a variedade visual sem confundir ilustração promocional com captura de gameplay ou repetir o mesmo quadro em tamanhos diferentes.",
-            "A Team Cherry ainda não precisa revelar todos os detalhes para que cada imagem tenha contexto: a página de origem identifica a obra e associa cada arquivo à licença declarada.",
-            "Com a evidência preservada, o artigo pode apresentar a arte principal e duas capturas próprias, mantendo crédito visível e uma ligação direta para a fonte consultada.",
+            "A página de origem identifica tecnicamente cada arquivo e permite comparar os bytes baixados com os recursos nela listados.",
+            "Com a evidência técnica preservada, o artigo pode apresentar a arte principal e duas capturas próprias, mantendo a ligação direta para a fonte consultada.",
         ]
         body = "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs)
         featured = {
@@ -332,8 +323,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
         ]
         body_with_images = insert_media(body, inline_plan)
         schema_media_fields = {
-            "paragraph_index", "source_page_url", "direct_image_url", "author",
-            "license", "license_url", "captured_at", "credit_text", "alt_text",
+            "paragraph_index", "source_page_url", "direct_image_url", "credit_text", "alt_text",
             "is_featured", "media_library_id", "subject", "search_query",
             "phash", "evidence_score", "evidence_verdict", "candidate_id",
             "decision_id", "decision",
@@ -484,7 +474,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "source": {
                 "status": source_stats.get("source_status"),
                 "candidate_count": len(candidates),
-                "rights_verified_count": sum(bool(item.get("rights_verified")) for item in candidates),
+                "source_verified_count": sum(bool(item.get("source_verified")) for item in candidates),
                 "evidence_scores": [int(item.get("evidence_score") or 0) for item in candidates],
             },
             "acquisition": {

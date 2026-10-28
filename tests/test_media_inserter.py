@@ -212,7 +212,7 @@ class MediaInserterTests(unittest.TestCase):
         assert result["html"].count('id="opening"') == 1
 
     def test_adds_one_visible_featured_credit(self):
-        credit = "Crédito da imagem: Omelete. Imagem promocional do trailer. Direitos autorais dos detentores."
+        credit = "Legenda editorial opcional da imagem."
         result = append_featured_credit("<p>Texto.</p><p>Continuação.</p>", credit)
         self.assertIn('<p class="image-credit">' + credit + "</p>", result)
         self.assertEqual(append_featured_credit(result, credit), result)
@@ -227,6 +227,16 @@ class MediaInserterTests(unittest.TestCase):
         )
         self.assertIn("Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).[/caption]", result)
         self.assertLess(result.index('</p>[caption id="" align="aligncenter"'), result.index("<p>Três."))
+
+    def test_inserts_technically_valid_image_without_optional_credit(self):
+        item = _item(index=1)
+        item.pop("credit_text")
+        result = insert_media(
+            "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>", [item]
+        )
+        self.assertIn('<figure class="wp-caption aligncenter" style="width:1280px">', result)
+        self.assertIn('alt="Imagem de jogo"', result)
+        self.assertNotIn("caption id=", result)
 
     def test_rejects_insertion_inside_paragraph(self):
         with self.assertRaises(MediaInsertionError):
@@ -347,10 +357,18 @@ class MediaInserterTests(unittest.TestCase):
         self.assertIn('alt="Donkey Kong Bananza (Nintendo Switch 2)"', result)
 
     def test_append_featured_credit_strips_html(self):
-        credit = "<p>Crédito da imagem: Credit: Nintendo</p>"
+        credit = "<p>Legenda: Nintendo</p>"
         result = append_featured_credit("<p>Texto.</p><p>Cont.</p>", credit)
-        self.assertIn("Credit: Nintendo", result)
-        self.assertNotIn("<p>Credit", result)
+        self.assertIn("Legenda: Nintendo", result)
+        self.assertNotIn("<p>Legenda", result)
+
+    def test_insert_accepts_optional_caption_without_credit_prefix(self):
+        item = _item(index=1)
+        item["credit_text"] = "Cena de gameplay: personagem em Pharloom."
+        result = insert_media(
+            "<p>Um.</p><p>Dois.</p><p>Três.</p><p>Quatro.</p>", [item]
+        )
+        self.assertIn("Cena de gameplay: personagem em Pharloom.[/caption]", result)
 
 
 if __name__ == "__main__":

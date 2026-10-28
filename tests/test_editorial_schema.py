@@ -28,6 +28,41 @@ class EditorialSchemaTests(unittest.TestCase):
     def test_accepts_valid_payload(self):
         self.assertEqual(validate_editorial(valid_payload())["cleaned_html"], "<p>Texto revisado.</p>")
 
+    def test_media_plan_needs_source_and_alt_but_no_legal_metadata(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Cena do jogo",
+            "is_featured": False,
+        }]
+        normalized = validate_editorial(payload)
+        self.assertEqual(len(normalized["media_plan"]), 1)
+        self.assertNotIn("license", normalized["media_plan"][0])
+
+    def test_historical_legal_fields_are_readable_but_removed_from_active_plan(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Cena do jogo",
+            "is_featured": False,
+            "license": "legacy license",
+            "license_url": "https://rights.example/terms",
+            "rights_verified": False,
+            "rights_decision": {"status": "UNPROVEN"},
+            "author": "Legacy author",
+            "credit_text": "Legacy credit",
+        }]
+        normalized = validate_editorial(payload)
+        self.assertEqual(set(normalized["media_plan"][0]), {
+            "paragraph_index", "source_page_url", "direct_image_url", "alt_text", "is_featured",
+            "credit_text",
+        })
+        self.assertEqual(normalized["media_plan"][0]["credit_text"], "Legacy credit")
+
     def test_media_exhausted_optional_boolean(self):
         # media_exhausted e opcional (default ausente) e deve ser booleano.
         result = validate_editorial(valid_payload())
@@ -122,22 +157,20 @@ class EditorialSchemaTests(unittest.TestCase):
         with self.assertRaises(EditorialValidationError):
             validate_editorial(payload)
 
-    def test_rejects_media_without_license_evidence(self):
+    def test_accepts_media_without_legal_metadata(self):
         payload = valid_payload()
         payload["media_plan"] = [{
             "paragraph_index": 1,
             "source_page_url": "https://source.example/page",
             "direct_image_url": "https://source.example/image.jpg",
-            "author": "Autor",
-            "license": "",
-            "license_url": "https://source.example/license",
-            "captured_at": "2026-08-20T12:00:00Z",
-            "credit_text": "Imagem: Autor / Source",
             "alt_text": "Imagem ilustrativa",
             "is_featured": False,
         }]
-        with self.assertRaises(EditorialValidationError):
-            validate_editorial(payload)
+        normalized = validate_editorial(payload)
+        self.assertEqual(
+            normalized["media_plan"][0]["source_page_url"],
+            "https://source.example/page",
+        )
 
     def test_rejects_more_than_one_featured_image(self):
         payload = valid_payload()

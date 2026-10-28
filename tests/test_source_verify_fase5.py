@@ -25,18 +25,6 @@ class Fase5ValidateCandidateTests(unittest.TestCase):
         self.assertGreaterEqual(out["verification_elapsed_ms"], 0)
         self.assertIn("source_page_validation", out["verification_stage_durations_ms"])
 
-    def test_source_page_html_is_cached_for_rights_validation(self):
-        page = "https://page.example/source"
-        cache = {}
-        with mock.patch.object(
-            source_verify, "_fetch", return_value=b"<html>source</html>"
-        ) as fetch:
-            first = source_verify.source_page_html(page, cache=cache)
-            second = source_verify.source_page_html(page, cache=cache)
-        self.assertEqual(first, "<html>source</html>")
-        self.assertEqual(second, first)
-        fetch.assert_called_once()
-
     def test_imagem_listada_na_pagina_e_valida(self):
         html = '<html><body><img src="https://cdn.example/bleach-keyart.jpg"></body></html>'
         out = self._rodar(

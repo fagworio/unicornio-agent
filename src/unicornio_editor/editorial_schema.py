@@ -35,12 +35,9 @@ _MEDIA = {
     "paragraph_index",
     "source_page_url",
     "direct_image_url",
-    "author",
-    "license",
-    "license_url",
-    "captured_at",
-    "credit_text",
     "alt_text",
+    # Optional editorial caption; never used as proof of ownership or a gate.
+    "credit_text",
     "is_featured",
     # Reuse of an existing Media Library attachment: the image is downloaded
     # from this attachment and re-uploaded as a NEW attachment (the original
@@ -66,6 +63,11 @@ _MEDIA = {
     # declarar a query real usada; nunca inventar para "decorar" uma imagem
     # errada.
     "search_query",
+}
+_LEGACY_MEDIA_RIGHTS_FIELDS = {
+    "author", "license", "license_url", "captured_at",
+    "rights_verified", "rights_checked", "rights_decision", "rights_evidence",
+    "source_rights_attestation",
 }
 
 
@@ -149,31 +151,37 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     for index, item in enumerate(media_plan):
         media = _object(item, f"media_plan[{index}]")
         _keys(
-            media, _MEDIA, f"media_plan[{index}]",
+            media, _MEDIA | _LEGACY_MEDIA_RIGHTS_FIELDS, f"media_plan[{index}]",
             # Campos de evidência são OPCIONAIS: o apply recalcula o score e não
             # confia no JSON (um media_plan manual/adulterado não pode passar
             # apenas por preencher evidence_score).
             optional={
                 "media_library_id", "search_query", "subject", "phash",
                 "evidence_score", "evidence_verdict", "candidate_id",
+                "credit_text",
                 # Rastreabilidade opcional (vem do ledger de decisões); o apply
                 # NUNCA confia nela para decidir, só para medir qualidade.
                 "decision_id", "decision",
+                *_LEGACY_MEDIA_RIGHTS_FIELDS,
             },
         )
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
             raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")
-        for name in ("author", "license", "captured_at", "credit_text", "alt_text"):
-            _nonempty_string(media[name], f"media_plan[{index}].{name}")
-        for name in ("source_page_url", "direct_image_url", "license_url"):
+        _nonempty_string(media["alt_text"], f"media_plan[{index}].alt_text")
+        for name in ("source_page_url", "direct_image_url"):
             _http_url(media[name], f"media_plan[{index}].{name}")
         is_featured = media["is_featured"]
         if not isinstance(is_featured, bool):
             raise EditorialValidationError(f"media_plan[{index}].is_featured must be boolean")
         if is_featured:
             featured_count += 1
-        normalized_media.append(dict(media))
+        # Accept old plans so checkpoints and saved drafts remain readable,
+        # but do not carry legal-validation fields into the active plan.
+        normalized_media.append({
+            key: value for key, value in media.items()
+            if key not in _LEGACY_MEDIA_RIGHTS_FIELDS
+        })
     if featured_count > 1:
         raise EditorialValidationError("media_plan must contain at most one featured image")
 

@@ -56,41 +56,36 @@ _DROP_TAGS = {"img", "script", "style", "iframe", "object", "embed", "form", "in
 _UNWRAP_TAGS = {"article", "div"}
 _VOID_TAGS = {"area", "base", "br", "col", "hr", "link", "meta", "param", "source", "track", "wbr"}
 _ALLOWED_ATTRS = {"class", "id", "title", "alt", "href", "src", "target", "rel", "width", "height"}
-_LICENSE_TOKEN = re.compile(
-    r"cc\s*0"
-    r"|cc\s*by(?:[\s-]*[-–]?\s*(?:sa|nc|nd|nc-sa|nc-nd))?"
-    r"|creative\s*commons"
-    r"|public\s*domain"
-    r"|dominio\s*publico"
-    r"|dom[ií]nio\s*p[uú]blico"
-    r"|uso\s*com\s*credito"
-)
-_CREDIT_MARKER = re.compile(r"credito\s+da\s+imagem|^credito\s*:")
 
 
 def _repair_orphan_media(html: str) -> str:
     if not isinstance(html, str) or "<img" not in html.lower():
         return html
-    _FIG_WITH_IMG = re.compile(
+    figure_then_image = re.compile(
         r"(<figure\b[^>]*>.*?</figure>)\s*(<img\b[^>]*>)", re.IGNORECASE | re.DOTALL
     )
-    _IMG_WITH_FIG = re.compile(
+    image_then_figure = re.compile(
         r"(<img\b[^>]*>)\s*(<figure\b[^>]*>.*?</figure>)", re.IGNORECASE | re.DOTALL
     )
 
-    def _fold(match: re.Match[str], *, image_first: bool = False) -> str:
-        img, figure = (match.group(1), match.group(2)) if image_first else (match.group(2), match.group(1))
+    def fold(match: re.Match[str], *, image_first: bool = False) -> str:
+        image, figure = (match.group(1), match.group(2)) if image_first else (match.group(2), match.group(1))
         if "<img" in figure.lower():
             return match.group(0)
-        caption = re.search(r"<figcaption>", figure, re.IGNORECASE)
-        if not caption or "credito da imagem" not in _normalize(figure):
-            return match.group(0)
-        return figure[: caption.start()] + img + figure[caption.start():]
+        caption = re.search(r"<figcaption\b", figure, re.IGNORECASE)
+        if caption:
+            insert_at = caption.start()
+        else:
+            closing = re.search(r"</figure\s*>$", figure, re.IGNORECASE)
+            if not closing:
+                return match.group(0)
+            insert_at = closing.start()
+        return figure[:insert_at] + image + figure[insert_at:]
 
     result = html
     for _ in range(10):
-        folded = _FIG_WITH_IMG.sub(_fold, result)
-        folded = _IMG_WITH_FIG.sub(lambda match: _fold(match, image_first=True), folded)
+        folded = figure_then_image.sub(fold, result)
+        folded = image_then_figure.sub(lambda match: fold(match, image_first=True), folded)
         if folded == result:
             break
         result = folded
@@ -150,9 +145,7 @@ def _sanitize_wp_caption_block(block: str) -> str:
     tail = block[img.end():]
     caption = re.sub(r"<[^>]+>", " ", tail)
     caption = re.sub(r"[\s\u00a0]+", " ", caption).strip()
-    if not caption.lower().startswith("crédito da imagem:"):
-        caption = "Crédito da imagem: " + caption
-    return head + safe_img + " " + caption
+    return head + safe_img + (" " + caption if caption else "")
 
 
 def normalize_h1_headings(html: str, *, post_title: str = "") -> str:
@@ -175,10 +168,9 @@ def normalize_h1_headings(html: str, *, post_title: str = "") -> str:
 def clean_html(html: str, *, post_title: str = "") -> str:
     """Return safe, normalized HTML while preserving editorial text.
 
-    Imported inline images are dropped UNLESS they live inside a <figure> whose
-    <figcaption> carries a complete credit block, OR inside a WordPress
-    [caption]...[/caption] shortcode (rendered by WP as a figure with credit).
-    Both are preserved so verified licensed imagery is not re-discovered.
+    Imported images outside a figure remain dropped. Images inside a figure or
+    WordPress caption are preserved after URL and attribute sanitization;
+    captions are optional editorial text and are never treated as authorization.
     """
     if not isinstance(html, str):
         raise TypeError("html must be a string")
@@ -195,12 +187,12 @@ def clean_html(html: str, *, post_title: str = "") -> str:
     return cleaned
 
 
-def _serialize(value: _Node | str, keep_licensed_image: bool = False) -> str:
+def _serialize(value: _Node | str, keep_figure_image: bool = False) -> str:
     if isinstance(value, str):
         return escape(value, quote=False)
     text = _node_text(value).strip().lower()
     if value.tag == "img":
-        return _serialize_img(value) if keep_licensed_image else ""
+        return _serialize_img(value) if keep_figure_image else ""
     if value.tag in _DROP_TAGS:
         return ""
     if value.tag == "h3" and "confira mais novidades em nosso portal de notícias" in text:
@@ -208,9 +200,8 @@ def _serialize(value: _Node | str, keep_licensed_image: bool = False) -> str:
     if value.tag == "em" and text.startswith("fonte:"):
         return ""
     if value.tag == "figure":
-        licensed = _has_complete_credit(value)
         children = "".join(
-            _serialize(child, keep_licensed_image=licensed) for child in value.children
+            _serialize(child, keep_figure_image=True) for child in value.children
         )
     else:
         children = "".join(_serialize(child) for child in value.children)
@@ -229,29 +220,16 @@ def _serialize(value: _Node | str, keep_licensed_image: bool = False) -> str:
 
 def _serialize_img(node: _Node) -> str:
     attrs = _safe_attrs(node.attrs)
+    src = next((value for name, value in attrs if name == "src"), None)
+    parsed = urlparse(str(src or "").strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
     attrs_text = "".join(
         f' {name}="{escape(attr_value, quote=True)}"'
         for name, attr_value in attrs
         if attr_value is not None
     )
     return f"<img{attrs_text} />"
-
-
-def _has_complete_credit(figure: _Node) -> bool:
-    for child in figure.children:
-        if isinstance(child, _Node) and child.tag == "figcaption":
-            text = _node_text(child)
-            break
-    else:
-        return False
-    if not text.strip():
-        return False
-    normalized = _normalize(text)
-    if not _CREDIT_MARKER.search(normalized):
-        return False
-    if not _LICENSE_TOKEN.search(normalized):
-        return False
-    return "http://" in normalized or "https://" in normalized
 
 
 def _normalize(text: str) -> str:

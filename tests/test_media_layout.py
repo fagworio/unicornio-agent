@@ -105,13 +105,13 @@ def test_closing_featured_repeat_is_allowed_only_with_verified_display_evidence(
         media=MediaProgress.from_dict({"required": 4, "featured": featured}),
     )["valid"]
 
-    no_credit = {**featured, "credit_text": "Fonte oficial"}
-    restricted = build_normal_article_layout_policy(
+    no_credit = {key: value for key, value in featured.items() if key != "credit_text"}
+    without_caption = build_normal_article_layout_policy(
         body, target_ideal=4, verified_inline=(), featured_media_id=7,
         featured_repeat_evidence=no_credit,
     )
-    assert restricted is not None
-    assert "closing_featured_repeat" not in restricted
+    assert without_caption is not None
+    assert "closing_featured_repeat" in without_caption
 
     tampered = {**policy, "closing_featured_repeat": {**policy["closing_featured_repeat"], "media_id": 8}}
     tampered["layout_sha256"] = _layout_sha256(tampered)

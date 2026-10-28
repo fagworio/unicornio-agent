@@ -240,127 +240,29 @@ def discover_article_source_candidates(
             "valid": True,
             "verification_level": "ARTICLE_SOURCE",
             "alt_text": asset.alt or asset.figcaption or asset.heading or asset_subject,
-            "credit_text": f"Crédito da imagem: {(parsed.hostname or 'fonte original').lower()}",
             "subject": asset_subject,
             "subjects": list(editorial_subjects),
             "source_context_kind": asset.context_kind,
             "role": "inline",
         }
-        from .license import enrich_source_image_object_rights
-
-        result.append(enrich_source_image_object_rights(candidate, html, root=root))
+        result.append(candidate)
     return result
 
 
-def enrich_wikimedia_rights(
-    candidate: dict[str, Any], *, audit=None, url_policy: str = "audit",
-    root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Attach rights evidence from Wikimedia Commons' authoritative API.
-
-    This never infers permission from a search result. It only enriches a
-    candidate whose source page is a Commons file page and whose exact direct
-    URL is returned by ``imageinfo`` together with compatible extmetadata.
-    """
-    source = str(candidate.get("source_page_url") or "").strip()
-    host = (urlparse(source).hostname or "").casefold()
-    if host not in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
-        return candidate
-    marker = "/wiki/"
-    if marker not in urlparse(source).path:
-        return candidate
-    title = unquote(urlparse(source).path.split(marker, 1)[1])
-    if not title or title.casefold().startswith("special:"):
-        return candidate
-    from .license import RightsDecision
-
-    # A proof from a prior process is not an authorization cache. Clear it
-    # before refreshing Commons metadata; an unavailable API must remain a
-    # retryable technical state rather than reusing the old license silently.
-    refreshed = dict(candidate)
-    refreshed.pop("source_rights_attestation", None)
-    refreshed["rights_verified"] = False
-    refreshed["rights_checked"] = True
-
-    def unavailable(reason: str) -> dict[str, Any]:
-        refreshed["rights_decision"] = RightsDecision(
-            "TECHNICAL_FAILURE", "media_rights_unavailable", reason, retryable=True,
-        ).to_dict()
-        return refreshed
-
-    api = "https://commons.wikimedia.org/w/api.php?action=query&format=json&titles=" + quote(title, safe="") + "&prop=imageinfo&iiprop=url|extmetadata"
-    payload = _fetch(api, "application/json", _PAGE_MAX_BYTES, [_VERIFY_TOTAL_MAX_BYTES], audit, url_policy)
-    if not payload:
-        return unavailable("wikimedia_api_unavailable")
-    try:
-        pages = (json.loads(payload.decode("utf-8", "ignore")).get("query") or {}).get("pages") or {}
-        page = next(iter(pages.values()))
-        info = (page.get("imageinfo") or [])[0]
-        metadata = info.get("extmetadata") or {}
-        def value(name: str) -> str:
-            item = metadata.get(name) or {}
-            return str(item.get("value") if isinstance(item, dict) else item or "").strip()
-        license_name = value("LicenseShortName")
-        license_url = value("LicenseUrl")
-        author = re.sub(r"<[^>]+>", " ", value("Artist"))
-        author = " ".join(author.split())
-        direct = str(info.get("url") or "").strip()
-        if not direct or not license_name or not license_url or not author:
-            return unavailable("wikimedia_rights_metadata_incomplete")
-        discovered = str(candidate.get("direct_image_url") or "").strip()
-        if discovered and discovered != direct:
-            budget = [_VERIFY_TOTAL_MAX_BYTES]
-            discovered_bytes = _fetch(discovered, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
-            authorized_bytes = _fetch(direct, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
-            if not discovered_bytes or not authorized_bytes:
-                return unavailable("wikimedia_image_identity_unavailable")
-            equivalent, _identity_reason = verify_image_identity(discovered_bytes, authorized_bytes)
-            if not equivalent:
-                return unavailable("wikimedia_image_identity_mismatch")
-        enriched = dict(candidate)
-        enriched.update({
-            "source_page_url": source,
-            "direct_image_url": direct,
-            "author": author,
-            "license": license_name,
-            "license_url": license_url,
-            "captured_at": __import__("datetime").date.today().isoformat(),
-            "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
-            "alt_text": str(candidate.get("alt_text") or candidate.get("subject") or title),
-            "rights_evidence": {
-                "provider": "wikimedia_commons_api",
-                "file_title": title,
-                "image_url": direct,
-                "license": license_name,
-                "license_url": license_url,
-                "author": author,
-            },
-        })
-        from .license import attest_wikimedia_rights
-        attestation = attest_wikimedia_rights(enriched, root=root)
-        if attestation:
-            enriched["source_rights_attestation"] = attestation
-            enriched["rights_verified"] = True
-            evidence_reference = str(attestation["evidence_sha256"])
-            enriched["rights_evidence"]["evidence_sha256"] = evidence_reference
-            enriched["rights_decision"] = RightsDecision(
-                "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
-                evidence_reference=evidence_reference,
-            ).to_dict()
-            return enriched
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return unavailable("wikimedia_rights_response_invalid")
-    return unavailable("wikimedia_rights_unverified")
 def search_wikimedia_commons_candidates(
    query: str, *, limit: int = 12, audit=None, url_policy: str = "audit",
    root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-   """Discover Commons file pages with rights metadata in one authoritative call."""
+   """Discover Commons assets and verify their technical source identity.
+
+   The API is used only to resolve the file page to its direct asset URL. No
+   license or attribution metadata is requested or interpreted.
+   """
    api = (
        "https://commons.wikimedia.org/w/api.php?action=query&format=json"
        "&generator=search&gsrnamespace=6&gsrsearch=" + quote(str(query), safe="")
        + f"&gsrlimit={max(1, min(int(limit), 50))}"
-       + "&prop=imageinfo&iiprop=url|extmetadata"
+       + "&prop=imageinfo&iiprop=url"
    )
    payload = _fetch(api, "application/json", _PAGE_MAX_BYTES, [_VERIFY_TOTAL_MAX_BYTES], audit, url_policy)
    if not payload:
@@ -369,20 +271,12 @@ def search_wikimedia_commons_candidates(
        pages = (json.loads(payload.decode("utf-8", "ignore")).get("query") or {}).get("pages") or {}
    except (TypeError, ValueError, json.JSONDecodeError):
        return []
-   from .license import attest_wikimedia_rights
    result: list[dict[str, Any]] = []
    for page in pages.values():
        info = (page.get("imageinfo") or [None])[0] or {}
-       metadata = info.get("extmetadata") or {}
-       def value(name: str) -> str:
-           item = metadata.get(name) or {}
-           return str(item.get("value") if isinstance(item, dict) else item or "").strip()
        title = str(page.get("title") or "").strip()
        direct = str(info.get("url") or "").strip()
-       license_name = value("LicenseShortName")
-       license_url = value("LicenseUrl")
-       author = " ".join(re.sub(r"<[^>]+>", " ", value("Artist")).split())
-       if not title or not direct or not license_name or not license_url or not author:
+       if not title or not direct:
            continue
        source_page = str(info.get("descriptionurl") or "").strip()
        if not source_page:
@@ -391,21 +285,7 @@ def search_wikimedia_commons_candidates(
            "source_page_url": source_page,
            "discovery_image_url": direct,
            "direct_image_url": direct,
-           "author": author,
-           "license": license_name,
-           "license_url": license_url,
-           "captured_at": __import__("datetime").date.today().isoformat(),
-           "credit_text": f"Crédito da imagem: {author}. Licença {license_name}.",
            "alt_text": title.removeprefix("File: ") or str(query),
-           "rights_evidence": {
-               "provider": "wikimedia_commons_api",
-               "file_title": title,
-               "image_url": direct,
-               "license": license_name,
-               "license_url": license_url,
-               "author": author,
-           },
-           "rights_checked": True,
            "origin_type": "wikimedia_commons",
            "source_origin_type": "wikimedia_commons",
            "subject": str(query),
@@ -434,19 +314,6 @@ def search_wikimedia_commons_candidates(
        )
        if candidate["evidence"].get("verdict") != "deterministic_match":
            continue
-       attestation = attest_wikimedia_rights(candidate, root=root)
-       if not attestation:
-           continue
-       candidate["source_rights_attestation"] = attestation
-       candidate["rights_verified"] = True
-       from .license import RightsDecision
-
-       evidence_reference = str(attestation["evidence_sha256"])
-       candidate["rights_evidence"]["evidence_sha256"] = evidence_reference
-       candidate["rights_decision"] = RightsDecision(
-           "VERIFIED", "image_object_license_match", "wikimedia_commons_api",
-           evidence_reference=evidence_reference,
-       ).to_dict()
        result.append(candidate)
    return result
 
@@ -526,34 +393,6 @@ def _asset_rendition_key(url: str) -> str:
 def _image_urls_in_page(html: str, base_url: str) -> list[str]:
     """URLs de assets declarados pela página, inclusive CDNs sem extensão."""
     return [asset.url for asset in extract_page_assets(html, base_url)]
-
-
-def source_page_html(
-    page_url: str,
-    *,
-    cache: dict[str, str | None] | None = None,
-    cache_lock: Lock | None = None,
-    audit=None,
-    url_policy: str = "audit",
-) -> str | None:
-    """Fetch and cache source HTML for independent rights-evidence checks."""
-    if not _valid_http(page_url):
-        return None
-    cache = cache if cache is not None else {}
-
-    def populate() -> None:
-        if page_url in cache:
-            return
-        budget = [_VERIFY_TOTAL_MAX_BYTES]
-        payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
-        cache[page_url] = payload.decode("utf-8", "ignore") if payload is not None else None
-
-    if cache_lock is None:
-        populate()
-    else:
-        with cache_lock:
-            populate()
-    return cache[page_url]
 
 
 def _normalized_url(url: str) -> str:

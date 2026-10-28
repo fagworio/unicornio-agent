@@ -7,9 +7,6 @@ from typing import Any
 import re
 import unicodedata
 
-from .license import validate_upload_candidate
-
-
 def friendly_media_filename(path: Path, candidate: dict[str, Any]) -> str:
     """Return a human-readable, stable WebP filename for a new attachment.
 
@@ -32,9 +29,19 @@ def friendly_media_filename(path: Path, candidate: dict[str, Any]) -> str:
 
 
 def upload_image(
-    client: Any, path: Path, candidate: dict[str, Any], *, root=None,
+    client: Any, path: Path, candidate: dict[str, Any],
 ) -> dict[str, Any]:
-    evidence = validate_upload_candidate(candidate, root=root)
+    """Upload a technically validated, converted image to WordPress.
+
+    Source membership and relevance are checked by the caller before upload;
+    this boundary only enforces the media format and basic source identity.
+    Legacy rights keys on ``candidate`` are deliberately ignored.
+    """
+    evidence = dict(candidate)
+    if not str(evidence.get("source_page_url") or "").strip():
+        raise ValueError("source_page_url is required before upload")
+    if not str(evidence.get("direct_image_url") or "").strip():
+        raise ValueError("direct_image_url is required before upload")
     path = Path(path)
     if path.suffix.lower() != ".webp":
         raise ValueError("only converted WebP files may be uploaded")
@@ -45,8 +52,8 @@ def upload_image(
     # puro; o alt tambem nunca deve carregar markup.
     from .text import plain_text
 
-    credit = plain_text(evidence["credit_text"])
-    alt = plain_text(evidence["alt_text"])
+    credit = plain_text(evidence.get("credit_text") or "")
+    alt = plain_text(evidence.get("alt_text") or "")
     return client.upload_media(
         path,
         filename=friendly_media_filename(path, evidence),

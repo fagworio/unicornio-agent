@@ -13,7 +13,6 @@ from unicornio_editor.media.source_verify import (
     _normalized_url,
     validate_discovered_candidate,
     verify_downloaded_against_source,
-    enrich_wikimedia_rights,
     search_wikimedia_commons_candidates,
 )
 
@@ -378,74 +377,37 @@ class SourceVerifyTests(unittest.TestCase):
         self.assertTrue(reason.startswith("source_scan_incomplete:"), reason)
         self.assertNotIn("source_bytes_mismatch", reason)
 
-    def test_wikimedia_api_rights_enrichment_binds_exact_file(self):
-        payload = json.dumps({"query": {"pages": {"1": {"imageinfo": [{
-            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
-            "extmetadata": {
-                "LicenseShortName": {"value": "CC BY-SA 4.0"},
-                "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
-                "Artist": {"value": "<a href=\"https://commons.wikimedia.org/wiki/User:Author\">Author</a>"},
-            },
-        }]}}}}).encode()
-        candidate = {
-            "source_page_url": "https://commons.wikimedia.org/wiki/File:Game.jpg",
-            "direct_image_url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
-            "subject": "Game",
-        }
-        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload):
-            enriched = enrich_wikimedia_rights(candidate)
-        self.assertTrue(enriched["rights_verified"])
-        self.assertEqual(enriched["direct_image_url"], "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg")
-        self.assertEqual(enriched["license"], "CC BY-SA 4.0")
-        self.assertEqual(enriched["source_rights_attestation"]["provider"], "wikimedia_commons_api")
-
-    def test_wikimedia_search_returns_only_attested_licensed_files(self):
+    def test_wikimedia_search_uses_file_url_without_requesting_license_metadata(self):
         payload = json.dumps({"query": {"pages": {
             "1": {"title": "File:Game.jpg", "imageinfo": [{
                 "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
-                "extmetadata": {
-                    "LicenseShortName": {"value": "CC BY-SA 4.0"},
-                    "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
-                    "Artist": {"value": "Author"},
-                },
-            }]},
-            "2": {"title": "File:NoRights.jpg", "imageinfo": [{
-                "url": "https://upload.wikimedia.org/no-rights.jpg",
-                "extmetadata": {},
+                "descriptionurl": "https://commons.wikimedia.org/wiki/File:Game.jpg",
             }]},
         }}}).encode()
-        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload), mock.patch(
+        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload) as fetch, mock.patch(
             "unicornio_editor.media.source_verify._validate_discovered_candidate",
             return_value={"valid": True, "source_verified": True, "reason": "source_reference_found: test"},
         ):
             candidates = search_wikimedia_commons_candidates("Game", limit=8)
         self.assertEqual(len(candidates), 1)
-        self.assertTrue(candidates[0]["rights_verified"])
-        self.assertEqual(candidates[0]["source_rights_attestation"]["provider"], "wikimedia_commons_api")
+        self.assertEqual(candidates[0]["source_page_url"], "https://commons.wikimedia.org/wiki/File:Game.jpg")
+        self.assertEqual(candidates[0]["direct_image_url"], "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg")
         self.assertEqual(candidates[0]["evidence"]["verdict"], "deterministic_match")
+        self.assertIn("iiprop=url", fetch.call_args.args[0])
+        self.assertNotIn("extmetadata", fetch.call_args.args[0])
+        self.assertNotIn("license", candidates[0])
 
-    def test_wikimedia_api_rejects_different_discovered_representation(self):
+    def test_wikimedia_search_does_not_return_candidate_with_unverified_source(self):
         payload = json.dumps({"query": {"pages": {"1": {"imageinfo": [{
             "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Game.jpg",
-            "extmetadata": {
-                "LicenseShortName": {"value": "CC BY-SA 4.0"},
-                "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
-                "Artist": {"value": "Author"},
-            },
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Game.jpg",
         }]}}}}).encode()
-        candidate = {
-            "source_page_url": "https://commons.wikimedia.org/wiki/File:Game.jpg",
-            "direct_image_url": "https://upload.wikimedia.org/discovered.jpg",
-            "subject": "Game",
-        }
-        with mock.patch(
-            "unicornio_editor.media.source_verify._fetch",
-            side_effect=[payload, _png_bytes((200, 30, 30)), _png_bytes((30, 30, 200))],
+        with mock.patch("unicornio_editor.media.source_verify._fetch", return_value=payload), mock.patch(
+            "unicornio_editor.media.source_verify._validate_discovered_candidate",
+            return_value={"valid": False, "source_verified": False, "reason": "source_mismatch"},
         ):
-            enriched = enrich_wikimedia_rights(candidate)
-        self.assertIs(enriched["rights_verified"], False)
-        self.assertEqual(enriched["rights_decision"]["status"], "TECHNICAL_FAILURE")
-        self.assertTrue(enriched["rights_decision"]["retryable"])
+            candidates = search_wikimedia_commons_candidates("Game", limit=8)
+        self.assertEqual(candidates, [])
 
 
 if __name__ == "__main__":

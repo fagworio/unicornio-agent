@@ -904,12 +904,10 @@ def _compact_cards(report: dict) -> dict:
 def _media_search_item(item: dict) -> dict:
     """Projecao compacta de um candidato da Media Library (economia de tokens).
 
-    ``tem_credito`` informa se o attachment carrega o bloco 'Crédito da
-    imagem' no title/caption — sem isso a imagem NAO pode ser reutilizada
-    (falta evidencia de licenca). O reuso nunca edita o attachment original.
+    A presença de título/legenda não determina se um attachment pode ser
+    reutilizado. O reuso nunca edita o attachment original.
     """
     title = str((item.get("title") or {}).get("rendered") or "")
-    caption = str((item.get("caption") or {}).get("rendered") or "")
     details = item.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
     return {
@@ -917,7 +915,6 @@ def _media_search_item(item: dict) -> dict:
         "title": title[:120],
         "alt": str(item.get("alt_text") or "")[:120],
         "dimensoes": f"{width or '?'}x{height or '?'}",
-        "tem_credito": "crédito da imagem" in f"{title} {caption}".lower(),
         "url": str(item.get("source_url") or ""),
     }
 
@@ -1457,7 +1454,7 @@ def _resolve_media_batch(
     )
     from .observability import append_telemetry
     from .media.diagnostics import (
-        measure_rights_capacity,
+        measure_media_capacity,
         sanitize_candidate_diagnostic,
         summarize_candidate_diagnostics,
     )
@@ -1570,23 +1567,9 @@ def _resolve_media_batch(
             attempt_id=attempt_id,
             role=str(spec.get("role") or ""),
         )
-        from .media.license import LicenseError, RightsDecision, validate_upload_candidate
-
-        def _rights_proven(candidate: dict[str, Any]) -> bool:
-            if candidate.get("rights_verified") is not True:
-                return False
-            try:
-                if RightsDecision.from_value(candidate.get("rights_decision")).status != "VERIFIED":
-                    return False
-                validate_upload_candidate(candidate, root=root)
-            except LicenseError:
-                return False
-            return True
-
         accepted = [
             candidate for candidate in aprovados
             if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and _rights_proven(candidate)
         ]
         accepted_candidates_by_query[str(query)] = [dict(candidate) for candidate in accepted]
         from .media.visual_hash import canonical_visual_representatives
@@ -1684,7 +1667,7 @@ def _resolve_media_batch(
             )
             for candidate in diagnostic_candidates
         ]
-        rights_capacity = measure_rights_capacity(
+        media_capacity = measure_media_capacity(
             reuso,
             diagnostic_candidates,
             required_total=needed,
@@ -1692,8 +1675,8 @@ def _resolve_media_batch(
         )
         candidate_diagnostic_summary = summarize_candidate_diagnostics(
             candidate_diagnostics,
-            needed=rights_capacity["rights_required_web"],
-            rights_capacity=rights_capacity,
+            needed=media_capacity["media_required_web"],
+            media_capacity=media_capacity,
         )
         candidate_verification_incomplete = any(
             not candidate.get("capacity_deferred")
@@ -2295,17 +2278,10 @@ def _enriquecer_candidatos(
 
     from .media.evidence import evidence_score, source_context
     from .media.official_sources import official_source
-    from .media.source_verify import enrich_wikimedia_rights, validate_discovered_candidate
-    from .media.license import enrich_source_image_object_rights
-    from .media.license import LicenseError, RightsDecision, validate_upload_candidate
+    from .media.source_verify import validate_discovered_candidate
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
-        enriched_candidate = enrich_wikimedia_rights(candidate, url_policy=url_policy, root=root)
-        if enriched_candidate is not candidate:
-            candidate.clear()
-            candidate.update(enriched_candidate)
-        candidate["rights_checked"] = True
         if not candidate.get("candidate_id"):
             candidate["candidate_id"] = hashlib.sha256(
                 f"{candidate.get('engine','')}|{candidate.get('query', termo)}|{candidate.get('direct_image_url','')}".encode()
@@ -2344,8 +2320,6 @@ def _enriquecer_candidatos(
         "verification_status", "comparisons_attempted", "assets_considered",
         "already_in_library", "library_media_id", "media_library_id", "phash", "capacity_deferred",
         "sha256", "mime", "width", "height",
-        "rights_checked", "rights_verified", "rights_decision", "rights_evidence",
-        "source_rights_attestation", "author", "license", "license_url", "captured_at",
         "credit_text", "alt_text",
     )
     _DISCOVERY_IDENTITY_FIELDS = (
@@ -2369,17 +2343,6 @@ def _enriquecer_candidatos(
         cache_memo[chave or _memo_key(cand)] = {
             campo: cand[campo] for campo in _ENRICHMENT_MEMO_FIELDS if campo in cand
         }
-
-    def _has_valid_rights_attestation(cand: dict) -> bool:
-        if cand.get("rights_verified") is not True:
-            return False
-        try:
-            if RightsDecision.from_value(cand.get("rights_decision")).status != "VERIFIED":
-                return False
-            validate_upload_candidate(cand, root=root)
-        except LicenseError:
-            return False
-        return True
 
     pendentes: list[dict] = []
     for cand in candidates:
@@ -2431,15 +2394,11 @@ def _enriquecer_candidatos(
                 pass
         return hashes_locais.get(chave)
 
-    def _rights_proven_for_capacity(candidate: dict[str, Any]) -> bool:
-        return _has_valid_rights_attestation(candidate)
-
     def _fortes_distintos() -> int:
         fortes = [
             dict(forte)
             for forte in aprovados
             if (forte.get("evidence") or {}).get("verdict") == "deterministic_match"
-            and _rights_proven_for_capacity(forte)
         ]
         if not fortes:
             return 0
@@ -2546,11 +2505,6 @@ def _enriquecer_candidatos(
                 cand["direct_image_url"] = matched
                 cand["canonical_source_asset"] = True
         pagina = str(cand.get("source_page_url") or "")
-        if verify and pagina and not _has_valid_rights_attestation(cand):
-            rights_enriched = enrich_source_image_object_rights(
-                cand, cache_html.get(pagina), root=root
-            )
-            cand.update(rights_enriched)
         nome = unquote(str(cand.get("direct_image_url") or "").split("?")[0].rsplit("/", 1)[-1])
         ctx = (
             source_context(cache_html.get(pagina, ""), str(cand.get("direct_image_url") or ""),
@@ -2614,17 +2568,6 @@ def _enriquecer_candidatos(
                     return
         if pontos.get("recoverable"):
             deferidos.append(cand)
-        elif cand.get("rights_checked") and (
-            (cand.get("rights_decision") or {}).get("status") != "VERIFIED"
-        ):
-            rights = cand.get("rights_decision") or {}
-            cand["rejected_reason"] = str(
-                rights.get("reason_code") or "media_rights_unproven"
-            )
-            if rights.get("retryable") is True:
-                deferidos.append(cand)
-            else:
-                rejeitados.append(cand)
         else:
             (aprovados if pontos["verdict"] in (
                 "deterministic_match", "ambiguous", "insufficient_source_context"
@@ -4728,24 +4671,6 @@ def _reuse_from_library(
         # listada na pagina original.
         if not (url and pagina) or url in vistos:
             return
-        from .media.license import LicenseError, validate_candidate
-
-        rights = {
-            "source_page_url": pagina,
-            "direct_image_url": url,
-            "author": entrada.get("author"),
-            "license": entrada.get("license"),
-            "license_url": entrada.get("license_url"),
-            "captured_at": entrada.get("captured_at"),
-            "credit_text": entrada.get("credit_text"),
-            "alt_text": entrada.get("alt_text"),
-        }
-        try:
-            validate_candidate(rights)
-        except LicenseError:
-            # Old index records have provenance but no rights evidence. They
-            # remain in the index for deduplication, never for executable reuse.
-            return
         vistos.add(url)
         reuso.append(
             {
@@ -4754,7 +4679,10 @@ def _reuse_from_library(
                 "media_id": entrada.get("media_id"),
                 "phash": str(entrada.get("phash") or ""),
                 "subject": entrada.get("subject"),
-                **rights,
+                "source_page_url": pagina,
+                "direct_image_url": url,
+                "alt_text": str(entrada.get("alt_text") or entrada.get("subject") or subject),
+                "credit_text": str(entrada.get("credit_text") or ""),
             }
         )
 

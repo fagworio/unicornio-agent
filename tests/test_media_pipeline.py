@@ -17,7 +17,6 @@ from unicornio_editor.media.converter import (
     prepare_featured_webp,
 )
 from unicornio_editor.media.downloader import MediaDownloadError, _retry_delay, download_image, select_reupload_source
-from unicornio_editor.media.license import LicenseError, attest_source_rights
 from unicornio_editor.media.wordpress_media import friendly_media_filename, upload_image
 
 
@@ -217,29 +216,14 @@ class MediaPipelineTests(unittest.TestCase):
             evidence = {
                 "source_page_url": "https://source.example/page",
                 "direct_image_url": "https://source.example/image.webp",
-                "author": "Autor",
-                "license": "CC0",
-                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
-                "captured_at": "2026-08-20T12:00:00Z",
-                "credit_text": "Crédito da imagem: Autor. Imagem de jogo. Domínio público (CC0).",
                 "alt_text": "Imagem de jogo",
             }
-            evidence["source_rights_attestation"] = attest_source_rights(
-                evidence,
-                '<script type="application/ld+json">'
-                '{"@context":"https://schema.org","@type":"ImageObject",'
-                '"contentUrl":"https://source.example/image.webp",'
-                '"license":"https://creativecommons.org/publicdomain/zero/1.0/",'
-                '"creator":{"@type":"Person","name":"Autor"}}'
-                "</script>",
-                root=directory,
-            )
             result = upload_image(
-                FakeClient(), source, evidence, root=directory,
+                FakeClient(), source, evidence,
             )
             self.assertEqual(result["id"], 7)
 
-    def test_upload_refuses_unproven_rights_without_touching_wordpress(self):
+    def test_upload_requires_technical_source_identity_without_touching_wordpress(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "image.webp"
             source.write_bytes(b"webp")
@@ -247,14 +231,10 @@ class MediaPipelineTests(unittest.TestCase):
             evidence = {
                 "source_page_url": "https://source.example/page",
                 "direct_image_url": "https://source.example/image.webp",
-                "author": "Autor",
-                "license": "CC0",
-                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
-                "captured_at": "2026-08-20T12:00:00Z",
-                "credit_text": "Crédito da imagem: Autor.",
                 "alt_text": "Imagem de jogo",
             }
-            with self.assertRaisesRegex(LicenseError, "not proven"):
+            evidence["direct_image_url"] = ""
+            with self.assertRaisesRegex(ValueError, "direct_image_url"):
                 upload_image(client, source, evidence)
             self.assertEqual(client.calls, [])
 

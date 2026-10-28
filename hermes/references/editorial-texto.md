@@ -19,7 +19,8 @@
   4; de 1.001 a 1.500: pelo menos 6. Para textos maiores, mantenha pelo menos 6
   e aumente conforme a densidade do conteudo. A quantidade e um minimo
   editorial, nao motivo para inserir imagens sem relacao direta — cada imagem
-  deve contextualizar o trecho e passar pela licenca.
+  deve contextualizar o trecho e passar pelas verificações técnicas de origem,
+  identidade e relevância.
 - Imagens inline centralizadas (`figure.aligncenter` ou equivalente); a
   featured image segue o wrapper visual do tema sem duplicar a imagem no corpo.
 - Revise semanticamente titulo, subtitulos, palavra-chave, entidades e termos
@@ -42,8 +43,9 @@
   descricao`, sem texto entre o H2 e a imagem.
 - O H2 deve conter numero, nome identificavel do item e complemento descritivo;
   a sequencia deve ser crescente ou decrescente, sem duplicatas ou lacunas.
-- Imagens genericas ou de outro item nao servem para cumprir a metrica. O
-  credito e a licenca continuam obrigatorios.
+- Imagens genericas ou de outro item nao servem para cumprir a metrica. ALT
+  factual continua obrigatório; legenda/crédito é opcional e não é evidência
+  de origem ou autorização.
 - Remova sempre a tag `<article>` do conteudo; o tema e responsavel pelos
   wrappers externos.
 - Antes de publicar, valide quantidade, numeracao, presenca de H2, imagem

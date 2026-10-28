@@ -476,14 +476,11 @@ def run_pre_publish_checklist(
                 if _canonical_image_url(str(image.get("src") or "")) == feature_url
             ]
             last_image = content_images[-1]
-            expected_credit = plain_text(str(featured_payload.get("credit_text") or ""))
             expected_alt = plain_text(str(featured_payload.get("alt_text") or ""))
             closing_repeat_valid = bool(
                 repeat_claim.get("media_url") == feature_url
                 and repeated_positions == [len(content_images) - 1]
                 and plain_text(str(last_image.get("alt") or "")) == expected_alt
-                and plain_text(str(last_image.get("caption") or "")) == expected_credit
-                and expected_credit.casefold().startswith("crédito da imagem:")
             )
     # Policy v4: media accepted after visual-identity rollout must carry a
     # durable identity and a positive (INITIAL/DIFFERENT) verification.  The

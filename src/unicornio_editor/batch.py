@@ -327,8 +327,8 @@ def _context_for_post(
     requirements = {
         "internal_links_enabled": bool(config.internal_links_enabled),
         # Tudo que depende de IMAGEM pertence a etapa deterministica seguinte
-        # (`media-resolve-batch`), que busca, prova a origem e preenche
-        # autor/licenca/credito. O que o modelo desta chamada ve sao apenas as
+        # (`media-resolve-batch`), que busca, verifica a origem tecnica e
+        # preenche a legenda opcional. O que o modelo desta chamada ve sao apenas as
         # obrigacoes de TEXTO/SEO (`requirements`), sem contagem de imagem:
         # ver `_model_facing_context`.
         "media_stage": {
@@ -338,14 +338,12 @@ def _context_for_post(
                 words, title=title, content=cleaned_html
             ),
             "featured_required": True,
-            "credit_required": True,
+            "caption_optional": True,
             "source_page_required_for_new_media": True,
             "editorial_media_plan": [],
             "not_a_reason_for_needs_retry": [
                 "imagens",
                 "featured",
-                "credito",
-                "licenca",
                 "origem",
             ],
         },

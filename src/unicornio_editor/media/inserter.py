@@ -152,7 +152,7 @@ def minimum_normal_article_paragraphs(
 
 
 def append_featured_credit(html: str, credit_text: str) -> str:
-    """Add one visible featured-image credit without duplicating it.
+    """Add one optional, sanitized featured-image caption without duplicating it.
 
     O credito e sanitizado para TEXTO PURO (nunca HTML) e so e adicionado se
     ainda nao aparecer no conteudo (dedup por texto exato) — evita o caption
@@ -165,8 +165,6 @@ def append_featured_credit(html: str, credit_text: str) -> str:
     credit = plain_text(credit_text)
     if not credit:
         return html
-    if not credit.startswith("Crédito da imagem:"):
-        raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
     if credit in html:
         return html  # ja presente (dedup)
     match = re.search(r"</p>\s*", html, flags=re.IGNORECASE)
@@ -684,8 +682,9 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
     for item in plan:
         if not isinstance(item, Mapping):
             raise MediaInsertionError("each media placement must be an object")
-        required = {"paragraph_index", "media_url", "alt_text", "credit_text", "width", "height"}
+        required = {"paragraph_index", "media_url", "alt_text", "width", "height"}
         allowed = required | {
+            "credit_text",
             "item_identity", "item_title", "item_group", "html_position",
             "item_number", "section_heading", "section_slot", "subject", "placement",
             "role", "media_id",
@@ -747,14 +746,10 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         from .text import plain_text
 
         alt = plain_text(item["alt_text"])
-        credit = plain_text(item["credit_text"])
-        if not credit:
-            raise MediaInsertionError("credit_text is required")
-        if not credit.startswith("Crédito da imagem:"):
-            raise MediaInsertionError("credit_text must start with 'Crédito da imagem:'")
+        credit = plain_text(item.get("credit_text") or "")
         # SEO determinístico (sem IA): title = alt (texto descritivo da obra),
         # garantindo que o <img> nunca fique sem title.
-        img_title = alt or credit
+        img_title = alt
         # Padrao NATIVO do WordPress: shortcode [caption ...]...[/caption].
         # O WP renderiza com estilo proprio (aligncenter, legenda) e mantem o
         # layout da galeria; nao usar <figure> manual para nao quebrar o tema.
@@ -766,6 +761,8 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
         figure = (
             f'[caption id="" align="aligncenter" width="{width}"]'
             f"{img} {escape(credit)}[/caption]"
+            if credit else
+            f'<figure class="wp-caption aligncenter" style="width:{width}px">{img}</figure>'
         )
         placements.append((index, figure, item))
         indexes.append(index)

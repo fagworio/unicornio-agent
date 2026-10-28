@@ -289,7 +289,6 @@ def _recover_locked(
     if (
         (not operation_id or (not is_adoption and not candidate_id))
         or not subject or not source_page or not direct_url
-        or not credit.casefold().startswith("crédito da imagem:")
         or not isinstance(relevance, dict)
         or relevance.get("verdict") != "deterministic_match"
         or not relevance.get("matched")

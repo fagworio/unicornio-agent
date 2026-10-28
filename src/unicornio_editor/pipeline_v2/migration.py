@@ -830,7 +830,7 @@ def repair_compose_114987(
             if item.get("valid")
         )
         checks["accepted_media_evidence"] = bool(state is not None) and all(
-            bool(item.media_url and item.subject and item.credit_text)
+            bool(item.media_url and item.subject)
             for item in state.media.inline
         )
 
@@ -1026,10 +1026,6 @@ def repair_compose_114987(
             "all_accepted_media_reconstructed": set(reconstructed_ids) == set(checks["accepted_media_ids"]),
             "img_elements": len(iter_content_images(str(candidate.get("content") or ""))),
             "distinct_accepted_img_elements": len({attachment_urls.get(media_id) for media_id in reconstructed_ids if attachment_urls.get(media_id)}),
-            "credits_present": all(
-                str(item.credit_text or "") in str(candidate.get("content") or "")
-                for item in state.media.inline
-            ),
             "featured_valid": (
                 state.media.featured.status is FeaturedStatus.VALID
                 and candidate.get("featured_media") == state.media.featured.media_id
@@ -1049,7 +1045,6 @@ def repair_compose_114987(
         if not (
             result["validation"]["all_accepted_media_reconstructed"]
             and result["validation"]["distinct_accepted_img_elements"] == len(checks["accepted_media_ids"])
-            and result["validation"]["credits_present"]
             and result["validation"]["featured_valid"]
             and result["validation"]["seo_valid"]
             and result["validation"]["language_ok"]

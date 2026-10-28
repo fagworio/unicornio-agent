@@ -14,7 +14,9 @@ import secrets
 from typing import Any
 
 _KEY = secrets.token_bytes(32)
-_VERSION = 1
+# Version 2 deliberately excludes historical legal/license metadata. Old
+# process-local seals are not reusable after restart and fail this version check.
+_VERSION = 2
 
 
 def _payload(item: dict[str, Any]) -> bytes:
@@ -36,15 +38,6 @@ def _payload(item: dict[str, Any]) -> bytes:
         "html_position": item.get("html_position"),
         "source_verification_reason_code": str(item.get("source_verification_reason_code") or ""),
         "source_comparison_proved": bool(item.get("source_comparison_proved")),
-        # Rights and visible attribution are distinct from relevance evidence,
-        # but must not be mutable after the runtime approves the exact item.
-        "rights": {
-            key: str(item.get(key) or "")
-            for key in (
-                "author", "license", "license_url", "captured_at",
-                "credit_text", "alt_text",
-            )
-        },
         "evidence": {
             "verdict": str(evidence.get("verdict") or ""),
             "score": evidence.get("score"),

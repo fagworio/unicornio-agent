@@ -218,7 +218,7 @@ abaixo. Estes invariantes devem ser verificados no resultado do runner:
    exato. `cleaned_html` OPCIONAL; `content POST_ID` SÓ quando
    `requires_content: true` ou reescrita real.
 5. IMAGENS: antes do `media_plan`, leia UMA vez `references/politica-imagens.md`
-   (contagem 2/4/6, listicle, fonte/licença/crédito, dimensões, posição no texto,
+   (contagem 2/4/6, listicle, origem técnica, identidade, dimensões, posição no texto,
    reuso, fallback). Busca: `media-search-web "TERMO" --post-id POST_ID --needed N`
    (N = `images.missing`); listicle: UMA chamada
    `media-search-listicle "OBRA 1" "OBRA 2" ... --post-id POST_ID --limit 3`.
@@ -248,8 +248,9 @@ abaixo. Estes invariantes devem ser verificados no resultado do runner:
 11. `skip`/`uncertain`/`awaiting_human` nunca publicam nem marcam READY.
     Publicação: SÓ o cron. Nunca publique manualmente.
 
-O agente nunca muda um post para status de publicação. Créditos de mídia sempre
-visíveis e rastreáveis à licença.
+O agente nunca muda um post para status de publicação. O software valida origem,
+identidade e relevância técnica/editorial; não verifica nem atesta permissão
+legal. Legendas/créditos são opcionais e não substituem essas verificações.
 
 ## Estados (fonte de verdade: meta `_hermes_state` no WordPress)
 

@@ -192,7 +192,7 @@ class ChecklistTests(unittest.TestCase):
             "status": "valid", "media_id": 7, "media_url": featured_url,
             "sha256": "f" * 64, "phash": "f" * 16,
             "visual_group_id": "visual:featured", "alt_text": "Redfall key art",
-            "credit_text": "Crédito da imagem: Fonte oficial",
+            "credit_text": "",
             "width": 1280, "height": 720,
             "visual_verification": {"decision": "INITIAL"},
         }
@@ -225,8 +225,7 @@ class ChecklistTests(unittest.TestCase):
             f'<figcaption>Crédito da imagem: Fonte {item["media_id"]}</figcaption></figure>'
             for item in inline
         ) + (
-            f'<figure><img src="{featured_url}" alt="Redfall key art" width="1280" height="720">'
-            "<figcaption>Crédito da imagem: Fonte oficial</figcaption></figure>"
+            f'<figure><img src="{featured_url}" alt="Redfall key art" width="1280" height="720"></figure>'
         )
         media_context = {
             "visual_identity_policy": 4,

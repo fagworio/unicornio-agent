@@ -240,7 +240,7 @@ def main() -> int:
         "images": {},
         "scenarios": [],
         "media_acquisition": {
-            "source": "controlled local HTTP with exact Schema.org ImageObject rights",
+            "source": "controlled local HTTP with technical source-asset matching",
             "visual_provider": "controlled local OpenAI-compatible endpoint",
             "trailer_waiver": "synthetic audited official_not_found fixture; no live trailer search",
             "wordpress": "real ephemeral REST API and database",

@@ -10,7 +10,6 @@ from unittest import mock
 from unicornio_editor.config import Config
 from unicornio_editor.manifest import manifest_matches, parse_manifest
 from unicornio_editor.media.visual_identity import VisualIdentity, VisualIdentityDecision
-from unicornio_editor.media.license import attest_source_rights as _attest_source_rights
 from unicornio_editor.pipeline_v2.model import (
     BlockerCode,
     FeaturedProgress,
@@ -75,28 +74,9 @@ def _vision_result(*, accepted, status="MATCH", confidence=0.91, visual_type="ke
     }
 
 
-def _mock_source_rights():
-    """Isolate workflow unit tests from rights; dedicated tests exercise proof validation."""
-    from contextlib import ExitStack
-
-    stack = ExitStack()
-    stack.enter_context(mock.patch(
-        "unicornio_editor.workflow.source_page_html", return_value="<html></html>"
-    ))
-    stack.enter_context(mock.patch(
-        "unicornio_editor.media.license.attest_source_rights",
-        return_value={"version": 2, "signature": "0" * 64, "evidence_sha256": "a" * 64},
-    ))
-    stack.enter_context(mock.patch(
-        "unicornio_editor.media.license.validate_upload_candidate",
-        return_value=None,
-    ))
-    return stack
-
-
 def editorial_payload(decision="process"):
-    # Politica de imagens (2/4/6 sem waiver): o payload de teste reflete um
-    # editorial valido — 2 imagens reais com credito + keyword no corpo.
+    # Política editorial de imagens (2/4/6 sem waiver): o payload reflete um
+    # editorial válido com imagens relevantes e keyword no corpo.
     title = "Título sobre videogame e lançamento importante"
     images = (
         '<figure><img src="https://s3.example/noticia-importante-1.webp" alt="%s" width="800" height="450" />'
@@ -215,33 +195,7 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def setUp(self):
-        def attest_test_source(candidate, _html, *, root=None):
-            image_object = {
-                "@context": "https://schema.org",
-                "@type": "ImageObject",
-                "contentUrl": candidate.get("direct_image_url"),
-                "license": candidate.get("license_url"),
-                "creator": {"@type": "Person", "name": candidate.get("author")},
-            }
-            return _attest_source_rights(
-                candidate,
-                '<script type="application/ld+json">'
-                + json.dumps(image_object)
-                + "</script>",
-                root=root,
-            )
-
-        self._source_html_patcher = mock.patch(
-            "unicornio_editor.workflow.source_page_html", return_value="<html></html>"
-        )
-        self._source_html_patcher.start()
-        self.addCleanup(self._source_html_patcher.stop)
-        self._rights_attestation_patcher = mock.patch(
-            "unicornio_editor.media.license.attest_source_rights",
-            side_effect=attest_test_source,
-        )
-        self._rights_attestation_patcher.start()
-        self.addCleanup(self._rights_attestation_patcher.stop)
+        pass
 
     def config(self, dry_run):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=dry_run)
@@ -1268,46 +1222,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(report["media_plan_results"]), 3)
         self.assertTrue(report["media_plan_results"][2]["featured"])
 
-    def test_unproven_image_rights_reject_candidate_before_upload(self):
-        payload = editorial_payload()
-        payload["cleaned_html"] = (
-            "<p>Um videogame.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p>"
-            "<p>Cinco.</p><p>Seis.</p><p>Sete.</p>"
-        )
-        payload["media_plan"] = [
-            {**self.media_item(paragraph_index=0), "direct_image_url": "https://source.example/a.jpg"},
-        ]
-        with mock.patch(
-            "unicornio_editor.workflow.download_image", return_value=Path("/tmp/source.jpg")
-        ), mock.patch(
-            "unicornio_editor.workflow.verify_downloaded_against_source",
-            return_value=(True, "source_reference_found: test"),
-        ), mock.patch(
-            "unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)
-        ), mock.patch(
-            "unicornio_editor.media.license.attest_source_rights", return_value=None
-        ), mock.patch("unicornio_editor.workflow.upload_image") as upload:
-            with tempfile.TemporaryDirectory() as directory:
-                report = apply_editorial(
-                    FakeClient(self.post()), self.config(False), Path(directory), 42, payload
-                )
-        upload.assert_not_called()
-        results = report["media_plan_results"]
-        self.assertEqual(results[0]["reason_code"], "image_rights_unproven")
-
-    def test_unproven_candidate_does_not_block_later_licensed_candidate(self):
-        items = [
-            {
-                **self.media_item(paragraph_index=index * 3),
-                "direct_image_url": f"https://source.example/{name}.jpg",
-                "alt_text": f"Wolverine {name}",
-            }
-            for index, name in enumerate(("unproven", "licensed"))
-        ]
+    def test_candidate_without_legal_metadata_passes_technical_upload_gates(self):
+        item = {
+            "paragraph_index": 0,
+            "source_page_url": "https://source.example/wolverine",
+            "direct_image_url": "https://source.example/wolverine.jpg",
+            "alt_text": "Wolverine artwork",
+            "is_featured": False,
+        }
         editorial = {
             "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
             "cleaned_html": "<p>Wolverine videogame.</p>",
-            "media_plan": items,
+            "media_plan": [item],
         }
         config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
         with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
@@ -1320,14 +1246,6 @@ class WorkflowTests(unittest.TestCase):
              mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
              mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
              mock.patch(
-                 "unicornio_editor.media.license.attest_source_rights",
-                 side_effect=[None, {"version": 2, "signature": "0" * 64, "evidence_sha256": "a" * 64}],
-             ), \
-             mock.patch(
-                 "unicornio_editor.media.license.validate_upload_candidate",
-                 return_value=None,
-             ), \
-             mock.patch(
                  "unicornio_editor.workflow.upload_image",
                  return_value={"id": 77, "source_url": "https://wp.test/77.webp"},
              ) as upload:
@@ -1336,8 +1254,8 @@ class WorkflowTests(unittest.TestCase):
                     editorial, config, object(), Path(directory),
                     preflight={"rejected": [], "featured_vision": []}, post_id=42,
                 )
-        self.assertEqual(results[0]["reason_code"], "image_rights_unproven")
-        self.assertEqual(results[1]["status"], "accepted")
+        self.assertEqual(results[0]["status"], "accepted")
+        self.assertEqual(results[0]["media_id"], 77)
         upload.assert_called_once()
 
     def test_media_plan_falls_back_to_serial_when_pool_cannot_start(self):
@@ -1667,18 +1585,19 @@ class WorkflowTests(unittest.TestCase):
             '<figure><img src="https://s3.example/noticia-importante-2.webp" alt="Título sobre videogame e lançamento importante" width="800" height="450" />'
             "<figcaption>Crédito: Autor. Licença CC BY 4.0 (https://creativecommons.org/licenses/by/4.0).</figcaption></figure>"
         )
-        # Reuse item: media_library_id references an existing attachment whose
-        # title carries the credit block. The apply must download from the
-        # attachment URL and upload a NEW attachment (original untouched).
+        # Reuse does not depend on legal metadata or a caption. The apply must
+        # download from the attachment URL and upload a NEW attachment.
         item = self.media_item(paragraph_index=1, is_featured=True)
         item["media_library_id"] = 500
+        for legacy_field in ("author", "license", "license_url", "captured_at", "credit_text"):
+            item.pop(legacy_field, None)
         payload["media_plan"] = [item]
         attachment = {
             "id": 500,
             "source_url": "https://wp.test/uploads/reuse-source.webp",
             "media_details": {"width": 1920, "height": 1080},
             "alt_text": "Titulo sobre videogame",
-            "title": {"rendered": "Crédito da imagem: Autor Original. Titulo sobre videogame. CC BY 4.0."},
+            "title": {"rendered": "Imagem de videogame"},
             "caption": {"rendered": ""},
         }
 
@@ -1711,7 +1630,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["featured_media"], 77)
         self.assertEqual(client.updated[0][1]["featured_media"], 77)
 
-    def test_apply_rejects_media_library_reuse_without_credit(self):
+    def test_apply_rejects_irrelevant_media_library_reuse_without_credit(self):
         payload = editorial_payload()
         payload["cleaned_html"] = (
             "<p>Um.</p><p>Dois.</p><p>Tres.</p><p>Quatro.</p><p>Cinco.</p>"
@@ -3228,8 +3147,7 @@ def test_execute_media_plan_rejects_final_duplicate_before_upload(tmp_path):
     }
     client = object()
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3456,58 +3374,14 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
         "paragraph_index": 0,
         "source_page_url": "https://source.example/wolverine",
         "direct_image_url": "https://source.example/wolverine-new.jpg",
-        "author": "Autor",
-        "license": "CC BY 4.0",
-        "license_url": "https://creativecommons.org/licenses/by/4.0/",
-        "captured_at": "2026-10-07T00:00:00Z",
-        "credit_text": "Crédito da imagem: Autor.",
         "alt_text": "Wolverine novo",
         "is_featured": False,
         "engine": "duckduckgo",
         "candidate_id": "ddg-wolverine-1",
     }
-    item["rights_evidence"] = {
-        "provider": "wikimedia_commons_api",
-        "file_title": "File:Wolverine.jpg",
-        "image_url": item["direct_image_url"],
-        "author": item["author"],
-        "license": item["license"],
-        "license_url": item["license_url"],
-    }
-    from unicornio_editor.media.license import (
-        attest_wikimedia_rights,
-        validate_upload_candidate as validate_rights,
-    )
-    item["rights_verified"] = True
-    item["source_rights_attestation"] = attest_wikimedia_rights(item, root=tmp_path)
     editorial = {"seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"}, "cleaned_html": "<p>Wolverine videogame.</p>", "media_plan": [item]}
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-
-    def refresh_wikimedia(candidate, *, root=None, **_kwargs):
-        refreshed = dict(candidate)
-        refreshed["rights_evidence"] = {
-            "provider": "wikimedia_commons_api",
-            "file_title": "File:Wolverine.jpg",
-            "image_url": candidate["direct_image_url"],
-            "author": candidate["author"],
-            "license": candidate["license"],
-            "license_url": candidate["license_url"],
-        }
-        proof = attest_wikimedia_rights(refreshed, root=root)
-        refreshed["rights_evidence"]["evidence_sha256"] = proof["evidence_sha256"]
-        refreshed["source_rights_attestation"] = proof
-        refreshed["rights_verified"] = True
-        return refreshed
-
-    validated_rights = []
-
-    def capture_validated_rights(evidence, *, root=None):
-        validated_rights.append(dict(evidence))
-        return validate_rights(evidence, root=root)
-
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.media.source_verify.enrich_wikimedia_rights", side_effect=refresh_wikimedia), \
-         mock.patch("unicornio_editor.media.license.validate_upload_candidate", side_effect=capture_validated_rights), \
+    with \
          mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
@@ -3522,8 +3396,6 @@ def test_execute_media_plan_uploads_new_final_phash(tmp_path):
         results, _, _ = _execute_media_plan(editorial, config, object(), tmp_path, preflight={"rejected": [], "featured_vision": []}, post_id=115088, previous_inline_phashes=("ccc04d9fb063ed1c",))
     upload.assert_called_once()
     assert results[0]["media_id"] == 115094
-    assert validated_rights[0]["rights_evidence"]["provider"] == "wikimedia_commons_api"
-    assert validated_rights[0]["rights_evidence"]["evidence_sha256"] == validated_rights[0]["source_rights_attestation"]["evidence_sha256"]
     index = json.loads((tmp_path / "work" / "media_index.json").read_text())
     assert index["entries"][-1]["phash"] == "1111111111111111"
     funnel = [
@@ -3559,8 +3431,7 @@ def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp
         "media_plan": [item],
     }
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3615,8 +3486,7 @@ def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp
         vision_enabled=True, vision_api_key="test-key", vision_base_url="https://vision.test/v1",
     )
 
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
          mock.patch("unicornio_editor.workflow.prepare_featured_webp", side_effect=lambda *_args: (final_path.write_bytes(final_bytes), final_path)[1]), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3692,8 +3562,7 @@ def test_execute_media_plan_reuses_featured_decision_when_final_sha_matches(tmp_
         "subject": featured_vision_subject(editorial),
     }
 
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=source_path), \
          mock.patch("unicornio_editor.workflow.prepare_featured_webp", return_value=final_path), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
@@ -3771,7 +3640,7 @@ def test_featured_preflight_to_apply_keeps_wordpress_context_and_evidence(tmp_pa
         }
 
     preflight_upload_evidence = []
-    with _mock_source_rights(), mock.patch(
+    with mock.patch(
         "unicornio_editor.workflow._validate_featured_candidate_vision",
         side_effect=approved_preflight,
     ) as vision_preflight, \
@@ -3861,8 +3730,7 @@ def test_article_source_candidate_does_not_re_resolve_provenance(tmp_path):
         "media_plan": [item],
     }
     config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
-    with _mock_source_rights(), \
-         mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
          mock.patch("unicornio_editor.workflow.download_image", return_value=tmp_path / "source.jpg"), \
          mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
          mock.patch("unicornio_editor.workflow.verify_downloaded_against_source") as verify, \
