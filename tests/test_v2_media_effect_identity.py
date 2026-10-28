@@ -60,6 +60,7 @@ def test_historical_media_usage_is_ignored_but_current_applied_usage_is_effect(t
         authorization_id="old-auth",
         status="applied",
     )
+    _update_usage(tmp_path, 115863, applied_at="2026-10-27T12:00:00+00:00")
 
     historical = _media_effect_evidence(tmp_path, 115736, journal)
     assert historical["effects_detected"] is False

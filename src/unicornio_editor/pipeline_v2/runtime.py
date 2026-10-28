@@ -1290,7 +1290,12 @@ def _media_effect_evidence(
                     timestamp_ambiguous = any(state in {"invalid", "ambiguous"} for state in timestamp_states)
                     if usage_identity == expected_identity and identity_complete:
                         classification = "CURRENT_CORRELATED"
-                    elif identity_complete and not timestamp_ambiguous:
+                    elif (
+                        identity_complete
+                        and bool(timestamp_columns)
+                        and "valid_utc" in timestamp_states
+                        and not timestamp_ambiguous
+                    ):
                         classification = "HISTORICAL_PROVEN"
                     else:
                         classification = "IDENTITY_UNCERTAIN"
