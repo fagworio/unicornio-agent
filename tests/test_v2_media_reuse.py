@@ -68,6 +68,80 @@ def test_adaptive_media_planning_uses_persisted_rejection_reasons(tmp_path):
     assert "https://cdn.test/old.webp" in history["urls"]
 
 
+@pytest.mark.parametrize(
+    "legacy_reason",
+    [
+        "metadados de licença inválidos ou incompletos: source-bound rights evidence is invalid",
+        "a origem não comprova licença compatível vinculada a esta imagem",
+        "atestação de direitos inválida: rights are not proven for this exact source image",
+        "image_rights_attestation_invalid",
+    ],
+)
+def test_real_history_reader_does_not_blacklist_legacy_rights_only_rejections(
+    tmp_path, legacy_reason,
+):
+    batch = tmp_path / "work" / "batches" / "batch-legacy-rights"
+    batch.mkdir(parents=True)
+    image_url = "https://cdn.test/previously-rights-rejected.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "previously_rejected_candidate",
+            "original_reason": legacy_reason,
+            "direct_image_url": image_url,
+            "sha256": "a" * 64,
+            "rights_decision": {"reason_code": "media_rights_unproven"},
+            "evidence": {"verdict": "reject", "gate": "rights"},
+        }]}]}),
+        encoding="utf-8",
+    )
+
+    history = _media_rejection_history(tmp_path, 115234)
+
+    assert image_url not in history["urls"]
+    assert "a" * 64 not in history["fingerprints"]
+    assert legacy_reason not in history["reasons"]
+
+
+def test_real_history_reader_preserves_technical_rejection_with_legacy_rights_reason(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-legacy-rights-and-mismatch"
+    batch.mkdir(parents=True)
+    image_url = "https://cdn.test/rights-and-source-mismatch.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "rejected_reason": "metadados de licença inválidos ou incompletos",
+            "original_gate": "source_verification",
+            "direct_image_url": image_url,
+            "evidence": {"verdict": "source_mismatch", "gate": "source_verification"},
+        }]}]}),
+        encoding="utf-8",
+    )
+
+    history = _media_rejection_history(tmp_path, 115234)
+
+    assert image_url in history["revalidation_urls"]
+    assert image_url not in history["urls"]
+
+
+def test_real_history_reader_uses_explicit_legacy_rights_gate_without_message(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-legacy-rights-gate"
+    batch.mkdir(parents=True)
+    image_url = "https://cdn.test/rights-gate-only.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "disposition": "reject_final",
+            "direct_image_url": image_url,
+            "evidence": {"verdict": "reject", "gate": "rights"},
+        }]}]}),
+        encoding="utf-8",
+    )
+
+    history = _media_rejection_history(tmp_path, 115234)
+
+    assert image_url not in history["urls"]
+
+
 def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, tmp_path):
     import unicornio_editor.pipeline_v2.runtime as runtime
     import unicornio_editor.pipeline_v2.visual_media as visual_media

@@ -68,6 +68,15 @@ def _artwork(index: int) -> bytes:
     return stream.getvalue()
 
 
+def _webp_artwork(index: int) -> bytes:
+    import io
+
+    image = Image.open(io.BytesIO(_artwork(index)))
+    stream = io.BytesIO()
+    image.save(stream, format="WEBP")
+    return stream.getvalue()
+
+
 class ControlledSource:
     """Local source and OpenAI-compatible vision endpoint; no external network."""
 
@@ -77,6 +86,7 @@ class ControlledSource:
             "hollow-knight-silksong-screenshot-one.png": _artwork(2),
             "hollow-knight-silksong-screenshot-two.png": _artwork(3),
         }
+        self.imported_webp = _webp_artwork(4)
         self.operations: list[str] = []
         owner = self
 
@@ -119,6 +129,8 @@ class ControlledSource:
                         + "</article></body></html>"
                     ).encode()
                     return self._send(200, "text/html; charset=utf-8", document)
+                if path == "/images/imported-hotlink.webp":
+                    return self._send(200, "image/webp", owner.imported_webp)
                 prefix = "/images/"
                 if path.startswith(prefix) and path[len(prefix):] in owner.images:
                     return self._send(200, "image/png", owner.images[path[len(prefix):]])
@@ -398,6 +410,39 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
         assert checklist["all_passed"], json.dumps(failed_checklist_items, ensure_ascii=False)
         assert checklist["media_decision"]["accepted"] == 2
 
+        # Imported figures remain sanitized/preserved by the HTML cleaner, but
+        # a relevant external WebP is not an accepted WordPress attachment and
+        # therefore cannot count as verified V2 media or pass the write gate.
+        from unicornio_editor.html_cleaner import clean_html
+
+        imported_figure = clean_html(
+            f'<figure><img src="{source.base_url}/images/imported-hotlink.webp" '
+            'width="1600" height="900" alt="Hollow Knight Silksong gameplay scene" />'
+            "<figcaption>Legenda editorial opcional.</figcaption></figure>"
+        )
+        assert "imported-hotlink.webp" in imported_figure
+        hotlink_content = content + imported_figure
+        hotlink_editorial = {
+            **editorial_with_media,
+            "cleaned_html": str(editorial_with_media["cleaned_html"]) + imported_figure,
+        }
+        hotlink_checklist = run_pre_publish_checklist(
+            post={**current, "featured_media": int(featured_id)},
+            editorial=hotlink_editorial,
+            content=hotlink_content,
+            backup_path=backup,
+            config=config,
+            client=case.client,
+            media_context=media_progress.to_dict(),
+        )
+        hotlink_gate = next(
+            item for item in hotlink_checklist["items"]
+            if item["name"] == "imagens_attachment_verificado"
+        )
+        assert hotlink_gate["status"] == "fail", hotlink_gate
+        assert hotlink_gate["blocker"] == "media_origin"
+        assert hotlink_checklist["all_passed"] is False
+
         run_id = f"wp-e2e-media-ready-{post_id}"
         work_state = WorkState(
             state=LifecycleState.READY,
@@ -490,6 +535,11 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
                 "passed": checklist["passed"],
                 "failed": checklist["failed"],
                 "media_decision": checklist["media_decision"],
+                "imported_external_webp": {
+                    "cleaner_preserved_figure": "imported-hotlink.webp" in imported_figure,
+                    "attachment_gate_status": hotlink_gate["status"],
+                    "blocker": hotlink_gate.get("blocker"),
+                },
             },
             "writer_result": writer_result,
             "journal": case._journal_summary(post_id),

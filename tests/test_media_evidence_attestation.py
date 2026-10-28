@@ -50,6 +50,7 @@ def test_attestation_is_bound_to_technical_source_subject_and_role():
     for field, value in (
         ("source_page_url", "https://other.test/story"),
         ("subject", "Halo Infinite"),
+        ("alt_text", "Halo Infinite key art"),
         ("role", "featured"),
     ):
         changed = {**original, field: value}
@@ -68,8 +69,9 @@ def test_old_process_seal_version_is_not_accepted():
     item = _candidate()
     seal = attest_deterministic_media(item)
     assert seal is not None
-    item["source_evidence_attestation"] = {**seal, "version": 1}
-    assert not _item_evidence_relevant(item, {"metroid prime 4"})
+    for old_version in (1, 2):
+        item["source_evidence_attestation"] = {**seal, "version": old_version}
+        assert not _item_evidence_relevant(item, {"metroid prime 4"})
 
 
 def test_agent_supplied_verdict_without_runtime_seal_does_not_bypass_url_gate():

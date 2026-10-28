@@ -395,6 +395,41 @@ class ChecklistTests(unittest.TestCase):
         )
         self.assertEqual(item["status"], "fail")
 
+    def test_v2_blocks_relevant_external_webp_not_reconciled_to_attachment(self):
+        from unicornio_editor.html_cleaner import clean_html
+
+        imported_html = clean_html(
+            '<figure><img src="https://external.example/redfall-scene.webp?token=private" '
+            'width="1280" height="720" alt="Redfall gameplay scene" />'
+            "<figcaption>Legenda editorial opcional.</figcaption></figure>"
+        )
+        self.assertIn("redfall-scene.webp", imported_html)
+        media_context = {
+            "visual_identity_policy": 4,
+            "inline": {"required": 2, "accepted": []},
+            "featured": {},
+        }
+
+        result = self._run_checklist(
+            editorial=editorial_payload(cleaned_html=imported_html),
+            content=imported_html,
+            media_context=media_context,
+        )
+
+        item = next(
+            row for row in result["items"]
+            if row["name"] == "imagens_attachment_verificado"
+        )
+        self.assertEqual(item["status"], "fail")
+        self.assertEqual(item["blocker"], "media_origin")
+        self.assertEqual(item["phase"], "media_validation")
+        self.assertEqual(
+            item["invalid_media"][0],
+            {"slot": 0, "source_host": "external.example", "reason_code": "attachment_not_reconciled"},
+        )
+        self.assertNotIn("token=private", str(item))
+        self.assertFalse(result["all_passed"])
+
     def test_listicle_does_not_exempt_final_duplicate_of_another_inline(self):
         content = "<h2>1. Jogo A</h2><p>Descrição.</p><img src=\"https://media.example/other.webp\"><h2>2. Jogo B</h2><p>Descrição.</p><img src=\"https://media.example/crop.webp\">"
         media_context = {

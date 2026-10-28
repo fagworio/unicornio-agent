@@ -346,6 +346,7 @@ def run_pre_publish_checklist(
         for asset in inline_assets
         if str((asset.get("visual_verification") or {}).get("decision") or "") in {"SAME_IMAGE", "SAME_ART_CROP"}
     }
+    v2_valid_inline_urls: set[str] = set()
     # The quota is based on final, canonical frames. WordPress size variants
     # of the same attachment do not inflate the 2/4/6 count.
     if visual_identity_policy >= 4 and isinstance(media_context, Mapping):
@@ -360,6 +361,7 @@ def run_pre_publish_checklist(
             and int(asset.get("media_id") or 0) in valid_ids
             and str(asset.get("media_url") or "").strip()
         }
+        v2_valid_inline_urls = proven_urls
         image_count = len({_canonical_image_url(url) for url in inline_images} & proven_urls)
     else:
         image_count = len({_canonical_image_url(url) for url in inline_images} - confirmed_duplicate_urls)
@@ -865,6 +867,44 @@ def run_pre_publish_checklist(
                 blocker="provider_error",
                 phase="media_validation",
             )
+        # An imported <figure><img> can be relevant, WebP and dimensionally
+        # plausible while still pointing at an untracked external hotlink.
+        # For V2, every image in the final HTML must map to an accepted,
+        # visually verified inline attachment (or the actual featured
+        # attachment when an existing list/closing-repeat rule allows it).
+        verified_attachment_urls = set(v2_valid_inline_urls)
+        if featured_ok and featured_url:
+            verified_attachment_urls.add(_canonical_image_url(featured_url))
+        unverified_html_images = [
+            (index, image) for index, image in enumerate(content_images)
+            if _canonical_image_url(str(image.get("src") or ""))
+            not in verified_attachment_urls
+        ]
+        # Do not echo full source URLs into persisted checklist diagnostics:
+        # imported HTML can contain signed/query-token URLs.
+        unverified_descriptors = []
+        for index, image in unverified_html_images:
+            try:
+                source_host = (urlsplit(str(image.get("src") or "")).hostname or "")[:120]
+            except ValueError:
+                source_host = ""
+            unverified_descriptors.append({
+                "slot": index,
+                "source_host": source_host,
+                "reason_code": "attachment_not_reconciled",
+            })
+        check(
+            "imagens_attachment_verificado",
+            not unverified_html_images,
+            (
+                f"{len(content_images) - len(unverified_html_images)} imagem(ns) ligada(s) a attachments V2 verificados"
+                if not unverified_html_images
+                else f"{len(unverified_html_images)} imagem(ns) do HTML sem attachment V2 tecnicamente verificado"
+            ),
+            invalid_media=unverified_descriptors,
+            blocker="media_origin" if unverified_html_images else None,
+            phase="media_validation" if unverified_html_images else None,
+        )
     inline_ids_by_url: dict[str, int] = {}
     if isinstance(media_context, Mapping):
         inline_context = media_context.get("inline")

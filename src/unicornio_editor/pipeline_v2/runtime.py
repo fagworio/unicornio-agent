@@ -44,11 +44,32 @@ _LEGACY_MEDIA_RIGHTS_MARKERS = (
     "license proof", "license evidence", "direitos de imagem",
     "crédito visível", "credito visivel", "licença compatível",
     "licenca compativel", "licença não", "licenca nao",
+    # Reasons persisted by the pre-removal upload preflight and Wikimedia
+    # rights adapter. Keep these specific: a generic mention of "license" in
+    # an editorial caption must never disable technical rejection history.
+    "metadados de licença inválidos", "metadados de licenca invalidos",
+    "atestação de direitos inválida", "atestacao de direitos invalida",
+    "a origem não comprova licença compatível",
+    "a origem nao comprova licenca compativel",
+    "revalidação atual dos direitos wikimedia",
+    "revalidacao atual dos direitos wikimedia",
+    "direitos não comprovados", "direitos nao comprovados",
+    "rights are not proven", "source rights evidence",
+    "source-bound rights evidence", "rights attestation", "image rights",
+    "source rights", "license metadata", "image-credit format",
+    "license reference does not match a supported license",
+    "no_exact_image_object", "unsupported_commercial_or_derivative_terms",
+    "unsupported_or_incomplete_image_object", "image_object_without_bound_license",
+    "wikimedia_rights_metadata_incomplete", "wikimedia_rights_response_invalid",
+    "wikimedia_rights_unverified",
 )
 _TECHNICAL_MEDIA_REJECTION_MARKERS = (
     "source_mismatch", "source_bytes_mismatch", "source_page_unavailable",
     "source_asset_unavailable", "source_scan_incomplete", "source_decode_failed",
     "duplicate_existing_frame", "duplicate_frame", "width_below_minimum",
+    "source_page_unreachable", "source_reference_not_found",
+    "source_verification_inconclusive", "unsafe_source_url", "source_url_invalid",
+    "network_error", "timeout", "provider_error", "decode_failed",
     "resolution", "identity_mismatch", "unrelated",
 )
 
@@ -70,7 +91,10 @@ def _is_legacy_rights_only_media_decision(value: Mapping[str, Any]) -> bool:
                 field_value = item.get(field)
                 if isinstance(field_value, str):
                     texts.append(field_value.casefold())
-            for key in ("evidence", "invalid_media"):
+            for key in (
+                "evidence", "invalid_media", "rights_decision", "rights_evidence",
+                "source_rights_attestation",
+            ):
                 nested = item.get(key)
                 if isinstance(nested, Mapping):
                     collect(nested, depth + 1)
@@ -89,7 +113,11 @@ def _is_legacy_rights_only_media_decision(value: Mapping[str, Any]) -> bool:
         for marker in _TECHNICAL_MEDIA_REJECTION_MARKERS
         for text in texts
     )
-    return has_legacy_rights and not has_technical_rejection
+    has_legacy_rights_gate = any(
+        text.strip() in {"rights", "license", "licença", "licenca", "image_rights", "media_rights"}
+        for text in texts
+    )
+    return (has_legacy_rights or has_legacy_rights_gate) and not has_technical_rejection
 
 
 def _canonical_embedded_media_url(value: str) -> str:

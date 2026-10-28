@@ -14,9 +14,10 @@ import secrets
 from typing import Any
 
 _KEY = secrets.token_bytes(32)
-# Version 2 deliberately excludes historical legal/license metadata. Old
-# process-local seals are not reusable after restart and fail this version check.
-_VERSION = 2
+# Version 3 excludes historical legal/license metadata but binds the
+# editorial ALT to the exact technical evidence item. Old process-local seals
+# are not reusable after restart and fail this version check.
+_VERSION = 3
 
 
 def _payload(item: dict[str, Any]) -> bytes:
@@ -29,6 +30,7 @@ def _payload(item: dict[str, Any]) -> bytes:
         "direct_image_url": str(item.get("direct_image_url") or ""),
         "matched_image_url": str(item.get("matched_image_url") or ""),
         "subject": str(item.get("subject") or ""),
+        "alt_text": str(item.get("alt_text") or ""),
         "role": str(item.get("role") or ""),
         "is_featured": bool(item.get("is_featured")),
         "item_identity": str(item.get("item_identity") or ""),

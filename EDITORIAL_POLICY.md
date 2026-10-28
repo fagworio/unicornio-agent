@@ -33,38 +33,27 @@ Engajamento significa reduzir atrito de leitura e aumentar utilidade, nao fabric
 6. trailer quando e parte real da noticia;
 7. CTA somente no template padrao do site.
 
-## Imagens e direitos autorais
+## Imagens: decisão editorial e controles técnicos
 
-O Google Images será usado somente como ferramenta de descoberta. Uma imagem aparecer nos resultados não significa que seja pública, livre de direitos ou autorizada para republicação.
+O pipeline não verifica, classifica nem atesta licença, autorização,
+titularidade ou permissão legal de uso. A decisão editorial sobre o uso de uma
+imagem externa pertence ao operador/editor e deve seguir as políticas aplicáveis
+fora do software. Um resultado de busca, crédito, domínio oficial ou presença
+em uma página não é tratado pelo código como autorização.
 
-### Fontes aceitáveis
+Os controles automatizados são técnicos e editoriais: a página de origem e a
+URL direta do asset devem ser identificáveis; a origem declarada é comparada
+com os bytes obtidos; URLs inseguras, divergências, conteúdo inacessível,
+arquivos inválidos e imagens irrelevantes ou duplicadas são bloqueados. Mídia
+nova aceita é convertida para WebP e enviada à Media Library local do
+WordPress. Imagens preservadas no HTML final precisam corresponder a
+attachments V2 tecnicamente verificados; hotlinks ou imagens externas não
+reconciliadas bloqueiam a validação.
 
-- domínio público, com evidência na página original;
-- Creative Commons compatível com republicação e com os termos de atribuição respeitados;
-- permissão explícita do autor, publisher, desenvolvedora, assessoria ou detentor dos direitos;
-- material oficial cuja página autorize claramente o uso editorial.
-
-### Regras obrigatórias
-
-1. Abrir a página original, não confiar apenas no preview ou na URL do Google Images.
-2. Registrar `source_page_url`, `direct_image_url`, autor, licença, `license_url`, data da captura e texto de crédito.
-3. Recusar a imagem se a licença não puder ser confirmada ou se os termos proibirem o uso pretendido.
-4. Baixar uma cópia temporária, validar origem/MIME/tamanho, converter para WebP e enviar à Media Library local do WordPress.
-5. Não usar bucket, CDN externo ou hotlink da imagem original.
-6. Exibir crédito visível em toda imagem no formato `Crédito da imagem: Autor/Empresa. Descrição da imagem. Informação de licença ou direitos autorais, quando aplicável.`, com link para a origem/licença quando possível.
-7. Entender que crédito não substitui licença nem transforma material protegido em público.
-8. Remover a imagem do plano e procurar outra fonte quando houver dúvida.
-
-As categorias acima definem o que pode ser editorialmente autorizado; elas não
-significam que todas já sejam verificadas automaticamente pelo pipeline. No
-momento, a validação automática aceita apenas CC0, domínio público, CC BY e CC
-BY-SA compatíveis, com evidência vinculada à imagem exata. Permissão direta,
-termos de publisher e material de press kit exigem revisão humana até que haja
-um grant verificável e uma política aprovada para esse tipo de evidência. Um
-domínio oficial, crédito, rótulo "imagem de divulgação" ou resultado de busca
-isoladamente nunca autoriza upload.
-
-O `media_plan` deve conter a evidência da licença antes que qualquer upload ou alteração no post seja permitido.
+ALT deve descrever a imagem de forma factual e compatível com o contexto. Uma
+legenda ou crédito editorial é opcional e não substitui a verificação técnica
+de origem nem constitui evidência legal. Campos jurídicos em planos e estados
+históricos são ignorados pelo fluxo atual e não são reescritos por compatibilidade.
 
 ## SEO
 - uma keyword principal;
