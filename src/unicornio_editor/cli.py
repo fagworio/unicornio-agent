@@ -1668,8 +1668,18 @@ def _resolve_media_batch(
             for decision, group in diagnostic_groups
             for candidate in group
         ]
+        candidate_order = {}
+        for index, candidate in enumerate(candidates):
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if candidate_id:
+                candidate_order.setdefault(candidate_id, index)
+        candidate_diagnostics.sort(
+            key=lambda row: candidate_order.get(
+                str(row.get("candidate_id") or ""), len(candidate_order)
+            )
+        )
         candidate_diagnostic_summary = summarize_candidate_diagnostics(
-            candidate_diagnostics
+            candidate_diagnostics, needed=needed
         )
         candidate_verification_incomplete = any(
             not candidate.get("capacity_deferred")

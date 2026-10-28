@@ -42,6 +42,29 @@ _SAFE_VERIFICATION_STAGES = frozenset({
     "asset_extraction", "source_reference", "candidate_image_fetch",
     "source_asset_fetch", "visual_comparison", "asset_comparison_limit",
 })
+_SAFE_RIGHTS_STATUSES = frozenset({
+    "VERIFIED", "UNPROVEN", "INCOMPATIBLE", "UNSUPPORTED_EVIDENCE",
+    "TECHNICAL_FAILURE",
+})
+_SAFE_RIGHTS_BASES = frozenset({
+    "schema.org_image_object", "wikimedia_commons_api",
+    "no_exact_image_object", "source_page_unavailable",
+    "unsupported_commercial_or_derivative_terms",
+    "unsupported_or_incomplete_image_object",
+    "image_object_without_bound_license", "wikimedia_api_unavailable",
+    "wikimedia_rights_metadata_incomplete",
+    "wikimedia_image_identity_unavailable", "wikimedia_image_identity_mismatch",
+    "wikimedia_rights_response_invalid", "wikimedia_rights_unverified",
+    "legacy_or_missing_evidence",
+})
+_SAFE_RIGHTS_REASONS = frozenset({
+    "image_object_license_match", "media_rights_unproven",
+    "media_rights_incompatible", "media_rights_unsupported_evidence",
+    "media_rights_unavailable",
+})
+_UNRESOLVED_RIGHTS_STATUSES = frozenset({
+    "UNPROVEN", "UNSUPPORTED_EVIDENCE", "TECHNICAL_FAILURE",
+})
 
 
 def _bounded_int(value: Any, *, low: int = -100, high: int = 100) -> int | None:
@@ -140,6 +163,22 @@ def sanitize_candidate_diagnostic(
         candidate.get("source_verification_reason_code") or evidence.get("reason_code"),
         limit=48,
     )
+    rights = candidate.get("rights_decision")
+    rights = rights if isinstance(rights, dict) else {}
+    raw_rights_status = str(rights.get("status") or "")
+    rights_status = (
+        raw_rights_status if raw_rights_status in _SAFE_RIGHTS_STATUSES else "unassessed"
+    )
+    raw_rights_basis = str(rights.get("basis") or "")
+    rights_basis = (
+        raw_rights_basis if raw_rights_basis in _SAFE_RIGHTS_BASES
+        else "other" if raw_rights_basis else ""
+    )
+    raw_rights_reason = str(rights.get("reason_code") or "")
+    rights_reason = (
+        raw_rights_reason if raw_rights_reason in _SAFE_RIGHTS_REASONS
+        else "other" if raw_rights_reason else ""
+    )
     query = str(candidate.get("query") or "")
     elapsed = _bounded_int(
         candidate.get("verification_elapsed_ms"), low=0, high=600_000
@@ -177,6 +216,14 @@ def sanitize_candidate_diagnostic(
             str(candidate.get("source_page_url") or "").strip()
         ),
         "source_verified": bool(candidate.get("valid")),
+        # Rights evidence is summarized separately from source provenance.
+        # Only bounded enums are copied; raw grants, URLs and provider text are
+        # intentionally excluded from diagnostics.
+        "official_source": candidate.get("official_source") is True,
+        "rights_status": rights_status,
+        "rights_basis": rights_basis,
+        "rights_reason": rights_reason,
+        "rights_retryable": rights.get("retryable") is True,
     }
     return result
 
@@ -201,8 +248,15 @@ def sanitize_candidate_diagnostics(
 
 def summarize_candidate_diagnostics(
     candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    needed: int | None = None,
 ) -> dict[str, Any]:
-    """Aggregate the complete candidate funnel without exposing source text."""
+    """Aggregate candidate-stage evidence without exposing source text.
+
+    Rights counts describe discovered candidates before vision, download,
+    upload, or final application; they are not proof of final media capacity
+    or of a completed/exhausted search.
+    """
     decisions = Counter()
     categories = Counter()
     reason_codes = Counter()
@@ -212,7 +266,17 @@ def summarize_candidate_diagnostics(
     verification_states = Counter()
     roles = Counter()
     duration_totals = Counter()
+    rights_statuses = Counter()
+    rights_bases = Counter()
+    rights_reasons = Counter()
     candidate_ids: set[str] = set()
+    official_candidates = 0
+    official_rights_unresolved = 0
+    open_license_verified_candidates = 0
+    accepted_after_rights = 0
+    technical_rights_failures = 0
+    verified_rights_candidates = 0
+    first_rights_blocker: dict[str, str] | None = None
     for row in candidates:
         if not isinstance(row, dict):
             continue
@@ -222,6 +286,42 @@ def summarize_candidate_diagnostics(
         role = str(row.get("role") or "")
         if role in _SAFE_MEDIA_ROLES:
             roles[role] += 1
+        rights_status = str(row.get("rights_status") or "unassessed")
+        if rights_status not in _SAFE_RIGHTS_STATUSES:
+            rights_status = "unassessed"
+        rights_statuses[rights_status] += 1
+        rights_basis = str(row.get("rights_basis") or "")
+        if rights_basis in _SAFE_RIGHTS_BASES or rights_basis == "other":
+            rights_bases[rights_basis] += 1
+        rights_reason = str(row.get("rights_reason") or "")
+        if rights_reason in _SAFE_RIGHTS_REASONS or rights_reason == "other":
+            rights_reasons[rights_reason] += 1
+        is_official = row.get("official_source") is True
+        if is_official:
+            official_candidates += 1
+            if rights_status in _UNRESOLVED_RIGHTS_STATUSES:
+                official_rights_unresolved += 1
+        if (
+            rights_status == "VERIFIED"
+            and rights_basis in {"schema.org_image_object", "wikimedia_commons_api"}
+        ):
+            open_license_verified_candidates += 1
+        if rights_status == "VERIFIED":
+            verified_rights_candidates += 1
+        if decision == "accepted" and rights_status == "VERIFIED":
+            accepted_after_rights += 1
+        if rights_status == "TECHNICAL_FAILURE":
+            technical_rights_failures += 1
+        if (
+            first_rights_blocker is None
+            and rights_status in _UNRESOLVED_RIGHTS_STATUSES | {"INCOMPATIBLE"}
+        ):
+            first_rights_blocker = {
+                "candidate_id": _safe_token(row.get("candidate_id"), limit=64),
+                "engine": _safe_token(row.get("engine"), limit=24),
+                "status": rights_status,
+                "reason": rights_reason or "other",
+            }
         category = str(row.get("source_verification_category") or "unclassified")
         categories[category] += 1
         stage = _safe_token(row.get("source_verification_stage"), limit=40) or "unknown"
@@ -245,6 +345,9 @@ def summarize_candidate_diagnostics(
         candidate_id = _safe_token(row.get("candidate_id"), limit=64)
         if candidate_id:
             candidate_ids.add(candidate_id)
+    rights_needed = (
+        _bounded_int(needed, low=0, high=1000) if needed is not None else None
+    )
     return {
         "candidates_seen": sum(decisions.values()),
         "unique_candidate_ids": len(candidate_ids),
@@ -260,4 +363,20 @@ def summarize_candidate_diagnostics(
         "source_verification_categories": dict(sorted(categories.items())),
         "source_verification_reasons": dict(sorted(reason_codes.items())),
         "first_gate_and_verdict": dict(sorted(gates.items())),
+        "rights_status_counts": dict(sorted(rights_statuses.items())),
+        "rights_basis_counts": dict(sorted(rights_bases.items())),
+        "rights_reason_counts": dict(sorted(rights_reasons.items())),
+        "official_candidates": official_candidates,
+        "official_rights_unresolved": official_rights_unresolved,
+        "open_license_verified_candidates": open_license_verified_candidates,
+        "accepted_after_rights": accepted_after_rights,
+        "technical_rights_failures": technical_rights_failures,
+        "rights_metric_scope": "discovered_candidates_before_vision_and_upload",
+        "rights_needed_candidates": rights_needed,
+        "rights_verified_candidates": verified_rights_candidates,
+        "rights_verified_candidate_shortfall": (
+            max(0, rights_needed - verified_rights_candidates)
+            if rights_needed is not None else None
+        ),
+        "first_rights_blocker": first_rights_blocker,
     }

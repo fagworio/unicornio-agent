@@ -65,6 +65,11 @@ def test_candidate_diagnostics_keep_scores_and_field_evidence_without_urls_or_te
         "needs_vision": False,
         "source_reference_present": True,
         "source_verified": True,
+        "official_source": False,
+        "rights_status": "unassessed",
+        "rights_basis": "",
+        "rights_reason": "",
+        "rights_retryable": False,
     }]
     assert "https://" not in serialized
     assert "signed-image-secret" not in serialized
@@ -127,3 +132,95 @@ def test_candidate_diagnostic_summary_correlates_attempt_and_decisions_without_u
     assert "secret" not in serialized
     assert "private search phrase" not in serialized
     assert "https://" not in serialized
+
+
+def test_rights_diagnostics_distinguish_proof_gaps_from_technical_failures():
+    rows = sanitize_candidate_diagnostics([
+        {
+            "candidate_id": "open-license",
+            "official_source": True,
+            "rights_decision": {
+                "status": "VERIFIED",
+                "basis": "schema.org_image_object",
+                "reason_code": "image_object_license_match",
+            },
+        },
+        {
+            "candidate_id": "official-unproven",
+            "official_source": True,
+            "rights_decision": {
+                "status": "UNPROVEN",
+                "basis": "no_exact_image_object",
+                "reason_code": "media_rights_unproven",
+            },
+            "source_page_url": "https://publisher.test/page?signature=do-not-log",
+        },
+        {
+            "candidate_id": "rights-outage",
+            "rights_decision": {
+                "status": "TECHNICAL_FAILURE",
+                "basis": "source_page_unavailable",
+                "reason_code": "media_rights_unavailable",
+                "retryable": True,
+            },
+        },
+        {"candidate_id": "not-checked"},
+    ], role="inline")
+    rows[0]["decision"] = "accepted"
+
+    summary = summarize_candidate_diagnostics(rows, needed=3)
+    serialized = json.dumps({"rows": rows, "summary": summary})
+
+    assert rows[0]["rights_status"] == "VERIFIED"
+    assert rows[1]["rights_status"] == "UNPROVEN"
+    assert rows[1]["official_source"] is True
+    assert rows[2]["rights_status"] == "TECHNICAL_FAILURE"
+    assert rows[2]["rights_retryable"] is True
+    assert rows[3]["rights_status"] == "unassessed"
+    assert summary["rights_status_counts"] == {
+        "TECHNICAL_FAILURE": 1,
+        "UNPROVEN": 1,
+        "VERIFIED": 1,
+        "unassessed": 1,
+    }
+    assert summary["rights_basis_counts"] == {
+        "no_exact_image_object": 1,
+        "schema.org_image_object": 1,
+        "source_page_unavailable": 1,
+    }
+    assert summary["official_candidates"] == 2
+    assert summary["official_rights_unresolved"] == 1
+    assert summary["open_license_verified_candidates"] == 1
+    assert summary["accepted_after_rights"] == 1
+    assert summary["technical_rights_failures"] == 1
+    assert summary["rights_metric_scope"] == "discovered_candidates_before_vision_and_upload"
+    assert summary["rights_needed_candidates"] == 3
+    assert summary["rights_verified_candidates"] == 1
+    assert summary["rights_verified_candidate_shortfall"] == 2
+    assert summary["first_rights_blocker"] == {
+        "candidate_id": "official-unproven",
+        "engine": "",
+        "status": "UNPROVEN",
+        "reason": "media_rights_unproven",
+    }
+    assert "do-not-log" not in serialized
+    assert "https://" not in serialized
+
+
+def test_rights_diagnostics_redact_unrecognized_values():
+    row = sanitize_candidate_diagnostic({
+        "rights_decision": {
+            "status": "permission granted by user: secret@example.test",
+            "basis": "signed grant https://private.test/terms?token=secret",
+            "reason_code": "raw-error: Authorization private-token",
+            "retryable": True,
+        },
+    })
+
+    serialized = json.dumps(row)
+    assert row["rights_status"] == "unassessed"
+    assert row["rights_basis"] == "other"
+    assert row["rights_reason"] == "other"
+    assert "private.test" not in serialized
+    assert "secret" not in serialized
+    assert "private-token" not in serialized

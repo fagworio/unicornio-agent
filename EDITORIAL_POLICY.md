@@ -55,6 +55,15 @@ O Google Images será usado somente como ferramenta de descoberta. Uma imagem ap
 7. Entender que crédito não substitui licença nem transforma material protegido em público.
 8. Remover a imagem do plano e procurar outra fonte quando houver dúvida.
 
+As categorias acima definem o que pode ser editorialmente autorizado; elas não
+significam que todas já sejam verificadas automaticamente pelo pipeline. No
+momento, a validação automática aceita apenas CC0, domínio público, CC BY e CC
+BY-SA compatíveis, com evidência vinculada à imagem exata. Permissão direta,
+termos de publisher e material de press kit exigem revisão humana até que haja
+um grant verificável e uma política aprovada para esse tipo de evidência. Um
+domínio oficial, crédito, rótulo "imagem de divulgação" ou resultado de busca
+isoladamente nunca autoriza upload.
+
 O `media_plan` deve conter a evidência da licença antes que qualquer upload ou alteração no post seja permitido.
 
 ## SEO

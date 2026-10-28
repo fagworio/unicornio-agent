@@ -22,6 +22,18 @@ Provedores de busca são **somente índices de descoberta** — a fonte é a pá
 **ORIGINAL** da imagem (preview, thumbnail ou resultado do buscador não são
 fonte de proveniência nem de direitos).
 
+## Limite atual da validação automática
+
+A política editorial também admite permissão explícita e material oficial cuja
+página autorize claramente o uso. Essas categorias ainda não têm um resolver
+automático de grants no pipeline. Até esse suporte existir, só são aceitos
+automaticamente os direitos CC0, domínio público, CC BY e CC BY-SA compatíveis
+com prova vinculada à imagem exata descrita abaixo. Permissão direta, termos de
+publisher e press kits dependem de revisão humana antes de qualquer upload.
+Domínio oficial, crédito, rótulos como "imagem de divulgação" e resultados de
+busca não substituem essa prova. Não cadastre uma fonte como autorizada sem
+revisão explícita dos termos e do escopo de transformação/republicação.
+
 ## Ordem de busca
 
 1. **Reuso elegível primeiro**: consulte `media-search` e use apenas entradas
