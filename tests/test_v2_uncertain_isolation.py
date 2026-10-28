@@ -597,6 +597,72 @@ def test_prewriter_media_sidecar_identity_mismatch_is_not_eligible(tmp_path, fie
     assert "valid_media_artifacts" in evidence["missing_criteria"]
 
 
+
+
+def test_prewriter_media_sidecar_preview_and_apply_share_eligibility(tmp_path):
+    args, _journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    sidecar = {
+        "schema_version": 1,
+        "post_id": POST,
+        "run_id": RUN,
+        "cycle_id": CYCLE,
+        "cycle_round": 1,
+        "authorization_id": AUTH,
+        "checkpoint_sha256": transaction_admin._hash_bytes(partial_bytes),
+        "media_ids": [115775],
+    }
+    sidecar_path = tmp_path / "backups" / str(POST) / "editorial.partial.v2.json"
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    target = next(item for item in preview["evidence"]["round_post_evidence"] if item["post_id"] == POST)
+    assert target["prewriter_media_isolation"]["eligible"] is True
+    applied = isolate_uncertain_transaction(
+        **args,
+        apply=True,
+        preview=preview,
+        operator_authorization="synthetic-e2e-sidecar-isolation",
+    )
+    assert applied["status"] == "applied"
+    assert applied["wordpress_writes"] == 0
+    archive = Path(applied["archive_dir"])
+    assert (archive / f"editorial-partial-v2-{POST}.json").read_text(encoding="utf-8") == sidecar_path.read_text(encoding="utf-8")
+    assert sidecar_path.read_text(encoding="utf-8") == json.dumps(sidecar)
+
+
+@pytest.mark.parametrize(
+    "mutator,expected_error",
+    [
+        (lambda sidecar: sidecar.update(schema_version=2), "schema_version_unsupported"),
+        (lambda sidecar: sidecar.update(media_ids=[115775, 115775]), "media_ids_duplicate"),
+        (lambda sidecar: sidecar.update(media_ids=[-1]), "media_id_0_invalid"),
+        (lambda sidecar: sidecar.update(media_ids=["115775"]), "media_id_0_invalid"),
+        (lambda sidecar: sidecar.update(media_ids=[True]), "media_id_0_invalid"),
+    ],
+)
+def test_prewriter_media_sidecar_strict_validation_is_not_eligible(tmp_path, mutator, expected_error):
+    args, _journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    sidecar = {
+        "schema_version": 1,
+        "post_id": POST,
+        "run_id": RUN,
+        "cycle_id": CYCLE,
+        "cycle_round": 1,
+        "authorization_id": AUTH,
+        "checkpoint_sha256": transaction_admin._hash_bytes(partial_bytes),
+        "media_ids": [115775],
+    }
+    mutator(sidecar)
+    (tmp_path / "backups" / str(POST) / "editorial.partial.v2.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+    result = isolate_uncertain_transaction(**args, apply=False)
+    target = next(item for item in result["evidence"]["round_post_evidence"] if item["post_id"] == POST)
+    evidence = target["prewriter_media_isolation"]
+    assert expected_error in evidence["sidecar_parse_errors"]
+    assert evidence["eligible"] is False
+    assert result["wordpress_writes"] == 0
+
+
 def test_prewriter_media_isolation_archives_exact_partial_and_closes_only_proven_round(tmp_path):
     args, original_journal, partial_bytes = _prewriter_media_fixture(tmp_path)
     preview = isolate_uncertain_transaction(**args, apply=False)

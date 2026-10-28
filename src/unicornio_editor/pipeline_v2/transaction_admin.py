@@ -630,7 +630,30 @@ def _media_artifact_snapshot(root: Path, post_id: int) -> dict[str, Any]:
                     partial_ids.add(int(value))
 
     sidecar_summary: dict[str, Any] = {"parse_status": result["sidecar"]["parse_status"]}
+    sidecar_parse_errors: list[str] = []
     if parsed_sidecar is not None:
+        schema_version = parsed_sidecar.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        ):
+            sidecar_parse_errors.append("schema_version_unsupported")
+        for key in ("post_id", "run_id", "cycle_id", "cycle_round", "authorization_id", "checkpoint_sha256", "media_ids"):
+            if key not in parsed_sidecar:
+                sidecar_parse_errors.append(f"missing_{key}")
+        sidecar_media_ids = parsed_sidecar.get("media_ids")
+        normalized_sidecar_ids: list[int] = []
+        if not isinstance(sidecar_media_ids, list):
+            sidecar_parse_errors.append("media_ids_not_list")
+        else:
+            for index, value in enumerate(sidecar_media_ids):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    sidecar_parse_errors.append(f"media_id_{index}_invalid")
+                    continue
+                normalized_sidecar_ids.append(value)
+            if len(normalized_sidecar_ids) != len(set(normalized_sidecar_ids)):
+                sidecar_parse_errors.append("media_ids_duplicate")
         sidecar_summary.update({
             key: parsed_sidecar.get(key)
             for key in (
@@ -638,21 +661,13 @@ def _media_artifact_snapshot(root: Path, post_id: int) -> dict[str, Any]:
                 "cycle_round", "authorization_id", "checkpoint_sha256",
             )
         })
-        sidecar_media_ids = parsed_sidecar.get("media_ids", [])
-        sidecar_summary["media_ids"] = (
-            sorted(
-                int(value)
-                for value in sidecar_media_ids
-                if not isinstance(value, bool) and str(value).isdigit()
-            )
-            if isinstance(sidecar_media_ids, list)
-            else None
-        )
+        sidecar_summary["media_ids"] = normalized_sidecar_ids
     return {
         **result,
         "partial_sha256": result["partial"].get("sha256", ""),
         "partial_media_ids": sorted(partial_ids),
         "partial_parse_errors": partial_parse_errors,
+        "sidecar_parse_errors": sidecar_parse_errors,
         "sidecar_summary": sidecar_summary,
     }
 
@@ -787,6 +802,7 @@ def _prewriter_media_isolation_evidence(
         not sidecar_present
         or (
             sidecar.get("parse_status") == "valid"
+            and not artifacts.get("sidecar_parse_errors")
             and str(sidecar.get("post_id") or "") == str((journal or {}).get("post_id") or "")
             and str(sidecar.get("run_id") or "") == str(run_id or "")
             and str(sidecar.get("cycle_id") or "") == str((journal or {}).get("cycle_id") or "")
@@ -831,6 +847,7 @@ def _prewriter_media_isolation_evidence(
         "registry_identity_conflicts": registry_identity_conflicts,
         "sidecar_present": sidecar_present,
         "sidecar_identity_matches": sidecar_identity_matches,
+        "sidecar_parse_errors": list(artifacts.get("sidecar_parse_errors") or []),
         "missing_criteria": [
             name for name, ok in (
                 ("current_journal_identity", current_identity),

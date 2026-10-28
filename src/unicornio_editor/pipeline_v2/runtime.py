@@ -1151,6 +1151,7 @@ def _media_effect_evidence(
     applied_media_ids: set[int] = set()
     accepted_decision_count = 0
     historical_media_usage_ignored: list[dict[str, Any]] = []
+    media_usage_classifications: list[dict[str, Any]] = []
     partial_path = Path(root) / "backups" / str(int(post_id)) / "editorial.partial.json"
     if partial_path.is_file():
         try:
@@ -1187,6 +1188,7 @@ def _media_effect_evidence(
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
             "historical_media_usage_ignored": historical_media_usage_ignored,
+            "media_usage_classifications": media_usage_classifications,
         }
 
     run_id = str(journal.get("run_id") or "")
@@ -1225,10 +1227,17 @@ def _media_effect_evidence(
                     name for name in ("run_id", "cycle_id", "cycle_round", "authorization_id")
                     if name in usage_columns
                 ]
+                timestamp_columns = [
+                    name for name in ("accepted_at", "applied_at", "readback_confirmed_at")
+                    if name in usage_columns
+                ]
                 select_identity = ", ".join(identity_columns)
+                select_timestamps = ", ".join(timestamp_columns)
                 usage_query = "SELECT wordpress_media_id, status"
                 if select_identity:
                     usage_query += ", " + select_identity
+                if select_timestamps:
+                    usage_query += ", " + select_timestamps
                 usage_query += " FROM media_usage WHERE post_id = ?"
                 rows = db.execute(usage_query, (int(post_id),)).fetchall()
                 expected_identity = (
@@ -1239,7 +1248,8 @@ def _media_effect_evidence(
                 )
                 for row in rows:
                     media_id, status = row[:2]
-                    identity_values = dict(zip(identity_columns, row[2:]))
+                    values = dict(zip(identity_columns + timestamp_columns, row[2:]))
+                    identity_values = {name: values.get(name, "") for name in identity_columns}
                     usage_run_id = identity_values.get("run_id", "")
                     usage_cycle_id = identity_values.get("cycle_id", "")
                     usage_round = identity_values.get("cycle_round", "")
@@ -1256,7 +1266,43 @@ def _media_effect_evidence(
                         str(usage_round or ""),
                         str(usage_auth or ""),
                     )
-                    if usage_identity != expected_identity:
+                    identity_complete = bool(
+                        identity_columns == ["run_id", "cycle_id", "cycle_round", "authorization_id"]
+                        and all(usage_identity)
+                    )
+                    timestamp_states: list[str] = []
+                    for name in timestamp_columns:
+                        raw = values.get(name)
+                        if raw in (None, ""):
+                            timestamp_states.append("missing")
+                            continue
+                        text = str(raw).strip().replace("Z", "+00:00")
+                        try:
+                            parsed = datetime.fromisoformat(text)
+                        except (TypeError, ValueError):
+                            timestamp_states.append("invalid")
+                            continue
+                        timestamp_states.append(
+                            "valid_utc"
+                            if parsed.tzinfo is not None and parsed.utcoffset() is not None
+                            else "ambiguous"
+                        )
+                    timestamp_ambiguous = any(state in {"invalid", "ambiguous"} for state in timestamp_states)
+                    if usage_identity == expected_identity and identity_complete:
+                        classification = "CURRENT_CORRELATED"
+                    elif identity_complete and not timestamp_ambiguous:
+                        classification = "HISTORICAL_PROVEN"
+                    else:
+                        classification = "IDENTITY_UNCERTAIN"
+                    media_usage_classifications.append({
+                        "media_id": media_id,
+                        "status": str(status or ""),
+                        "classification": classification,
+                        "identity": usage_identity,
+                        "expected_identity": expected_identity,
+                        "timestamps": timestamp_states,
+                    })
+                    if classification == "HISTORICAL_PROVEN":
                         historical_media_usage_ignored.append({
                             "media_id": media_id,
                             "status": str(status or ""),
@@ -1268,7 +1314,11 @@ def _media_effect_evidence(
                         accepted_media_ids.add(media_id)
                         if str(status or "") == "applied":
                             applied_media_ids.add(media_id)
-                        reasons.append("media_usage_outside_initial_state")
+                        reasons.append(
+                            "media_usage_outside_initial_state"
+                            if classification == "CURRENT_CORRELATED"
+                            else "media_usage_identity_uncertain"
+                        )
             if "media_runs" in table_names and run_id:
                 row = db.execute(
                     """SELECT planned_deficits, acquisition_outcome
@@ -1304,6 +1354,7 @@ def _media_effect_evidence(
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
             "historical_media_usage_ignored": historical_media_usage_ignored,
+            "media_usage_classifications": media_usage_classifications,
         }
 
     effect_reasons = [reason for reason in reasons if reason != "media_registry_incomplete"]
@@ -1324,6 +1375,7 @@ def _media_effect_evidence(
             "applied_media_ids": sorted(applied_media_ids),
             "accepted_decision_count": accepted_decision_count,
             "historical_media_usage_ignored": historical_media_usage_ignored,
+            "media_usage_classifications": media_usage_classifications,
             "acquisition_checkpoint": acquisition_checkpoint,
         }
     return {
@@ -1339,6 +1391,7 @@ def _media_effect_evidence(
         "applied_media_ids": sorted(applied_media_ids),
         "accepted_decision_count": accepted_decision_count,
         "historical_media_usage_ignored": historical_media_usage_ignored,
+        "media_usage_classifications": media_usage_classifications,
     }
 
 

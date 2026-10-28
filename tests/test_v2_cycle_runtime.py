@@ -480,6 +480,7 @@ def test_reconcile_interrupted_pre_writer_with_media_effects_stays_blocked(tmp_p
             "applied_media_ids": [],
             "accepted_decision_count": 1,
             "historical_media_usage_ignored": [],
+            "media_usage_classifications": [],
         },
     }]
 
