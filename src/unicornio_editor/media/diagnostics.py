@@ -62,6 +62,12 @@ _SAFE_RIGHTS_REASONS = frozenset({
     "media_rights_incompatible", "media_rights_unsupported_evidence",
     "media_rights_unavailable",
 })
+_RIGHTS_REJECTION_REASONS = frozenset({
+    "media_rights_unproven",
+    "media_rights_incompatible",
+    "media_rights_unsupported_evidence",
+    "media_rights_unavailable",
+})
 _UNRESOLVED_RIGHTS_STATUSES = frozenset({
     "UNPROVEN", "UNSUPPORTED_EVIDENCE", "TECHNICAL_FAILURE",
 })
@@ -224,6 +230,9 @@ def sanitize_candidate_diagnostic(
         "rights_basis": rights_basis,
         "rights_reason": rights_reason,
         "rights_retryable": rights.get("retryable") is True,
+        # Set by the resolver only after the source-bound rights evidence is
+        # validated; diagnostics never copy the attestation or its payload.
+        "rights_attestation_current": candidate.get("rights_verified") is True,
     }
     return result
 
@@ -246,10 +255,186 @@ def sanitize_candidate_diagnostics(
     ]
 
 
+def _rights_status(candidate: dict[str, Any]) -> str:
+    decision = candidate.get("rights_decision")
+    if not isinstance(decision, dict):
+        return "unassessed"
+    status = str(decision.get("status") or "")
+    return status if status in _SAFE_RIGHTS_STATUSES else "unassessed"
+
+
+def _has_verified_rights(candidate: dict[str, Any]) -> bool:
+    return (
+        candidate.get("rights_verified") is True
+        and _rights_status(candidate) == "VERIFIED"
+    )
+
+
+def _is_relevance_qualified_frame(candidate: dict[str, Any]) -> bool:
+    evidence = candidate.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return (
+        candidate.get("valid") is True
+        and str(evidence.get("gate") or "") == "relevance"
+        and str(evidence.get("verdict") or "") == "deterministic_match"
+        and bool(str(candidate.get("direct_image_url") or "").strip())
+        and not candidate.get("capacity_deferred")
+    )
+
+
+def _has_visual_hash(candidate: dict[str, Any]) -> bool:
+    value = candidate.get("phash")
+    return bool(
+        isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{16}", value)
+    ) or callable(getattr(value, "__sub__", None))
+
+
+def _distinct_frame_count(candidates: list[dict[str, Any]]) -> int | None:
+    try:
+        from .visual_hash import canonical_visual_representatives
+
+        return len(canonical_visual_representatives(candidates))
+    except Exception:  # noqa: BLE001 - observability must never break acquisition
+        return None
+
+
+def _sanitize_effective_rights_blocker(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    status = str(value.get("status") or "")
+    reason = str(value.get("reason") or "")
+    return {
+        "candidate_id": _safe_token(value.get("candidate_id"), limit=64),
+        "engine": _safe_token(value.get("engine"), limit=24),
+        "status": status if status in _SAFE_RIGHTS_STATUSES else "unassessed",
+        "reason": reason if reason in _SAFE_RIGHTS_REASONS else "other",
+    }
+
+
+def measure_rights_capacity(
+    reuse_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    web_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    required_total: int,
+    search_requested_web: int,
+) -> dict[str, Any]:
+    """Measure proven, distinct rights capacity without affecting media gates.
+
+    Only candidates that passed deterministic source and relevance checks and
+    carry the resolver's current verified-rights flag count as usable frames.
+    Visual identity is counted with the same canonical pHash grouping used by
+    media selection. Missing hashes are not treated as proof of a distinct
+    frame. This metric does not change any selection or publication decision.
+    """
+    reuse_rows = [row for row in reuse_candidates if isinstance(row, dict)]
+    web_rows = [row for row in web_candidates if isinstance(row, dict)]
+    reuse_raw = sum(_has_verified_rights(row) for row in reuse_rows)
+    web_raw = sum(_has_verified_rights(row) for row in web_rows)
+    reuse_rights_frames = [row for row in reuse_rows if _has_verified_rights(row)]
+    web_rights_frames = [row for row in web_rows if _has_verified_rights(row)]
+    reuse_frames = [
+        row for row in reuse_rights_frames
+        if _is_relevance_qualified_frame(row)
+    ]
+    web_frames = [
+        row for row in web_rights_frames
+        if _is_relevance_qualified_frame(row)
+    ]
+    reuse_distinct = _distinct_frame_count(reuse_frames)
+    web_distinct = _distinct_frame_count(web_rights_frames)
+    web_effective_distinct = _distinct_frame_count(web_frames)
+    effective_distinct = _distinct_frame_count(reuse_frames + web_frames)
+    identity_available = all(
+        count is not None
+        for count in (
+            reuse_distinct, web_distinct, web_effective_distinct, effective_distinct
+        )
+    )
+    required = _bounded_int(required_total, low=0, high=1000)
+    requested_web = _bounded_int(search_requested_web, low=0, high=1000)
+    required_web = (
+        max(0, required - reuse_distinct)
+        if required is not None and reuse_distinct is not None else None
+    )
+    first_effective_blocker: dict[str, str] | None = None
+    effective_shortfall = (
+        max(0, required - effective_distinct)
+        if required is not None and effective_distinct is not None else None
+    )
+    if identity_available and effective_distinct is not None and effective_shortfall:
+        verified_frames = reuse_frames + web_frames
+        unresolved_statuses = _UNRESOLVED_RIGHTS_STATUSES | {"INCOMPATIBLE"}
+        for candidate in web_rows:
+            status = _rights_status(candidate)
+            rejection_reason = str(candidate.get("rejected_reason") or "")
+            if (
+                status not in unresolved_statuses
+                or candidate.get("rights_checked") is not True
+                or rejection_reason not in _RIGHTS_REJECTION_REASONS
+                or not _is_relevance_qualified_frame(candidate)
+                or not _has_visual_hash(candidate)
+            ):
+                continue
+            increased = _distinct_frame_count(verified_frames + [candidate])
+            if increased is None or increased <= effective_distinct:
+                continue
+            safe = sanitize_candidate_diagnostic(candidate)
+            first_effective_blocker = {
+                "candidate_id": safe["candidate_id"],
+                "engine": safe["engine"],
+                "status": safe["rights_status"],
+                "reason": safe["rights_reason"] or "other",
+            }
+            break
+
+    return {
+        "rights_required_total": required,
+        "rights_reuse_verified_candidates_raw": reuse_raw,
+        "rights_reuse_verified": reuse_distinct,
+        "rights_required_web": required_web,
+        "rights_search_requested_web": requested_web,
+        "rights_web_verified_candidates_raw": web_raw,
+        "rights_web_verified": web_distinct,
+        "rights_verified_candidates_raw": web_raw,
+        "rights_verified_distinct_frames": web_distinct,
+        "rights_verified_distinct_shortfall": (
+            max(0, required_web - web_distinct)
+            if required_web is not None and web_distinct is not None else None
+        ),
+        "rights_verified_distinct_scope": (
+            "web_candidates_with_verified_rights_and_proven_phash_before_final_selection"
+        ),
+        "rights_effective_verified": effective_distinct,
+        "rights_effective_shortfall": (
+            effective_shortfall
+        ),
+        "rights_reuse_verified_without_visual_identity": sum(
+            not _has_visual_hash(row) for row in reuse_frames
+        ),
+        "rights_web_verified_without_visual_identity": sum(
+            not _has_visual_hash(row) for row in web_rights_frames
+        ),
+        "rights_visual_identity_available": identity_available,
+        "rights_visual_identity_complete": (
+            identity_available
+            and all(
+                _has_visual_hash(row)
+                for row in reuse_rights_frames + web_rights_frames
+            )
+        ),
+        "rights_effective_web_verified": web_effective_distinct,
+        "rights_effective_capacity_scope": (
+            "distinct_frames_passing_source_relevance_and_current_verified_rights_flag"
+        ),
+        "first_effective_rights_blocker": first_effective_blocker,
+    }
+
+
 def summarize_candidate_diagnostics(
     candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
     needed: int | None = None,
+    rights_capacity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate candidate-stage evidence without exposing source text.
 
@@ -276,7 +461,7 @@ def summarize_candidate_diagnostics(
     accepted_after_rights = 0
     technical_rights_failures = 0
     verified_rights_candidates = 0
-    first_rights_blocker: dict[str, str] | None = None
+    first_unresolved_rights_candidate: dict[str, str] | None = None
     for row in candidates:
         if not isinstance(row, dict):
             continue
@@ -304,19 +489,24 @@ def summarize_candidate_diagnostics(
         if (
             rights_status == "VERIFIED"
             and rights_basis in {"schema.org_image_object", "wikimedia_commons_api"}
+            and row.get("rights_attestation_current") is True
         ):
             open_license_verified_candidates += 1
-        if rights_status == "VERIFIED":
+        if rights_status == "VERIFIED" and row.get("rights_attestation_current") is True:
             verified_rights_candidates += 1
-        if decision == "accepted" and rights_status == "VERIFIED":
+        if (
+            decision == "accepted"
+            and rights_status == "VERIFIED"
+            and row.get("rights_attestation_current") is True
+        ):
             accepted_after_rights += 1
         if rights_status == "TECHNICAL_FAILURE":
             technical_rights_failures += 1
         if (
-            first_rights_blocker is None
+            first_unresolved_rights_candidate is None
             and rights_status in _UNRESOLVED_RIGHTS_STATUSES | {"INCOMPATIBLE"}
         ):
-            first_rights_blocker = {
+            first_unresolved_rights_candidate = {
                 "candidate_id": _safe_token(row.get("candidate_id"), limit=64),
                 "engine": _safe_token(row.get("engine"), limit=24),
                 "status": rights_status,
@@ -348,7 +538,54 @@ def summarize_candidate_diagnostics(
     rights_needed = (
         _bounded_int(needed, low=0, high=1000) if needed is not None else None
     )
-    return {
+    capacity_summary: dict[str, Any] = {}
+    raw_capacity = rights_capacity if isinstance(rights_capacity, dict) else {}
+    capacity_count_fields = {
+        "rights_required_total",
+        "rights_reuse_verified_candidates_raw",
+        "rights_reuse_verified",
+        "rights_required_web",
+        "rights_search_requested_web",
+        "rights_web_verified_candidates_raw",
+        "rights_web_verified",
+        "rights_verified_candidates_raw",
+        "rights_verified_distinct_frames",
+        "rights_verified_distinct_shortfall",
+        "rights_effective_web_verified",
+        "rights_effective_verified",
+        "rights_effective_shortfall",
+        "rights_reuse_verified_without_visual_identity",
+        "rights_web_verified_without_visual_identity",
+    }
+    for key in capacity_count_fields:
+        if key in raw_capacity:
+            value = raw_capacity[key]
+            capacity_summary[key] = (
+                _bounded_int(value, low=0, high=1000) if value is not None else None
+            )
+    for key in (
+        "rights_visual_identity_available", "rights_visual_identity_complete"
+    ):
+        if key in raw_capacity:
+            capacity_summary[key] = raw_capacity[key] is True
+    if raw_capacity.get("rights_verified_distinct_scope") == (
+        "web_candidates_with_verified_rights_and_proven_phash_before_final_selection"
+    ):
+        capacity_summary["rights_verified_distinct_scope"] = raw_capacity[
+            "rights_verified_distinct_scope"
+        ]
+    if raw_capacity.get("rights_effective_capacity_scope") == (
+        "distinct_frames_passing_source_relevance_and_current_verified_rights_flag"
+    ):
+        capacity_summary["rights_effective_capacity_scope"] = raw_capacity[
+            "rights_effective_capacity_scope"
+        ]
+    capacity_summary["first_effective_rights_blocker"] = (
+        _sanitize_effective_rights_blocker(
+            raw_capacity.get("first_effective_rights_blocker")
+        )
+    )
+    summary = {
         "candidates_seen": sum(decisions.values()),
         "unique_candidate_ids": len(candidate_ids),
         "decisions": dict(sorted(decisions.items())),
@@ -378,5 +615,14 @@ def summarize_candidate_diagnostics(
             max(0, rights_needed - verified_rights_candidates)
             if rights_needed is not None else None
         ),
-        "first_rights_blocker": first_rights_blocker,
+        "rights_candidate_shortfall_scope": (
+            "raw_web_candidate_rows_not_distinct_visual_capacity"
+        ),
+        "rights_verified_candidates_raw": verified_rights_candidates,
+        "first_unresolved_rights_candidate": first_unresolved_rights_candidate,
     }
+    summary.update(capacity_summary)
+    # Keep the old key as a compatibility alias, now with causal rather than
+    # merely unresolved-candidate semantics.
+    summary["first_rights_blocker"] = summary.get("first_effective_rights_blocker")
+    return summary

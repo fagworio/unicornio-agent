@@ -1457,6 +1457,7 @@ def _resolve_media_batch(
     )
     from .observability import append_telemetry
     from .media.diagnostics import (
+        measure_rights_capacity,
         sanitize_candidate_diagnostic,
         summarize_candidate_diagnostics,
     )
@@ -1658,28 +1659,41 @@ def _resolve_media_batch(
             ("rejected", rejeitados),
             ("deferred", deferidos),
         )
-        candidate_diagnostics = [
-            sanitize_candidate_diagnostic(
-                candidate,
-                decision=decision,
-                attempt_id=attempt_id,
-                role=str(item.get("role") or ""),
-            )
-            for decision, group in diagnostic_groups
-            for candidate in group
-        ]
         candidate_order = {}
         for index, candidate in enumerate(candidates):
             candidate_id = str(candidate.get("candidate_id") or "")
             if candidate_id:
                 candidate_order.setdefault(candidate_id, index)
-        candidate_diagnostics.sort(
-            key=lambda row: candidate_order.get(
-                str(row.get("candidate_id") or ""), len(candidate_order)
+        decision_by_object = {
+            id(candidate): decision
+            for decision, group in diagnostic_groups
+            for candidate in group
+        }
+        diagnostic_candidates = sorted(
+            all_examined,
+            key=lambda candidate: candidate_order.get(
+                str(candidate.get("candidate_id") or ""), len(candidate_order)
+            ),
+        )
+        candidate_diagnostics = [
+            sanitize_candidate_diagnostic(
+                candidate,
+                decision=decision_by_object.get(id(candidate), ""),
+                attempt_id=attempt_id,
+                role=str(item.get("role") or ""),
             )
+            for candidate in diagnostic_candidates
+        ]
+        rights_capacity = measure_rights_capacity(
+            reuso,
+            diagnostic_candidates,
+            required_total=needed,
+            search_requested_web=needed_web,
         )
         candidate_diagnostic_summary = summarize_candidate_diagnostics(
-            candidate_diagnostics, needed=needed
+            candidate_diagnostics,
+            needed=rights_capacity["rights_required_web"],
+            rights_capacity=rights_capacity,
         )
         candidate_verification_incomplete = any(
             not candidate.get("capacity_deferred")

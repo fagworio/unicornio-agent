@@ -765,6 +765,90 @@ def test_media_resolve_marks_local_reuse_as_not_required(monkeypatch, tmp_path):
     assert result["posts"][0]["reuse"][0]["valid"] is True
 
 
+def test_media_resolve_rights_capacity_reports_reuse_and_web_frames(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    reuse = {
+        "url": "https://cdn.test/reuse.webp",
+        "source": "https://source.test/reuse",
+        "media_id": 81,
+        "phash": "0" * 16,
+    }
+    web_candidates = [
+        {
+            "candidate_id": "web-duplicate",
+            "direct_image_url": "https://cdn.test/reuse-copy.webp",
+            "source_page_url": "https://source.test/reuse-copy",
+            "engine": "bing",
+            "phash": "0" * 16,
+        },
+        {
+            "candidate_id": "web-distinct",
+            "direct_image_url": "https://cdn.test/distinct.webp",
+            "source_page_url": "https://source.test/distinct",
+            "engine": "bing",
+            "phash": "f" * 16,
+        },
+    ]
+
+    def enrich(candidates, **_kwargs):
+        for candidate in candidates:
+            candidate.update({
+                "valid": True,
+                "rights_checked": True,
+                "rights_verified": True,
+                "rights_decision": {
+                    "status": "VERIFIED",
+                    "basis": "schema.org_image_object",
+                    "reason_code": "image_object_license_match",
+                },
+                "evidence": {
+                    "gate": "relevance",
+                    "verdict": "deterministic_match",
+                    "score": 9,
+                },
+                "evidence_score": 9,
+            })
+        return list(candidates), [], []
+
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [reuse])
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", enrich)
+    monkeypatch.setattr(search, "search_web_images_batch", lambda queries, **_kwargs: [{
+        "query": queries[0],
+        "candidates": web_candidates,
+        "engine_reports": {"bing": {"failure_kind": "ok"}},
+    }])
+
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "rights-capacity-reuse-web",
+            "posts": [{
+                "post_id": 115234,
+                "subject": "Test",
+                "query": "test query",
+                "needed": 3,
+                "limit": 3,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+    )
+
+    summary = result["posts"][0]["candidate_diagnostic_summary"]
+    assert summary["rights_required_total"] == 3
+    assert summary["rights_reuse_verified"] == 1
+    assert summary["rights_required_web"] == 2
+    assert summary["rights_search_requested_web"] == 2
+    assert summary["rights_web_verified"] == 2
+    assert summary["rights_effective_verified"] == 2
+    assert summary["rights_effective_shortfall"] == 1
+
+
 def test_legacy_library_entry_without_rights_does_not_become_reusable(tmp_path):
     import unicornio_editor.cli as cli
     from unicornio_editor.media.library_index import register
