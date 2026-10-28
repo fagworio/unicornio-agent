@@ -1067,9 +1067,29 @@ def run_pre_publish_checklist(
     vision_ready, vision_msg = vision_config_ready(
         enabled=config.vision_enabled, api_key=config.vision_api_key
     )
+    prior_failures = [item for item in items if item["status"] == "fail"]
+    search_exhaustion_candidate = bool(
+        not is_list
+        and image_count < required
+        and isinstance(search_progress, Mapping)
+        and search_progress.get("completed") is True
+        and search_progress.get("exhausted") is True
+        and search_progress.get("completion_reason") == "EXHAUSTED_VERIFIED"
+    )
+    # The search waiver is evaluated below, after its full coverage evidence is
+    # checked. If the inline deficit is the only current failure and the search
+    # reports verified exhaustion, still verify the featured image now: the
+    # waiver must not turn a vision check skipped because of that deficit into
+    # implicit approval. This condition only decides whether to spend the
+    # optional vision call; it does not authorize the waiver.
+    inline_deficit_is_only_failure = bool(
+        search_exhaustion_candidate
+        and prior_failures
+        and all(item.get("name") == "imagens_no_corpo" for item in prior_failures)
+    )
     if not vision_ready:
         check("imagens_visao", True, vision_msg, skipped=True)
-    elif any(item["status"] == "fail" for item in items):
+    elif prior_failures and not inline_deficit_is_only_failure:
         check(
             "imagens_visao",
             True,

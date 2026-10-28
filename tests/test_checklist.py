@@ -85,7 +85,10 @@ class ChecklistTests(unittest.TestCase):
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
 
-    def _run_checklist(self, post=None, editorial=None, content=None, backup=True, client=None, media_context=None):
+    def _run_checklist(
+        self, post=None, editorial=None, content=None, backup=True, client=None,
+        media_context=None, config=None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
             backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +99,7 @@ class ChecklistTests(unittest.TestCase):
                 editorial=editorial or editorial_payload(),
                 content=content or "<p>Texto revisado sobre o jogo videogame.</p>",
                 backup_path=backup_path if backup else None,
-                config=self.config(),
+                config=config or self.config(),
                 client=client or FakeClient(),
                 media_context=media_context,
             )
@@ -1163,6 +1166,118 @@ class ChecklistTests(unittest.TestCase):
         assert result["all_passed"] is True
         assert result["media_decision"]["waiver_applied"] is True
         assert result["media_decision"]["waiver_basis"]["accepted"] == 0
+
+    def test_exhausted_search_does_not_waive_featured_vision_skipped_for_inline_deficit(self):
+        content = (
+            "<p>Texto revisado sobre Redfall e seu lançamento.</p>"
+            "<p>Mais informações sobre Redfall para o leitor.</p>"
+            "<h3>Confira mais novidades em nosso Portal de Notícias!</h3>"
+        )
+        config = Config(
+            "wordpress",
+            "http://wp.test",
+            "/wp-json/wp/v2",
+            dry_run=True,
+            vision_enabled=True,
+            vision_api_key="test-key",
+            vision_base_url="http://vision.test/v1",
+            vision_model="vision-m",
+        )
+        editorial = editorial_payload(
+            game_name="Redfall",
+            cleaned_html=content,
+            seo={
+                "title": "Redfall recebe novidades importantes",
+                "meta_description": "Redfall recebe novidades importantes, com detalhes sobre a obra, contexto, lançamento e informações confirmadas para o leitor.",
+                "focus_keyword": "Redfall",
+            },
+            trailer_unavailable=True,
+            trailer_search_evidence={
+                "result": "official_not_found",
+                "searched_at": "2026-10-16T12:00:00+00:00",
+                "provider": "youtube",
+                "query": "Redfall trailer",
+            },
+        )
+        media_context = {
+            "search": {
+                "completed": True,
+                "exhausted": True,
+                "completion_reason": "EXHAUSTED_VERIFIED",
+                "coverage": {
+                    "version": 1,
+                    "verified": True,
+                    "active_coverage": {
+                        "verified": True,
+                        "strategy_complete": True,
+                        "expected_engines": ["bing"],
+                        "reported_engines": ["bing"],
+                        "engine_results": {"redfall query": {"bing": "no_results_legitimate"}},
+                        "queries": ["redfall query"],
+                        "technical_failures": [],
+                        "planned_queries": 1,
+                        "completed_queries": 1,
+                    },
+                    "attempt_history": [],
+                },
+            },
+            "inline": {"required": 2, "accepted": []},
+            "featured": {
+                "status": "valid",
+                "media_id": 7,
+                "media_url": "https://media.example/redfall-1280x720.webp",
+                "sha256": "f" * 64,
+                "phash": "f" * 16,
+                "visual_group_id": "visual:featured",
+                "visual_verification": {"decision": "INITIAL"},
+            },
+            "visual_identity_policy": 4,
+            "visual_identity_evidence_valid": True,
+        }
+
+        with (
+            mock.patch("unicornio_editor.checklist.prepare_vision_image_input", return_value="data:image/png;base64,AA=="),
+            mock.patch("unicornio_editor.checklist.image_input_sha256", return_value="a" * 64),
+            mock.patch("unicornio_editor.media.vision_cache.get_cached_decision", return_value=None),
+            mock.patch("unicornio_editor.media.vision_cache.set_cached_decision"),
+            mock.patch("unicornio_editor.media.vision_cache.vision_model_identity", return_value="vision-m"),
+            mock.patch(
+                "unicornio_editor.checklist.verify_image_subject_decision",
+                return_value={"accepted": False, "reason": "featured subject was not confirmed"},
+            ) as verify,
+        ):
+            result = self._run_checklist(
+                post=make_post(featured_media=7),
+                editorial=editorial,
+                content=content,
+                media_context=media_context,
+                config=config,
+            )
+            verify.return_value = {
+                "accepted": True,
+                "status": "MATCH",
+                "confidence": 0.98,
+                "visual_type": "key_art",
+            }
+            confirmed_result = self._run_checklist(
+                post=make_post(featured_media=7),
+                editorial=editorial,
+                content=content,
+                media_context=media_context,
+                config=config,
+            )
+
+        statuses = self.statuses(result)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(statuses["imagens_visao"], "fail")
+        self.assertEqual(statuses["imagens_no_corpo"], "fail")
+        self.assertFalse(result["media_decision"]["waiver_applied"])
+        self.assertFalse(result["all_passed"])
+        confirmed_statuses = self.statuses(confirmed_result)
+        self.assertEqual(confirmed_statuses["imagens_visao"], "pass")
+        self.assertEqual(confirmed_statuses["imagens_no_corpo"], "pass")
+        self.assertTrue(confirmed_result["media_decision"]["waiver_applied"])
+        self.assertTrue(confirmed_result["all_passed"])
 
     def test_second_enrichment_round_does_not_waive_normal_article_without_faking_missing(self):
         content = (
