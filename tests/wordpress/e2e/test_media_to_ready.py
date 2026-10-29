@@ -87,6 +87,7 @@ class ControlledSource:
             "hollow-knight-silksong-screenshot-two.png": _artwork(3),
         }
         self.imported_webp = _webp_artwork(4)
+        self.unavailable_images: set[str] = set()
         self.operations: list[str] = []
         owner = self
 
@@ -132,8 +133,12 @@ class ControlledSource:
                 if path == "/images/imported-hotlink.webp":
                     return self._send(200, "image/webp", owner.imported_webp)
                 prefix = "/images/"
-                if path.startswith(prefix) and path[len(prefix):] in owner.images:
-                    return self._send(200, "image/png", owner.images[path[len(prefix):]])
+                if path.startswith(prefix):
+                    name = path[len(prefix):]
+                    if name in owner.unavailable_images:
+                        return self._send(503, "text/plain", b"controlled transient source failure")
+                    if name in owner.images:
+                        return self._send(200, "image/png", owner.images[name])
                 self._send(404, "text/plain", b"not found")
 
             def do_POST(self) -> None:  # noqa: N802
@@ -552,4 +557,403 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "journal": case._journal_summary(post_id),
             "registry_v5": case._registry_summary(run_id),
             "rest_events": audit.get("events", []),
+        })
+
+
+def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2e_case, monkeypatch):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+    from unicornio_editor.media.evidence_attestation import attest_deterministic_media
+    from unicornio_editor.pipeline_v2.runtime import ProductionMediaResolver
+
+    case = wordpress_e2e_case
+    post_id = case.post_id("media_replacement")
+    title = "Hollow Knight Silksong: o mundo de Pharloom em novas imagens"
+    subject = "Hollow Knight Silksong"
+    run_id = f"wp-e2e-media-replacement-{post_id}"
+    with ControlledSource() as source:
+        third_name = "hollow-knight-silksong-screenshot-three.png"
+        source.images[third_name] = _artwork(5)
+        source_url = f"{source.base_url}/article"
+        before = _snapshot(case.client.get_post(post_id))
+        case.client.update_post(post_id, {"title": title})
+        post = case.client.get_post(post_id)
+
+        config = Config(
+            content_source="wordpress",
+            wordpress_url=case.url,
+            wordpress_api_base="/wp-json/wp/v2",
+            app_user=case.user,
+            app_password=case.password,
+            dry_run=False,
+            http_timeout=10,
+            remote_url_policy="off",
+            internal_links_enabled=False,
+            vision_enabled=True,
+            vision_api_key="e2e-local-only",
+            vision_base_url=f"{source.base_url}/v1",
+            vision_model="controlled-e2e-pixel-provider",
+            vision_mode="all",
+            visual_comparison_max_calls=12,
+            visual_comparison_min_confidence=0.85,
+            max_source_retries=0,
+        )
+        source_stats: dict[str, Any] = {}
+        discovered = discover_article_source_candidates(
+            source_url,
+            subject=subject,
+            limit=8,
+            stats=source_stats,
+            url_policy="off",
+            root=case.root,
+        )
+        by_name = {
+            str(item["direct_image_url"]).rsplit("/", 1)[-1]: item
+            for item in discovered
+        }
+        assert third_name in by_name, source_stats
+
+        body = "".join(
+            f"<p>{paragraph}</p>"
+            for paragraph in (
+                "Hollow Knight Silksong leva a exploração para Pharloom, um reino de caminhos verticais, criaturas novas e combates mais ágeis.",
+                "A jornada mantém a leitura cuidadosa dos cenários, mas muda o ritmo e apresenta ferramentas que alteram a forma de enfrentar cada área.",
+                "As capturas mostram momentos diferentes da exploração e ajudam a distinguir a direção de arte de uma cena real de gameplay.",
+                "A página de origem identifica os arquivos consultados e permite confirmar que cada imagem pertence ao assunto do artigo.",
+                "Com duas capturas distintas, o leitor compara ambientes e entende como a aventura apresenta Pharloom sem repetir o mesmo quadro.",
+                "A composição preserva a origem técnica, o crédito do site e a identidade visual de cada arquivo aceito.",
+            )
+        )
+        editorial = {
+            "site_relevance": {
+                "decision": "process",
+                "confidence": 0.99,
+                "reason": "controlled source describes the game",
+                "matched_topics": ["games"],
+            },
+            "cleaned_html": body,
+            "seo": {
+                "title": title,
+                "meta_description": "Imagens de Hollow Knight Silksong apresentam Pharloom, a direção de arte e diferentes momentos de exploração com crédito e fonte verificados.",
+                "focus_keyword": subject,
+            },
+            "game_name": subject,
+            "needs_trailer": False,
+            "trailer_url": None,
+            "trailer_unavailable": True,
+            "trailer_search_evidence": {
+                "query": "Hollow Knight Silksong trailer official",
+                "provider": "controlled-e2e-fixture",
+                "searched_at": "2026-10-27T00:00:00+00:00",
+                "result": "official_not_found",
+            },
+        }
+
+        featured_item = {
+            **by_name["hollow-knight-silksong-key-art.png"],
+            "paragraph_index": 0,
+            "is_featured": True,
+            "role": "featured",
+            "search_query": f"{subject} key art",
+        }
+        featured_plan = {**editorial, "media_plan": [featured_item]}
+        featured_preflight = validate_media_plan(
+            case.client,
+            featured_plan,
+            config=config,
+            root=case.root,
+            post_title=title,
+            post_id=post_id,
+        )
+        assert featured_preflight["valid"] == 1, featured_preflight
+        featured_results, featured_id, featured_credit = _execute_media_plan(
+            featured_plan,
+            config,
+            case.client,
+            case.root,
+            preflight=featured_preflight,
+            post_id=post_id,
+            post_title=title,
+        )
+        featured_result = next(
+            item for item in featured_results if item.get("status") == "accepted"
+        )
+        assert featured_id == featured_result["media_id"]
+        featured_attachment = case.client.get_media(int(featured_id))
+        featured_progress = FeaturedProgress(
+            status=FeaturedStatus.VALID,
+            media_id=int(featured_id),
+            media_url=str(featured_attachment["source_url"]),
+            sha256=str(featured_result["sha256"]),
+            phash=str(featured_result["phash"]),
+            visual_group_id=str(featured_result["visual_group_id"]),
+            visual_verification=dict(featured_result["visual_verification"]),
+            alt_text=str(featured_result["alt_text"]),
+            credit_text=str(featured_result["credit_text"]),
+            width=int(featured_result["width"]),
+            height=int(featured_result["height"]),
+        )
+
+        # Discovery evidence is positive, but the first CDN fetch fails at
+        # application time. The resolver must preserve that transient result
+        # and continue through the bounded replacement candidates.
+        failed_name = "hollow-knight-silksong-screenshot-two.png"
+        source.unavailable_images.add(failed_name)
+        candidate_rows = []
+        for candidate_id, name in (
+            ("first-transient-failure", failed_name),
+            ("replacement-one", "hollow-knight-silksong-screenshot-one.png"),
+            ("replacement-two", third_name),
+        ):
+            row = dict(by_name[name])
+            row.update({
+                "candidate_id": candidate_id,
+                "engine": "bing",
+                "query": f"{subject} gameplay screenshot",
+                "subject": subject,
+                "usable": True,
+                "valid": True,
+                "source_verified": True,
+                "source_comparison_proved": True,
+                "alt_text": f"Hollow Knight Silksong gameplay screenshot {candidate_id}",
+                "evidence": {
+                    "verdict": "deterministic_match",
+                    "score": 9,
+                    "local_score": 6,
+                    "subject": subject,
+                    "matched": ["filename", "page_title", "alt_original"],
+                    "evidence": {
+                        "filename": name,
+                        "page_title": "Hollow Knight Silksong screenshots",
+                        "alt_original": "Hollow Knight Silksong gameplay screenshot",
+                        "page_url": source_url,
+                    },
+                },
+            })
+            row["source_evidence_attestation"] = attest_deterministic_media({
+                **row,
+                "role": "inline",
+                "is_featured": False,
+            })
+            candidate_rows.append(row)
+
+        resolution_requests: list[dict[str, Any]] = []
+
+        def controlled_resolution(_client, _config, _root, batch, **_kwargs):
+            request = dict(batch["posts"][0])
+            resolution_requests.append(request)
+            assert request["replacement_reserve"] == 2
+            assert request["limit"] >= request["needed"] + 2
+            return {"posts": [{
+                "reuse": [],
+                "audit_candidates": [dict(row) for row in candidate_rows],
+                "search": {
+                    "completed": False,
+                    "completion_reason": "SEARCH_INCOMPLETE",
+                    "queries_attempted": 1,
+                    "queries_planned": 1,
+                    "queries_completed": 0,
+                    "engines_attempted": ["bing"],
+                    "candidates_seen": len(candidate_rows),
+                },
+            }]}
+
+        monkeypatch.setattr(cli, "_resolve_media_batch", controlled_resolution)
+        monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": subject}])
+        monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+        monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 2)
+        real_execute = runtime._execute_media_plan
+        execution_results: list[dict[str, Any]] = []
+
+        def observe_execution(editorial_value, *args, **kwargs):
+            results = real_execute(editorial_value, *args, **kwargs)
+            execution_results.append({
+                "candidate_id": (editorial_value.get("media_plan") or [{}])[0].get("candidate_id"),
+                "statuses": [str(item.get("status") or "") for item in results[0]],
+                "media_ids": [int(item["media_id"]) for item in results[0] if item.get("media_id")],
+            })
+            return results
+
+        monkeypatch.setattr(runtime, "_execute_media_plan", observe_execution)
+        previous = MediaProgress(required=2, featured=featured_progress)
+        state = WorkState(
+            state=LifecycleState.PENDING,
+            phase=Phase.MEDIA,
+            relevance_approved=True,
+            media=previous,
+        )
+        media = ProductionMediaResolver(case.client, config, case.root)(
+            {
+                "post_id": post_id,
+                "title": title,
+                "post": post,
+                "original_link": "",
+                "v2_run_id": run_id,
+            },
+            state,
+            editorial,
+            previous,
+        )
+
+        assert [row["candidate_id"] for row in execution_results] == [
+            "first-transient-failure", "replacement-one", "replacement-two",
+        ]
+        assert [row["statuses"] for row in execution_results] == [
+            ["error"], ["accepted"], ["accepted"],
+        ]
+        assert len(resolution_requests) == 1, (
+            f"search_calls={len(resolution_requests)}; executions={execution_results}; "
+            f"inline_count={len(media.inline)}; search={media.search.to_dict()}"
+        )
+        assert len(media.inline) == 2, media.to_dict()
+        accepted_media_ids = [
+            media_id for row in execution_results[1:] for media_id in row["media_ids"]
+        ]
+        assert {item.media_id for item in media.inline} == set(accepted_media_ids)
+        assert media.valid_distinct_inline_count == 2, media.to_dict()
+        assert media.search.completed is False
+        assert media.search.completion_reason == "SEARCH_INCOMPLETE"
+
+        from unicornio_editor.media.registry import connect as connect_registry
+
+        with connect_registry(case.root) as db:
+            decisions = db.execute(
+                "SELECT candidate_id, disposition, reason_code FROM media_decisions "
+                "WHERE post_id=? AND run_id=? AND candidate_id != '' ORDER BY decision_id",
+                (post_id, run_id),
+            ).fetchall()
+        decision_map = {str(row[0]): (str(row[1]), str(row[2])) for row in decisions}
+        assert decision_map["first-transient-failure"] == (
+            "defer_retry", "transient_provider_failure",
+        )
+        assert decision_map["replacement-one"] == ("accepted", "candidate_accepted")
+        assert decision_map["replacement-two"] == ("accepted", "candidate_accepted")
+
+        inline_plan = [{
+            "paragraph_index": item.slot,
+            "media_url": item.media_url,
+            "alt_text": item.alt_text,
+            "credit_text": item.credit_text,
+            "width": item.width,
+            "height": item.height,
+        } for item in media.inline]
+        body_with_images = insert_media(body, inline_plan)
+        schema_media_fields = {
+            "paragraph_index", "source_page_url", "direct_image_url", "credit_text", "alt_text",
+            "is_featured", "media_library_id", "subject", "search_query",
+            "phash", "evidence_score", "evidence_verdict", "candidate_id",
+            "decision_id", "decision",
+        }
+        editorial_with_media = {
+            **editorial,
+            "cleaned_html": body_with_images,
+            "media_plan": [
+                {key: value for key, value in {
+                    **candidate,
+                    "paragraph_index": inline_plan[index]["paragraph_index"],
+                    "is_featured": False,
+                    "role": "inline",
+                }.items() if key in schema_media_fields}
+                for index, candidate in enumerate(candidate_rows[1:])
+            ],
+        }
+        content, _trailer, _trailer_status = compose_final_content(
+            editorial_with_media, config, None, root=case.root,
+        )
+        if featured_credit:
+            from unicornio_editor.workflow import append_featured_credit
+
+            content = append_featured_credit(content, featured_credit)
+        backup_path = case.root / "backups" / str(post_id) / "e2e-snapshot.json"
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text(json.dumps(before), encoding="utf-8")
+        checklist = run_pre_publish_checklist(
+            post={**post, "featured_media": int(featured_id)},
+            editorial=editorial_with_media,
+            content=content,
+            backup_path=backup_path,
+            config=config,
+            client=case.client,
+            media_context=media.to_dict(),
+        )
+        failed_checklist_items = [
+            item for item in checklist["items"] if item.get("status") != "pass"
+        ]
+        assert checklist["all_passed"], json.dumps(failed_checklist_items, ensure_ascii=False)
+        assert checklist["media_decision"]["accepted"] == 2
+
+        ready_state = WorkState(
+            state=LifecycleState.READY,
+            phase=Phase.VALIDATE,
+            relevance_approved=True,
+            media=media,
+        )
+        candidate = {
+            "_v2_run_id": run_id,
+            "title": title,
+            "content": content,
+            "featured_media": int(featured_id),
+            "seo": dict(editorial["seo"]),
+            "editorial": editorial_with_media,
+            "media": media.to_dict(),
+        }
+        candidate_path = case.root / "backups" / str(post_id) / "editorial.candidate.json"
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
+        candidate_hash = hashlib.sha256(content.encode()).hexdigest()
+        candidate_path.with_name("editorial.validation.json").write_text(
+            json.dumps({
+                "_v2_run_id": run_id,
+                "candidate_run_id": run_id,
+                "candidate_hash": candidate_hash,
+                "passed": True,
+                "checklist": checklist,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        writer_result = WordPressWriterV2(case.client, case.root).commit(
+            post_id,
+            {
+                "post": post,
+                "v2_run_id": run_id,
+                "v2_cycle_id": "e2e-media-replacement-cycle",
+                "v2_cycle_round": 1,
+                "v2_authorization_id": "e2e-media-replacement-authorization",
+                "original_link": "",
+            },
+            ready_state,
+            Outcome.ready(),
+        )
+        assert writer_result["readback"] is True, writer_result
+        assert writer_result["media_readback"] is True, writer_result
+        assert writer_result["media_application_status"] == "confirmed", writer_result
+        after_post = case.client.get_post(post_id)
+        after = _snapshot(after_post)
+        assert after["status"] == "pending"
+        assert after["ready_state"] == "ready"
+        assert after["featured_media"] == int(featured_id)
+        final_html = str((after_post.get("content") or {}).get("raw") or "")
+        for item in media.inline:
+            assert item.media_url in final_html
+
+        case.observations.append({
+            "scenario": "media_candidate_replacement",
+            "post_id": post_id,
+            "run_id": run_id,
+            "before": before,
+            "after": after,
+            "media_search": media.search.to_dict(),
+            "candidate_execution": execution_results,
+            "candidate_registry_decisions": [
+                {"candidate_id": row[0], "disposition": row[1], "reason_code": row[2]}
+                for row in decisions
+            ],
+            "accepted_inline_media_ids": [item.media_id for item in media.inline],
+            "checklist": {
+                "all_passed": bool(checklist["all_passed"]),
+                "accepted_inline": checklist["media_decision"]["accepted"],
+                "failed": checklist["failed"],
+            },
+            "writer_result": writer_result,
+            "journal": case._journal_summary(post_id),
         })

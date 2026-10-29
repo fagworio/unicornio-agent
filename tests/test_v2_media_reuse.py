@@ -892,6 +892,76 @@ def test_media_resolve_capacity_reports_reuse_and_web_frames(monkeypatch, tmp_pa
     assert summary["media_effective_shortfall"] == 1
 
 
+def test_media_resolve_requests_bounded_replacement_capacity(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing,yandex")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+    enrichment_capacities = []
+    candidates = [
+        {
+            "candidate_id": f"candidate-{index}",
+            "direct_image_url": f"https://cdn.test/image-{index}.webp",
+            "source_page_url": f"https://source.test/image-{index}",
+            "engine": "bing",
+            "phash": str(index) * 16,
+            "usable": True,
+        }
+        for index in (1, 2)
+    ]
+
+    def enrich(rows, **kwargs):
+        enrichment_capacities.append(kwargs["capacity"])
+        for row in rows:
+            row.update({
+                "valid": True,
+                "evidence": {"verdict": "deterministic_match", "score": 9},
+            })
+        return list(rows), [], []
+
+    def search_batch(queries, *, limit, accept, **_kwargs):
+        assert limit == 2
+        assert accept(candidates, queries[0]) == 2
+        return [{
+            "query": queries[0],
+            "candidates": candidates,
+            "engine_reports": {"bing": {"failure_kind": "ok"}},
+            "completion_reason": "TARGET_REACHED",
+        }]
+
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", enrich)
+    monkeypatch.setattr(search, "search_web_images_batch", search_batch)
+
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "bounded-replacement-capacity",
+            "posts": [{
+                "post_id": 115234,
+                "subject": "Test",
+                "query": "test query",
+                "needed": 1,
+                "limit": 1,
+                "replacement_reserve": 1,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=False,
+    )
+
+    row = result["posts"][0]
+    assert 2 in enrichment_capacities
+    assert len(row["audit_candidates"]) == 2
+    assert row["search"]["coverage"]["candidate_capacity"] == 2
+    assert row["search"]["coverage"]["replacement_reserve_requested"] == 1
+    assert row["search"]["completion_reason"] == "TARGET_REACHED"
+
+
 def test_legacy_library_entry_without_legal_metadata_is_reusable_with_technical_source(tmp_path):
     import unicornio_editor.cli as cli
     from unicornio_editor.media.library_index import register
@@ -2038,6 +2108,130 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.completion_reason == "SEARCH_INCOMPLETE"
     assert result.search.coverage["active_coverage"]["verified"] is False
     assert result.search.exhausted is False
+
+
+@pytest.mark.parametrize("replacement_succeeds", [True, False])
+def test_media_resolver_uses_same_query_replacement_after_final_rejection(
+    monkeypatch, tmp_path, replacement_succeeds,
+):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.pipeline_v2.runtime as runtime
+
+    candidates = [
+        _attested_candidate({
+            "candidate_id": "first-choice",
+            "direct_image_url": "https://cdn.test/first.webp",
+            "source_page_url": "https://source.test/first",
+            "subject": "Test",
+            "valid": True,
+            "phash": "1" * 16,
+            "evidence": {"verdict": "deterministic_match", "score": 9},
+        }),
+        _attested_candidate({
+            "candidate_id": "replacement-choice",
+            "direct_image_url": "https://cdn.test/replacement.webp",
+            "source_page_url": "https://source.test/replacement",
+            "subject": "Test",
+            "valid": True,
+            "phash": "f" * 16,
+            "evidence": {"verdict": "deterministic_match", "score": 8},
+        }),
+    ]
+    attempted_urls = []
+
+    def fake_resolve(_client, _config, _root, batch, **_kwargs):
+        assert batch["posts"][0]["replacement_reserve"] == 2
+        return {"posts": [{
+            "reuse": [],
+            "audit_candidates": candidates,
+            "search": {
+                "completed": True,
+                "completion_reason": "TARGET_REACHED",
+                "queries_attempted": 1,
+                "queries_planned": 1,
+                "queries_completed": 1,
+                "engines_attempted": ["bing"],
+                "candidates_seen": 2,
+            },
+        }]}
+
+    def execute(editorial, *_args, **_kwargs):
+        item = editorial["media_plan"][0]
+        url = item["direct_image_url"]
+        attempted_urls.append(url)
+        if url.endswith("first.webp") or not replacement_succeeds:
+            return ([{
+                "paragraph_index": item["paragraph_index"],
+                "status": "error",
+                "detail": "processamento de midia: image download failed (HTTP 503)",
+            }], None, None)
+        return ([{
+            "media_id": 88,
+            "media_url": url,
+            "paragraph_index": item["paragraph_index"],
+            "alt_text": item["alt_text"],
+            "credit_text": item["credit_text"],
+            "featured": False,
+            "sha256": "a" * 64,
+            "phash": "f" * 16,
+            "visual_group_id": "visual:" + "f" * 24,
+            "visual_verification": {"decision": "INITIAL", "method": "test"},
+            "status": "accepted",
+        }], None, None)
+
+    monkeypatch.setattr(cli, "_resolve_media_batch", fake_resolve)
+    monkeypatch.setattr(runtime, "post_subjects", lambda **_kwargs: [{"subject": "Test"}])
+    monkeypatch.setattr(runtime, "editorial_subjects", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime, "diverse_item_queries", lambda *_args, **_kwargs: ["Test"])
+    monkeypatch.setattr(runtime, "required_image_count", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runtime, "validate_media_plan", lambda *_args, **_kwargs: {"valid": True, "rejected": []})
+    monkeypatch.setattr(runtime, "_execute_media_plan", execute)
+
+    previous = MediaProgress(
+        required=1,
+        featured=FeaturedProgress(FeaturedStatus.VALID, 99, "https://cdn.test/featured.webp"),
+    )
+    result = ProductionMediaResolver(object(), Config(), tmp_path)(
+        {
+            "post_id": 115109,
+            "title": "Test",
+            "v2_run_id": "candidate-replacement-run",
+        },
+        SimpleNamespace(media=previous),
+        {"cleaned_html": _article_html(), "seo": {}},
+        previous,
+    )
+
+    assert attempted_urls == [
+        "https://cdn.test/first.webp",
+        "https://cdn.test/replacement.webp",
+    ]
+    assert result.accepted == int(replacement_succeeds)
+    if replacement_succeeds:
+        assert result.search.completed is True
+        assert result.search.completion_reason == "TARGET_REACHED"
+    else:
+        assert result.search.completed is False
+        assert result.search.exhausted is False
+        assert result.search.completion_reason == "SEARCH_INCOMPLETE"
+
+    from unicornio_editor.media.registry import connect
+
+    with connect(tmp_path) as db:
+        decisions = db.execute(
+            "SELECT candidate_id, disposition, reason_code FROM media_decisions "
+            "WHERE post_id=? AND run_id=? AND candidate_id != '' ORDER BY decision_id",
+            (115109, "candidate-replacement-run"),
+        ).fetchall()
+    decision_map = {str(row[0]): (str(row[1]), str(row[2])) for row in decisions}
+    assert decision_map["first-choice"] == (
+        "defer_retry", "transient_provider_failure",
+    )
+    assert decision_map["replacement-choice"] == (
+        ("accepted", "candidate_accepted")
+        if replacement_succeeds
+        else ("defer_retry", "transient_provider_failure")
+    )
 
 
 def test_media_resolver_uses_approved_candidate_fallback_before_target(monkeypatch, tmp_path):

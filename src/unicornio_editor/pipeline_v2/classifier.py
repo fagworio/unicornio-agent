@@ -3,7 +3,14 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .model import BlockerCode, Outcome, OutcomeType, Phase, WorkState
+from .model import (
+    BlockerCode,
+    Outcome,
+    OutcomeType,
+    Phase,
+    WorkState,
+    media_search_is_incomplete,
+)
 
 GATE_TO_BLOCKER: dict[str, BlockerCode] = {
     "imagens_no_corpo": BlockerCode.INLINE_MISSING,
@@ -255,12 +262,7 @@ def classify(
         if isinstance(source_discovery, dict)
         else ""
     )
-    provider_search_incomplete = bool(
-        search is not None
-        and not bool(getattr(search, "completed", False))
-        and int(getattr(search, "queries_planned", 0) or 0)
-        > int(getattr(search, "queries_completed", 0) or 0)
-    )
+    provider_search_incomplete = media_search_is_incomplete(search)
     if (
         blockers[0] in MEDIA_BLOCKERS
         and search is not None
@@ -268,6 +270,20 @@ def classify(
     ):
         # Missing media after an incomplete provider/source-verification run is
         # operationally unresolved, not proof that the article is impossible.
+        # Keep the no-progress budget untouched, but bound automatic retries
+        # with the existing per-phase attempt budget so a permanently broken
+        # provider cannot keep the same post in an unattended retry loop.
+        media_phase_attempt = _phase_attempts(previous, Phase.MEDIA) + 1
+        if media_phase_attempt >= max(1, max_rework_attempts):
+            return Outcome.human_required(
+                Phase.MEDIA,
+                BlockerCode.PROVIDER_ERROR,
+                detail=(
+                    f"media acquisition remained incomplete after "
+                    f"{media_phase_attempt}/{max(1, max_rework_attempts)} "
+                    "phase attempts; no-progress budget was preserved"
+                ),
+            )
         detail = (
             f"article source discovery retryable ({source_reason})"
             if source_retryable

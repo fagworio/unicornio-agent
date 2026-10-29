@@ -8,7 +8,21 @@ from urllib.parse import urlsplit, urlunsplit
 from ..content_quality import _keyword_in_text, rendered_text
 from .classifier import MEDIA_BLOCKERS, blocker_for_gate, classify, classify_stage_error, editorial_decision
 from .errors import StageError
-from .model import BlockerCode, CURRENT_RETRY_POLICY_VERSION, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
+from .model import (
+    BlockerCode,
+    CURRENT_RETRY_POLICY_VERSION,
+    FeaturedProgress,
+    FeaturedStatus,
+    InlineMedia,
+    LifecycleState,
+    MediaProgress,
+    Outcome,
+    OutcomeType,
+    Phase,
+    RetryInfo,
+    WorkState,
+    media_search_is_incomplete,
+)
 
 
 class PipelineRunner:
@@ -44,10 +58,7 @@ class PipelineRunner:
         source_discovery = coverage.get("source_discovery")
         if isinstance(source_discovery, dict) and source_discovery.get("retryable") is True:
             return True
-        return bool(
-            not search.completed
-            and int(search.queries_planned or 0) > int(search.queries_completed or 0)
-        )
+        return media_search_is_incomplete(search)
 
     @staticmethod
     def _editorial_preflight(editorial: dict[str, Any], context: dict[str, Any]) -> None:
@@ -185,12 +196,14 @@ class PipelineRunner:
                 search_incomplete = (
                     media_completed and self._media_attempt_incomplete(media)
                 )
-                current_no_progress = (
-                    (0 if progress else media_base_no_progress + 1)
-                    if media_completed
-                    and not search_incomplete
-                    else media_base_no_progress
-                )
+                if not media_completed:
+                    current_no_progress = media_base_no_progress
+                elif progress:
+                    current_no_progress = 0
+                elif search_incomplete:
+                    current_no_progress = media_base_no_progress
+                else:
+                    current_no_progress = media_base_no_progress + 1
                 outcome = classify(previous, editorial, media, validation, no_progress=current_no_progress, **self._policy())
             except StageError as exc:
                 media_stage_error = exc.phase is Phase.MEDIA
@@ -242,15 +255,22 @@ class PipelineRunner:
             media_completed and self._media_attempt_incomplete(media)
         )
         media_attempt = media_completed and not technical_media_error and not search_incomplete
-        progress = self._media_progressed(previous.media, effective_media) if media_attempt else False
-        current_no_progress = (
-            stage_error_no_progress
-            if media_stage_error and outcome.blocker in MEDIA_BLOCKERS
-            else (
-                (0 if progress else media_base_no_progress + 1)
-                if media_attempt else media_base_no_progress
-            )
+        progress = (
+            self._media_progressed(previous.media, effective_media)
+            if media_completed and not technical_media_error
+            else False
         )
+        if media_stage_error and outcome.blocker in MEDIA_BLOCKERS:
+            current_no_progress = stage_error_no_progress
+        elif progress:
+            # A verified asset accepted during an incomplete search is still
+            # real progress; it resets the streak but never counts as an
+            # exhausted/no-progress attempt.
+            current_no_progress = 0
+        elif media_attempt:
+            current_no_progress = media_base_no_progress + 1
+        else:
+            current_no_progress = media_base_no_progress
         if media_completed and validation is not None:
             corrected = classify(previous, editorial, effective_media, validation, no_progress=current_no_progress, **self._policy())
             if corrected != outcome:

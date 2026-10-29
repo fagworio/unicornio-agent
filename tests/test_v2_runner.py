@@ -1,3 +1,6 @@
+import pytest
+from types import SimpleNamespace
+
 from unicornio_editor.pipeline_v2.model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, LifecycleState, MediaProgress, MediaSearchProgress, Outcome, OutcomeType, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.runner import PipelineRunner
 from datetime import datetime, timedelta
@@ -276,7 +279,16 @@ def test_media_no_progress_continues_only_within_media_phase():
     assert store.state.retry.no_progress == 2
 
 
-def test_incomplete_media_search_does_not_exhaust_no_progress_budget():
+@pytest.mark.parametrize(
+    ("queries_planned", "queries_completed", "completion_reason"),
+    [
+        (3, 1, "SOURCE_VERIFICATION_INCOMPLETE"),
+        (2, 2, "SEARCH_INCOMPLETE"),
+    ],
+)
+def test_incomplete_media_search_does_not_exhaust_no_progress_budget(
+    queries_planned, queries_completed, completion_reason,
+):
     previous = WorkState(
         phase=Phase.MEDIA,
         retry=RetryInfo(no_progress=2),
@@ -285,10 +297,10 @@ def test_incomplete_media_search_does_not_exhaust_no_progress_budget():
             required=2,
             search=MediaSearchProgress(
                 completed=False,
-                queries_attempted=1,
-                queries_planned=3,
-                queries_completed=1,
-                completion_reason="SOURCE_VERIFICATION_INCOMPLETE",
+                queries_attempted=queries_completed,
+                queries_planned=queries_planned,
+                queries_completed=queries_completed,
+                completion_reason=completion_reason,
             ),
         ),
     )
@@ -310,7 +322,51 @@ def test_incomplete_media_search_does_not_exhaust_no_progress_budget():
     assert outcome.blocker is BlockerCode.PROVIDER_ERROR
     assert store.state.state is not LifecycleState.HUMAN_REQUIRED
     assert store.state.retry.no_progress == 2
-    assert store.state.media.search.completion_reason == "SOURCE_VERIFICATION_INCOMPLETE"
+    assert store.state.media.search.completion_reason == completion_reason
+
+
+def test_repeated_incomplete_media_searches_are_bounded_without_spending_no_progress():
+    previous = WorkState(
+        phase=Phase.MEDIA,
+        retry=RetryInfo(no_progress=2, phase_attempts=2),
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            search=MediaSearchProgress(
+                completed=False,
+                queries_attempted=2,
+                queries_planned=2,
+                queries_completed=1,
+                completion_reason="SEARCH_INCOMPLETE",
+            ),
+        ),
+    )
+    store = MemoryStore(previous)
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not run")),
+        "media": lambda *_: previous.media,
+        "compose": lambda *_: {},
+        "validate": lambda *_: {
+            "passed": False,
+            "failures": [{"gate": "imagens_no_corpo"}],
+        },
+    }
+
+    outcome = PipelineRunner(
+        store,
+        stages,
+        config=SimpleNamespace(
+            max_media_no_progress_attempts=2,
+            max_rework_attempts=3,
+            rework_cooldown_minutes=30,
+        ),
+    ).run_one(115633, {"editorial": {"decision": "process"}})
+
+    assert outcome.type is OutcomeType.HUMAN_REQUIRED
+    assert outcome.phase is Phase.MEDIA
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+    assert "3/3 phase attempts" in str(outcome.detail)
+    assert store.state.retry.no_progress == 2
 
 
 def test_retryable_article_source_failure_does_not_consume_media_no_progress():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -27,7 +28,16 @@ from ..seo.rank_math import build_meta
 from ..state import STATE_READY, build_state_markers
 from ..workflow import _execute_media_plan, validate_media_plan
 from .lock import RunSessionLock
-from .model import FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase, WorkState
+from .model import (
+    FeaturedProgress,
+    FeaturedStatus,
+    InlineMedia,
+    MEDIA_CANDIDATE_REPLACEMENT_RESERVE,
+    MediaProgress,
+    MediaSearchProgress,
+    Phase,
+    WorkState,
+)
 from .media_accounting import account_visual_media, reconcile_working_visual_media
 from .epoch_protection import EpochProtectionError, load_epoch_protection
 from .quarantine import load_quarantine
@@ -2465,7 +2475,8 @@ class ProductionMediaResolver:
                     "subject": subject,
                     "query": query,
                     "needed": needed,
-                    "limit": max(needed, 3),
+                    "limit": max(needed + MEDIA_CANDIDATE_REPLACEMENT_RESERVE, 3),
+                    "replacement_reserve": MEDIA_CANDIDATE_REPLACEMENT_RESERVE,
                     "engine": "auto",
                     "role": role,
                     "size": "xga",
@@ -2654,7 +2665,13 @@ class ProductionMediaResolver:
                     status = str(result.get("status") or "").casefold()
                     detail = str(result.get("detail") or result.get("reason") or "")
                     explicit_reason = str(result.get("reason_code") or "").casefold().strip()
-                    temporary = bool(result.get("recoverable")) or any(token in detail.casefold() for token in ("timeout", "tempor", "network", "cdn", "unreachable"))
+                    http_status_match = re.search(r"\bHTTP[\s_-]*(\d{3})\b", detail, re.IGNORECASE)
+                    http_status = int(http_status_match.group(1)) if http_status_match else 0
+                    retryable_http_status = http_status in {408, 425, 429} or 500 <= http_status <= 599
+                    temporary = bool(result.get("recoverable")) or retryable_http_status or any(
+                        token in detail.casefold()
+                        for token in ("timeout", "tempor", "network", "cdn", "unreachable")
+                    )
                     definitive = any(token in detail.casefold() for token in (
                         "duplicate", "duplicat", "unrelated", "sem relação", "width_below_minimum",
                         "resolution", "resolu", "source_bytes_mismatch", "mismatch",

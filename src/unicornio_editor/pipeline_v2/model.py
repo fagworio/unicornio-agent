@@ -234,6 +234,32 @@ class MediaSearchProgress:
         )
 
 
+MEDIA_CANDIDATE_REPLACEMENT_RESERVE = 2
+
+
+def media_search_is_incomplete(search: Any) -> bool:
+    """Whether the media attempt lacks a completed search result.
+
+    Query counters alone cannot prove completion: downstream media conversion
+    or application can report ``SEARCH_INCOMPLETE`` after all queries ended.
+    """
+    if search is None:
+        return False
+    if isinstance(search, dict):
+        completed = bool(search.get("completed", False))
+        reason = str(search.get("completion_reason") or "").strip()
+        planned = int(search.get("queries_planned", 0) or 0)
+        queries_completed = int(search.get("queries_completed", 0) or 0)
+    else:
+        completed = bool(getattr(search, "completed", False))
+        reason = str(getattr(search, "completion_reason", "") or "").strip()
+        planned = int(getattr(search, "queries_planned", 0) or 0)
+        queries_completed = int(getattr(search, "queries_completed", 0) or 0)
+    if completed:
+        return False
+    return bool(reason or planned > queries_completed)
+
+
 @dataclass(frozen=True)
 class InlineMedia:
     media_id: int

@@ -50,6 +50,7 @@ from .workflow import (
 )
 from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state, uncertain_second_pass_eligible
 from .media.text import sanitize_title
+from .pipeline_v2.model import MEDIA_CANDIDATE_REPLACEMENT_RESERVE
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -1470,6 +1471,7 @@ def _resolve_media_batch(
     excluded_fingerprints = excluded_fingerprints or {}
     reuse_by_post: dict[int, list[dict]] = {}
     needed_web_by_post: dict[int, int] = {}
+    candidate_capacity_by_post: dict[int, int] = {}
     searchable = []
     for item in posts:
         post_id = int(item["post_id"])
@@ -1524,10 +1526,23 @@ def _resolve_media_batch(
         ]
         reuse_by_post[post_id] = reuse
         needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
+        try:
+            requested_reserve = max(0, int(item.get("replacement_reserve") or 0))
+        except (TypeError, ValueError, OverflowError):
+            requested_reserve = 0
+        reserve = min(MEDIA_CANDIDATE_REPLACEMENT_RESERVE, requested_reserve)
+        candidate_capacity_by_post[post_id] = (
+            needed_web_by_post[post_id] + reserve
+            if needed_web_by_post[post_id] > 0
+            else 0
+        )
         if needed_web_by_post[post_id] > 0:
             searchable.append(item)
     queries = [str(item["query"] or item["subject"]) for item in searchable]
-    limit = max((int(item["limit"]) for item in searchable), default=1)
+    limit = max((
+        max(int(item["limit"]), candidate_capacity_by_post[int(item["post_id"])])
+        for item in searchable
+    ), default=1)
     first = searchable[0] if searchable else posts[0]
     spec_by_query = {str(item["query"] or item["subject"]): item for item in searchable}
     memo_by_query = {query: {} for query in queries}
@@ -1555,7 +1570,7 @@ def _resolve_media_batch(
             termo=str(spec["query"]),
             verify=True,
             root=root,
-            capacity=needed_web_by_post[post_id],
+            capacity=candidate_capacity_by_post[post_id],
             enriched_cache=memo_by_query[str(query)],
             post_id=post_id,
             existing_media_urls=spec.get("existing_media_urls") or [],
@@ -1611,7 +1626,7 @@ def _resolve_media_batch(
             termo=str(item["query"]),
             verify=True,
             root=root,
-            capacity=needed_web,
+            capacity=candidate_capacity_by_post[post_id],
             enriched_cache=memo_by_query.get(str(item["query"]), {}),
             post_id=post_id,
             existing_media_urls=item.get("existing_media_urls") or [],
@@ -1797,18 +1812,27 @@ def _resolve_media_batch(
         if needed_web <= 0:
             completion_reason = "NOT_REQUIRED"
             search_completed = True
-        elif accepted_count >= needed_web:
+        elif accepted_count >= candidate_capacity_by_post[post_id]:
             # A candidate-level quota can be met after every required provider
             # was already exhausted and verified. Preserve that stronger proof
             # so a later conversion/upload rejection can still use the
-            # legitimate article-only exhaustion waiver. If provider traversal
-            # stopped early or was technically incomplete, only discovery has
-            # reached target; it is not an exhaustion proof.
+            # legitimate article-only exhaustion waiver. V2 may request a
+            # small bounded replacement reserve; reaching only the base quota
+            # while that reserve was not filled is not a completed strategy.
             completion_reason = (
                 "EXHAUSTED_VERIFIED"
                 if provider_stop_reason == "EXHAUSTED_VERIFIED" and all_engines_verified
                 else "TARGET_REACHED"
             )
+            search_completed = True
+        elif (
+            accepted_count >= needed_web
+            and provider_stop_reason == "EXHAUSTED_VERIFIED"
+            and all_engines_verified
+        ):
+            # All required providers were verified, even though they could not
+            # fill the optional downstream replacement buffer.
+            completion_reason = "EXHAUSTED_VERIFIED"
             search_completed = True
         elif candidate_verification_incomplete:
             completion_reason = "SOURCE_VERIFICATION_INCOMPLETE"
@@ -1892,6 +1916,10 @@ def _resolve_media_batch(
                 "completed_queries": 1 if needed_web > 0 and search_completed else 0,
                 "verified": completion_reason == "EXHAUSTED_VERIFIED",
                 "accepted_visual_representatives": accepted_count,
+                "candidate_capacity": candidate_capacity_by_post[post_id],
+                "replacement_reserve_requested": max(
+                    0, candidate_capacity_by_post[post_id] - needed_web
+                ),
                 "candidate_verification_incomplete": candidate_verification_incomplete,
             },
         }
