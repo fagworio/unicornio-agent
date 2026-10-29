@@ -23,6 +23,49 @@ def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _safe_source_page_url(value: Any) -> str:
+    """Keep source-page identity without credentials, query strings, or fragments."""
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.casefold()
+        host = (parsed.hostname or "").rstrip(".").casefold()
+        if scheme not in {"http", "https"} or not host:
+            return ""
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if port and not (scheme == "http" and port == 80) and not (scheme == "https" and port == 443):
+        host = f"{host}:{port}"
+    return urlsplit(f"{scheme}://{host}{parsed.path or '/'}").geturl()
+
+
+def _source_page_from_library_index(root: str | Path, media_id: Any) -> str:
+    """Read unambiguous legacy provenance by attachment ID without writing."""
+    try:
+        attachment_id = int(media_id or 0)
+        if attachment_id < 1:
+            return ""
+        from .library_index import load_index
+        from .text import source_site_name
+
+        entries = load_index(root).get("entries", [])
+    except (ImportError, OSError, TypeError, ValueError):
+        return ""
+    source_pages = [
+        _safe_source_page_url(entry.get("source_page"))
+        for entry in entries
+        if isinstance(entry, dict)
+        and str(entry.get("media_id") or "") == str(attachment_id)
+    ]
+    source_pages = [page for page in source_pages if page]
+    site_names = {source_site_name(page) for page in source_pages} - {""}
+    if len(site_names) != 1:
+        return ""
+    return source_pages[0]
+
+
 class RegistryError(RuntimeError):
     """Raised when a registry cannot be safely opened or migrated."""
 
@@ -422,22 +465,27 @@ def record_v2_observation(
             url = str(getattr(item, "media_url", "") or "").strip()
             if not url:
                 continue
+            media_id = getattr(item, "media_id", None)
+            source_page_url = _source_page_from_library_index(root, media_id)
             visual_verification = getattr(item, "visual_verification", {})
             if not isinstance(visual_verification, dict):
                 visual_verification = {}
             identity_evidence = json.dumps(visual_verification, sort_keys=True)
             db.execute(
                 """INSERT INTO media_assets
-                (canonical_url, source_type, sha256, phash, visual_group_id,
+                (canonical_url, source_page_url, source_type, sha256, phash, visual_group_id,
                  wordpress_media_id, subject, status)
-                VALUES (?, 'v2_observation', ?, ?, ?, ?, ?, 'known')
+                VALUES (?, ?, 'v2_observation', ?, ?, ?, ?, ?, 'known')
                 ON CONFLICT(canonical_url) DO UPDATE SET
+                    source_page_url=CASE
+                        WHEN media_assets.source_page_url = '' AND excluded.source_page_url <> ''
+                        THEN excluded.source_page_url ELSE media_assets.source_page_url END,
                     sha256=CASE WHEN excluded.sha256 <> '' THEN excluded.sha256 ELSE media_assets.sha256 END,
                     phash=CASE WHEN excluded.phash <> '' THEN excluded.phash ELSE media_assets.phash END,
                     visual_group_id=CASE WHEN excluded.visual_group_id <> '' THEN excluded.visual_group_id ELSE media_assets.visual_group_id END,
                     wordpress_media_id=COALESCE(excluded.wordpress_media_id, media_assets.wordpress_media_id),
                     subject=CASE WHEN excluded.subject <> '' THEN excluded.subject ELSE media_assets.subject END""",
-                (url, str(getattr(item, "sha256", "") or ""), str(getattr(item, "phash", "") or ""),
+                (url, source_page_url, str(getattr(item, "sha256", "") or ""), str(getattr(item, "phash", "") or ""),
                  str(getattr(item, "visual_group_id", "") or ""), getattr(item, "media_id", None),
                  str(getattr(item, "subject", "") or "")),
             )
@@ -491,7 +539,7 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
                       u.identity_evidence, u.role, u.section_slot, u.status
                FROM media_usage AS u
                JOIN media_assets AS a ON a.asset_id = u.asset_id
-              WHERE u.post_id = ? AND u.status = 'applied'
+               WHERE u.post_id = ? AND u.status IN ('accepted', 'applied')
               ORDER BY u.usage_id DESC""",
             (int(post_id),),
         ).fetchall()
@@ -500,7 +548,12 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        item["source_site_name"] = source_site_name(item.pop("source_page_url", ""))
+        source_page_url = str(item.pop("source_page_url", "") or "")
+        if not source_page_url:
+            source_page_url = _source_page_from_library_index(
+                root, item.get("wordpress_media_id"),
+            )
+        item["source_site_name"] = source_site_name(source_page_url)
         raw_identity = item.pop("identity_evidence", "{}")
         try:
             identity = json.loads(raw_identity) if raw_identity else {}

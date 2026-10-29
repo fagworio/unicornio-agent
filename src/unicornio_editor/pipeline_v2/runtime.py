@@ -2072,7 +2072,12 @@ class ProductionMediaResolver:
             used_slots.add(slot)
         previous = replace(previous, inline=tuple(current_inline))
         registry_featured = next(
-            (row for row in registry_media if row.get("role") == "featured" and row.get("wordpress_media_id")),
+            (
+                row for row in registry_media
+                if row.get("role") == "featured"
+                and row.get("status") == "applied"
+                and row.get("wordpress_media_id")
+            ),
             None,
         )
         registry_featured_attachment: dict[str, Any] = {}

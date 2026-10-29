@@ -11,6 +11,7 @@ from unicornio_editor.media.registry import (
     RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index,
     record_v2_candidate_decision, record_v2_observation, registry_path,
 )
+from unicornio_editor.media.library_index import register as register_library_media
 from unicornio_editor.pipeline_v2.model import InlineMedia, MediaProgress, FeaturedProgress, FeaturedStatus, MediaSearchProgress
 from unicornio_editor.pipeline_v2.runtime import _attach_candidate_vision_evidence
 
@@ -485,7 +486,8 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
             "SELECT cycle_id, cycle_round, authorization_id, operation_status FROM media_operations WHERE run_id='run-1'"
         ).fetchone()
         assert tuple(operation) == ("cycle-current", 1, "auth-current", "started")
-    assert load_v2_media(tmp_path, post_id=10) == []
+    accepted = load_v2_media(tmp_path, post_id=10)
+    assert {row["status"] for row in accepted} == {"accepted"}
 
     record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
     record_v2_observation(tmp_path, post_id=10, run_id="run-2", state=state, phase="media", outcome="started", applied=False)
@@ -579,6 +581,107 @@ def test_load_v2_media_exposes_only_safe_source_site_label_for_credit_recovery(t
     assert loaded[0]["source_site_name"] == "IGN"
     assert "source_page_url" not in loaded[0]
     assert "private" not in json.dumps(loaded)
+
+
+def test_load_v2_media_recovers_accepted_source_from_library_index_read_only(tmp_path):
+    media_id = 304
+    media_url = "https://cdn.test/pending.webp"
+    state = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(media_id, media_url, 0, "alt", "", "Subject"),),
+    ))
+    record_v2_observation(
+        tmp_path, post_id=304, run_id="run-accepted-without-source", state=state,
+        phase="media", applied=False,
+    )
+    # This represents a historical V2 usage whose source is present in the
+    # library index but was not copied into media_assets.source_page_url.
+    register_library_media(
+        tmp_path,
+        source_url="https://images.ign.com/pending.webp?signature=secret",
+        source_page="https://user:private@www.ign.com/article?token=private#private",
+        media_id=media_id,
+    )
+
+    loaded = load_v2_media(tmp_path, post_id=304)
+
+    assert len(loaded) == 1
+    assert loaded[0]["status"] == "accepted"
+    assert loaded[0]["source_site_name"] == "IGN"
+    assert "source_page_url" not in loaded[0]
+    assert "private" not in json.dumps(loaded)
+    assert "secret" not in json.dumps(loaded)
+    with connect(tmp_path) as db:
+        assert db.execute(
+            "SELECT status FROM media_usage WHERE post_id=? AND wordpress_media_id=?",
+            (304, media_id),
+        ).fetchone()[0] == "accepted"
+        assert db.execute(
+            "SELECT source_page_url FROM media_assets WHERE canonical_url=?",
+            (media_url,),
+        ).fetchone()[0] == ""
+
+
+def test_record_v2_observation_persists_sanitized_library_source_for_accepted_media(tmp_path):
+    media_id = 305
+    media_url = "https://cdn.test/persist-source.webp"
+    register_library_media(
+        tmp_path,
+        source_url="https://images.ign.com/persist-source.webp?signature=secret",
+        source_page="https://user:private@www.ign.com/article?token=private#private",
+        media_id=media_id,
+    )
+    state = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(media_id, media_url, 0, "alt", "", "Subject"),),
+    ))
+
+    record_v2_observation(
+        tmp_path, post_id=305, run_id="run-persist-source", state=state,
+        phase="media", applied=False,
+    )
+
+    loaded = load_v2_media(tmp_path, post_id=305)
+    assert loaded[0]["status"] == "accepted"
+    assert loaded[0]["source_site_name"] == "IGN"
+    with connect(tmp_path) as db:
+        source_page_url = db.execute(
+            "SELECT source_page_url FROM media_assets WHERE canonical_url=?",
+            (media_url,),
+        ).fetchone()[0]
+        status = db.execute(
+            "SELECT status FROM media_usage WHERE post_id=? AND wordpress_media_id=?",
+            (305, media_id),
+        ).fetchone()[0]
+    assert source_page_url == "https://www.ign.com/article"
+    assert status == "accepted"
+
+
+def test_ambiguous_legacy_source_for_attachment_id_does_not_create_credit(tmp_path):
+    media_id = 306
+    state = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(media_id, "https://cdn.test/ambiguous.webp", 0),),
+    ))
+    record_v2_observation(
+        tmp_path, post_id=306, run_id="run-ambiguous-source", state=state,
+        phase="media", applied=False,
+    )
+    for suffix, source_page in (
+        ("a", "https://www.ign.com/article-a"),
+        ("b", "https://www.nintendo.com/article-b"),
+    ):
+        register_library_media(
+            tmp_path,
+            source_url=f"https://images.test/{suffix}.webp",
+            source_page=source_page,
+            media_id=media_id,
+        )
+
+    loaded = load_v2_media(tmp_path, post_id=306)
+
+    assert loaded[0]["status"] == "accepted"
+    assert loaded[0]["source_site_name"] == ""
 
 
 def test_invalidation_can_be_scoped_to_inline_role(tmp_path):

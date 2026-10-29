@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,10 +20,12 @@ from unicornio_editor.pipeline_v2.production_stages import (
 )
 from unicornio_editor.pipeline_v2.production import ProductionContextLoader, recover_editorial, editorial_has_substantive_text
 from unicornio_editor.pipeline_v2.runtime import (
+    ProductionMediaResolver,
     WordPressWriterV2,
     _embedded_media_urls,
     _v2_inline_media_ids_to_invalidate,
 )
+from unicornio_editor.media.library_index import register as register_library_media
 from unicornio_editor.media.registry import (
     connect as connect_media_registry,
     invalidate_v2_media,
@@ -1605,6 +1608,80 @@ def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_pa
     assert candidate["content"].count("Crédito da imagem: Featured Source.") == 1
     accepted_ids = [row["media_id"] for row in candidate["media"]["inline"]["accepted"]]
     assert accepted_ids == [22]
+
+
+def test_resume_composes_credit_for_accepted_media_from_library_index_without_upload(
+    tmp_path, monkeypatch,
+):
+    import unicornio_editor.pipeline_v2.runtime as runtime_module
+    import unicornio_editor.pipeline_v2.visual_media as visual_media_module
+
+    first = replace(_verified_inline(303, "https://wp.test/a.webp", 0), credit_text="")
+    second = replace(_verified_inline(304, "https://wp.test/b.webp", 3), credit_text="")
+    featured = FeaturedProgress(
+        FeaturedStatus.VALID,
+        399,
+        "https://wp.test/featured.webp",
+        "f" * 64,
+        "f" * 16,
+        "visual:" + "f" * 24,
+        {"decision": "INITIAL"},
+        "Imagem de capa",
+        "Crédito da imagem: Capa.",
+        1200,
+        800,
+    )
+    previous = MediaProgress(required=2, inline=(first, second), featured=featured)
+    state = SimpleNamespace(media=previous, phase=Phase.MEDIA)
+    register_library_media(
+        tmp_path,
+        source_url="https://images.ign.com/a.webp?signature=secret",
+        source_page="https://user:private@www.ign.com/article?token=private",
+        media_id=first.media_id,
+    )
+    record_v2_observation(
+        tmp_path, post_id=303, run_id="resume-accepted-source", state=state,
+        phase="media", applied=False,
+    )
+
+    monkeypatch.setattr(runtime_module, "_required_image_count_for_editorial", lambda *_a, **_k: 2)
+    monkeypatch.setattr(
+        visual_media_module,
+        "materialize_media_identity",
+        lambda _client, _config, _root, media, **_kwargs: media,
+    )
+
+    class Client:
+        def get_media(self, _media_id):
+            raise AssertionError("accepted media recovery must not issue a new WP read")
+
+    body = _substantive_body(8)
+    editorial = {"cleaned_html": body, "seo": {"focus_keyword": "Nintendo"}}
+    context = {
+        "post_id": 303,
+        "title": "Nintendo Switch: atualização",
+        "post": {"featured_media": featured.media_id, "content": {"raw": ""}},
+    }
+    recovered = ProductionMediaResolver(Client(), Config(), tmp_path)(
+        context, state, editorial, previous,
+    )
+
+    assert recovered.inline[0].credit_text == "Crédito da imagem: IGN."
+    assert recovered.inline[1].credit_text == ""
+    candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
+        context, editorial, recovered, persist=False,
+    )
+
+    assert "Crédito da imagem: IGN." in candidate["content"]
+    assert candidate["content"].count("Crédito da imagem: IGN.") == 1
+    assert "https://wp.test/a.webp" in candidate["content"]
+    assert [item["media_id"] for item in candidate["media"]["inline"]["accepted"]] == [303, 304]
+    with connect_media_registry(tmp_path) as db:
+        statuses = db.execute(
+            "SELECT status FROM media_usage WHERE post_id=? AND role='inline' ORDER BY wordpress_media_id",
+            (303,),
+        ).fetchall()
+    assert [row[0] for row in statuses] == ["accepted", "accepted"]
 
 
 def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
