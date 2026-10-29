@@ -1008,6 +1008,9 @@ def _acquisition_checkpoint_evidence(
     if len(operations) != 1 or len(media_run) != 1:
         return None
     operation = operations[0]
+    # ``started`` is the producer's nonterminal acquisition marker, not proof
+    # of a completed write. The status/identity/write/readback checks below
+    # must all still hold; empty remains accepted for legacy Registry rows.
     if (
         int(operation[0] or 0) != int(post_id)
         or str(operation[1] or "") != cycle_id
@@ -1017,7 +1020,7 @@ def _acquisition_checkpoint_evidence(
         or operation[5] != 0
         or operation[6] != 0
         or operation[7] is not None
-        or str(operation[8] or "")
+        or str(operation[8] or "") not in {"", "started"}
         or int(media_run[0][0] or 0) != int(post_id)
         or any(int(row[0] or 0) != int(post_id) for row in decisions)
     ):

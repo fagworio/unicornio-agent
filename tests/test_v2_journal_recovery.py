@@ -1,8 +1,10 @@
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from unicornio_editor.pipeline_v2.runtime import (
+    _acquisition_checkpoint_evidence,
     _incomplete_v2_journal_conflicts,
     _media_effect_evidence,
     _record_v2_writer_exception,
@@ -11,6 +13,7 @@ from unicornio_editor.pipeline_v2.runtime import (
     _write_v2_media_checkpoint,
     recover_interrupted_journal,
 )
+from unicornio_editor.media.registry import connect as connect_media_registry, record_v2_observation
 from unicornio_editor.pipeline_v2.model import (
     FeaturedProgress,
     InlineMedia,
@@ -362,6 +365,138 @@ def test_correlated_pre_writer_media_checkpoint_resumes_only_after_attachment_re
     assert _incomplete_v2_journal_conflicts(
         tmp_path, [115757], resumable_media_checkpoint_ids={115757: {115775}}
     ) == []
+
+
+def test_registry_produced_started_outcome_correlates_checkpoint_but_terminal_outcomes_do_not(tmp_path):
+    post_id = 115769
+    run_id = "run-started-registry"
+    cycle_id = "cycle-started-registry"
+    authorization_id = "auth-started-registry"
+    prior_media = InlineMedia(
+        115855, "https://wp.test/uploads/115855.webp", 0,
+        subject="Example game", sha256="prior-sha",
+    )
+    acquired_media = InlineMedia(
+        115913, "https://wp.test/uploads/115913.webp", 1,
+        subject="Example game", sha256="new-sha",
+    )
+    initial_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(prior_media,)),
+    )
+    checkpoint_media = MediaProgress(
+        required=2,
+        inline=(prior_media, acquired_media),
+    )
+    journal = {
+        "status": "running",
+        "post_id": post_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "cycle_round": 1,
+        "authorization_id": authorization_id,
+        "protocol_version": 2,
+        "writer_started": False,
+        "readback": False,
+        "state": initial_state.to_dict(),
+    }
+    journal_path = tmp_path / "work" / "v2-journal" / f"{post_id}.json"
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path,
+        post_id,
+        checkpoint_media,
+        run_id=run_id,
+        cycle_id=cycle_id,
+        cycle_round=1,
+        authorization_id=authorization_id,
+    )
+
+    # Use the production Registry V5 writer, not a hand-built SQLite schema or row.
+    with connect_media_registry(tmp_path):
+        pass
+    record_v2_observation(
+        tmp_path,
+        post_id=post_id,
+        run_id=run_id,
+        state=initial_state,
+        phase=Phase.MEDIA.value,
+        outcome="started",
+        checkpoint_reference=f"work/v2-journal/{post_id}.json",
+        cycle_id=cycle_id,
+        cycle_round=1,
+        authorization_id=authorization_id,
+        operation_status="started",
+        write_started=False,
+        readback_confirmed=False,
+    )
+    record_v2_observation(
+        tmp_path,
+        post_id=post_id,
+        run_id=run_id,
+        state=replace(initial_state, media=checkpoint_media),
+        phase=Phase.MEDIA.value,
+        outcome="started",
+        checkpoint_reference=f"work/v2-journal/{post_id}.json",
+        cycle_id=cycle_id,
+        cycle_round=1,
+        authorization_id=authorization_id,
+        operation_status="started",
+        write_started=False,
+        readback_confirmed=False,
+    )
+
+    evidence = _acquisition_checkpoint_evidence(
+        tmp_path,
+        post_id,
+        journal,
+        initial_media_ids={115855},
+    )
+    assert evidence is not None
+    assert evidence["media_ids"] == [115855, 115913]
+    assert evidence["new_media_ids"] == [115913]
+
+    # Legacy rows with an empty outcome remain compatible, but terminal and
+    # unknown outcomes or any writer/readback signal stay fail-closed.
+    with connect_media_registry(tmp_path) as db:
+        db.execute("UPDATE media_operations SET outcome='' WHERE run_id=?", (run_id,))
+    assert _acquisition_checkpoint_evidence(
+        tmp_path, post_id, journal, initial_media_ids={115855}
+    ) is not None
+    for outcome in ("ready", "failed", "retry", "unknown"):
+        with connect_media_registry(tmp_path) as db:
+            db.execute(
+                "UPDATE media_operations SET outcome=? WHERE run_id=?",
+                (outcome, run_id),
+            )
+        assert _acquisition_checkpoint_evidence(
+            tmp_path, post_id, journal, initial_media_ids={115855}
+        ) is None, outcome
+
+    for column, value in (
+        ("operation_status", "completed"),
+        ("write_started", 1),
+        ("readback_confirmed", 1),
+        ("completed_at", "2026-10-29T00:00:00+00:00"),
+    ):
+        with connect_media_registry(tmp_path) as db:
+            db.execute(
+                """UPDATE media_operations
+                      SET operation_status='started', write_started=0,
+                          readback_confirmed=0, completed_at=NULL, outcome='started'
+                    WHERE run_id=?""",
+                (run_id,),
+            )
+            db.execute(
+                f"UPDATE media_operations SET {column}=? WHERE run_id=?",
+                (value, run_id),
+            )
+        assert _acquisition_checkpoint_evidence(
+            tmp_path, post_id, journal, initial_media_ids={115855}
+        ) is None, column
 
 
 def test_pre_writer_media_checkpoint_stays_blocked_when_attachment_readback_fails(tmp_path):

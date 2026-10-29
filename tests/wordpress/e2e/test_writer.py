@@ -14,7 +14,20 @@ from unicornio_editor.pipeline_v2.transaction_admin import (
     TransactionIsolationError,
     _validate_historical_target_journal,
 )
-from unicornio_editor.pipeline_v2.runtime import run_v2
+from unicornio_editor.pipeline_v2.runtime import (
+    _verify_acquisition_checkpoint_for_resume,
+    _write_v2_media_checkpoint,
+    recover_interrupted_journal,
+    run_v2,
+)
+from unicornio_editor.pipeline_v2 import cycle_runtime
+from unicornio_editor.pipeline_v2.model import (
+    InlineMedia,
+    LifecycleState,
+    MediaProgress,
+    Phase,
+    WorkState,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -401,3 +414,275 @@ def test_legacy_prewriter_isolation_uses_real_wordpress_readbacks_without_writes
         "next_round_selected_ids": next_round["queue"]["selected_ids"],
         "isolated_post_excluded_from_next_round": target_id not in next_round["queue"]["selected_ids"],
     }
+
+
+def test_started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks(
+    wordpress_e2e_case,
+    tmp_path,
+):
+    case = wordpress_e2e_case
+    post_id = case.post_id("prewriter_media_resume")
+    cycle_id = "e2e-cycle-started-media-resume"
+    authorization_id = "e2e-auth-started-media-resume"
+    run_id = f"e2e-run-{post_id}-started-media-resume"
+    from PIL import Image, ImageDraw
+    from unicornio_editor.media.visual_identity import fingerprint_path
+
+    uploaded_media = []
+    identities = []
+    for index, name in enumerate(("prior", "acquired")):
+        image_path = tmp_path / f"{name}-media-resume.webp"
+        image = Image.new("RGB", (128, 128), (40 + index * 150, 70, 110))
+        draw = ImageDraw.Draw(image)
+        for row in range(0, 128, 16):
+            draw.rectangle(
+                (row, (row * (index + 1)) % 112, row + 9, (row * (index + 1)) % 112 + 12),
+                fill=(230 - index * 100, 210, 35 + index * 120),
+            )
+        image.save(image_path, format="WEBP")
+        identities.append(fingerprint_path(image_path))
+        uploaded_media.append(case.client.upload_media(
+            str(image_path),
+            filename=image_path.name,
+            alt_text=f"{name.title()} recovery fixture",
+            title=f"{name.title()} recovery fixture",
+        ))
+    prior_id, acquired_id = (int(item["id"]) for item in uploaded_media)
+    prior_url, acquired_url = (
+        str(item["source_url"]) for item in uploaded_media
+    )
+    assert prior_id > 0 and acquired_id > 0 and prior_id != acquired_id
+
+    prior_identity, acquired_identity = identities
+    initial_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=MediaProgress(
+            required=2,
+            inline=(InlineMedia(
+                prior_id, prior_url, 0,
+                sha256=prior_identity.sha256,
+                phash=prior_identity.phash,
+                visual_group_id=prior_identity.visual_group_id,
+                visual_verification={"decision": "INITIAL", "method": "e2e_fixture"},
+            ),),
+        ),
+    )
+    checkpoint_media = MediaProgress(
+        required=2,
+        inline=(
+            InlineMedia(
+                prior_id, prior_url, 0,
+                sha256=prior_identity.sha256,
+                phash=prior_identity.phash,
+                visual_group_id=prior_identity.visual_group_id,
+                visual_verification={"decision": "INITIAL", "method": "e2e_fixture"},
+            ),
+            InlineMedia(
+                acquired_id, acquired_url, 1,
+                sha256=acquired_identity.sha256,
+                phash=acquired_identity.phash,
+                visual_group_id=acquired_identity.visual_group_id,
+                visual_verification={"decision": "DIFFERENT", "method": "e2e_fixture"},
+            ),
+        ),
+    )
+    checkpoint_state = replace(initial_state, media=checkpoint_media)
+    case.client.update_post(
+        post_id,
+        {"meta": {"_hermes_work_state": json.dumps(initial_state.to_dict())}},
+    )
+
+    journal = {
+        "status": "running",
+        "post_id": post_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "cycle_round": 1,
+        "authorization_id": authorization_id,
+        "protocol_version": 2,
+        "writer_started": False,
+        "readback": False,
+        "state": initial_state.to_dict(),
+    }
+    journal_path = case.root / "work" / "v2-journal" / f"{post_id}.json"
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.write_text(json.dumps(journal, sort_keys=True), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        case.root,
+        post_id,
+        checkpoint_media,
+        run_id=run_id,
+        cycle_id=cycle_id,
+        cycle_round=1,
+        authorization_id=authorization_id,
+    )
+    with connect_registry(case.root):
+        pass
+    for state in (initial_state, checkpoint_state):
+        record_v2_observation(
+            case.root,
+            post_id=post_id,
+            run_id=run_id,
+            state=state,
+            phase=Phase.MEDIA.value,
+            outcome="started",
+            checkpoint_reference=f"work/v2-journal/{post_id}.json",
+            cycle_id=cycle_id,
+            cycle_round=1,
+            authorization_id=authorization_id,
+            operation_status="started",
+            write_started=False,
+            readback_confirmed=False,
+        )
+    cycle_store = CycleStateStore(case.root)
+    cycle = CycleState(cycle_id=cycle_id, phase="ADMISSION", status="running")
+    cycle_store.start_round(
+        cycle,
+        round_number=1,
+        request={"batch_size": 1},
+        authorization_id=authorization_id,
+    )
+    cycle_store.authorize_round(cycle, [post_id])
+
+    def snapshot() -> dict:
+        post = case.client.get_post(post_id)
+        content = post.get("content") if isinstance(post.get("content"), dict) else {}
+        meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+        return {
+            "status": str(post.get("status") or ""),
+            "content": str(content.get("raw") or content.get("rendered") or ""),
+            "featured_media": int(post.get("featured_media") or 0),
+            "work_state": str(meta.get("_hermes_work_state") or ""),
+        }
+
+    before = snapshot()
+    assert before["status"] == "pending"
+    assert before["work_state"] == json.dumps(initial_state.to_dict())
+    requests = []
+    original_request = case.client._request
+
+    def track_request(method, *args, **kwargs):
+        requests.append(str(method).upper())
+        return original_request(method, *args, **kwargs)
+
+    def reject_duplicate_upload(*_args, **_kwargs):
+        raise AssertionError("pre-writer recovery must not upload media")
+
+    case.client._request = track_request
+    case.client.upload_media = reject_duplicate_upload
+    verification = _verify_acquisition_checkpoint_for_resume(
+        case.client,
+        case.root,
+        post_id,
+        journal,
+        {"v2_state": checkpoint_state},
+    )
+    assert verification is not None
+    assert verification["wordpress_status"] == "pending"
+    assert verification["wordpress_state_matches"] is True
+    assert verification["wordpress_readback_media_ids"] == sorted([prior_id, acquired_id])
+    recovery = cycle_runtime._reconcile_completed_round(
+        case.client,
+        case.root,
+        [post_id],
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=1,
+        expected_authorization_id=authorization_id,
+    )
+    assert recovery is not None
+    assert recovery.reconciled_without_replay is True
+    assert recovery.executed_ids == (post_id,)
+    assert recovery.details[0]["outcome"] == "retry"
+    assert recovery.details[0]["ready_verified"] is False
+    assert recovery.details[0]["recovery_classification"] == "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+    recovered_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert recovered_journal["status"] == "interrupted_pre_writer"
+    assert recovered_journal["resumable"] is True
+    assert recovered_journal["recovery_evidence"]["media_ids"] == sorted([prior_id, acquired_id])
+    assert recovered_journal["recovery_evidence"]["new_media_ids"] == [acquired_id]
+    journal_after_first_recovery = journal_path.read_text(encoding="utf-8")
+    repeated_reconciliation = cycle_runtime._reconcile_completed_round(
+        case.client,
+        case.root,
+        [post_id],
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=1,
+        expected_authorization_id=authorization_id,
+    )
+    assert repeated_reconciliation is not None
+    assert repeated_reconciliation.reconciled_without_replay is True
+    assert repeated_reconciliation.executed_ids == (post_id,)
+    assert repeated_reconciliation.details[0]["ready_verified"] is False
+    assert journal_path.read_text(encoding="utf-8") == journal_after_first_recovery
+    second_recovery = recover_interrupted_journal(
+        case.root,
+        post_id,
+        apply=True,
+        expected_identity={
+            "run_id": run_id,
+            "cycle_id": cycle_id,
+            "cycle_round": "1",
+            "authorization_id": authorization_id,
+        },
+        media_checkpoint_resume=verification,
+    )
+    assert second_recovery["recovered"] is False
+    assert second_recovery["reason"] == "already_recovered"
+
+    for media_id, expected_url in ((prior_id, prior_url), (acquired_id, acquired_url)):
+        attachment = case.client.get_media(media_id)
+        assert int(attachment.get("id") or 0) == media_id
+        assert str(attachment.get("source_url") or "") == expected_url
+    after = snapshot()
+    assert after == before
+    assert acquired_url not in after["content"]
+    assert after["featured_media"] != acquired_id
+    assert set(requests) == {"GET"}
+    with connect_registry(case.root) as db:
+        operation = db.execute(
+            """SELECT operation_status, write_started, readback_confirmed, outcome
+                 FROM media_operations WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        usage = db.execute(
+            """SELECT wordpress_media_id, status, applied_at
+                 FROM media_usage WHERE post_id=? ORDER BY wordpress_media_id""",
+            (post_id,),
+        ).fetchall()
+    assert tuple(operation) == ("started", 0, 0, "started")
+    assert [(int(row[0]), str(row[1]), row[2]) for row in usage] == [
+        (prior_id, "accepted", None),
+        (acquired_id, "accepted", None),
+    ]
+    audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={post_id}")
+    case.observations.append({
+        "scenario": "started_media_registry_checkpoint_recovery",
+        "post_id": post_id,
+        "run_id": run_id,
+        "before": {"status": before["status"], "featured_media": before["featured_media"]},
+        "after": {"status": after["status"], "featured_media": after["featured_media"]},
+        "journal": recovered_journal,
+        "rest_events": audit.get("events", []),
+        "recovery": {
+            "reconciled_without_replay": recovery.reconciled_without_replay,
+            "executed_ids": list(recovery.executed_ids),
+            "detail": recovery.details[0],
+        },
+        "repeated_reconciliation": {
+            "reconciled_without_replay": repeated_reconciliation.reconciled_without_replay,
+            "executed_ids": list(repeated_reconciliation.executed_ids),
+        },
+        "second_recovery": second_recovery,
+        "attachment_readback": {
+            str(media_id): {"verified": True, "source_url_matches": True}
+            for media_id in (prior_id, acquired_id)
+        },
+        "wordpress_content_unchanged": after["content"] == before["content"],
+        "wordpress_writes_during_recovery": requests,
+        "media_registry_operation": dict(
+            zip(("operation_status", "write_started", "readback_confirmed", "outcome"), operation)
+        ),
+        "media_usage": [dict(row) for row in usage],
+    })

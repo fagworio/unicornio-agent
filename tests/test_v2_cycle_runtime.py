@@ -579,7 +579,7 @@ def test_reconcile_correlated_acquisition_checkpoint_as_retry_without_writer_rep
                (post_id, run_id, cycle_id, cycle_round, authorization_id,
                 operation_status, started_at, write_started, readback_confirmed,
                 completed_at, outcome)
-               VALUES (?, ?, ?, ?, ?, 'started', '2026-10-24T10:00:00+00:00', 0, 0, NULL, '')""",
+               VALUES (?, ?, ?, ?, ?, 'started', '2026-10-24T10:00:00+00:00', 0, 0, NULL, 'started')""",
             (post_id, "run-media", "cycle-media", 4, "auth-media"),
         )
 
@@ -603,6 +603,174 @@ def test_reconcile_correlated_acquisition_checkpoint_as_retry_without_writer_rep
     saved_journal = json.loads(journal_path.read_text(encoding="utf-8"))
     assert saved_journal["status"] == "interrupted_pre_writer"
     assert saved_journal["writer_started"] is False
+
+
+def test_reconcile_mixed_historical_round_preserves_committed_and_started_media_without_replay(tmp_path):
+    from unicornio_editor.media.registry import connect, record_v2_observation
+    from unicornio_editor.pipeline_v2.runtime import _write_v2_media_checkpoint
+
+    cycle_id = "cycle-mixed-media"
+    authorization_id = "auth-mixed-media"
+    selected = [115771, 115769, 115329, 115798, 115802]
+    committed_id, recovery_id, *not_executed_ids = selected
+    prior = InlineMedia(
+        115855, "https://wp.test/uploads/115855.webp", 0,
+        sha256="prior-sha", phash="prior-phash", visual_group_id="prior-group",
+        visual_verification={"decision": "INITIAL"},
+    )
+    acquired = InlineMedia(
+        115913, "https://wp.test/uploads/115913.webp", 1,
+        sha256="acquired-sha", phash="acquired-phash", visual_group_id="acquired-group",
+        visual_verification={"decision": "DIFFERENT"},
+    )
+    initial_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(prior,)),
+    )
+    acquired_state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        relevance_approved=True,
+        media=MediaProgress(required=2, inline=(prior, acquired)),
+    )
+
+    class Client:
+        def __init__(self):
+            self.requests = []
+            self.posts = {
+                post_id: {
+                    "id": post_id,
+                    "status": "pending",
+                    "title": {"raw": f"Post {post_id}"},
+                    "content": {"raw": "<p>Unchanged body</p>"},
+                    "featured_media": 0,
+                    "meta": {"_hermes_work_state": json.dumps(
+                        initial_state.to_dict()
+                    )},
+                }
+                for post_id in selected
+            }
+
+        def list_pending(self, *, page, per_page, status):
+            return list(self.posts.values()) if page == 1 else []
+
+        def get_post(self, post_id):
+            self.requests.append(("GET", int(post_id)))
+            return self.posts.get(int(post_id))
+
+        def get_media(self, media_id):
+            self.requests.append(("GET_MEDIA", int(media_id)))
+            urls = {
+                115855: "https://wp.test/uploads/115855.webp",
+                115913: "https://wp.test/uploads/115913.webp",
+            }
+            return {"id": int(media_id), "source_url": urls[int(media_id)]}
+
+    client = Client()
+    store = CycleStateStore(tmp_path)
+    cycle = CycleState(cycle_id=cycle_id, phase="ADMISSION", status="running")
+    store.start_round(
+        cycle,
+        round_number=1,
+        request={"batch_size": len(selected)},
+        authorization_id=authorization_id,
+    )
+    store.authorize_round(cycle, selected)
+
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / f"{committed_id}.json").write_text(json.dumps({
+        "status": "committed",
+        "post_id": committed_id,
+        "run_id": "run-committed-115771",
+        "cycle_id": cycle_id,
+        "cycle_round": 1,
+        "authorization_id": authorization_id,
+        "protocol_version": 2,
+        "writer_started": True,
+        "readback": True,
+        "state": initial_state.to_dict(),
+    }), encoding="utf-8")
+    recovery_run_id = "run-started-115769"
+    recovery_journal = {
+        "status": "running",
+        "post_id": recovery_id,
+        "run_id": recovery_run_id,
+        "cycle_id": cycle_id,
+        "cycle_round": 1,
+        "authorization_id": authorization_id,
+        "protocol_version": 2,
+        "writer_started": False,
+        "readback": False,
+        "state": initial_state.to_dict(),
+    }
+    recovery_journal_path = journal_dir / f"{recovery_id}.json"
+    recovery_journal_path.write_text(json.dumps(recovery_journal), encoding="utf-8")
+    _write_v2_media_checkpoint(
+        tmp_path,
+        recovery_id,
+        acquired_state.media,
+        run_id=recovery_run_id,
+        cycle_id=cycle_id,
+        cycle_round=1,
+        authorization_id=authorization_id,
+    )
+    with connect(tmp_path):
+        pass
+    for state in (initial_state, acquired_state):
+        record_v2_observation(
+            tmp_path,
+            post_id=recovery_id,
+            run_id=recovery_run_id,
+            state=state,
+            phase=Phase.MEDIA.value,
+            outcome="started",
+            cycle_id=cycle_id,
+            cycle_round=1,
+            authorization_id=authorization_id,
+            operation_status="started",
+            write_started=False,
+            readback_confirmed=False,
+        )
+
+    from unicornio_editor.pipeline_v2.production import ProductionCandidateReader
+    from unicornio_editor.pipeline_v2.runtime import _verify_acquisition_checkpoint_for_resume
+    recovery_context = dict(
+        ProductionCandidateReader(client, tmp_path).snapshot(page_size=10)
+    )[recovery_id]
+    assert _verify_acquisition_checkpoint_for_resume(
+        client, tmp_path, recovery_id, recovery_journal, recovery_context
+    ) is not None, recovery_context
+
+    result = cycle_runtime._reconcile_completed_round(
+        client,
+        tmp_path,
+        selected,
+        expected_cycle_id=cycle_id,
+        expected_cycle_round=1,
+        expected_authorization_id=authorization_id,
+    )
+
+    assert result is not None
+    assert result.reconciled_without_replay is True, result.reconciliation_blocking_info
+    assert result.preview_selected_ids == tuple(selected)
+    assert result.executed_ids == (committed_id, recovery_id)
+    assert result.reconciliation_info["not_executed_post_ids"] == not_executed_ids
+    details = {int(detail["post_id"]): detail for detail in result.details}
+    assert len(details) == len(selected)
+    assert details[committed_id]["journal_status"] == "committed"
+    assert details[committed_id]["transaction_readback"] is True
+    assert details[recovery_id]["outcome"] == "retry"
+    assert details[recovery_id]["recovery_classification"] == "ACCEPTED_MEDIA_CHECKPOINT_RESUMABLE"
+    assert details[recovery_id]["accepted_media_ids"] == [115855, 115913]
+    assert details[recovery_id]["ready_verified"] is False
+    assert details[recovery_id]["write_replayed"] is False
+    assert all(details[post_id]["outcome"] == "not_executed" for post_id in not_executed_ids)
+    assert json.loads(recovery_journal_path.read_text(encoding="utf-8"))["status"] == "interrupted_pre_writer"
+    assert CycleStateStore(tmp_path).load().pending_round["authorization_id"] == authorization_id
+    assert not any(method == "POST" for method, _post_id in client.requests)
 
 
 
