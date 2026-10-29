@@ -1613,6 +1613,7 @@ def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_pa
 def test_resume_composes_credit_for_accepted_media_from_library_index_without_upload(
     tmp_path, monkeypatch,
 ):
+    import unicornio_editor.cli as cli_module
     import unicornio_editor.pipeline_v2.runtime as runtime_module
     import unicornio_editor.pipeline_v2.visual_media as visual_media_module
 
@@ -1627,7 +1628,7 @@ def test_resume_composes_credit_for_accepted_media_from_library_index_without_up
         "visual:" + "f" * 24,
         {"decision": "INITIAL"},
         "Imagem de capa",
-        "Crédito da imagem: Capa.",
+        "",
         1200,
         800,
     )
@@ -1639,12 +1640,23 @@ def test_resume_composes_credit_for_accepted_media_from_library_index_without_up
         source_page="https://user:private@www.ign.com/article?token=private",
         media_id=first.media_id,
     )
+    register_library_media(
+        tmp_path,
+        source_url="https://images.nintendo.com/featured.webp?signature=secret",
+        source_page="https://user:private@www.nintendo.com/article?token=private",
+        media_id=featured.media_id,
+    )
     record_v2_observation(
         tmp_path, post_id=303, run_id="resume-accepted-source", state=state,
         phase="media", applied=False,
     )
 
     monkeypatch.setattr(runtime_module, "_required_image_count_for_editorial", lambda *_a, **_k: 2)
+    monkeypatch.setattr(
+        cli_module,
+        "_resolve_media_batch",
+        lambda *_a, **_k: pytest.fail("accepted media recovery must not upload or search"),
+    )
     monkeypatch.setattr(
         visual_media_module,
         "materialize_media_identity",
@@ -1668,12 +1680,14 @@ def test_resume_composes_credit_for_accepted_media_from_library_index_without_up
 
     assert recovered.inline[0].credit_text == "Crédito da imagem: IGN."
     assert recovered.inline[1].credit_text == ""
+    assert recovered.featured.credit_text == "Crédito da imagem: Nintendo."
     candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
         context, editorial, recovered, persist=False,
     )
 
     assert "Crédito da imagem: IGN." in candidate["content"]
     assert candidate["content"].count("Crédito da imagem: IGN.") == 1
+    assert candidate["content"].count("Crédito da imagem: Nintendo.") == 1
     assert "https://wp.test/a.webp" in candidate["content"]
     assert [item["media_id"] for item in candidate["media"]["inline"]["accepted"]] == [303, 304]
     with connect_media_registry(tmp_path) as db:
@@ -1681,7 +1695,12 @@ def test_resume_composes_credit_for_accepted_media_from_library_index_without_up
             "SELECT status FROM media_usage WHERE post_id=? AND role='inline' ORDER BY wordpress_media_id",
             (303,),
         ).fetchall()
+        featured_status = db.execute(
+            "SELECT status FROM media_usage WHERE post_id=? AND role='featured' AND wordpress_media_id=?",
+            (303, featured.media_id),
+        ).fetchone()[0]
     assert [row[0] for row in statuses] == ["accepted", "accepted"]
+    assert featured_status == "accepted"
 
 
 def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):

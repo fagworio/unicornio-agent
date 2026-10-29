@@ -2132,6 +2132,27 @@ class ProductionMediaResolver:
                     str(registry_featured.get("source_site_name") or ""),
                 ),
             )
+        elif previous.featured.status is FeaturedStatus.VALID:
+            # A checkpoint already proves this featured attachment is the
+            # selected one. Recover only its source-site credit from accepted
+            # registry evidence; do not re-read WordPress or change its state.
+            accepted_featured_source = next(
+                (
+                    row for row in registry_media
+                    if row.get("role") == "featured"
+                    and row.get("status") == "accepted"
+                    and int(row.get("wordpress_media_id") or 0) == int(featured.media_id or 0)
+                ),
+                None,
+            )
+            if accepted_featured_source:
+                featured = replace(
+                    featured,
+                    credit_text=credit_text_with_source_name(
+                        featured.credit_text,
+                        str(accepted_featured_source.get("source_site_name") or ""),
+                    ),
+                )
         from .visual_media import materialize_media_identity
 
         recovered_media = materialize_media_identity(

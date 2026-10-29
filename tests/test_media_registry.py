@@ -658,7 +658,12 @@ def test_record_v2_observation_persists_sanitized_library_source_for_accepted_me
 
 
 def test_ambiguous_legacy_source_for_attachment_id_does_not_create_credit(tmp_path):
+    from unicornio_editor.media.text import source_site_name
+
     media_id = 306
+    assert source_site_name("https://www.ign.com/article-a") == source_site_name(
+        "https://ign.co.uk/article-b"
+    ) == "IGN"
     state = SimpleNamespace(media=MediaProgress(
         required=1,
         inline=(InlineMedia(media_id, "https://cdn.test/ambiguous.webp", 0),),
@@ -669,7 +674,9 @@ def test_ambiguous_legacy_source_for_attachment_id_does_not_create_credit(tmp_pa
     )
     for suffix, source_page in (
         ("a", "https://www.ign.com/article-a"),
-        ("b", "https://www.nintendo.com/article-b"),
+        # Both domains produce the display label "IGN".  Ambiguity must be
+        # evaluated from the normalized source domains, not display labels.
+        ("b", "https://ign.co.uk/article-b"),
     ):
         register_library_media(
             tmp_path,

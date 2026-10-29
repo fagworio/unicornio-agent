@@ -41,6 +41,17 @@ def _safe_source_page_url(value: Any) -> str:
     return urlsplit(f"{scheme}://{host}{parsed.path or '/'}").geturl()
 
 
+def _source_domain_identity(value: Any) -> str:
+    """Return a canonical host identity for provenance ambiguity checks."""
+    try:
+        host = (urlsplit(str(value or "")).hostname or "").rstrip(".").casefold()
+        if not host:
+            return ""
+        return host.encode("idna").decode("ascii").casefold()
+    except (UnicodeError, TypeError, ValueError):
+        return ""
+
+
 def _source_page_from_library_index(root: str | Path, media_id: Any) -> str:
     """Read unambiguous legacy provenance by attachment ID without writing."""
     try:
@@ -48,7 +59,6 @@ def _source_page_from_library_index(root: str | Path, media_id: Any) -> str:
         if attachment_id < 1:
             return ""
         from .library_index import load_index
-        from .text import source_site_name
 
         entries = load_index(root).get("entries", [])
     except (ImportError, OSError, TypeError, ValueError):
@@ -60,8 +70,8 @@ def _source_page_from_library_index(root: str | Path, media_id: Any) -> str:
         and str(entry.get("media_id") or "") == str(attachment_id)
     ]
     source_pages = [page for page in source_pages if page]
-    site_names = {source_site_name(page) for page in source_pages} - {""}
-    if len(site_names) != 1:
+    source_domains = {_source_domain_identity(page) for page in source_pages} - {""}
+    if len(source_domains) != 1:
         return ""
     return source_pages[0]
 
