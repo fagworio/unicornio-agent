@@ -2,6 +2,7 @@ from unicornio_editor.pipeline_v2.classifier import classify, blocker_for_gate
 from datetime import datetime, timezone
 
 from unicornio_editor.pipeline_v2.model import BlockerCode, MediaProgress, OutcomeType, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.errors import StageError
 
 
 def test_gate_map_is_explicit_not_substring_matching():
@@ -86,8 +87,6 @@ def test_visual_identity_outage_retries_listicle_after_second_enrichment_round()
     assert outcome.blocker is BlockerCode.PROVIDER_ERROR
 
 
-
-
 def test_temporary_featured_read_error_retries_provider_not_internal_error():
     outcome = classify(
         WorkState(relevance_approved=True, retry=RetryInfo(attempts=9)),
@@ -155,7 +154,53 @@ def test_relevance_skip_is_the_only_skip_path():
 
 def test_relevance_uncertain_repeats_require_human():
     outcome = classify(
-        WorkState(phase=Phase.RELEVANCE, blocker=BlockerCode.RELEVANCE_UNCERTAIN, retry=__import__("unicornio_editor.pipeline_v2.model", fromlist=["RetryInfo"]).RetryInfo(attempts=1)),
+        WorkState(phase=Phase.RELEVANCE, blocker=BlockerCode.RELEVANCE_UNCERTAIN, retry=RetryInfo(attempts=1)),
         {"decision": "uncertain"}, {}, {"passed": False, "failures": []},
     )
     assert outcome.type is OutcomeType.HUMAN_REQUIRED
+
+
+def test_missing_editorial_decision_preserves_correlated_timeout_failure():
+    outcome = classify(
+        WorkState(), {}, {},
+        {"passed": False, "failures": [{
+            "gate": "provider_editorial", "blocker": "provider_error",
+            "phase": "editorial", "detail": "editorial provider timed out",
+            "failure_class": "timeout", "retryable": True,
+        }]},
+    )
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.EDITORIAL
+    assert outcome.blocker is BlockerCode.PROVIDER_ERROR
+    assert "timeout" in (outcome.detail or "")
+    assert "retryable=true" in (outcome.detail or "")
+
+
+def test_missing_editorial_decision_preserves_schema_failure():
+    outcome = classify(
+        WorkState(), {}, {},
+        {"passed": False, "failures": [{
+            "gate": "schema_editorial", "phase": "editorial",
+            "detail": "top-level has invalid fields (unknown=['post_id'])",
+        }]},
+    )
+    assert outcome.type is OutcomeType.RETRY
+    assert outcome.phase is Phase.EDITORIAL
+    assert outcome.blocker is BlockerCode.SCHEMA
+    assert "post_id" in (outcome.detail or "")
+
+
+def test_stage_timeout_metadata_survives_classification():
+    outcome = __import__("unicornio_editor.pipeline_v2.classifier", fromlist=["classify_stage_error"]).classify_stage_error(
+        WorkState(),
+        StageError(
+            BlockerCode.PROVIDER_ERROR,
+            Phase.EDITORIAL,
+            "editorial provider timed out",
+            failure_class="timeout",
+            retryable=True,
+        ),
+    )
+    assert outcome.type is OutcomeType.RETRY
+    assert "failure_class=timeout" in (outcome.detail or "")
+    assert "retryable=true" in (outcome.detail or "")
