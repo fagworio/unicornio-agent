@@ -2,7 +2,13 @@
 
 import unittest
 
-from unicornio_editor.media.text import dedupe_credit_figures, plain_text, sanitize_title
+from unicornio_editor.media.text import (
+    credit_text_with_source_site,
+    dedupe_credit_figures,
+    plain_text,
+    sanitize_title,
+    source_site_name,
+)
 
 
 class PlainTextTests(unittest.TestCase):
@@ -27,6 +33,49 @@ class PlainTextTests(unittest.TestCase):
         title = "Pokémon Heart &amp; Soul 2.0: freebie gratuito"
         self.assertEqual(sanitize_title(title), "Pokémon Heart & Soul 2.0: freebie gratuito")
         self.assertEqual(sanitize_title("Heart &amp Soul"), "Heart & Soul")
+
+
+class SourceCreditTests(unittest.TestCase):
+    def test_source_name_comes_from_page_host_not_image_cdn_or_query(self):
+        self.assertEqual(
+            source_site_name("https://www.IGN.com/article?token=private"), "IGN",
+        )
+        self.assertEqual(
+            source_site_name("https://images.cdn.nintendo.com.br/art?sig=private"),
+            "Nintendo",
+        )
+
+    def test_site_credit_appends_without_discarding_existing_author_caption(self):
+        self.assertEqual(
+            credit_text_with_source_site(
+                "Crédito da imagem: E2E Artist. Captura de gameplay.",
+                "https://www.ign.com/article",
+            ),
+            "Crédito da imagem: E2E Artist. Captura de gameplay. Crédito da imagem: IGN.",
+        )
+
+    def test_existing_source_credit_is_not_duplicated(self):
+        text = "Crédito da imagem: Autor, via IGN. Captura do jogo."
+        self.assertEqual(credit_text_with_source_site(text, "https://www.ign.com/article"), text)
+
+    def test_site_mentioned_outside_credit_clause_does_not_suppress_attribution(self):
+        self.assertEqual(
+            credit_text_with_source_site(
+                "Crédito da imagem: Autor. O artigo também menciona IGN.",
+                "https://www.ign.com/article",
+            ),
+            "Crédito da imagem: Autor. O artigo também menciona IGN. Crédito da imagem: IGN.",
+        )
+
+    def test_safe_persisted_site_name_adds_credit_without_url_material(self):
+        self.assertEqual(
+            credit_text_with_source_site("", "https://user:secret@www.ign.com/article?token=private"),
+            "Crédito da imagem: IGN.",
+        )
+
+    def test_missing_or_invalid_source_does_not_invent_credit(self):
+        self.assertEqual(credit_text_with_source_site("Legenda editorial.", ""), "Legenda editorial.")
+        self.assertEqual(credit_text_with_source_site("", "javascript://ign.com/image"), "")
 
 
 class DedupeCreditFiguresTests(unittest.TestCase):

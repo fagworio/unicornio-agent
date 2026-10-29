@@ -50,10 +50,16 @@ WordPress. Imagens preservadas no HTML final precisam corresponder a
 attachments V2 tecnicamente verificados; hotlinks ou imagens externas não
 reconciliadas bloqueiam a validação.
 
-ALT deve descrever a imagem de forma factual e compatível com o contexto. Uma
-legenda ou crédito editorial é opcional e não substitui a verificação técnica
-de origem nem constitui evidência legal. Campos jurídicos em planos e estados
-históricos são ignorados pelo fluxo atual e não são reescritos por compatibilidade.
+ALT deve descrever a imagem de forma factual e compatível com o contexto. Para
+imagens adquiridas ou reutilizadas pelo V2 com uma página de origem verificada,
+o pipeline acrescenta automaticamente `Crédito da imagem: [site de origem]` à
+legenda do anexo e à composição inline/featured. O texto identifica somente o
+site da página de origem; não declara autoria nem constitui evidência legal.
+Créditos editoriais já existentes são preservados e a atribuição do mesmo site
+não é duplicada. Para mídia histórica sem proveniência verificável, o pipeline
+preserva a legenda disponível e não inventa uma fonte. Campos jurídicos em
+planos e estados históricos são ignorados pelo fluxo atual e não são reescritos
+por compatibilidade.
 
 ## SEO
 - uma keyword principal;

@@ -2015,6 +2015,26 @@ class ProductionMediaResolver:
         except Exception:
             registry_media = []
         current_inline = list(previous.inline)
+        registry_by_media_id = {
+            int(row.get("wordpress_media_id") or 0): row
+            for row in registry_media
+            if int(row.get("wordpress_media_id") or 0) > 0
+        }
+        from ..media.text import credit_text_with_source_name
+
+        # Older accepted V2 attachments may have a verified source URL in the
+        # local registry but no display credit in their checkpoint. Recover
+        # only the website label from that provenance; never infer an author.
+        current_inline = [
+            replace(
+                item,
+                credit_text=credit_text_with_source_name(
+                    item.credit_text,
+                    str(registry_by_media_id.get(item.media_id, {}).get("source_site_name") or ""),
+                ),
+            )
+            for item in current_inline
+        ]
         post_content_urls = set(_embedded_media_urls(str(((context.get("post") or {}).get("content") or {}).get("raw") or "")))
         used_slots = {item.slot for item in current_inline}
         known_ids = {item.media_id for item in current_inline}
@@ -2039,7 +2059,11 @@ class ProductionMediaResolver:
             while slot in used_slots:
                 slot += 1
             current_inline.append(InlineMedia(
-                media_id, str(row.get("canonical_url") or ""), slot, subject=str(row.get("subject") or ""),
+                media_id, str(row.get("canonical_url") or ""), slot,
+                credit_text=credit_text_with_source_name(
+                    "", str(row.get("source_site_name") or ""),
+                ),
+                subject=str(row.get("subject") or ""),
                 section_slot=row.get("section_slot"), phash=str(row.get("phash") or ""),
                 sha256=str(row.get("sha256") or ""), visual_group_id=str(row.get("visual_group_id") or ""),
                 visual_verification=dict(row.get("visual_verification") or {}),
@@ -2066,7 +2090,10 @@ class ProductionMediaResolver:
 
                     details = registry_featured_attachment.get("media_details") or {}
                     registry_featured_alt = plain_text(str(registry_featured_attachment.get("alt_text") or ""))
-                    registry_featured_credit = plain_text(str(((registry_featured_attachment.get("caption") or {}).get("rendered") or "")))
+                    registry_featured_credit = credit_text_with_source_name(
+                        plain_text(str(((registry_featured_attachment.get("caption") or {}).get("rendered") or ""))),
+                        str(registry_featured.get("source_site_name") or ""),
+                    )
                     registry_featured_width = int(details.get("width") or 0)
                     registry_featured_height = int(details.get("height") or 0)
             except Exception:
@@ -2089,6 +2116,17 @@ class ProductionMediaResolver:
             and int((context.get("post") or {}).get("featured_media") or 0) == int(registry_featured["wordpress_media_id"])
             else self._recover_existing_featured(context, editorial, previous)
         )
+        if (
+            registry_featured
+            and featured.media_id == int(registry_featured.get("wordpress_media_id") or 0)
+        ):
+            featured = replace(
+                featured,
+                credit_text=credit_text_with_source_name(
+                    featured.credit_text,
+                    str(registry_featured.get("source_site_name") or ""),
+                ),
+            )
         from .visual_media import materialize_media_identity
 
         recovered_media = materialize_media_identity(

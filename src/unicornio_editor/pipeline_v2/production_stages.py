@@ -29,6 +29,7 @@ from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
 from ..media.inserter import (
     MediaInsertionError,
+    append_featured_credit,
     insert_media,
     minimum_normal_article_paragraphs,
     normal_media_urls_to_insert,
@@ -1245,6 +1246,8 @@ class ProductionComposeStage:
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
             working = attach_trailer_audit(working, trailer, search_status=trailer_status)
             content = normalize_editorial_dashes(content)
+            if media.featured.credit_text:
+                content = append_featured_credit(content, media.featured.credit_text)
             # Keep the exact prepared editorial body as the quota and layout
             # evidence source. The composed publication HTML is stored
             # separately in candidate["content"] and may contain captions,

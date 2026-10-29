@@ -559,6 +559,28 @@ def test_visual_identity_evidence_is_scoped_to_post_usage(tmp_path):
     assert media_b["visual_verification"] == {"decision": "SAME_ART_CROP", "duplicate_of": "202"}
 
 
+def test_load_v2_media_exposes_only_safe_source_site_label_for_credit_recovery(tmp_path):
+    state = SimpleNamespace(media=MediaProgress(
+        required=1,
+        inline=(InlineMedia(303, "https://wp.test/a.webp", 0, "alt", "", "Subject"),),
+    ))
+    record_v2_observation(
+        tmp_path, post_id=303, run_id="run-source-credit", state=state,
+        phase="validate", applied=True,
+    )
+    with connect(tmp_path) as db:
+        db.execute(
+            "UPDATE media_assets SET source_page_url=? WHERE canonical_url=?",
+            ("https://user:private@www.ign.com/article?token=private", "https://wp.test/a.webp"),
+        )
+        db.commit()
+
+    loaded = load_v2_media(tmp_path, post_id=303)
+    assert loaded[0]["source_site_name"] == "IGN"
+    assert "source_page_url" not in loaded[0]
+    assert "private" not in json.dumps(loaded)
+
+
 def test_invalidation_can_be_scoped_to_inline_role(tmp_path):
     media = MediaProgress(
         required=1,

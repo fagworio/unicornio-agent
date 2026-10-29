@@ -1591,6 +1591,7 @@ def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_pa
         "1" * 16,
         "visual:" + "a" * 24,
         {"decision": "INITIAL"},
+        credit_text="Crédito da imagem: Featured Source.",
     )
     media = MediaProgress(required=2, inline=(duplicate, distinct), featured=featured)
 
@@ -1601,6 +1602,7 @@ def test_compose_reconciles_confirmed_duplicate_before_candidate_creation(tmp_pa
     assert duplicate_url not in candidate["content"]
     assert "Legenda antiga" not in candidate["content"]
     assert distinct_url in candidate["content"]
+    assert candidate["content"].count("Crédito da imagem: Featured Source.") == 1
     accepted_ids = [row["media_id"] for row in candidate["media"]["inline"]["accepted"]]
     assert accepted_ids == [22]
 

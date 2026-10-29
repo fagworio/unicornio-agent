@@ -308,10 +308,16 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
         featured_result = next(item for item in accepted if item.get("featured"))
         inline_results = [item for item in accepted if not item.get("featured")]
         assert len(inline_results) == 2
+        expected_source_credit = "Crédito da imagem: 127.0.0.1."
+        assert featured_credit == expected_source_credit
+        assert all(item["credit_text"] == expected_source_credit for item in accepted)
         for result in accepted:
             attachment = case.client.get_media(int(result["media_id"]))
             details = attachment.get("media_details") or {}
             assert str(attachment.get("source_url") or "").endswith(".webp")
+            assert expected_source_credit in str(
+                ((attachment.get("caption") or {}).get("rendered") or "")
+            )
             assert details.get("width", 0) >= 1 and details.get("height", 0) >= 1
             result["media_url"] = str(attachment["source_url"])
             result["width"] = int(details["width"])
@@ -334,6 +340,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             for item in inline_results
         ]
         body_with_images = insert_media(body, inline_plan)
+        assert body_with_images.count(expected_source_credit) == 2
         schema_media_fields = {
             "paragraph_index", "source_page_url", "direct_image_url", "credit_text", "alt_text",
             "is_featured", "media_library_id", "subject", "search_query",

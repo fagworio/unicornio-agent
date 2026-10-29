@@ -2477,6 +2477,15 @@ def _execute_media_plan(
 
             def _process_item(pair: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
                 position, item = pair
+                from .media.text import credit_text_with_source_site
+
+                # The article page is the verified source of this candidate.
+                # Attribute that site, without treating it as an author or
+                # inferring legal permission, before upload and composition.
+                item["credit_text"] = credit_text_with_source_site(
+                    str(item.get("credit_text") or ""),
+                    str(item.get("source_page_url") or ""),
+                )
                 vision_evidence_record: dict[str, Any] | None = None
                 evidence = {
                     name: item.get(name)

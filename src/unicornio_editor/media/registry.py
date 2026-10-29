@@ -486,7 +486,7 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
     with connect(root) as db:
         rows = db.execute(
             """SELECT COALESCE(u.wordpress_media_id, a.wordpress_media_id) AS wordpress_media_id,
-                      a.canonical_url, a.sha256, a.phash, a.visual_group_id,
+                      a.canonical_url, a.source_page_url, a.sha256, a.phash, a.visual_group_id,
                       COALESCE(NULLIF(u.subject, ''), a.subject) AS subject,
                       u.identity_evidence, u.role, u.section_slot, u.status
                FROM media_usage AS u
@@ -495,9 +495,12 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
               ORDER BY u.usage_id DESC""",
             (int(post_id),),
         ).fetchall()
+    from .text import source_site_name
+
     result: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        item["source_site_name"] = source_site_name(item.pop("source_page_url", ""))
         raw_identity = item.pop("identity_evidence", "{}")
         try:
             identity = json.loads(raw_identity) if raw_identity else {}
