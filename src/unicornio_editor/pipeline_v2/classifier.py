@@ -97,6 +97,12 @@ def _failures(validation: dict[str, Any]) -> list[tuple[BlockerCode, str, Phase 
             except ValueError:
                 phase_value = None
         detail = str(failure.get("detail") or "")
+        failure_class = str(failure.get("failure_class") or "").strip()
+        if failure_class:
+            detail = f"{detail}; failure_class={failure_class}" if detail else f"failure_class={failure_class}"
+        if "retryable" in failure and isinstance(failure.get("retryable"), bool):
+            retryable = "true" if failure["retryable"] else "false"
+            detail = f"{detail}; retryable={retryable}" if detail else f"retryable={retryable}"
         blocker = None
         if failure.get("blocker"):
             try:
@@ -167,6 +173,12 @@ def classify_stage_error(
     if max_rework_attempts is not None:
         max_attempts = max_rework_attempts
     detail = str(getattr(exc, "detail", "") or exc)
+    failure_class = str(getattr(exc, "failure_class", "") or "").strip()
+    if failure_class:
+        detail = f"{detail}; failure_class={failure_class}"
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(retryable, bool):
+        detail = f"{detail}; retryable={'true' if retryable else 'false'}"
     if getattr(exc, "blocker", None) in OPERATIONAL_BLOCKERS:
         return _retry(
             previous,
@@ -230,16 +242,16 @@ def classify(
 ) -> Outcome:
     """Classify one completed pipeline attempt without side effects."""
     decision = editorial_decision(editorial)
+    failures = _failures(validation)
     if decision == "skip":
         return Outcome.skipped()
-    if decision == "uncertain":
+    if decision == "uncertain" and not failures:
         if previous.retry.attempts >= 1:
             return Outcome.human_required(Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN)
         return _retry(previous, Phase.RELEVANCE, BlockerCode.RELEVANCE_UNCERTAIN, now=now, cooldown_minutes=cooldown_minutes)
-    if decision != "process":
+    if decision != "process" and not failures:
         return Outcome.human_required(Phase.RELEVANCE, BlockerCode.INTERNAL_ERROR)
 
-    failures = _failures(validation)
     if not failures and validation.get("passed", False):
         return Outcome.ready()
     if not failures:

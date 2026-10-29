@@ -32,6 +32,7 @@ from unicornio_editor.media.registry import (
     record_v2_observation,
 )
 from unicornio_editor.workflow import MediaFunnelInvariantError, _resolve_seo_from_post, resolve_editorial_defaults
+from unicornio_editor.editorial_schema import validate_editorial
 
 
 class Config:
@@ -408,6 +409,31 @@ def test_recover_editorial_prefers_fresh_valid_draft_over_wordpress(tmp_path):
 
     assert editorial["cleaned_html"] == draft_body
     assert recovery["source"] == "editorial.draft.json"
+
+
+def test_recover_editorial_projects_legacy_operational_envelope(tmp_path):
+    body = "<p>" + ("texto editorial " * 40) + "</p>"
+    directory = tmp_path / "backups" / "115239"
+    directory.mkdir(parents=True)
+    (directory / "editorial.draft.json").write_text(json.dumps({
+        "cleaned_html": body,
+        "title": "Título válido",
+        "site_relevance": {"decision": "process", "confidence": 0.95, "reason": "ok", "matched_topics": ["games"]},
+        "media_plan": [], "needs_trailer": False, "trailer_url": None, "game_name": "Jogo",
+        "seo": {"title": "Título válido", "meta_description": "descrição válida sobre o artigo editorial e os detalhes confirmados para os leitores interessados no tema apresentado hoje.", "focus_keyword": "jogo"},
+        "backup": "snapshot.json", "original_link": "https://source.test/article",
+        "post_id": 115239, "status": "pending", "wordpress_changed": False,
+    }), encoding="utf-8")
+
+    editorial, recovery = recover_editorial({"id": 115239, "title": "Título"}, directory)
+
+    assert editorial is not None
+    assert editorial["cleaned_html"] == body
+    assert "backup" not in editorial
+    assert "original_link" not in editorial
+    assert "post_id" not in editorial
+    assert recovery["projected_fields"] == ["backup", "original_link", "post_id", "status", "wordpress_changed"]
+    validate_editorial(editorial)
 
 
 def test_recover_editorial_preserves_verified_metadata_with_body_only_draft(tmp_path):

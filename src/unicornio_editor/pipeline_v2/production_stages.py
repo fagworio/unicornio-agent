@@ -723,7 +723,14 @@ class ProductionEditorialStage:
                 "http_status": exc.http_status,
                 "phase": Phase.EDITORIAL.value,
             })
-            raise StageError(BlockerCode.PROVIDER_ERROR, Phase.EDITORIAL, str(exc)) from exc
+            raise StageError(
+                BlockerCode.PROVIDER_ERROR,
+                Phase.EDITORIAL,
+                str(exc),
+                failure_class=exc.failure_class,
+                retryable=exc.retryable,
+                http_status=exc.http_status,
+            ) from exc
         except BatchError as exc:
             raise StageError(BlockerCode.MANIFEST_INVALID, Phase.EDITORIAL, str(exc)) from exc
         except Exception as exc:
