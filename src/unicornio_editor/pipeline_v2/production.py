@@ -25,9 +25,40 @@ from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
 from ..content_quality import word_count
+from ..editorial_schema import _LEGACY_MEDIA_RIGHTS_FIELDS, _MEDIA, _TOP_LEVEL
 
 
 _MIN_RECOVERABLE_EDITORIAL_WORDS = 20
+
+
+def _project_recovered_editorial(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Project a legacy recovery artifact onto the strict editorial schema.
+
+    Recovery artifacts are operational envelopes, unlike new provider output.
+    Only known schema fields cross this boundary; discarded fields are returned
+    for audit telemetry instead of being silently accepted by validation.
+    """
+    projected = {key: value for key, value in payload.items() if key in _TOP_LEVEL}
+    projected_fields = sorted(set(payload) - set(projected))
+    media_plan = projected.get("media_plan")
+    if isinstance(media_plan, list):
+        allowed_media = _MEDIA | _LEGACY_MEDIA_RIGHTS_FIELDS
+        cleaned_plan = []
+        for item in media_plan:
+            if isinstance(item, dict):
+                cleaned_plan.append({key: value for key, value in item.items() if key in allowed_media})
+            else:
+                cleaned_plan.append(item)
+        projected["media_plan"] = cleaned_plan
+    return projected, projected_fields
+
+
+def _recovered_result(editorial: dict[str, Any], recovery: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    projected, fields = _project_recovered_editorial(editorial)
+    result = dict(recovery)
+    if fields:
+        result["projected_fields"] = fields
+    return projected, result
 
 
 def editorial_has_substantive_text(value: Any) -> bool:
@@ -130,13 +161,13 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     if draft_editorial and draft_fresh:
         draft_editorial = _recover_draft_metadata(draft_editorial, directory, int(post.get("id") or 0))
         draft_html = str(draft_editorial.get("cleaned_html") or "")
-        return dict(draft_editorial), {
+        return _recovered_result(dict(draft_editorial), {
             "source": "editorial.draft.json",
             "sha256": hashlib.sha256(draft_html.encode()).hexdigest(),
             "word_count": word_count(draft_html),
             "snapshot_fresh": True,
             "candidates": ["editorial.draft.json"],
-        }
+        })
     candidates.append({"source": "editorial.draft.json", "valid": bool(draft_editorial), "fresh": draft_fresh})
     wordpress_html = strip_canonical_footer(wordpress_text(post.get("content"), field="content"))
     prepared_for_wp: dict[str, Any] = {}
@@ -162,12 +193,12 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
         if candidate_editorial and hashlib.sha256(candidate_body.encode()).hexdigest() == digest:
             base.update(candidate_editorial)
         base["cleaned_html"] = wordpress_html
-        return base, {
+        return _recovered_result(base, {
             "source": "wordpress_get",
             "sha256": digest,
             "word_count": word_count(wordpress_html),
             "candidates": ["wordpress_get"],
-        }
+        })
     candidates.append({"source": "wordpress_get", "valid": False, "word_count": word_count(wordpress_html)})
 
     prepared = {}
@@ -193,13 +224,13 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     if editorial_has_substantive_text(prepared_html) and (not content_present or snapshot_fresh):
         digest = hashlib.sha256(prepared_html.encode()).hexdigest()
         candidates.append({"source": "prepared.json", "valid": True, "sha256": digest, "fresh": snapshot_fresh})
-        return {"cleaned_html": prepared_html, **{k: v for k, v in prepared.items() if k != "cleaned_html"}}, {
+        return _recovered_result({"cleaned_html": prepared_html, **{k: v for k, v in prepared.items() if k != "cleaned_html"}}, {
             "source": "prepared.json",
             "sha256": digest,
             "word_count": word_count(prepared_html),
             "snapshot_fresh": snapshot_fresh,
             "candidates": candidates,
-        }
+        })
     candidates.append({"source": "prepared.json", "valid": False, "fresh": snapshot_fresh, "word_count": word_count(prepared_html)})
 
     latest = {}
@@ -213,13 +244,13 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     latest_html = str(latest_editorial.get("cleaned_html") or "") if latest_editorial else ""
     if latest_editorial and (not content_present or snapshot_fresh):
         latest_digest = hashlib.sha256(latest_html.encode()).hexdigest()
-        return dict(latest_editorial), {
+        return _recovered_result(dict(latest_editorial), {
             "source": "editorial.latest.json",
             "sha256": latest_digest,
             "word_count": word_count(latest_html),
             "snapshot_fresh": snapshot_fresh,
             "candidates": candidates + [{"source": "editorial.latest.json", "valid": True}],
-        }
+        })
     candidates.append({"source": "editorial.latest.json", "valid": bool(latest_editorial), "fresh": snapshot_fresh})
 
     candidate_path = directory / "editorial.candidate.json"
@@ -234,13 +265,13 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     candidate_integrity = bool(candidate_editorial and candidate_digest == prepared_digest and prepared_digest)
     if candidate_integrity and (not content_present or snapshot_fresh):
         chosen_candidate = candidate_editorial or {}
-        return dict(chosen_candidate), {
+        return _recovered_result(dict(chosen_candidate), {
             "source": "editorial.candidate.json",
             "sha256": candidate_digest,
             "word_count": word_count(candidate_html),
             "snapshot_fresh": snapshot_fresh,
             "candidates": candidates + [{"source": "editorial.candidate.json", "valid": True, "integrity": True}],
-        }
+        })
     candidates.append({"source": "editorial.candidate.json", "valid": False, "integrity": candidate_integrity})
     return None, {
         "source": None,
