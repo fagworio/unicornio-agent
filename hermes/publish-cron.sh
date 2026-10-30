@@ -82,6 +82,9 @@ try:
     report_valid = isinstance(report, dict)
 except (json.JSONDecodeError, TypeError, ValueError):
     report = None
+# Saída malformada semanticamente não é sucesso, mesmo se for JSON válido.
+if fallback == "PUBLISHER_INCONSISTENCY":
+    report_valid = False
 if not report_valid:
     report = {
         "window_id": window_id,
@@ -122,7 +125,7 @@ else:
 report["final_classification"] = final
 history = Path(root) / "work" / "publish-windows"
 history.mkdir(parents=True, exist_ok=True)
-def atomic_write(path, value):
+def atomic_write(path, value, *, exclusive=False):
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -130,11 +133,15 @@ def atomic_write(path, value):
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        if exclusive:
+            # Link atomico: EEXIST em colisao, sem substituir historico existente.
+            os.link(tmp, path)
+        else:
+            os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-atomic_write(history / f"{window_id}.json", report)
+atomic_write(history / f"{window_id}.json", report, exclusive=True)
 atomic_write(Path(root) / "work" / "publish-window.log", report)
 PY
 }
@@ -168,7 +175,56 @@ if out="$("$ROOT/.venv/bin/unicornio-editor" publish-ready 2>&1)"; then
   fi
 
   if [ "$publish_status" -eq 0 ] || [ "$publish_status" -eq 75 ]; then
-    if ! printf '%s\n' "$out" | "$PYTHON_BIN" -c 'import json, sys; value = json.load(sys.stdin); sys.exit(0 if isinstance(value, dict) else 1)' 2>/dev/null; then
+    if ! printf '%s\n' "$out" | PUBLISH_CLI_EXIT_CODE="$publish_status" "$PYTHON_BIN" -c '
+import json, os, sys
+try:
+    data = json.load(sys.stdin)
+    required = {
+        "window_id", "published", "posts", "cli_exit_code",
+        "ready_snapshot_available", "ready_at_window", "ready_post_ids",
+        "error_count", "retryable_count", "zero_publication_reason",
+    }
+    ok = isinstance(data, dict) and required.issubset(data)
+    if ok:
+        published = data["published"]
+        posts = data["posts"]
+        ready = data["ready_at_window"]
+        ids = data["ready_post_ids"]
+        snapshot = data["ready_snapshot_available"]
+        errors = data["error_count"]
+        retries = data["retryable_count"]
+        cli_code = data["cli_exit_code"]
+        reason = data["zero_publication_reason"]
+        expected_code = int(os.environ["PUBLISH_CLI_EXIT_CODE"])
+        ok = (
+            data["window_id"] == os.environ["PUBLISH_WINDOW_ID"]
+            and type(published) is int and published >= 0
+            and type(posts) is list and len(posts) == published
+            and all(isinstance(post, dict) and type(post.get("post_id")) is int for post in posts)
+            and type(cli_code) is int and cli_code == expected_code
+            and type(errors) is int and errors >= 0
+            and type(retries) is int and retries >= 0
+            and type(snapshot) is bool
+            and (
+                (snapshot and type(ready) is int and ready >= 0
+                 and type(ids) is list and len(ids) == ready
+                 and all(type(post_id) is int for post_id in ids))
+                or (not snapshot and ready is None and ids is None)
+            )
+            and (
+                (published > 0 and reason is None)
+                or (published == 0 and reason in {
+                    "NO_READY", "READY_BLOCKED_BY_VALIDATION",
+                    "PUBLISHER_INTERNAL_ERROR", "INSUFFICIENT_EVIDENCE",
+                })
+            )
+            and (expected_code == 75) == (errors + retries > 0)
+            and (reason != "NO_READY" or (snapshot and ready == 0))
+        )
+except (TypeError, ValueError, KeyError, AttributeError):
+    ok = False
+sys.exit(0 if ok else 1)
+' 2>/dev/null; then
       # Exit 0/75 sem saída ou JSON inválido é uma inconsistência, nunca
       # sucesso parcial. A saída original permanece no log próprio da janela.
       printf '%s\n' "$out" > "$RUN_LOG"
