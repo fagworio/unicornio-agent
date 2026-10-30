@@ -20,6 +20,9 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 COMPOSE_FILE = ROOT / "tests/wordpress/e2e/compose.yaml"
+PYTHON_RUNNER = Path(os.environ.get("WP_E2E_PYTHON", str(ROOT / ".venv" / "bin" / "python")))
+if not PYTHON_RUNNER.is_file():
+    PYTHON_RUNNER = Path(sys.executable)
 FAULT_PLUGIN = ROOT / "tests/wordpress/e2e/mu-plugins/unicornio-e2e-faults.php"
 MU_PLUGINS = (
     ROOT / "wp/mu-plugins/unicornio-rest-meta.php",
@@ -109,6 +112,15 @@ def command(args: list[str], *, env=None, input_text=None, timeout=180, check=Tr
                 safe = safe.replace(value, "[REDACTED]")
         raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args[:4])}\n{safe[-6000:]}")
     return result
+
+
+def sanitized_output(result, env) -> str:
+    safe = result.stdout or ""
+    for key in ("WP_E2E_DB_PASSWORD", "WP_E2E_DB_ROOT_PASSWORD", "WP_E2E_APP_PASSWORD"):
+        value = (env or os.environ).get(key, "")
+        if value:
+            safe = safe.replace(value, "[REDACTED]")
+    return safe[-6000:]
 
 
 def free_port() -> int:
@@ -257,6 +269,7 @@ def main() -> int:
         "full_suite": {},
         "environment": {"ephemeral": True, "ephemeral_environment_destroyed": False},
         "errors": [],
+        "subprocess_failures": [],
     }
     setup_ok = False
     e2e_status = 1
@@ -335,12 +348,18 @@ def main() -> int:
             "WP_E2E_OBSERVATIONS_PATH": str(observations_path),
         })
         e2e_run = command(
-            [sys.executable, "-m", "pytest", "-q", "tests/wordpress/e2e", f"--junitxml={e2e_junit_path}"],
+            [str(PYTHON_RUNNER), "-m", "pytest", "-q", "tests/wordpress/e2e", f"--junitxml={e2e_junit_path}"],
             env=app_env,
             timeout=600,
             check=False,
         )
         e2e_status = e2e_run.returncode
+        if e2e_status:
+            report["subprocess_failures"].append({
+                "stage": "wordpress_e2e_pytest",
+                "exit_code": e2e_status,
+                "output": sanitized_output(e2e_run, app_env),
+            })
         report["e2e_suite"] = parse_junit(e2e_junit_path)
         report["e2e_suite"]["exit_code"] = e2e_status
         observations = {}
@@ -398,12 +417,18 @@ def main() -> int:
         suite_env.pop("WP_E2E_USER", None)
         suite_env.pop("WP_E2E_APP_PASSWORD", None)
         suite_run = command(
-            [sys.executable, "-m", "pytest", "-q", f"--junitxml={suite_junit_path}"],
+            [str(PYTHON_RUNNER), "-m", "pytest", "-q", f"--junitxml={suite_junit_path}"],
             env=suite_env,
             timeout=1200,
             check=False,
         )
         suite_status = suite_run.returncode
+        if suite_status:
+            report["subprocess_failures"].append({
+                "stage": "full_pytest",
+                "exit_code": suite_status,
+                "output": sanitized_output(suite_run, suite_env),
+            })
         report["full_suite"] = parse_junit(suite_junit_path)
         report["full_suite"]["exit_code"] = suite_status
         report["environment"]["local_checkout"] = True
@@ -416,7 +441,7 @@ def main() -> int:
                 report["errors"].append({"stage": "observation_parse", "type": "InvalidObservations"})
         try:
             report["build"] = {
-                "python_compileall_exit_code": command([sys.executable, "-m", "compileall", "-q", "src", "tests", "scripts"], env=suite_env, check=False).returncode,
+                "python_compileall_exit_code": command([str(PYTHON_RUNNER), "-m", "compileall", "-q", "src", "tests", "scripts"], env=suite_env, check=False).returncode,
             }
         except Exception:
             report["build"] = {"python_compileall_exit_code": 1}
