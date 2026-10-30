@@ -181,3 +181,34 @@ o diretório do projeto (`cwd`/`git_repo_root`), sem misturar outros crons.
 
 ## Rollback
 Cada `prepare` salva um snapshot JSON completo do post em `backups/` antes do trabalho. O rollback pode ser feito manualmente a partir do `content.raw`, metas e featured media do snapshot.
+
+## Recuperação administrativa de ciclo V2 bloqueado
+
+`v2-recover-cycle` é separado de `v2-cycle-abandon`. Ele só aceita um
+checkpoint `running` em `ADMISSION`, exige a seleção e a autorização exatas,
+exige uma classificação individual para todos os posts selecionados e não faz
+writes no WordPress. Posts com efeitos incertos são arquivados por hash e
+adicionados à quarentena; posts comprovadamente não executados permanecem
+aptos para um ciclo futuro. Journals, sidecars, manifestos, backups, batches e
+MediaRegistry são copiados sem alteração. Não use este comando para fabricar
+`NOT_EXECUTED` nem para contornar evidência de mídia.
+
+Sempre execute primeiro o preview. O `--apply` requer autorização operacional
+explícita e deve ser executado somente após readback do preview:
+
+```bash
+unicornio-editor v2-recover-cycle \
+  --root /caminho/do/repo \
+  --cycle-id CICLO_ATUAL \
+  --authorization-id AUTORIZACAO_DA_RODADA \
+  --pending-round 3 \
+  --selected-ids 115890,115892,115894,115864,115866 \
+  --uncertain-post-ids 115890,115892,115894,115864 \
+  --not-executed-post-ids 115866 \
+  --run-ids 115890=RUN_A,115892=RUN_B,115894=RUN_C,115864=RUN_D \
+  --operator-authorization TICKET_AUDITAVEL \
+  --new-cycle-id NOVO_CICLO
+```
+
+A saída deve declarar `wordpress_writes: 0` e `replay: false`. Não execute
+`--fresh`, Writer, upload ou retry como parte desta transição.
