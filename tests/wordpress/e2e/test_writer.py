@@ -7,7 +7,9 @@ from dataclasses import replace
 
 import pytest
 
+from unicornio_editor.config import Config
 from unicornio_editor.media.registry import connect as connect_registry, record_v2_observation
+from unicornio_editor.workflow import retry_post
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
 from unicornio_editor.pipeline_v2.transaction_admin import isolate_uncertain_transaction
 from unicornio_editor.pipeline_v2.transaction_admin import (
@@ -57,6 +59,50 @@ def test_pending_transitions_to_awaiting_human_with_rest_readback(wordpress_e2e_
     assert observation["journal"]["status"] == "committed"
     assert observation["journal"]["readback"] is True
     assert len(_status_posts(observation)) == 1
+
+
+def test_retry_history_meta_roundtrip_and_human_to_pending(wordpress_e2e_case):
+    case = wordpress_e2e_case
+    post_id = case.post_id("retry_history")
+    before_post = case.client.get_post(post_id)
+    before_content = (before_post.get("content") or {}).get("raw")
+    seed_history = [{"operation": "seed", "previous_retry": {"attempts": 2}}]
+    seed_json = json.dumps(seed_history, ensure_ascii=False, separators=(",", ":"))
+    case.client.update_post(post_id, {"meta": {"_hermes_retry_history": seed_json}})
+    seeded = case.client.get_post(post_id)
+    assert seeded["meta"]["_hermes_retry_history"] == seed_json
+
+    config = Config(
+        content_source="wordpress",
+        wordpress_url=case.url,
+        wordpress_api_base="/wp-json/wp/v2",
+        app_user=case.user,
+        app_password=case.password,
+        dry_run=False,
+        http_timeout=20.0,
+    )
+    result = retry_post(case.client, config, case.root, post_id)
+    after = case.client.get_post(post_id)
+    after_meta = after.get("meta") or {}
+    history = json.loads(after_meta["_hermes_retry_history"])
+    work_state = json.loads(after_meta["_hermes_work_state"])
+    assert result["readback"] is True
+    assert after["status"] == "pending"
+    assert history[0] == seed_history[0]
+    assert history[-1]["operation"] == "retry"
+    assert work_state["state"] == "pending"
+    assert (after.get("content") or {}).get("raw") == before_content
+
+    audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={post_id}")
+    case.observations.append({
+        "scenario": "retry_history_roundtrip",
+        "post_id": post_id,
+        "before": {"status": before_post["status"], "history": seed_json},
+        "after": {"status": after["status"], "history": after_meta["_hermes_retry_history"], "work_state": work_state},
+        "retry_result": result,
+        "content_preserved": (after.get("content") or {}).get("raw") == before_content,
+        "rest_events": audit.get("events", []),
+    })
 
 
 def test_existing_awaiting_human_without_changes_avoids_post(wordpress_e2e_case):

@@ -37,9 +37,12 @@ add_action( 'init', function () {
 		'_hermes_next_retry_at'      => 'sanitize_text_field',
 		'_hermes_last_error'         => 'sanitize_text_field',
 		'_hermes_ready_hash'         => 'sanitize_text_field',
+		'_hermes_retry_history'      => static function ( $value ) {
+			return is_string( $value ) ? $value : '';
+		}, // JSON canônico do histórico de contadores de retry
 		'_hermes_ready_manifest'     => static function ( $value ) {
 			return is_string( $value ) ? $value : '';
-		}, // JSON canônico compacto (closure: strval() interno fatala com os 4 args do sanitize_meta)
+		}, // JSON canônico compacto
 		'_hermes_policy_version'     => 'sanitize_text_field',
 		'_hermes_processed_at'       => 'sanitize_text_field',
 		// Marcadores legados de auditoria do apply/publish.

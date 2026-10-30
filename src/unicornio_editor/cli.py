@@ -47,10 +47,14 @@ from .workflow import (
     publish_ready_posts,
     resolve_editorial_defaults,
     retry_post,
+    _acquire_post_lock,
+    _guard_post_client,
+    _retry_post_unlocked,
     validate_media_plan,
 )
 from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state, uncertain_second_pass_eligible
 from .media.text import sanitize_title
+from .pipeline_v2.lock import RunSessionLock
 from .pipeline_v2.model import MEDIA_CANDIDATE_REPLACEMENT_RESERVE
 from .wordpress import WordPressClient, WordPressError
 
@@ -82,7 +86,7 @@ def select_retry_all_targets(
     return sorted(selected)
 
 
-def _retry_all_cycle_guard(root: Path) -> dict[str, Any] | None:
+def _retry_all_cycle_guard(root: Path, *, lock_held: bool = False) -> dict[str, Any] | None:
     """Return a blocking reason when a cycle/round can still execute."""
     state_path = root / "work" / "v2-cycle" / "state.json"
     if state_path.is_file():
@@ -98,7 +102,7 @@ def _retry_all_cycle_guard(root: Path) -> dict[str, Any] | None:
                 "round_number": pending.get("round_number"),
                 "authorization_id": pending.get("authorization_id"),
             }
-    for relative in ("work/v2-run.lock", "work/v2-cycle/.lock"):
+    for relative in (("work/v2-cycle/.lock",) if lock_held else ("work/v2-run.lock", "work/v2-cycle/.lock")):
         path = root / relative
         if not path.exists():
             continue
@@ -109,6 +113,20 @@ def _retry_all_cycle_guard(root: Path) -> dict[str, Any] | None:
         except (OSError, BlockingIOError):
             return {"reason": "cycle_lock_held", "lock": relative}
     return None
+
+
+def _retry_all_with_lock(root: Path, mutation):
+    """Run selection/revalidation/mutation under the V2 session lock."""
+    lock = RunSessionLock(root / "work" / "v2-run.lock")
+    if not lock.acquire():
+        return {"status": "blocked", "reason": "global_lock_unavailable"}
+    try:
+        guard = _retry_all_cycle_guard(root, lock_held=True)
+        if guard is not None:
+            return {"status": "blocked", "reason": "cycle_or_round_in_progress", "guard": guard}
+        return mutation()
+    finally:
+        lock.release()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4214,40 +4232,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = draft
         elif args.command == "retry-all":
             states = {st.strip() for st in (args.states or "").split(",") if st.strip()}
-            report = build_queue_report(client, args.root)
-            target_ids = select_retry_all_targets(report, states)
-            guard = _retry_all_cycle_guard(args.root)
-            if guard is not None:
-                result = {
-                    "status": "blocked",
-                    "reason": "cycle_or_round_in_progress",
-                    "guard": guard,
-                    "requested_states": sorted(states),
-                    "eligible_ids": target_ids,
-                    "retried": 0,
-                    "failed": 0,
-                    "posts": [],
-                }
-            elif args.dry_run:
-                result = {
-                    "status": "dry_run",
-                    "requested_states": sorted(states),
-                    "eligible_ids": target_ids,
-                    "deduplicated_count": len(target_ids),
-                    "retried": 0,
-                    "failed": 0,
-                    "posts": [
-                        {"post_id": pid, "status": "eligible"} for pid in target_ids
-                    ],
-                }
-            else:
+
+            def mutate_retry_all():
+                report = build_queue_report(client, args.root)
+                target_ids = select_retry_all_targets(report, states)
+                if args.dry_run:
+                    return {
+                        "status": "dry_run",
+                        "requested_states": sorted(states),
+                        "eligible_ids": target_ids,
+                        "deduplicated_count": len(target_ids),
+                        "retried": 0,
+                        "failed": 0,
+                        "posts": [
+                            {"post_id": pid, "status": "eligible"} for pid in target_ids
+                        ],
+                    }
                 outcomes = []
                 for pid in target_ids:
                     try:
-                        outcomes.append(retry_post(client, config, args.root, pid))
+                        with _acquire_post_lock(args.root, config, pid) as lock_handle:
+                            guarded_client = _guard_post_client(
+                                client, lock_handle, root=args.root, post_id=pid
+                            )
+                            outcomes.append(
+                                _retry_post_unlocked(guarded_client, config, args.root, pid)
+                            )
                     except Exception as exc:  # noqa: BLE001 - report per post
                         outcomes.append({"post_id": pid, "status": "error", "reason": str(exc)})
-                result = {
+                return {
                     "status": "completed",
                     "requested_states": sorted(states),
                     "eligible_ids": target_ids,
@@ -4261,6 +4274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for o in outcomes
                     ],
                 }
+
+            result = _retry_all_with_lock(args.root, mutate_retry_all)
         elif args.command == "retry":
             result = retry_post(client, config, args.root, args.post_id)
         elif args.command == "discard":

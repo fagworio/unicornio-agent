@@ -2608,6 +2608,11 @@ class WorkflowTests(unittest.TestCase):
         # forcar READY — zera tentativas e cooldown, mantem blocked.
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())
+            client.post["meta"].update({
+                "_hermes_state": "blocked",
+                "_hermes_attempts": "2",
+                "_hermes_next_retry_at": "2099-01-01T00:00:00+00:00",
+            })
             result = retry_post(client, self.config(False), Path(directory), 42)
             self.assertEqual(result["status"], "retried")
             self.assertEqual(result["state"], "blocked")
@@ -2650,6 +2655,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved.retry.attempts, 0)
         self.assertEqual(saved.retry.no_progress, 0)
         self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
+
+    def test_retry_refuses_ready_v2_before_history_or_counter_reset(self):
+        post = self.post()
+        post["status"] = "pending"
+        previous = WorkState(
+            state=LifecycleState.READY,
+            phase=Phase.VALIDATE,
+            relevance_approved=True,
+            retry=replace(WorkState().retry, attempts=4, policy_version=9),
+        )
+        post["meta"] = {
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+            "_hermes_retry_history": "[]",
+            "_hermes_attempts": "4",
+        }
+        client = FakeClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(WorkflowError):
+                retry_post(client, self.config(False), Path(directory), 42)
+        self.assertEqual(client.post["meta"]["_hermes_retry_history"], "[]")
+        self.assertEqual(client.post["meta"]["_hermes_attempts"], "4")
+
+    def test_retry_refuses_published_and_skipped_v2_before_writes(self):
+        for terminal in (LifecycleState.PUBLISHED, LifecycleState.SKIPPED):
+            post = self.post()
+            post["meta"] = {"_hermes_work_state": json.dumps(
+                WorkState(state=terminal).to_dict()
+            )}
+            client = FakeClient(post)
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(WorkflowError):
+                    retry_post(client, self.config(False), Path(directory), 42)
+            self.assertEqual(client.updated, [])
 
     def test_retry_v2_preserves_policy_version_and_records_reset_history(self):
         post = self.post()

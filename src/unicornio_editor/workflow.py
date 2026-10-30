@@ -5788,10 +5788,33 @@ def retry_post(
     root: Path,
     post_id: int,
 ) -> dict[str, Any]:
-    """Reopen a post while sharing the per-post writer lock with the pipeline."""
-    with _acquire_post_lock(root, config, post_id) as lock_handle:
-        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
-        return _retry_post_unlocked(guarded_client, config, root, post_id)
+    """Reopen a post only while holding the global V2 session lock."""
+    session_lock = RunSessionLock(root / "work" / "v2-run.lock")
+    if not session_lock.acquire():
+        raise WorkflowError("V2 run lock is held; refusing retry")
+    try:
+        _assert_retry_cycle_quiescent(root)
+        with _acquire_post_lock(root, config, post_id) as lock_handle:
+            guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
+            return _retry_post_unlocked(guarded_client, config, root, post_id)
+    finally:
+        session_lock.release()
+
+
+def _assert_retry_cycle_quiescent(root: Path) -> None:
+    state_path = root / "work" / "v2-cycle" / "state.json"
+    if not state_path.is_file():
+        return
+    try:
+        cycle_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise WorkflowError(f"cycle checkpoint unreadable; refusing retry: {exc}") from exc
+    pending = cycle_state.get("pending_round")
+    if pending:
+        raise WorkflowError(
+            "cycle round pending; refusing retry "
+            f"cycle={cycle_state.get('cycle_id')} round={pending.get('round_number')}"
+        )
 
 
 def _retry_post_unlocked(
@@ -5836,6 +5859,11 @@ def _retry_post_unlocked(
             "phase_attempts": 0,
         }
         previous_state = str(legacy_before.get("state") or "")
+    allowed_canonical = {"human_required", "blocked", "awaiting_human"}
+    if previous_state not in allowed_canonical:
+        raise WorkflowError(
+            f"post {post_id} canonical state is not authorized for retry ({previous_state or 'missing'})"
+        )
     retry_history = meta_before.get("_hermes_retry_history")
     if isinstance(retry_history, str):
         try:

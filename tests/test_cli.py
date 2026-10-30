@@ -22,6 +22,7 @@ from unicornio_editor.cli import (
     _monitor_line,
     _record_cmd_output,
     _retry_all_cycle_guard,
+    _retry_all_with_lock,
     select_retry_all_targets,
 )
 from unicornio_editor.pipeline_v2.cycle import CycleReport
@@ -518,6 +519,23 @@ class CompactOutputTests(unittest.TestCase):
 
         args = build_parser().parse_args(["retry-all", "--dry-run"])
         self.assertTrue(args.dry_run)
+
+    def test_retry_all_holds_global_lock_during_mutation_callback(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            observed = {}
+            def mutation():
+                from unicornio_editor.pipeline_v2.lock import RunSessionLock
+                probe = RunSessionLock(root / "work" / "v2-run.lock")
+                observed["blocked"] = probe.acquire() is False
+                probe.release()
+                return {"status": "completed"}
+            result = _retry_all_with_lock(root, mutation)
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue(observed["blocked"])
+        finally:
+            import shutil
+            shutil.rmtree(root)
 
     def test_retry_all_guard_rejects_pending_cycle_round(self):
         root = Path(tempfile.mkdtemp())

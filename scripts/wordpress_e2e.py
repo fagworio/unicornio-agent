@@ -41,6 +41,7 @@ SCENARIOS = (
     "test_rejected_media_candidate_is_replaced_before_ready_readback",
     "test_visual_identity_retry_persists_and_resumes_after_cooldown",
     "test_started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks",
+    "test_retry_history_meta_roundtrip_and_human_to_pending",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -61,6 +62,9 @@ SCENARIO_OPERATIONS = {
     "started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks": [
         "started_media_registry_checkpoint_recovery",
     ],
+    "retry_history_meta_roundtrip_and_human_to_pending": [
+        "retry_history_roundtrip",
+    ],
 }
 POST_FIXTURES = {
     "pending_transition": ("pending", False),
@@ -77,6 +81,7 @@ POST_FIXTURES = {
     "visual_retry": ("pending", False),
     "visual_retry_new": ("pending", False),
     "prewriter_media_resume": ("pending", False),
+    "retry_history": ("awaiting_human", True),
     "isolation_target": ("pending", True),
     "isolation_committed_a": ("pending", True),
     "isolation_committed_b": ("pending", True),
@@ -315,6 +320,12 @@ def main() -> int:
             ids[key] = int(post_id)
             if exact_state:
                 wp_cli(project, env, "post", "meta", "update", post_id, "_hermes_work_state", state_json)
+            if key == "retry_history":
+                wp_cli(
+                    project, env, "post", "meta", "update", post_id,
+                    "_hermes_retry_history",
+                    json.dumps([{"operation": "seed", "previous_retry": {"attempts": 2}}], separators=(",", ":")),
+                )
             if key.startswith("isolation_"):
                 wp_cli(
                     project, env, "post", "meta", "update", post_id,
@@ -433,12 +444,18 @@ def main() -> int:
             and report.get("full_suite", {}).get("failures") == 0
             and report.get("full_suite", {}).get("errors") == 0
         )
-        if (
-            setup_ok and e2e_status == 0 and all_scenarios and suite_ok
-            and cleanup_ok and full_sha == expected_sha
-            and not bool(working_tree_changes)
-            and report.get("build", {}).get("python_compileall_exit_code") == 0
-        ):
+        homologation_checks = {
+            "setup_ok": setup_ok,
+            "e2e_exit_zero": e2e_status == 0,
+            "all_scenarios_passed": all_scenarios,
+            "full_suite_ok": suite_ok,
+            "cleanup_ok": cleanup_ok,
+            "tested_sha_matches_expected": full_sha == expected_sha,
+            "working_tree_clean_before_run": not bool(working_tree_changes),
+            "compileall_ok": report.get("build", {}).get("python_compileall_exit_code") == 0,
+        }
+        report["homologation_checks"] = homologation_checks
+        if all(homologation_checks.values()):
             report["classification"] = "E2E_HOMOLOGADO"
         report["completed_at"] = utc_now()
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
