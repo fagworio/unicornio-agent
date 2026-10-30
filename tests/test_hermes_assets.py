@@ -194,6 +194,32 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("references", content)
         self.assertIn("validate-monitor.sh", content)
 
+    def test_publish_cron_concurrent_windows_keep_separate_history(self):
+        roots = []
+        processes = []
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for index in ("a", "b"):
+                root = base / index
+                (root / "hermes").mkdir(parents=True)
+                (root / "work").mkdir()
+                (root / ".env").write_text("PUBLISH_ENABLED=false\n", encoding="utf-8")
+                shutil.copy2(ROOT / "hermes" / "publish-cron.sh", root / "hermes" / "publish-cron.sh")
+                shutil.copy2(ROOT / "hermes" / "relatorio_publicacao.py", root / "hermes" / "relatorio_publicacao.py")
+                roots.append(root)
+                processes.append(subprocess.Popen(
+                    ["bash", str(root / "hermes" / "publish-cron.sh")],
+                    cwd=root,
+                    env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root)},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                ))
+            results = [process.communicate(timeout=30) for process in processes]
+            self.assertEqual([process.returncode for process in processes], [0, 0])
+            reports = [list((root / "work" / "publish-windows").glob("*.json")) for root in roots]
+            self.assertEqual([len(items) for items in reports], [1, 1])
+            ids = [json.loads(items[0].read_text())["window_id"] for items in reports]
+            self.assertEqual(len(set(ids)), 2)
+
     def test_monitor_sync_updates_only_installed_script_with_backup(self):
         script = ROOT / "hermes" / "sync-monitor.sh"
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
