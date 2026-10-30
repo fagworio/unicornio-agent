@@ -9,8 +9,6 @@ import os
 import re
 import sqlite3
 import sys
-import tempfile
-import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -65,31 +63,6 @@ def _json_default(value: Any) -> Any:
         return serializer()
     raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
 
-
-def _persist_publish_window(root: Path, report: dict[str, Any]) -> str | None:
-    """Persist one immutable window report without making publication fail."""
-    try:
-        history = Path(root) / "work" / "publish-windows"
-        history.mkdir(parents=True, exist_ok=True)
-        window_id = str(report.get("window_id") or f"publish-{uuid.uuid4().hex}")
-        report["window_id"] = window_id
-        path = history / f"{window_id}.json"
-        fd, temporary = tempfile.mkstemp(prefix=f".{window_id}.", suffix=".tmp", dir=history)
-        try:
-            with open(fd, "w", encoding="utf-8") as handle:
-                json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        report["window_report_path"] = str(path)
-        return str(path)
-    except (OSError, TypeError, ValueError) as exc:
-        report["window_report_persist_error"] = str(exc)
-        return None
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -4339,7 +4312,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cli_exit_code": window_exit_code,
                 "exit_code": window_exit_code,
             })
-            _persist_publish_window(args.root, result)
         else:
             from . import session_budget
 

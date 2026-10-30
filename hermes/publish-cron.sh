@@ -77,13 +77,13 @@ root, log_path, window_id, wrapper_code, cli_code, fallback = sys.argv[1:]
 log = Path(log_path)
 raw = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
 report = None
+report_valid = False
 try:
-    match = re.search(r"\{", raw)
-    if match:
-        report, _ = json.JSONDecoder().raw_decode(raw[match.start():])
+    report = json.loads(raw)
+    report_valid = isinstance(report, dict)
 except (json.JSONDecodeError, TypeError, ValueError):
     report = None
-if not isinstance(report, dict):
+if not report_valid:
     report = {
         "window_id": window_id,
         "window_started_at": os.environ.get("PUBLISH_CRON_TRIGGERED_AT"),
@@ -105,7 +105,11 @@ report["window_id"] = window_id
 report["wrapper_exit_code"] = int(wrapper_code)
 report["cli_exit_code"] = int(report.get("cli_exit_code", cli_code))
 report["exit_code"] = int(report["cli_exit_code"])
-if int(wrapper_code) != 0:
+if report_valid and report.get("zero_publication_reason") in {"MAINTENANCE_LOCK", "PUBLISH_DISABLED"}:
+    final = report["zero_publication_reason"]
+elif not report_valid:
+    final = fallback
+elif int(wrapper_code) != 0:
     final = "PUBLISHER_INTERNAL_ERROR"
 elif int(cli_code) == 75:
     final = "PARTIAL_SUCCESS" if int(report.get("published", 0) or 0) else "RETRYABLE_FAILURE"
@@ -172,7 +176,7 @@ while [ "$ATTEMPT" -le 3 ]; do
 
   # Um erro estruturado pode ter ocorrido depois de uma escrita REST. Não
   # repetir: preservar a evidência e fechar a janela com erro.
-  if [[ "$out" == *"{"* ]]; then
+  if printf '%s\n' "$out" | "$PYTHON_BIN" -c 'import json, sys; value = json.load(sys.stdin); sys.exit(0 if isinstance(value, dict) else 1)' 2>/dev/null; then
     printf '%s\n' "$out" > "$LOG"
     finalize_window_report 1 "$publish_status" "PUBLISHER_INTERNAL_ERROR"
     "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
