@@ -48,7 +48,7 @@ def make_root(tmp_path: Path) -> Path:
     (root / "work" / "v2-journal" / "102.json").write_text(json.dumps({
         "post_id": 102, "run_id": RUNS[102], "cycle_id": CYCLE,
         "cycle_round": 3, "authorization_id": AUTH, "status": "running",
-        "writer_started": False, "readback": None,
+        "writer_started": False, "readback": None, "media_ids": [7],
     }) + "\n", encoding="utf-8")
     (root / "work" / "v2-editorial" / "101" / "partial.json").write_text("evidence", encoding="utf-8")
     (root / "work" / "batches" / "v2-101-inline" / "manifest.json").write_text("media", encoding="utf-8")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -82,6 +83,62 @@ def _post_files(root: Path, post_id: int) -> list[Path]:
             if directory.is_dir() and str(post_id) in directory.name:
                 candidates.extend(p for p in directory.rglob("*") if p.is_file() and not p.is_symlink())
     return sorted(set(candidates))
+
+
+def _registry_effects(root: Path, *, post_id: int, run_id: str) -> dict[str, int]:
+    path = root / "work" / "media_registry.sqlite"
+    if not path.is_file() or path.is_symlink():
+        return {"runs": 0, "decisions": 0, "operations": 0, "usage": 0}
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            counts = {}
+            for table in ("media_runs", "media_decisions", "media_operations", "media_usage"):
+                if table == "media_usage":
+                    counts["usage"] = int(db.execute(
+                        "SELECT COUNT(*) FROM media_usage WHERE post_id=? AND run_id=?",
+                        (post_id, run_id),
+                    ).fetchone()[0])
+                else:
+                    counts[table.removeprefix("media_")] = int(db.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE post_id=? AND run_id=?",
+                        (post_id, run_id),
+                    ).fetchone()[0])
+            return counts
+    except (OSError, sqlite3.Error):
+        return {"runs": 0, "decisions": 0, "operations": 0, "usage": 0}
+
+
+def _reconciliation_evidence(root: Path, post_id: int, run_id: str, journal: Mapping[str, Any]) -> dict[str, Any]:
+    registry = _registry_effects(root, post_id=post_id, run_id=run_id)
+    sidecar_path = root / "backups" / str(post_id) / "editorial.partial.v2.json"
+    sidecar = None
+    if sidecar_path.is_file() and not sidecar_path.is_symlink():
+        sidecar = _read_json(sidecar_path)
+    expected = {
+        "post_id": post_id,
+        "run_id": run_id,
+        "cycle_id": journal.get("cycle_id"),
+        "cycle_round": journal.get("cycle_round"),
+        "authorization_id": journal.get("authorization_id"),
+    }
+    identity_matches = isinstance(sidecar, dict) and all(sidecar.get(k) == v for k, v in expected.items())
+    journal_media = journal.get("media_ids") if isinstance(journal.get("media_ids"), list) else []
+    sidecar_media = sidecar.get("media_ids") if isinstance(sidecar, dict) and isinstance(sidecar.get("media_ids"), list) else []
+    if sidecar is not None and journal_media != sidecar_media:
+        identity_matches = False
+    return {
+        "post_id": post_id,
+        "run_id": run_id,
+        "writer_started": journal.get("writer_started"),
+        "journal_status": journal.get("status"),
+        "journal_readback": journal.get("readback"),
+        "registry_effects": registry,
+        "sidecar_present": sidecar is not None,
+        "sidecar_identity_matches": identity_matches,
+        "sidecar_media_ids": sidecar_media,
+        "journal_media_ids": journal_media,
+        "classification": "UNCERTAIN_EFFECTS_PRESERVED",
+    }
 
 
 def _validate_policy(root: Path) -> dict[str, Any]:
@@ -182,6 +239,7 @@ def recover_blocked_cycle(
                          pending_round=pending_round, selected_ids=selected,
                          uncertain_ids=uncertain, not_executed_ids=not_executed,
                          run_ids=run_ids)
+        reconciliation: list[dict[str, Any]] = []
         for post_id in uncertain:
             journal = root / "work" / "v2-journal" / f"{post_id}.json"
             if not journal.is_file() or journal.is_symlink():
@@ -193,8 +251,13 @@ def recover_blocked_cycle(
             for key, value in expected.items():
                 if data.get(key) != value:
                     raise CycleRecoveryError(f"uncertain post {post_id} journal identity mismatch: {key}")
+            evidence = _reconciliation_evidence(root, post_id, str(run_ids[post_id]), data)
+            has_effect_signal = bool(data.get("writer_started") is True or data.get("media_ids") or data.get("media_records") or data.get("apply_media_records") or any(evidence["registry_effects"].values()))
+            if not has_effect_signal:
+                raise CycleRecoveryError(f"uncertain post {post_id} has no positive effect signal")
             if data.get("readback") is True and data.get("status") == "committed" and data.get("writer_started") is not True:
                 raise CycleRecoveryError(f"uncertain post {post_id} has contradictory commit evidence")
+            reconciliation.append(evidence)
         policy = _validate_policy(root)
         existing = {int(row["post_id"]): row for row in policy["posts"]}
         for post_id in uncertain:
@@ -249,6 +312,7 @@ def recover_blocked_cycle(
         atomic_write_text(archive / "new-journal.jsonl", _json(new_event))
         manifest = {**preview, "status": "prepared", "archive_dir": str(archive),
                     "old_state_sha256": old_state_hash, "old_journal_sha256": old_journal_hash,
+                    "reconciliation_evidence": reconciliation,
                     "archived_files": files, "quarantine_after": policy,
                     "created_at": time.time()}
         atomic_write_text(archive / "archive-manifest.json", _json(manifest))
