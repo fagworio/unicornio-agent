@@ -51,6 +51,11 @@ def make_root(tmp_path: Path) -> Path:
         "writer_started": False, "readback": None, "media_ids": [7],
     }) + "\n", encoding="utf-8")
     (root / "work" / "v2-editorial" / "101" / "partial.json").write_text("evidence", encoding="utf-8")
+    (root / "backups" / "101").mkdir(parents=True)
+    (root / "backups" / "101" / "editorial.partial.v2.json").write_text(json.dumps({
+        "post_id": 101, "run_id": RUNS[101], "cycle_id": CYCLE,
+        "cycle_round": 3, "authorization_id": AUTH, "media_ids": [99],
+    }), encoding="utf-8")
     (root / "work" / "batches" / "v2-101-inline" / "manifest.json").write_text("media", encoding="utf-8")
     return root
 
@@ -93,6 +98,8 @@ def test_apply_archives_hashes_quarantines_uncertain_and_starts_cycle(tmp_path):
     assert manifest["old_state_sha256"] == hashlib.sha256(old_state).hexdigest()
     assert manifest["old_journal_sha256"] == hashlib.sha256(old_journal).hexdigest()
     assert (archive / "evidence" / "work" / "v2-journal" / "101.json").is_file()
+    evidence = manifest["reconciliation_evidence"]
+    assert evidence[0]["sidecar_identity_matches"] is False
     policy = json.loads((root / "config/v2-quarantine.json").read_text())
     assert [row["post_id"] for row in policy["posts"]] == [101, 102]
     state = json.loads((root / "work/v2-cycle/state.json").read_text())
