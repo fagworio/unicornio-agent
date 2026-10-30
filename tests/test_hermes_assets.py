@@ -141,7 +141,7 @@ class HermesAssetsTests(unittest.TestCase):
             editor.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf x >> \"$PUBLISH_CALL_LOG\"\n"
-                "printf 'transport failure\\n' >&2\n"
+                "printf '%s\\n' '{\"error\":\"transport failure\",\"retry_safe\":true,\"write_started\":false}'\n"
                 "exit 1\n", encoding="utf-8"
             )
             editor.chmod(0o755)
@@ -165,6 +165,39 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(report["wrapper_exit_code"], 1)
             self.assertEqual(report["cli_exit_code"], 1)
             self.assertEqual(report["final_classification"], "PUBLISHER_INTERNAL_ERROR")
+
+    def test_publish_cron_does_not_replay_possible_committed_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf x >> \"$PUBLISH_CALL_LOG\"\n"
+                "printf '%s\\n' '{\"error\":\"response lost after commit\",\"retry_safe\":false,\"write_started\":true}'\n"
+                "exit 1\n", encoding="utf-8"
+            )
+            editor.chmod(0o755)
+            (bin_dir / "python").symlink_to(sys.executable)
+            report_script = root / "hermes" / "relatorio_publicacao.py"
+            report_script.write_text("import sys; sys.stdin.read()\n", encoding="utf-8")
+            calls = root / "calls.log"
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root), "PUBLISH_CALL_LOG": str(calls)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(calls.read_text(), "x")
+            report = json.loads(next((root / "work" / "publish-windows").glob("*.json")).read_text())
+            self.assertEqual(report["final_classification"], "PUBLISHER_INTERNAL_ERROR")
+            self.assertEqual(report["wrapper_exit_code"], 1)
 
     def test_publish_cron_reports_maintenance_lock(self):
         with tempfile.TemporaryDirectory() as directory:

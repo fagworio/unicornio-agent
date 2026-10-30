@@ -174,8 +174,18 @@ while [ "$ATTEMPT" -le 3 ]; do
     exit 0
   fi
 
-  # Um erro estruturado pode ter ocorrido depois de uma escrita REST. Não
-  # repetir: preservar a evidência e fechar a janela com erro.
+  # Só uma autorização explícita de retry, emitida pelo executor, permite
+  # repetir: retry_safe=true e write_started=false. Saída ausente, inválida
+  # ou sem essa prova pode esconder efeito REST e encerra a janela.
+  if printf '%s\n' "$out" | "$PYTHON_BIN" -c 'import json, sys; value = json.load(sys.stdin); sys.exit(0 if isinstance(value, dict) and value.get("retry_safe") is True and value.get("write_started") is False else 1)' 2>/dev/null; then
+    printf 'publish-ready falhou antes da escrita (tentativa %s/3); retry autorizado pelo executor\n' "$ATTEMPT" >&2
+    [ "$ATTEMPT" -lt 3 ] && sleep 60
+    ATTEMPT=$((ATTEMPT + 1))
+    continue
+  fi
+
+  # Um erro estruturado sem prova de ausência de escrita pode ter ocorrido
+  # depois de uma gravação REST. Não repetir.
   if printf '%s\n' "$out" | "$PYTHON_BIN" -c 'import json, sys; value = json.load(sys.stdin); sys.exit(0 if isinstance(value, dict) else 1)' 2>/dev/null; then
     printf '%s\n' "$out" > "$LOG"
     finalize_window_report 1 "$publish_status" "PUBLISHER_INTERNAL_ERROR"
@@ -183,9 +193,11 @@ while [ "$ATTEMPT" -le 3 ]; do
     exit 1
   fi
 
-  printf 'publish-ready falhou (tentativa %s/3): %s\n' "$ATTEMPT" "$out" >&2
-  [ "$ATTEMPT" -lt 3 ] && sleep 60
-  ATTEMPT=$((ATTEMPT + 1))
+  printf 'publish-ready falhou sem prova de retry seguro; janela encerrada\n' >&2
+  printf '%s\n' "${out:-publish-ready sem saída estruturada}" > "$LOG"
+  finalize_window_report 1 "$publish_status" "PUBLISHER_INTERNAL_ERROR"
+  "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
+  exit 1
 done
 printf 'publish-ready falhou apos 3 tentativas\n' >&2
 printf '%s\n' "${out:-publish-ready sem saída estruturada}" > "$LOG"
