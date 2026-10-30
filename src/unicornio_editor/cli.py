@@ -155,12 +155,15 @@ def build_parser() -> argparse.ArgumentParser:
     v2_recover_cycle_parser.add_argument("--authorization-id", required=True)
     v2_recover_cycle_parser.add_argument("--pending-round", type=int, required=True)
     v2_recover_cycle_parser.add_argument("--selected-ids", required=True)
+    v2_recover_cycle_parser.add_argument("--committed-post-ids", required=True)
     v2_recover_cycle_parser.add_argument("--uncertain-post-ids", required=True)
     v2_recover_cycle_parser.add_argument("--not-executed-post-ids", required=True)
+    v2_recover_cycle_parser.add_argument("--pre-writer-recoverable-post-ids", default="")
     v2_recover_cycle_parser.add_argument("--run-ids", required=True, help="mapa post_id=run_id separado por vírgula")
     v2_recover_cycle_parser.add_argument("--operator-authorization", required=True)
     v2_recover_cycle_parser.add_argument("--new-cycle-id", default=None)
     v2_recover_cycle_parser.add_argument("--apply", action="store_true")
+    v2_recover_cycle_parser.add_argument("--preview-evidence", type=Path, default=None)
 
     v2_isolate_parser = subparsers.add_parser(
         "v2-isolate-uncertain",
@@ -3012,7 +3015,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 apply=bool(args.apply),
             )
         elif args.command == "v2-recover-cycle":
-            from .pipeline_v2.cycle_recovery import recover_blocked_cycle
+            from .pipeline_v2.cycle_recovery_v2 import recover_blocked_cycle
 
             parse_ids = lambda value: [int(item.strip()) for item in value.split(",") if item.strip()]
             run_ids = {
@@ -3021,15 +3024,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             result = recover_blocked_cycle(
                 args.root,
+                client,
                 cycle_id=args.cycle_id,
                 authorization_id=args.authorization_id,
                 pending_round=int(args.pending_round),
                 selected_ids=parse_ids(args.selected_ids),
+                committed_post_ids=parse_ids(args.committed_post_ids),
                 uncertain_post_ids=parse_ids(args.uncertain_post_ids),
                 not_executed_post_ids=parse_ids(args.not_executed_post_ids),
+                pre_writer_recoverable_post_ids=parse_ids(args.pre_writer_recoverable_post_ids),
                 run_ids=run_ids,
                 operator_authorization=args.operator_authorization,
                 new_cycle_id=args.new_cycle_id,
+                preview=(json.loads(args.preview_evidence.read_text(encoding="utf-8")) if args.preview_evidence else None),
                 apply=bool(args.apply),
             )
         elif args.command == "v2-isolate-uncertain":
