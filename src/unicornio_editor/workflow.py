@@ -5841,6 +5841,8 @@ def _retry_operation_load_active(root: Path, post_id: int) -> dict[str, Any] | N
             operation = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise WorkflowError(f"retry operation identity unreadable for post {post_id}")
+        if not isinstance(operation, dict) or int(operation.get("post_id") or 0) != int(post_id):
+            raise WorkflowError(f"retry operation identity mismatches post {post_id}")
         if operation.get("status") != "completed":
             active.append(operation)
     if len(active) > 1:
@@ -5870,6 +5872,9 @@ def _retry_operation_readback_matches(operation: dict[str, Any], post: dict[str,
         return False
     if event.get("previous_state_hash") != operation["previous_state_hash"]:
         raise WorkflowError("retry operation history identity mismatch")
+    expected_event = operation.get("history_event") or {}
+    if event.get("previous_state") != expected_event.get("previous_state") or event.get("previous_retry") != expected_event.get("previous_retry"):
+        raise WorkflowError("retry operation history provenance mismatch")
     target_work_state = operation.get("target_work_state") or ""
     if target_work_state:
         if meta.get("_hermes_work_state") != target_work_state:
@@ -5878,10 +5883,12 @@ def _retry_operation_readback_matches(operation: dict[str, Any], post: dict[str,
         return False
     if str(post.get("status") or "") != "pending":
         return False
-    return (
-        meta.get("_hermes_state") == STATE_BLOCKED
-        and str(meta.get("_hermes_attempts") or "") == "0"
-    )
+    if str(meta.get("_hermes_state") or "") != STATE_BLOCKED or str(meta.get("_hermes_attempts") or "") != "0":
+        return False
+    content_raw = ((post.get("content") or {}).get("raw"))
+    if operation.get("content_hash") and hashlib.sha256(str(content_raw or "").encode("utf-8")).hexdigest() != operation["content_hash"]:
+        raise WorkflowError("retry reconciliation changed editorial content")
+    return True
 
 
 def _reconcile_retry_operation(
@@ -6054,6 +6061,8 @@ def _retry_post_unlocked(
         "previous_state_hash": previous_state_hash,
         "previous_retry": previous_retry,
     }
+    content_raw = ((post.get("content") or {}).get("raw"))
+    content_hash = hashlib.sha256(str(content_raw or "").encode("utf-8")).hexdigest()
     operation = {
         "version": 1,
         "operation_id": operation_id,
@@ -6064,6 +6073,7 @@ def _retry_post_unlocked(
         "previous_work_state": previous_work_state,
         "target_work_state": target_work_state,
         "history_event": history_event,
+        "content_hash": content_hash,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }
     _retry_operation_save(root, operation)
