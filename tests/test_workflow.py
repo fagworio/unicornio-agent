@@ -2719,6 +2719,85 @@ class WorkflowTests(unittest.TestCase):
         history = json.loads(client.post["meta"]["_hermes_retry_history"])
         self.assertEqual(len(history), 1)
 
+    def test_retry_reconciles_response_loss_after_each_rest_write_boundary(self):
+        for boundary in ("history", "v2", "status", "legacy"):
+            post = self.post()
+            post["status"] = "awaiting_human"
+            previous = WorkState(
+                state=LifecycleState.HUMAN_REQUIRED,
+                phase=Phase.MEDIA,
+                blocker=BlockerCode.FEATURED_MISSING,
+                relevance_approved=True,
+            )
+            post["meta"] = {
+                "_hermes_state": "awaiting_human",
+                "_hermes_work_state": json.dumps(previous.to_dict()),
+            }
+            class BoundaryClient(FakeClient):
+                fail_boundary = boundary
+                def update_post(self, post_id, payload):
+                    meta = payload.get("meta") or {}
+                    matches = (
+                        (self.fail_boundary == "history" and "_hermes_retry_history" in meta)
+                        or (self.fail_boundary == "v2" and "_hermes_work_state" in meta)
+                        or (self.fail_boundary == "legacy" and "_hermes_state" in meta)
+                    )
+                    if matches:
+                        self.fail_boundary = None
+                        super().update_post(post_id, payload)
+                        raise WorkflowError(f"response lost after {boundary} write")
+                    return super().update_post(post_id, payload)
+                def move_to_status(self, post_id, status):
+                    if self.fail_boundary == "status":
+                        self.fail_boundary = None
+                        self.post["status"] = status
+                        raise WorkflowError("response lost after status write")
+                    self.post["status"] = status
+                    self.updated.append((post_id, {"status": status}))
+                    return {"id": post_id, "status": status}
+            client = BoundaryClient(post)
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(WorkflowError):
+                    retry_post(client, self.config(False), Path(directory), 42)
+                result = retry_post(client, self.config(False), Path(directory), 42)
+                self.assertTrue(result["reconciled"])
+            history = json.loads(client.post["meta"]["_hermes_retry_history"])
+            self.assertEqual(len([item for item in history if item.get("operation") == "retry"]), 1)
+            self.assertEqual(client.post["status"], "pending")
+
+    def test_two_legitimate_reopens_with_equal_counters_get_distinct_operation_ids(self):
+        post = self.post()
+        post["status"] = "awaiting_human"
+        previous = WorkState(
+            state=LifecycleState.HUMAN_REQUIRED,
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.FEATURED_MISSING,
+            relevance_approved=True,
+        )
+        post["meta"] = {
+            "_hermes_state": "awaiting_human",
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+        }
+        class StatusClient(FakeClient):
+            def move_to_status(self, post_id, status):
+                self.post["status"] = status
+                self.updated.append((post_id, {"status": status}))
+                return {"id": post_id, "status": status}
+        client = StatusClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            first = retry_post(client, self.config(False), Path(directory), 42)
+            first_history = json.loads(client.post["meta"]["_hermes_retry_history"])
+            reopened = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+            human_again = replace(reopened, state=LifecycleState.HUMAN_REQUIRED)
+            client.post["status"] = "awaiting_human"
+            client.post["meta"]["_hermes_work_state"] = json.dumps(human_again.to_dict(), separators=(",", ":"))
+            second = retry_post(client, self.config(False), Path(directory), 42)
+        history = json.loads(client.post["meta"]["_hermes_retry_history"])
+        retry_events = [item for item in history if item.get("operation") == "retry"]
+        self.assertEqual(len(retry_events), 2)
+        self.assertNotEqual(retry_events[0]["operation_id"], retry_events[1]["operation_id"])
+        self.assertNotEqual(first["operation_id"], second["operation_id"])
+
     def test_retry_v2_preserves_policy_version_and_records_reset_history(self):
         post = self.post()
         post["status"] = "awaiting_human"

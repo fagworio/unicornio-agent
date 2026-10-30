@@ -66,6 +66,7 @@ def test_retry_history_meta_roundtrip_and_human_to_pending(wordpress_e2e_case):
     post_id = case.post_id("retry_history")
     before_post = case.client.get_post(post_id)
     before_content = (before_post.get("content") or {}).get("raw")
+    before_state = json.loads((before_post.get("meta") or {})["_hermes_work_state"])
     seed_history = [{"operation": "seed", "previous_retry": {"attempts": 2}}]
     seed_json = json.dumps(seed_history, ensure_ascii=False, separators=(",", ":"))
     case.client.update_post(post_id, {"meta": {"_hermes_retry_history": seed_json}})
@@ -90,7 +91,10 @@ def test_retry_history_meta_roundtrip_and_human_to_pending(wordpress_e2e_case):
     assert after["status"] == "pending"
     assert history[0] == seed_history[0]
     assert history[-1]["operation"] == "retry"
+    assert history[-1]["operation_id"]
     assert work_state["state"] == "pending"
+    assert work_state["retry"]["policy_version"] == before_state["retry"]["policy_version"]
+    assert work_state["media"] == before_state["media"]
     assert (after.get("content") or {}).get("raw") == before_content
 
     audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={post_id}")
@@ -100,6 +104,9 @@ def test_retry_history_meta_roundtrip_and_human_to_pending(wordpress_e2e_case):
         "before": {"status": before_post["status"], "history": seed_json},
         "after": {"status": after["status"], "history": after_meta["_hermes_retry_history"], "work_state": work_state},
         "retry_result": result,
+        "operation_id": history[-1]["operation_id"],
+        "policy_version_preserved": work_state["retry"]["policy_version"] == before_state["retry"]["policy_version"],
+        "media_progress_preserved": work_state["media"] == before_state["media"],
         "content_preserved": (after.get("content") or {}).get("raw") == before_content,
         "rest_events": audit.get("events", []),
     })

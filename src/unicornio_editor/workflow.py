@@ -5817,6 +5817,161 @@ def _assert_retry_cycle_quiescent(root: Path) -> None:
         )
 
 
+def _retry_operation_dir(root: Path, post_id: int) -> Path:
+    return Path(root) / "work" / "retry-operations" / str(post_id)
+
+
+def _retry_operation_path(root: Path, post_id: int, operation_id: str) -> Path:
+    return _retry_operation_dir(root, post_id) / f"{operation_id}.json"
+
+
+def _retry_operation_save(root: Path, operation: dict[str, Any]) -> None:
+    path = _retry_operation_path(root, int(operation["post_id"]), str(operation["operation_id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(operation, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+
+
+def _retry_operation_load_active(root: Path, post_id: int) -> dict[str, Any] | None:
+    directory = _retry_operation_dir(root, post_id)
+    if not directory.is_dir():
+        return None
+    active = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            operation = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise WorkflowError(f"retry operation identity unreadable for post {post_id}")
+        if operation.get("status") != "completed":
+            active.append(operation)
+    if len(active) > 1:
+        raise WorkflowError(f"multiple unresolved retry operations for post {post_id}")
+    return active[0] if active else None
+
+
+def _retry_operation_history(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    value = meta.get("_hermes_retry_history")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError("retry history JSON is invalid") from exc
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise WorkflowError("retry history shape is invalid")
+    return value
+
+
+def _retry_operation_readback_matches(operation: dict[str, Any], post: dict[str, Any]) -> bool:
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    history = _retry_operation_history(meta)
+    event = next((item for item in history if item.get("operation_id") == operation["operation_id"]), None)
+    if event is None:
+        return False
+    if event.get("previous_state_hash") != operation["previous_state_hash"]:
+        raise WorkflowError("retry operation history identity mismatch")
+    target_work_state = operation.get("target_work_state") or ""
+    if target_work_state:
+        if meta.get("_hermes_work_state") != target_work_state:
+            return False
+    elif meta.get("_hermes_work_state"):
+        return False
+    if str(post.get("status") or "") != "pending":
+        return False
+    return (
+        meta.get("_hermes_state") == STATE_BLOCKED
+        and str(meta.get("_hermes_attempts") or "") == "0"
+    )
+
+
+def _reconcile_retry_operation(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    operation: dict[str, Any],
+) -> dict[str, Any]:
+    """Finish one identified retry, never infer recovery from generic PENDING."""
+    post_id = int(operation.get("post_id") or 0)
+    if post_id < 1 or not operation.get("operation_id") or operation.get("version") != 1:
+        raise WorkflowError("retry operation identity is incomplete")
+    if operation.get("status") == "completed":
+        return {"post_id": post_id, "status": "retried", "reconciled": True, "readback": True}
+    post = client.get_post(post_id)
+    meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    current_state = meta.get("_hermes_work_state") or ""
+    previous_hash = hashlib.sha256(
+        str(operation.get("previous_work_state") or "").encode("utf-8")
+    ).hexdigest()
+    if previous_hash != operation.get("previous_state_hash"):
+        raise WorkflowError("retry operation previous-state identity mismatch")
+    if current_state not in (operation.get("previous_work_state"), operation.get("target_work_state")):
+        raise WorkflowError("retry operation encountered an unrelated V2 state")
+    if post.get("status") not in ("awaiting_human", "pending"):
+        raise WorkflowError("retry operation encountered an unrelated WordPress status")
+    if config.dry_run:
+        raise WorkflowError("retry reconciliation requires write mode")
+    history = _retry_operation_history(meta)
+    event = operation["history_event"]
+    if not any(item.get("operation_id") == operation["operation_id"] for item in history):
+        history.append(event)
+        operation["status"] = "history_written_unknown"
+        _retry_operation_save(root, operation)
+        try:
+            client.update_post(post_id, {"meta": {"_hermes_retry_history": json.dumps(history[-50:], ensure_ascii=False, separators=(",", ":"))}})
+            readback = client.get_post(post_id)
+            if not any(item.get("operation_id") == operation["operation_id"] for item in _retry_operation_history(readback.get("meta") or {})):
+                raise WorkflowError("retry history read-back did not contain operation identity")
+        except Exception:
+            raise
+        operation["status"] = "history_confirmed"
+        _retry_operation_save(root, operation)
+        post = readback
+        meta = readback.get("meta") or {}
+    elif current_state != operation["target_work_state"]:
+        operation["status"] = "history_confirmed"
+        _retry_operation_save(root, operation)
+    if (meta.get("_hermes_work_state") or "") != operation["target_work_state"]:
+        if meta.get("_hermes_work_state") != operation.get("previous_work_state"):
+            raise WorkflowError("retry V2 state changed outside identified operation")
+        operation["status"] = "v2_write_unknown"
+        _retry_operation_save(root, operation)
+        client.update_post(post_id, {"meta": {"_hermes_work_state": operation["target_work_state"]}})
+        readback = client.get_post(post_id)
+        if (readback.get("meta") or {}).get("_hermes_work_state") != operation["target_work_state"]:
+            raise WorkflowError("V2 retry read-back failed during reconciliation")
+        operation["status"] = "v2_confirmed"
+        _retry_operation_save(root, operation)
+        post = readback
+        meta = readback.get("meta") or {}
+    if post.get("status") != "pending":
+        if post.get("status") != "awaiting_human":
+            raise WorkflowError("retry status changed outside identified operation")
+        operation["status"] = "status_write_unknown"
+        _retry_operation_save(root, operation)
+        client.move_to_status(post_id, "pending")
+        readback = client.get_post(post_id)
+        if readback.get("status") != "pending":
+            raise WorkflowError("retry status read-back failed during reconciliation")
+        operation["status"] = "status_confirmed"
+        _retry_operation_save(root, operation)
+        post = readback
+        meta = readback.get("meta") or {}
+    if meta.get("_hermes_state") != STATE_BLOCKED or str(meta.get("_hermes_attempts") or "") != "0":
+        operation["status"] = "legacy_write_unknown"
+        _retry_operation_save(root, operation)
+        if not _write_state_markers(client, config, post_id, STATE_BLOCKED, root=root, attempts=0, last_error="reaberto por revisao humana (retry)"):
+            raise WorkflowError("legacy retry marker did not persist during reconciliation")
+        readback = client.get_post(post_id)
+        meta = readback.get("meta") or {}
+    final = client.get_post(post_id)
+    if not _retry_operation_readback_matches(operation, final):
+        raise WorkflowError("retry reconciliation final read-back is incomplete")
+    operation["status"] = "completed"
+    operation["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    _retry_operation_save(root, operation)
+    return {"post_id": post_id, "status": "retried", "state": "pending" if operation.get("target_work_state") else STATE_BLOCKED, "attempts": 0, "wordpress_changed": True, "readback": True, "reconciled": True, "operation_id": operation["operation_id"]}
+
+
 def _retry_post_unlocked(
     client: WordPressClient,
     config: Config,
@@ -5831,6 +5986,9 @@ def _retry_post_unlocked(
     """
     assert_post_not_quarantined(root, post_id, operation="retry")
     post = client.get_post(post_id)
+    active_operation = _retry_operation_load_active(root, post_id)
+    if active_operation is not None:
+        return _reconcile_retry_operation(client, config, root, active_operation)
     if post.get("status") not in ("pending", "awaiting_human"):
         raise WorkflowError(f"post {post_id} nao esta pending/awaiting_human ({post.get('status')})")
     if config.dry_run:
@@ -5864,6 +6022,52 @@ def _retry_post_unlocked(
         raise WorkflowError(
             f"post {post_id} canonical state is not authorized for retry ({previous_state or 'missing'})"
         )
+    if config.dry_run:
+        raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    previous_work_state = existing_v2 if isinstance(existing_v2, str) else ""
+    target_work_state = ""
+    if existing_v2:
+        from .pipeline_v2.model import LifecycleState, RetryInfo, WorkState
+        previous = WorkState.from_dict(json.loads(existing_v2) if isinstance(existing_v2, str) else existing_v2)
+        reopened = WorkState(
+            state=LifecycleState.PENDING,
+            phase=previous.phase,
+            blocker=previous.blocker,
+            retry=RetryInfo(
+                attempts=0,
+                no_progress=0,
+                next_at=None,
+                policy_version=previous.retry.policy_version,
+                phase_attempts=0,
+            ),
+            relevance_approved=previous.relevance_approved,
+            media=previous.media,
+        )
+        target_work_state = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    operation_id = uuid.uuid4().hex
+    previous_state_hash = hashlib.sha256(previous_work_state.encode("utf-8")).hexdigest()
+    history_event = {
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "operation": "retry",
+        "operation_id": operation_id,
+        "previous_state": previous_state,
+        "previous_state_hash": previous_state_hash,
+        "previous_retry": previous_retry,
+    }
+    operation = {
+        "version": 1,
+        "operation_id": operation_id,
+        "post_id": post_id,
+        "status": "prepared",
+        "previous_state": previous_state,
+        "previous_state_hash": previous_state_hash,
+        "previous_work_state": previous_work_state,
+        "target_work_state": target_work_state,
+        "history_event": history_event,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }
+    _retry_operation_save(root, operation)
+    return _reconcile_retry_operation(client, config, root, operation)
     retry_history = meta_before.get("_hermes_retry_history")
     if isinstance(retry_history, str):
         try:
