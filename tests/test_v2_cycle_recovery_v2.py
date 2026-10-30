@@ -153,6 +153,12 @@ def test_completed_transition_is_auditable_after_new_cycle_advance_and_tamper_fa
         recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
 
 
+def test_declared_run_id_must_match_journal(tmp_path, monkeypatch):
+    root = _root(tmp_path); _evidence(monkeypatch)
+    with pytest.raises(recovery.CycleRecoveryError, match="run_id"):
+        recovery.recover_blocked_cycle(**_kwargs(root, run_ids={**RUNS, 101: "wrong"}))
+
+
 def test_real_reconciler_fixture_uses_journals_registry_and_wordpress_readback(tmp_path):
     root = _root(tmp_path)
     # Replace the deliberately small DB with the schema consumed by transaction_admin.
