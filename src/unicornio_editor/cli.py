@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -60,6 +61,54 @@ def _json_default(value: Any) -> Any:
     if callable(serializer):
         return serializer()
     raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
+
+
+def select_retry_all_targets(
+    report: dict[str, Any], requested_states: set[str]
+) -> list[int]:
+    """Select only explicitly authorized retry states, with V2 projection support."""
+    allowed: set[str] = set()
+    if "awaiting_human" in requested_states:
+        allowed.update({STATE_AWAITING_HUMAN, "human_required"})
+    if "blocked" in requested_states:
+        allowed.add(STATE_BLOCKED)
+    selected: set[int] = set()
+    for row in report.get("posts") or []:
+        if not isinstance(row, dict):
+            continue
+        post_id = row.get("id")
+        if isinstance(post_id, int) and post_id > 0 and row.get("state") in allowed:
+            selected.add(post_id)
+    return sorted(selected)
+
+
+def _retry_all_cycle_guard(root: Path) -> dict[str, Any] | None:
+    """Return a blocking reason when a cycle/round can still execute."""
+    state_path = root / "work" / "v2-cycle" / "state.json"
+    if state_path.is_file():
+        try:
+            cycle_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return {"reason": "cycle_checkpoint_unreadable", "detail": str(exc)}
+        pending = cycle_state.get("pending_round")
+        if pending:
+            return {
+                "reason": "cycle_round_pending",
+                "cycle_id": cycle_state.get("cycle_id"),
+                "round_number": pending.get("round_number"),
+                "authorization_id": pending.get("authorization_id"),
+            }
+    for relative in ("work/v2-run.lock", "work/v2-cycle/.lock"):
+        path = root / relative
+        if not path.exists():
+            continue
+        try:
+            with path.open("a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, BlockingIOError):
+            return {"reason": "cycle_lock_held", "lock": relative}
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -614,6 +663,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--states",
         default="awaiting_human,blocked",
         help="estados a destravar (default: awaiting_human,blocked)",
+    )
+    retry_all_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="somente lista IDs elegíveis; não altera WordPress nem estados V2",
     )
 
     discard_parser = subparsers.add_parser(
@@ -4161,28 +4215,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "retry-all":
             states = {st.strip() for st in (args.states or "").split(",") if st.strip()}
             report = build_queue_report(client, args.root)
-            target_ids: list[int] = []
-            for row in report.get("posts") or []:
-                st = row.get("state")
-                if st == STATE_AWAITING_HUMAN and "awaiting_human" in states:
-                    target_ids.append(int(row["id"]))
-                elif st == STATE_BLOCKED and "blocked" in states:
-                    target_ids.append(int(row["id"]))
-            outcomes = []
-            for pid in sorted(target_ids):
-                try:
-                    outcomes.append(retry_post(client, config, args.root, pid))
-                except Exception as exc:  # noqa: BLE001 - report per post
-                    outcomes.append({"post_id": pid, "status": "error", "reason": str(exc)})
-            result = {
-                "retried": sum(1 for o in outcomes if o.get("status") == "retried"),
-                "failed": sum(1 for o in outcomes if o.get("status") == "error"),
-                "posts": [
-                    {"post_id": o.get("post_id"), "status": o.get("status"),
-                     "state": o.get("state"), "reason": o.get("reason")}
-                    for o in outcomes
-                ],
-            }
+            target_ids = select_retry_all_targets(report, states)
+            guard = _retry_all_cycle_guard(args.root)
+            if guard is not None:
+                result = {
+                    "status": "blocked",
+                    "reason": "cycle_or_round_in_progress",
+                    "guard": guard,
+                    "requested_states": sorted(states),
+                    "eligible_ids": target_ids,
+                    "retried": 0,
+                    "failed": 0,
+                    "posts": [],
+                }
+            elif args.dry_run:
+                result = {
+                    "status": "dry_run",
+                    "requested_states": sorted(states),
+                    "eligible_ids": target_ids,
+                    "deduplicated_count": len(target_ids),
+                    "retried": 0,
+                    "failed": 0,
+                    "posts": [
+                        {"post_id": pid, "status": "eligible"} for pid in target_ids
+                    ],
+                }
+            else:
+                outcomes = []
+                for pid in target_ids:
+                    try:
+                        outcomes.append(retry_post(client, config, args.root, pid))
+                    except Exception as exc:  # noqa: BLE001 - report per post
+                        outcomes.append({"post_id": pid, "status": "error", "reason": str(exc)})
+                result = {
+                    "status": "completed",
+                    "requested_states": sorted(states),
+                    "eligible_ids": target_ids,
+                    "deduplicated_count": len(target_ids),
+                    "retried": sum(1 for o in outcomes if o.get("status") == "retried"),
+                    "failed": sum(1 for o in outcomes if o.get("status") == "error"),
+                    "posts": [
+                        {"post_id": o.get("post_id"), "status": o.get("status"),
+                         "state": o.get("state"), "readback": o.get("readback"),
+                         "reason": o.get("reason")}
+                        for o in outcomes
+                    ],
+                }
         elif args.command == "retry":
             result = retry_post(client, config, args.root, args.post_id)
         elif args.command == "discard":

@@ -2651,6 +2651,42 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved.retry.no_progress, 0)
         self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
 
+    def test_retry_v2_preserves_policy_version_and_records_reset_history(self):
+        post = self.post()
+        post["status"] = "awaiting_human"
+        previous = WorkState(
+            state=LifecycleState.HUMAN_REQUIRED,
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.INLINE_MISSING,
+            retry=replace(
+                WorkState().retry,
+                attempts=3,
+                no_progress=2,
+                policy_version=7,
+                phase_attempts=2,
+            ),
+        )
+        post["meta"] = {
+            "_hermes_state": "awaiting_human",
+            "_hermes_attempts": "3",
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+        }
+
+        class StatusClient(FakeClient):
+            def move_to_status(self, post_id, status):
+                self.post["status"] = status
+                self.updated.append((post_id, {"status": status}))
+                return {"id": post_id, "status": status}
+
+        client = StatusClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            retry_post(client, self.config(False), Path(directory), 42)
+        saved = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
+        history = json.loads(client.post["meta"]["_hermes_retry_history"])
+        self.assertEqual(saved.retry.policy_version, 7)
+        self.assertEqual(saved.retry.phase_attempts, 0)
+        self.assertEqual(history[-1]["previous_retry"], previous.retry.to_dict())
+
     def test_discard_projects_terminal_skipped_into_v2_state(self):
         post = self.post()
         ready = WorkState(

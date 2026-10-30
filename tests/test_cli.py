@@ -21,6 +21,8 @@ from unicornio_editor.cli import (
     _json_default,
     _monitor_line,
     _record_cmd_output,
+    _retry_all_cycle_guard,
+    select_retry_all_targets,
 )
 from unicornio_editor.pipeline_v2.cycle import CycleReport
 
@@ -486,6 +488,52 @@ class CompactOutputTests(unittest.TestCase):
 
         args = build_parser().parse_args(["retry-all", "--states", "blocked", "--root", "."])
         self.assertEqual(args.states, "blocked")
+
+    def test_retry_all_accepts_canonical_v2_human_required_and_deduplicates(self):
+        rows = (
+            [{"id": i, "state": "human_required"} for i in range(1, 146)]
+            + [{"id": 1, "state": "awaiting_human"},
+               {"id": 200, "state": "ready"},
+               {"id": 201, "state": "published"},
+               {"id": 202, "state": "skipped"}]
+        )
+        self.assertEqual(
+            select_retry_all_targets({"posts": rows}, {"awaiting_human"}),
+            list(range(1, 146)),
+        )
+
+    def test_retry_all_states_are_explicit_and_do_not_cross_authorization(self):
+        rows = [
+            {"id": 1, "state": "human_required"},
+            {"id": 2, "state": "blocked"},
+            {"id": 3, "state": "ready"},
+            {"id": 4, "state": "published"},
+            {"id": 5, "state": "skipped"},
+        ]
+        self.assertEqual(select_retry_all_targets({"posts": rows}, {"blocked"}), [2])
+        self.assertEqual(select_retry_all_targets({"posts": rows}, set()), [])
+
+    def test_retry_all_parser_supports_read_only_dry_run(self):
+        from unicornio_editor.cli import build_parser
+
+        args = build_parser().parse_args(["retry-all", "--dry-run"])
+        self.assertTrue(args.dry_run)
+
+    def test_retry_all_guard_rejects_pending_cycle_round(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            cycle_dir = root / "work" / "v2-cycle"
+            cycle_dir.mkdir(parents=True)
+            (cycle_dir / "state.json").write_text(json.dumps({
+                "cycle_id": "cycle-1",
+                "pending_round": {"round_number": 3, "authorization_id": "auth-1"},
+            }))
+            guard = _retry_all_cycle_guard(root)
+            self.assertEqual(guard["reason"], "cycle_round_pending")
+            self.assertEqual(guard["round_number"], 3)
+        finally:
+            import shutil
+            shutil.rmtree(root)
 
     def test_v2_media_recovery_parser_is_read_only_by_default(self):
         from unicornio_editor.cli import build_parser

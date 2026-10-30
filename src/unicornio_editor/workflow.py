@@ -5813,6 +5813,47 @@ def _retry_post_unlocked(
     if config.dry_run:
         raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
     existing_v2 = (post.get("meta") or {}).get("_hermes_work_state")
+    meta_before = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+    previous_retry: dict[str, Any] = {}
+    previous_state = ""
+    if existing_v2:
+        try:
+            from .pipeline_v2.model import WorkState
+
+            raw_previous = json.loads(existing_v2) if isinstance(existing_v2, str) else existing_v2
+            previous_model = WorkState.from_dict(raw_previous)
+            previous_retry = previous_model.retry.to_dict()
+            previous_state = previous_model.state.value
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise WorkflowError(f"estado V2 invalido para retry {post_id}: {exc}") from exc
+    else:
+        legacy_before = read_state(post)
+        previous_retry = {
+            "attempts": int(legacy_before.get("attempts") or 0),
+            "no_progress": int(legacy_before.get("no_progress_attempts") or 0),
+            "next_at": legacy_before.get("next_retry_at") or None,
+            "policy_version": config.policy_version,
+            "phase_attempts": 0,
+        }
+        previous_state = str(legacy_before.get("state") or "")
+    retry_history = meta_before.get("_hermes_retry_history")
+    if isinstance(retry_history, str):
+        try:
+            retry_history = json.loads(retry_history)
+        except json.JSONDecodeError:
+            retry_history = []
+    if not isinstance(retry_history, list):
+        retry_history = []
+    retry_history.append({
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "operation": "retry",
+        "previous_state": previous_state,
+        "previous_retry": previous_retry,
+    })
+    client.update_post(
+        post_id,
+        {"meta": {"_hermes_retry_history": json.dumps(retry_history[-50:], ensure_ascii=False, separators=(",", ":"))}},
+    )
     reopened = None
     if existing_v2:
         try:
@@ -5824,7 +5865,13 @@ def _retry_post_unlocked(
                 state=LifecycleState.PENDING,
                 phase=previous.phase,
                 blocker=previous.blocker,
-                retry=RetryInfo(attempts=0, no_progress=0, next_at=None),
+                retry=RetryInfo(
+                    attempts=0,
+                    no_progress=0,
+                    next_at=None,
+                    policy_version=previous.retry.policy_version,
+                    phase_attempts=0,
+                ),
                 relevance_approved=previous.relevance_approved,
                 media=previous.media,
             )
@@ -5857,6 +5904,13 @@ def _retry_post_unlocked(
     final_meta = final.get("meta") if isinstance(final.get("meta"), dict) else {}
     if final_meta.get("_hermes_state") != STATE_BLOCKED or str(final_meta.get("_hermes_attempts") or "") != "0":
         raise WorkflowError(f"retry legacy read-back failed for post {post_id}")
+    raw_history = final_meta.get("_hermes_retry_history")
+    try:
+        decoded_history = json.loads(raw_history) if isinstance(raw_history, str) else raw_history
+    except (TypeError, ValueError, json.JSONDecodeError):
+        decoded_history = None
+    if not isinstance(decoded_history, list) or not decoded_history or decoded_history[-1] != retry_history[-1]:
+        raise WorkflowError(f"retry history read-back failed for post {post_id}")
     if reopened is not None:
         from .pipeline_v2.model import WorkState
         raw_final = final_meta.get("_hermes_work_state")
