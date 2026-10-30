@@ -121,12 +121,13 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(reported["published"], 3)
             self.assertEqual(reported["retryable_posts"][0]["post_id"], 115702)
             window_log = (root / "work" / "publish-window.log").read_text(encoding="utf-8")
-            self.assertEqual(window_log, report_capture.read_text(encoding="utf-8"))
-            self.assertEqual(json.loads(window_log)["wrapper_exit_code"], 0)
-            self.assertEqual(json.loads(window_log)["cli_exit_code"], 75)
-            self.assertEqual(json.loads(window_log)["final_classification"], "PARTIAL_SUCCESS")
+            compatibility = json.loads(window_log)
+            self.assertEqual(compatibility["published"], 3)
+            self.assertEqual(compatibility["wrapper_exit_code"], 0)
+            self.assertEqual(compatibility["cli_exit_code"], 75)
+            self.assertEqual(compatibility["final_classification"], "PARTIAL_SUCCESS")
 
-    def test_publish_cron_reports_total_failure_after_three_attempts(self):
+    def test_publish_cron_reports_structured_failure_without_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "hermes").mkdir()
@@ -141,7 +142,7 @@ class HermesAssetsTests(unittest.TestCase):
             editor.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf x >> \"$PUBLISH_CALL_LOG\"\n"
-                "printf '%s\\n' '{\"error\":\"transport failure\",\"retry_safe\":true,\"write_started\":false}'\n"
+                "printf '%s\\n' '{\"error\":\"transport failure\"}'\n"
                 "exit 1\n", encoding="utf-8"
             )
             editor.chmod(0o755)
@@ -158,7 +159,7 @@ class HermesAssetsTests(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertEqual(calls.read_text(), "xxx")
+            self.assertEqual(calls.read_text(), "x")
             reports = list((root / "work" / "publish-windows").glob("*.json"))
             self.assertEqual(len(reports), 1)
             report = json.loads(reports[0].read_text())
@@ -241,7 +242,7 @@ class HermesAssetsTests(unittest.TestCase):
             editor.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf x >> \"$PUBLISH_CALL_LOG\"\n"
-                "exit 1\n", encoding="utf-8"
+                "exit 0\n", encoding="utf-8"
             )
             editor.chmod(0o755)
             (bin_dir / "python").symlink_to(sys.executable)
@@ -255,33 +256,57 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(calls.read_text(), "x")
             report = json.loads(next((root / "work" / "publish-windows").glob("*.json")).read_text())
-            self.assertEqual(report["final_classification"], "PUBLISHER_INTERNAL_ERROR")
+            self.assertEqual(report["final_classification"], "PUBLISHER_INCONSISTENCY")
+            self.assertEqual(report["zero_publication_reason"], "PUBLISHER_INCONSISTENCY")
+            self.assertEqual(report["raw_output"].strip(), "")
 
-    def test_publish_cron_concurrent_windows_keep_separate_history(self):
-        roots = []
-        processes = []
+    def test_publish_cron_concurrent_windows_share_operational_dir_without_interference(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            for index in ("a", "b"):
-                root = base / index
-                (root / "hermes").mkdir(parents=True)
-                (root / "work").mkdir()
-                (root / ".env").write_text("PUBLISH_ENABLED=false\n", encoding="utf-8")
-                shutil.copy2(ROOT / "hermes" / "publish-cron.sh", root / "hermes" / "publish-cron.sh")
-                shutil.copy2(ROOT / "hermes" / "relatorio_publicacao.py", root / "hermes" / "relatorio_publicacao.py")
-                roots.append(root)
-                processes.append(subprocess.Popen(
-                    ["bash", str(root / "hermes" / "publish-cron.sh")],
-                    cwd=root,
-                    env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root)},
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            for name in ("publish-a.sh", "publish-b.sh"):
+                shutil.copy2(ROOT / "hermes" / "publish-cron.sh", root / "hermes" / name)
+            shutil.copy2(ROOT / "hermes" / "relatorio_publicacao.py", root / "hermes" / "relatorio_publicacao.py")
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "python").symlink_to(sys.executable)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'start-%s\\n' \"$PUBLISH_TEST_LABEL\" >> \"$PUBLISH_EVENTS\"\n"
+                "touch \"$PUBLISH_ROOT/start-$PUBLISH_TEST_LABEL\"\n"
+                "while [[ ! -f \"$PUBLISH_ROOT/start-a\" || ! -f \"$PUBLISH_ROOT/start-b\" ]]; do sleep 0.01; done\n"
+                "if [[ \"$PUBLISH_TEST_LABEL\" == a ]]; then sleep 0.1; fi\n"
+                "printf 'end-%s\\n' \"$PUBLISH_TEST_LABEL\" >> \"$PUBLISH_EVENTS\"\n"
+                "if [[ \"$PUBLISH_TEST_LABEL\" == a ]]; then id=115701; else id=115702; fi\n"
+                "printf '%s\\n' \"{\\\"published\\\":1,\\\"posts\\\":[{\\\"post_id\\\":$id}],\\\"zero_publication_reason\\\":null}\"\n",
+                encoding="utf-8",
+            )
+            editor.chmod(0o755)
+            events = root / "events.log"
+            env_base = {**os.environ, "UNICORNIO_AGENT_ROOT": str(root), "PUBLISH_EVENTS": str(events), "PUBLISH_ROOT": str(root)}
+            processes = [
+                subprocess.Popen(
+                    ["bash", str(root / "hermes" / script_name)], cwd=root,
+                    env={**env_base, "PUBLISH_TEST_LABEL": label},
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                ))
+                )
+                for script_name, label in (("publish-a.sh", "a"), ("publish-b.sh", "b"))
+            ]
             results = [process.communicate(timeout=30) for process in processes]
-            self.assertEqual([process.returncode for process in processes], [0, 0])
-            reports = [list((root / "work" / "publish-windows").glob("*.json")) for root in roots]
-            self.assertEqual([len(items) for items in reports], [1, 1])
-            ids = [json.loads(items[0].read_text())["window_id"] for items in reports]
-            self.assertEqual(len(set(ids)), 2)
+            self.assertEqual([process.returncode for process in processes], [0, 0], results)
+            events_read = events.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(set(events_read[:2]), {"start-a", "start-b"})
+            self.assertEqual(set(events_read[2:]), {"end-a", "end-b"})
+            self.assertLess(events_read.index("end-b"), events_read.index("end-a"))
+            reports = list((root / "work" / "publish-windows").glob("publish-*.json"))
+            self.assertEqual(len(reports), 2)
+            data = [json.loads(report.read_text(encoding="utf-8")) for report in reports]
+            self.assertEqual({item["posts"][0]["post_id"] for item in data}, {115701, 115702})
+            compatibility = json.loads((root / "work" / "publish-window.log").read_text(encoding="utf-8"))
+            self.assertIn(compatibility["posts"][0]["post_id"], {115701, 115702})
 
     def test_monitor_sync_updates_only_installed_script_with_backup(self):
         script = ROOT / "hermes" / "sync-monitor.sh"

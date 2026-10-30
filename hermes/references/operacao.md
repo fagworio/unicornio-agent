@@ -26,10 +26,14 @@
 - Plano ~40 posts/dia: 00h=5, 08h=7, 12h=8, 18h=10, 21h=10 (America/Sao_Paulo).
 - `publish-cron.sh` roda `publish-ready` com gate `PUBLISH_ENABLED=true` +
   `EDITOR_DRY_RUN=false` (apenas neste script; o .env continua dry-run para o
-  pipeline editorial). Retry com backoff em falha transitória de API/Cloudflare
-  (3 tentativas) + compatibilidade em `work/publish-window.log` e histórico
-  imutável por janela em `work/publish-windows/<window_id>.json`; preserve
-  `work/publish-windows/` em backups, snapshots e deploys.
+  pipeline editorial). Cada execução grava primeiro em
+  `work/publish-windows/.<window_id>.run.json`; somente a finalização grava
+  atomicamente `work/publish-windows/<window_id>.json` e atualiza
+  `work/publish-window.log` como compatibilidade da última janela. Não existe
+  retry automático enquanto o CLI não produzir uma autorização confiável
+  `retry_safe=true` + `write_started=false`; exit code, mensagens ou stdout
+  vazio nunca autorizam replay. Preserve `work/publish-windows/` em backups,
+  snapshots e deploys.
 
 ## Estados e fila
 

@@ -25,13 +25,11 @@ def _load_window_json() -> dict | None:
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     if not raw.strip() and LOG.is_file():
         raw = LOG.read_text(encoding="utf-8", errors="replace")
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        return None
     try:
-        return json.loads(m.group(0))
-    except ValueError:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
         return None
+    return value if isinstance(value, dict) else None
 
 
 def _post_titles(post_ids: list[int]) -> dict[int, str]:
