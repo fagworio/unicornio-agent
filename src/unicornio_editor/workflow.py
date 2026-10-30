@@ -5906,10 +5906,10 @@ def _retry_operation_preflight(operation: dict[str, Any], post: dict[str, Any]) 
     if len(matches) > 1:
         raise WorkflowError("retry operation identity appears more than once")
     event = matches[0] if matches else None
-    required_fields = ("operation_id", "previous_state_hash", "previous_state", "previous_retry")
+    required_fields = ("previous_state_hash", "previous_state", "previous_retry")
+    if expected.get("operation_id") != operation_id:
+        raise WorkflowError("retry operation identity mismatch")
     for field in required_fields:
-        if expected.get(field) != operation.get("history_event", {}).get(field):
-            raise WorkflowError(f"retry operation journal is inconsistent ({field})")
         if event is not None and event.get(field) != expected.get(field):
             raise WorkflowError(f"retry history provenance mismatch ({field})")
     previous_hash = hashlib.sha256(str(operation.get("previous_work_state") or "").encode("utf-8")).hexdigest()

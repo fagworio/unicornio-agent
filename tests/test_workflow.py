@@ -2719,6 +2719,45 @@ class WorkflowTests(unittest.TestCase):
         history = json.loads(client.post["meta"]["_hermes_retry_history"])
         self.assertEqual(len(history), 1)
 
+    def test_retry_operation_id_divergence_is_rejected_without_rest_write(self):
+        post = self.post()
+        post["status"] = "awaiting_human"
+        previous = WorkState(
+            state=LifecycleState.HUMAN_REQUIRED,
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.FEATURED_MISSING,
+            relevance_approved=True,
+        )
+        post["meta"] = {
+            "_hermes_state": "awaiting_human",
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+        }
+        class LostHistoryClient(FakeClient):
+            failed = False
+            def update_post(self, post_id, payload):
+                result = super().update_post(post_id, payload)
+                if not self.failed and "_hermes_retry_history" in (payload.get("meta") or {}):
+                    self.failed = True
+                    raise WorkflowError("response lost after history write")
+                return result
+            def move_to_status(self, post_id, status):
+                self.post["status"] = status
+                self.updated.append((post_id, {"status": status}))
+                return {"id": post_id, "status": status}
+        client = LostHistoryClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(WorkflowError):
+                retry_post(client, self.config(False), root, 42)
+            operation_path = next((root / "work" / "retry-operations" / "42").glob("*.json"))
+            operation = json.loads(operation_path.read_text())
+            operation["operation_id"] = "tampered-operation-id"
+            operation_path.write_text(json.dumps(operation))
+            writes_before = len(client.updated)
+            with self.assertRaises(WorkflowError):
+                retry_post(client, self.config(False), root, 42)
+            self.assertEqual(len(client.updated), writes_before)
+
     def test_retry_reconciles_response_loss_after_each_rest_write_boundary(self):
         for boundary in ("history", "v2", "status", "legacy"):
             post = self.post()
