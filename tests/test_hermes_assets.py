@@ -227,6 +227,36 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("references", content)
         self.assertIn("validate-monitor.sh", content)
 
+    def test_publish_cron_stops_on_empty_output_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf x >> \"$PUBLISH_CALL_LOG\"\n"
+                "exit 1\n", encoding="utf-8"
+            )
+            editor.chmod(0o755)
+            (bin_dir / "python").symlink_to(sys.executable)
+            (root / "hermes" / "relatorio_publicacao.py").write_text("import sys; sys.stdin.read()\n", encoding="utf-8")
+            calls = root / "calls.log"
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root), "PUBLISH_CALL_LOG": str(calls)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(calls.read_text(), "x")
+            report = json.loads(next((root / "work" / "publish-windows").glob("*.json")).read_text())
+            self.assertEqual(report["final_classification"], "PUBLISHER_INTERNAL_ERROR")
+
     def test_publish_cron_concurrent_windows_keep_separate_history(self):
         roots = []
         processes = []
