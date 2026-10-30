@@ -11,9 +11,11 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from .backup import SnapshotStore
 from .batch import (
@@ -4190,6 +4192,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "uncertain":
             result = mark_uncertain(client, config, args.root, args.post_id, reason=args.reason)
         elif args.command == "publish-ready":
+            window_started_at = datetime.now(ZoneInfo("America/Sao_Paulo"))
+            try:
+                queue_before = build_queue_report(client, args.root)
+            except Exception:
+                queue_before = {}
+            ready_at_window = list(queue_before.get("ready_ids") or [])
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
             published_reconciled = [
@@ -4257,9 +4265,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ],
                 }
             else:
-                # Watchdog pattern: silent when nothing was published and no
-                # quality gate fired (everything cleanly skipped).
-                return 0
+                result = {
+                    "published": 0,
+                    "published_new": 0,
+                    "published_reconciled": 0,
+                    "posts": [],
+                    "not_published": 0,
+                    "blocked_or_skipped": 0,
+                    "skipped_count": 0,
+                    "quality_blocked": 0,
+                    "blocked_posts": [],
+                    "error_count": 0,
+                    "error_posts": [],
+                    "retryable_count": 0,
+                    "retryable_posts": [],
+                }
+            window_exit_code = 75 if errors or retryable else 0
+            zero_reason = None
+            if not published:
+                if errors or retryable:
+                    zero_reason = "PUBLISHER_INTERNAL_ERROR"
+                elif blocked:
+                    zero_reason = "READY_BLOCKED_BY_VALIDATION"
+                elif not ready_at_window:
+                    zero_reason = "NO_READY"
+                else:
+                    zero_reason = "INSUFFICIENT_EVIDENCE"
+            result.update({
+                "window_id": os.environ.get("PUBLISH_WINDOW_ID") or window_started_at.isoformat(),
+                "window_started_at": window_started_at.isoformat(),
+                "cron_triggered": bool(os.environ.get("PUBLISH_CRON_TRIGGERED_AT")),
+                "cron_triggered_at": os.environ.get("PUBLISH_CRON_TRIGGERED_AT"),
+                "ready_at_window": len(ready_at_window),
+                "ready_post_ids": ready_at_window,
+                "pending_current": queue_before.get("pending"),
+                "blocked_current": queue_before.get("blocked_ids") or [],
+                "retries_current": queue_before.get("uncertain_second_pass_ids") or [],
+                "errors_current": [o.get("post_id") for o in errors],
+                "zero_publication_reason": zero_reason,
+                "exit_code": window_exit_code,
+            })
         else:
             from . import session_budget
 

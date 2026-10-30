@@ -173,7 +173,9 @@ def main() -> int:
     cost_measurement = _custo_24h()
 
     print("📰 Relatório de publicação")
-    print(f"🕐 Janela: {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y %H:%M')} (-03)")
+    print(f"🆔 Janela: {data.get('window_id') or 'desconhecida'}")
+    print(f"🕐 Início: {data.get('window_started_at') or 'desconhecido'}")
+    print(f"🚦 Cron disparado: {'sim' if data.get('cron_triggered') else 'não comprovado'}")
 
     published_reconciled = [
         p for p in published if p.get("publication_kind") == "reconciled"
@@ -203,6 +205,11 @@ def main() -> int:
             print(f"  • {pid} | {titulo[:60]} | {_fmt_data(str(p.get('published_at','')))} | reconciled")
     else:
         print("♻️ Publicados reconciliados: 0")
+
+    if data.get("zero_publication_reason"):
+        print(f"⏸️ Motivo para zero publicação: {data['zero_publication_reason']}")
+    print(f"📦 READY na abertura: {data.get('ready_at_window', 'desconhecido')}")
+    print(f"🔢 Exit code: {data.get('exit_code', 'desconhecido')}")
 
     if blocked:
         print(f"\n⚠️ Bloqueados ({len(blocked)}):")

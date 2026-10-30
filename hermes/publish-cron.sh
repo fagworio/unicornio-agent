@@ -25,13 +25,55 @@ set -a
 source .env
 set +a
 
+LOG="work/publish-window.log"
+mkdir -p "$ROOT/work"
+PYTHON_BIN="$ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="python3"
+fi
+WINDOW_STARTED_AT="$(date --iso-8601=seconds)"
+export PUBLISH_WINDOW_ID="publish-${WINDOW_STARTED_AT}"
+export PUBLISH_CRON_TRIGGERED_AT="$WINDOW_STARTED_AT"
+
+write_gate_report() {
+  local reason="$1"
+  local code="$2"
+  WINDOW_REASON="$reason" WINDOW_EXIT_CODE="$code" "$PYTHON_BIN" - <<'PY' | tee "$LOG" >/dev/null
+import json, os
+print(json.dumps({
+    "window_id": os.environ["PUBLISH_WINDOW_ID"],
+    "window_started_at": os.environ["PUBLISH_CRON_TRIGGERED_AT"],
+    "cron_triggered": True,
+    "cron_triggered_at": os.environ["PUBLISH_CRON_TRIGGERED_AT"],
+    "ready_at_window": None,
+    "ready_post_ids": [],
+    "pending_current": None,
+    "published": 0,
+    "published_new": 0,
+    "published_reconciled": 0,
+    "posts": [],
+    "blocked_or_skipped": 0,
+    "blocked_posts": [],
+    "retryable_count": 0,
+    "retryable_posts": [],
+    "error_count": 0,
+    "error_posts": [],
+    "zero_publication_reason": os.environ["WINDOW_REASON"],
+    "exit_code": int(os.environ["WINDOW_EXIT_CODE"]),
+}, ensure_ascii=False))
+PY
+  "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
+}
+
 if [[ -f "$ROOT/work/v2-maintenance.lock" ]]; then
   echo "Publicacao bloqueada: reset administrativo V2 em andamento" >&2
+  write_gate_report "MAINTENANCE_LOCK" 75
   exit 75
 fi
 
 if [[ "${PUBLISH_ENABLED:-false}" != "true" ]]; then
   echo "Publicacao desabilitada: PUBLISH_ENABLED precisa ser true" >&2
+  write_gate_report "PUBLISH_DISABLED" 0
   exit 0
 fi
 
@@ -42,7 +84,6 @@ export EDITOR_DRY_RUN=false
 # excedentes permanecem READY para a proxima janela.
 export PUBLISH_LIMIT=5
 
-LOG="work/publish-window.log"
 ATTEMPT=1
 while [ "$ATTEMPT" -le 3 ]; do
   if out="$("$ROOT/.venv/bin/unicornio-editor" publish-ready 2>&1)"; then
