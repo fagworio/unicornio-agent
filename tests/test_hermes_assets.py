@@ -77,9 +77,22 @@ class HermesAssetsTests(unittest.TestCase):
             editor.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf 'run\\n' >> \"$PUBLISH_CALL_LOG\"\n"
-                "printf '%s\\n' '{\"published\":3,\"posts\":[{\"post_id\":115700},"
-                "{\"post_id\":115701},{\"post_id\":115704}],"
-                "\"retryable_count\":1,\"retryable_posts\":[{\"post_id\":115702}]} '\n"
+                "python3 - <<'PY'\n"
+                "import json, os\n"
+                "print(json.dumps({\n"
+                "    \"window_id\": os.environ[\"PUBLISH_WINDOW_ID\"],\n"
+                "    \"published\": 3,\n"
+                "    \"posts\": [{\"post_id\": 115700}, {\"post_id\": 115701}, {\"post_id\": 115704}],\n"
+                "    \"ready_snapshot_available\": True,\n"
+                "    \"ready_at_window\": 3,\n"
+                "    \"ready_post_ids\": [115700, 115701, 115704],\n"
+                "    \"error_count\": 0,\n"
+                "    \"retryable_count\": 1,\n"
+                "    \"retryable_posts\": [{\"post_id\": 115702}],\n"
+                "    \"zero_publication_reason\": None,\n"
+                "    \"cli_exit_code\": 75,\n"
+                "}))\n"
+                "PY\n"
                 "exit 75\n",
                 encoding="utf-8",
             )
@@ -260,6 +273,45 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(report["zero_publication_reason"], "PUBLISHER_INCONSISTENCY")
             self.assertEqual(report["raw_output"].strip(), "")
 
+    def test_publish_cron_rejects_incomplete_success_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf x >> \"$PUBLISH_CALL_LOG\"\n"
+                "printf '%s\\n' '{}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            editor.chmod(0o755)
+            (bin_dir / "python").symlink_to(sys.executable)
+            (root / "hermes" / "relatorio_publicacao.py").write_text(
+                "import sys; sys.stdin.read()\n", encoding="utf-8",
+            )
+            calls = root / "calls.log"
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root), "PUBLISH_CALL_LOG": str(calls)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(calls.read_text(), "x")
+            reports = list((root / "work" / "publish-windows").glob("publish-*.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["final_classification"], "PUBLISHER_INCONSISTENCY")
+            self.assertEqual(report["raw_output"].strip(), "{}")
+            self.assertEqual(report["published"], 0)
+            self.assertEqual(report["wrapper_exit_code"], 1)
+
     def test_publish_cron_concurrent_windows_share_operational_dir_without_interference(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -280,8 +332,22 @@ class HermesAssetsTests(unittest.TestCase):
                 "while [[ ! -f \"$PUBLISH_ROOT/start-a\" || ! -f \"$PUBLISH_ROOT/start-b\" ]]; do sleep 0.01; done\n"
                 "if [[ \"$PUBLISH_TEST_LABEL\" == a ]]; then sleep 0.1; fi\n"
                 "printf 'end-%s\\n' \"$PUBLISH_TEST_LABEL\" >> \"$PUBLISH_EVENTS\"\n"
-                "if [[ \"$PUBLISH_TEST_LABEL\" == a ]]; then id=115701; else id=115702; fi\n"
-                "printf '%s\\n' \"{\\\"published\\\":1,\\\"posts\\\":[{\\\"post_id\\\":$id}],\\\"zero_publication_reason\\\":null}\"\n",
+                "python3 - <<'PY'\n"
+                "import json, os\n"
+                "post_id = 115701 if os.environ[\"PUBLISH_TEST_LABEL\"] == \"a\" else 115702\n"
+                "print(json.dumps({\n"
+                "    \"window_id\": os.environ[\"PUBLISH_WINDOW_ID\"],\n"
+                "    \"published\": 1,\n"
+                "    \"posts\": [{\"post_id\": post_id}],\n"
+                "    \"ready_snapshot_available\": True,\n"
+                "    \"ready_at_window\": 1,\n"
+                "    \"ready_post_ids\": [post_id],\n"
+                "    \"error_count\": 0,\n"
+                "    \"retryable_count\": 0,\n"
+                "    \"zero_publication_reason\": None,\n"
+                "    \"cli_exit_code\": 0,\n"
+                "}))\n"
+                "PY\n",
                 encoding="utf-8",
             )
             editor.chmod(0o755)
