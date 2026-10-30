@@ -181,3 +181,53 @@ o diretório do projeto (`cwd`/`git_repo_root`), sem misturar outros crons.
 
 ## Rollback
 Cada `prepare` salva um snapshot JSON completo do post em `backups/` antes do trabalho. O rollback pode ser feito manualmente a partir do `content.raw`, metas e featured media do snapshot.
+
+## Recuperação administrativa de ciclo V2 bloqueado
+
+`v2-recover-cycle` é separado de `v2-cycle-abandon`. Ele só aceita um
+checkpoint `running` em `ADMISSION`, exige a seleção, autorização e os
+`run_id` exatos, reconcilia cada post com journal, MediaRegistry e readback
+WordPress, e não faz writes no WordPress. A classificação da rodada auditada
+é:
+
+- `COMMITTED_NO_REPLAY`: `115890`, `115892`, `115894` — preservados fora da quarentena;
+- `UNCERTAIN_ISOLATED`: `115864` — efeitos de mídia preservados e replay proibido;
+- `NOT_EXECUTED`: `115866` — ausência de Writer/uploads/efeitos da autorização comprovada;
+- `PRE_WRITER_RECOVERABLE`: somente quando todos os gates do contrato existente forem satisfeitos.
+
+A operação grava a intenção e a transição em `work/v2-cycle/transitions/<isolation_id>.json`.
+Cada fase valida hashes do checkpoint, journal, quarentena e snapshots arquivados
+antes de escrever. Archives e históricos de outras operações nunca são
+sobrescritos. Uma interrupção pode ser retomada apenas se os hashes permitidos
+para a fase ainda coincidirem; qualquer divergência bloqueia sem sobrescrever.
+Posts com efeitos incertos são arquivados por hash e adicionados à quarentena;
+posts comprovadamente não executados permanecem aptos para um ciclo futuro.
+Journals, sidecars, manifestos, backups, batches e MediaRegistry são copiados
+sem alteração. Não use este comando para fabricar `NOT_EXECUTED` nem para
+contornar evidência de mídia.
+
+Sempre execute primeiro o preview. O `--apply` requer a mesma evidência JSON
+salva pelo preview, autorização operacional explícita e readback do preview:
+
+```bash
+unicornio-editor v2-recover-cycle \
+  --root /caminho/do/repo \
+  --cycle-id CICLO_ATUAL \
+  --authorization-id AUTORIZACAO_DA_RODADA \
+  --pending-round 3 \
+  --selected-ids 115890,115892,115894,115864,115866 \
+  --committed-post-ids 115890,115892,115894 \
+  --uncertain-post-ids 115864 \
+  --not-executed-post-ids 115866 \
+  --run-ids 115890=RUN_A,115892=RUN_B,115894=RUN_C,115864=RUN_D \
+  --operator-authorization TICKET_AUDITAVEL \
+  --new-cycle-id NOVO_CICLO
+```
+
+Para aplicar, reutilize o JSON completo salvo pelo preview com
+`--preview-evidence /caminho/preview.json` e acrescente `--apply`. A saída
+idempotente da mesma operação é `already_applied`; uma operação com outro
+`isolation_id` não reutiliza esse histórico. `wordpress_writes: 0` e
+`replay: false` são obrigatórios tanto no preview
+quanto no resultado da aplicação. Não execute `--fresh`, Writer, upload ou
+retry como parte desta transição.
