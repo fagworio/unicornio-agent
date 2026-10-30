@@ -650,6 +650,70 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(report["zero_publication_reason"], "NO_READY")
         self.assertEqual(report["exit_code"], 0)
 
+    def test_publish_ready_reports_unavailable_ready_snapshot_as_insufficient_evidence(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "build_queue_report", side_effect=RuntimeError("REST down")), \
+                    mock.patch.object(cli, "publish_ready_posts", return_value=[]), \
+                    redirect_stdout(output):
+                code = cli.main(["publish-ready", "--root", str(root)])
+                history_count = len(list((root / "work" / "publish-windows").glob("*.json")))
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertIsNone(report["ready_at_window"])
+        self.assertFalse(report["ready_snapshot_available"])
+        self.assertEqual(report["zero_publication_reason"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(history_count, 1)
+
+    def test_publish_ready_reports_ready_blocked_by_validation(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        outcomes = [{"post_id": 115700, "status": "blocked", "wordpress_changed": False}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "build_queue_report", return_value={"pending": 1, "ready_ids": [115700]}), \
+                    mock.patch.object(cli, "publish_ready_posts", return_value=outcomes), \
+                    redirect_stdout(output):
+                cli.main(["publish-ready", "--root", str(root)])
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["ready_at_window"], 1)
+        self.assertEqual(report["zero_publication_reason"], "READY_BLOCKED_BY_VALIDATION")
+
+    def test_publish_window_history_keeps_two_successive_windows(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for window_id in ("publish-window-a", "publish-window-b"):
+                output = io.StringIO()
+                with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                        mock.patch.object(cli, "load_config", return_value=config), \
+                        mock.patch.object(cli, "WordPressClient"), \
+                        mock.patch.object(cli, "build_queue_report", return_value={"pending": 0, "ready_ids": []}), \
+                        mock.patch.object(cli, "publish_ready_posts", return_value=[]), \
+                        mock.patch.dict(os.environ, {"PUBLISH_WINDOW_ID": window_id}, clear=False), \
+                        redirect_stdout(output):
+                    cli.main(["publish-ready", "--root", str(root)])
+            reports = sorted((root / "work" / "publish-windows").glob("*.json"))
+            self.assertEqual([p.stem for p in reports], ["publish-window-a", "publish-window-b"])
+
+    def test_publish_ready_report_separates_new_and_reconciled_publications(self):
         from unicornio_editor import cli
         from unicornio_editor.config import Config
 

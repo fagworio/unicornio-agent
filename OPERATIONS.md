@@ -13,6 +13,14 @@ pip install -e '.[media-search]'
 cp .env.example .env
 ```
 
+### Estado de publicação por janela
+
+`work/publish-windows/<window_id>.json` é histórico operacional imutável de
+cada janela do Publisher. Backups, snapshots, restaurações e deploys devem
+preservar esse diretório junto com `work/publish-window.log`, que permanece
+somente como compatibilidade para a última janela. Nunca limpar ou substituir
+esses relatórios sem preservar os arquivos históricos.
+
 Edite `.env` e comece com:
 
 ```env

@@ -27,7 +27,9 @@
 - `publish-cron.sh` roda `publish-ready` com gate `PUBLISH_ENABLED=true` +
   `EDITOR_DRY_RUN=false` (apenas neste script; o .env continua dry-run para o
   pipeline editorial). Retry com backoff em falha transitória de API/Cloudflare
-  (3 tentativas) + log em `work/publish-window.log`.
+  (3 tentativas) + compatibilidade em `work/publish-window.log` e histórico
+  imutável por janela em `work/publish-windows/<window_id>.json`; preserve
+  `work/publish-windows/` em backups, snapshots e deploys.
 
 ## Estados e fila
 

@@ -9,6 +9,8 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
+import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -63,6 +65,31 @@ def _json_default(value: Any) -> Any:
         return serializer()
     raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
 
+
+def _persist_publish_window(root: Path, report: dict[str, Any]) -> str | None:
+    """Persist one immutable window report without making publication fail."""
+    try:
+        history = Path(root) / "work" / "publish-windows"
+        history.mkdir(parents=True, exist_ok=True)
+        window_id = str(report.get("window_id") or f"publish-{uuid.uuid4().hex}")
+        report["window_id"] = window_id
+        path = history / f"{window_id}.json"
+        fd, temporary = tempfile.mkstemp(prefix=f".{window_id}.", suffix=".tmp", dir=history)
+        try:
+            with open(fd, "w", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        report["window_report_path"] = str(path)
+        return str(path)
+    except (OSError, TypeError, ValueError) as exc:
+        report["window_report_persist_error"] = str(exc)
+        return None
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -4193,11 +4220,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = mark_uncertain(client, config, args.root, args.post_id, reason=args.reason)
         elif args.command == "publish-ready":
             window_started_at = datetime.now(ZoneInfo("America/Sao_Paulo"))
+            queue_snapshot_available = True
+            queue_snapshot_error = None
             try:
                 queue_before = build_queue_report(client, args.root)
-            except Exception:
+            except Exception as exc:
                 queue_before = {}
-            ready_at_window = list(queue_before.get("ready_ids") or [])
+                queue_snapshot_available = False
+                queue_snapshot_error = type(exc).__name__
+            ready_at_window = list(queue_before.get("ready_ids") or []) if queue_snapshot_available else None
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
             published_reconciled = [
@@ -4287,24 +4318,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     zero_reason = "PUBLISHER_INTERNAL_ERROR"
                 elif blocked:
                     zero_reason = "READY_BLOCKED_BY_VALIDATION"
+                elif not queue_snapshot_available:
+                    zero_reason = "INSUFFICIENT_EVIDENCE"
                 elif not ready_at_window:
                     zero_reason = "NO_READY"
-                else:
-                    zero_reason = "INSUFFICIENT_EVIDENCE"
             result.update({
                 "window_id": os.environ.get("PUBLISH_WINDOW_ID") or window_started_at.isoformat(),
                 "window_started_at": window_started_at.isoformat(),
                 "cron_triggered": bool(os.environ.get("PUBLISH_CRON_TRIGGERED_AT")),
                 "cron_triggered_at": os.environ.get("PUBLISH_CRON_TRIGGERED_AT"),
-                "ready_at_window": len(ready_at_window),
+                "ready_at_window": len(ready_at_window) if ready_at_window is not None else None,
                 "ready_post_ids": ready_at_window,
-                "pending_current": queue_before.get("pending"),
-                "blocked_current": queue_before.get("blocked_ids") or [],
-                "retries_current": queue_before.get("uncertain_second_pass_ids") or [],
+                "ready_snapshot_available": queue_snapshot_available,
+                "ready_snapshot_error": queue_snapshot_error,
+                "pending_current": queue_before.get("pending") if queue_snapshot_available else None,
+                "blocked_current": (queue_before.get("blocked_ids") or []) if queue_snapshot_available else None,
+                "retries_current": (queue_before.get("uncertain_second_pass_ids") or []) if queue_snapshot_available else None,
                 "errors_current": [o.get("post_id") for o in errors],
                 "zero_publication_reason": zero_reason,
+                "cli_exit_code": window_exit_code,
                 "exit_code": window_exit_code,
             })
+            _persist_publish_window(args.root, result)
         else:
             from . import session_budget
 

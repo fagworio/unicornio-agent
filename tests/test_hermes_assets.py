@@ -86,12 +86,18 @@ class HermesAssetsTests(unittest.TestCase):
             editor.chmod(0o755)
             fake_python = bin_dir / "python"
             fake_python.write_text(
-                "#!/usr/bin/env bash\ncat > \"$PUBLISH_REPORT_CAPTURE\"\n",
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$1\" == \"-\" ]]; then exec /usr/bin/python3 \"$@\"; fi\n"
+                "exec cat > \"$PUBLISH_REPORT_CAPTURE\"\n",
                 encoding="utf-8",
             )
             fake_python.chmod(0o755)
             (root / "hermes" / "relatorio_publicacao.py").write_text(
-                "# replaced by the isolated test wrapper\n", encoding="utf-8"
+                "import os, sys\n"
+                "data = sys.stdin.read()\n"
+                "sys.stdout.write(data)\n"
+                "open(os.environ['PUBLISH_REPORT_CAPTURE'], 'w').write(data)\n",
+                encoding="utf-8"
             )
             call_log = root / "publish-calls.log"
             report_capture = root / "report.json"
@@ -115,9 +121,72 @@ class HermesAssetsTests(unittest.TestCase):
             self.assertEqual(reported["published"], 3)
             self.assertEqual(reported["retryable_posts"][0]["post_id"], 115702)
             window_log = (root / "work" / "publish-window.log").read_text(encoding="utf-8")
-            self.assertIn("resultado parcial; retries adiados", window_log)
+            self.assertEqual(window_log, report_capture.read_text(encoding="utf-8"))
+            self.assertEqual(json.loads(window_log)["wrapper_exit_code"], 0)
+            self.assertEqual(json.loads(window_log)["cli_exit_code"], 75)
+            self.assertEqual(json.loads(window_log)["final_classification"], "PARTIAL_SUCCESS")
 
-    def test_cron_installer_wires_monitor_script_and_references(self):
+    def test_publish_cron_reports_total_failure_after_three_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            calls = root / "calls.log"
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf x >> \"$PUBLISH_CALL_LOG\"\n"
+                "printf 'transport failure\\n' >&2\n"
+                "exit 1\n", encoding="utf-8"
+            )
+            editor.chmod(0o755)
+            (bin_dir / "python").symlink_to(sys.executable)
+            sleep_bin = root / "fake-bin"
+            sleep_bin.mkdir()
+            sleep = sleep_bin / "sleep"
+            sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            sleep.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "PATH": f"{sleep_bin}:{os.environ['PATH']}",
+                     "UNICORNIO_AGENT_ROOT": str(root), "PUBLISH_CALL_LOG": str(calls)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(calls.read_text(), "xxx")
+            reports = list((root / "work" / "publish-windows").glob("*.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["wrapper_exit_code"], 1)
+            self.assertEqual(report["cli_exit_code"], 1)
+            self.assertEqual(report["final_classification"], "PUBLISHER_INTERNAL_ERROR")
+
+    def test_publish_cron_reports_maintenance_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            (root / "work").mkdir()
+            (root / "work" / "v2-maintenance.lock").write_text("lock\n")
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n", encoding="utf-8")
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 75)
+            reports = list((root / "work" / "publish-windows").glob("*.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["zero_publication_reason"], "MAINTENANCE_LOCK")
+            self.assertEqual(report["wrapper_exit_code"], 75)
+
         script = ROOT / "hermes" / "cron-install.sh"
         content = script.read_text()
         self.assertIn("--monitor-script", content)

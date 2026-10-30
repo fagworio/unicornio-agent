@@ -32,7 +32,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="python3"
 fi
 WINDOW_STARTED_AT="$(date --iso-8601=seconds)"
-export PUBLISH_WINDOW_ID="publish-${WINDOW_STARTED_AT}"
+WINDOW_UUID="$($PYTHON_BIN -c 'import uuid; print(uuid.uuid4().hex)')"
+export PUBLISH_WINDOW_ID="publish-${WINDOW_STARTED_AT//[:+]/}-${WINDOW_UUID}"
 export PUBLISH_CRON_TRIGGERED_AT="$WINDOW_STARTED_AT"
 
 write_gate_report() {
@@ -65,15 +66,82 @@ PY
   "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
 }
 
+finalize_window_report() {
+  local wrapper_code="$1"
+  local cli_code="$2"
+  local fallback_classification="$3"
+  "$PYTHON_BIN" - "$ROOT" "$LOG" "$PUBLISH_WINDOW_ID" "$wrapper_code" "$cli_code" "$fallback_classification" <<'PY'
+import json, os, re, sys, tempfile
+from pathlib import Path
+root, log_path, window_id, wrapper_code, cli_code, fallback = sys.argv[1:]
+log = Path(log_path)
+raw = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+report = None
+try:
+    match = re.search(r"\{", raw)
+    if match:
+        report, _ = json.JSONDecoder().raw_decode(raw[match.start():])
+except (json.JSONDecodeError, TypeError, ValueError):
+    report = None
+if not isinstance(report, dict):
+    report = {
+        "window_id": window_id,
+        "window_started_at": os.environ.get("PUBLISH_CRON_TRIGGERED_AT"),
+        "cron_triggered": True,
+        "ready_at_window": None,
+        "ready_post_ids": None,
+        "published": 0,
+        "published_new": 0,
+        "published_reconciled": 0,
+        "posts": [],
+        "blocked_posts": [],
+        "retryable_posts": [],
+        "error_posts": [{"reason": "publish-ready failed after three attempts"}],
+        "error_count": 1,
+        "retryable_count": 0,
+        "zero_publication_reason": "PUBLISHER_INTERNAL_ERROR",
+    }
+report["window_id"] = window_id
+report["wrapper_exit_code"] = int(wrapper_code)
+report["cli_exit_code"] = int(report.get("cli_exit_code", cli_code))
+report["exit_code"] = int(report["cli_exit_code"])
+if int(wrapper_code) != 0:
+    final = "PUBLISHER_INTERNAL_ERROR"
+elif int(cli_code) == 75:
+    final = "PARTIAL_SUCCESS" if int(report.get("published", 0) or 0) else "RETRYABLE_FAILURE"
+else:
+    final = report.get("zero_publication_reason") or "PUBLISHED"
+report["final_classification"] = final
+history = Path(root) / "work" / "publish-windows"
+history.mkdir(parents=True, exist_ok=True)
+def atomic_write(path, value):
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+atomic_write(history / f"{window_id}.json", report)
+atomic_write(log, report)
+PY
+}
+
 if [[ -f "$ROOT/work/v2-maintenance.lock" ]]; then
   echo "Publicacao bloqueada: reset administrativo V2 em andamento" >&2
   write_gate_report "MAINTENANCE_LOCK" 75
+  finalize_window_report 75 75 "MAINTENANCE_LOCK"
   exit 75
 fi
 
 if [[ "${PUBLISH_ENABLED:-false}" != "true" ]]; then
   echo "Publicacao desabilitada: PUBLISH_ENABLED precisa ser true" >&2
   write_gate_report "PUBLISH_DISABLED" 0
+  finalize_window_report 0 0 "PUBLISH_DISABLED"
   exit 0
 fi
 
@@ -93,27 +161,30 @@ while [ "$ATTEMPT" -le 3 ]; do
   fi
 
   if [ "$publish_status" -eq 0 ] || [ "$publish_status" -eq 75 ]; then
-    # A saída 75 significa que o lote foi processado, mas alguns posts ficaram
-    # em retry. Os sucessos parciais devem ser relatados agora; repetir o lote
-    # dentro da mesma janela só cria leituras/escritas desnecessárias. Os
-    # retries permanecem para a próxima janela natural.
-    if [ -n "$out" ]; then
-      if ! printf '%s\n' "$out" | tee "$LOG" >/dev/null; then
-        printf '[%s] falha ao salvar o resultado da janela\n' "$(date -Iseconds)" >> "$LOG" || true
-      fi
-      if ! printf '%s\n' "$out" | "$ROOT/.venv/bin/python" "$ROOT/hermes/relatorio_publicacao.py"; then
-        printf '[%s] falha ao gerar relatorio; publish-ready nao sera repetido\n' "$(date -Iseconds)" >> "$LOG" || true
-      fi
-    fi
-    if [ "$publish_status" -eq 75 ]; then
-      printf '[%s] resultado parcial; retries adiados para a proxima janela\n' "$(date -Iseconds)" >> "$LOG"
+    # Exit 75 significa processamento parcial; não repetir dentro da janela.
+    printf '%s\n' "$out" > "$LOG"
+    finalize_window_report 0 "$publish_status" "PARTIAL_SUCCESS"
+    if ! "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG"; then
+      printf '[%s] falha ao gerar relatorio\n' "$(date -Iseconds)" >&2
     fi
     exit 0
   fi
+
+  # Um erro estruturado pode ter ocorrido depois de uma escrita REST. Não
+  # repetir: preservar a evidência e fechar a janela com erro.
+  if [[ "$out" == *"{"* ]]; then
+    printf '%s\n' "$out" > "$LOG"
+    finalize_window_report 1 "$publish_status" "PUBLISHER_INTERNAL_ERROR"
+    "$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
+    exit 1
+  fi
+
   printf 'publish-ready falhou (tentativa %s/3): %s\n' "$ATTEMPT" "$out" >&2
-  printf '[%s] publish-ready tentativa %s/3 FALHOU: %s\n' "$(date -Iseconds)" "$ATTEMPT" "$out" >> "$LOG"
   [ "$ATTEMPT" -lt 3 ] && sleep 60
   ATTEMPT=$((ATTEMPT + 1))
 done
-printf 'publish-ready falhou apos 3 tentativas' >&2
+printf 'publish-ready falhou apos 3 tentativas\n' >&2
+printf '%s\n' "${out:-publish-ready sem saída estruturada}" > "$LOG"
+finalize_window_report 1 "${publish_status:-1}" "PUBLISHER_INTERNAL_ERROR"
+"$PYTHON_BIN" "$ROOT/hermes/relatorio_publicacao.py" < "$LOG" || true
 exit 1
