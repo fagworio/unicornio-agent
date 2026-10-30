@@ -5872,12 +5872,21 @@ def _retry_post_unlocked(
             retry_history = []
     if not isinstance(retry_history, list):
         retry_history = []
-    retry_history.append({
+    event = {
         "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "operation": "retry",
         "previous_state": previous_state,
         "previous_retry": previous_retry,
-    })
+    }
+    duplicate_interrupted_retry = bool(
+        retry_history
+        and isinstance(retry_history[-1], dict)
+        and retry_history[-1].get("operation") == "retry"
+        and retry_history[-1].get("previous_state") == event["previous_state"]
+        and retry_history[-1].get("previous_retry") == event["previous_retry"]
+    )
+    if not duplicate_interrupted_retry:
+        retry_history.append(event)
     client.update_post(
         post_id,
         {"meta": {"_hermes_retry_history": json.dumps(retry_history[-50:], ensure_ascii=False, separators=(",", ":"))}},

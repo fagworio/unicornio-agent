@@ -2689,6 +2689,36 @@ class WorkflowTests(unittest.TestCase):
                     retry_post(client, self.config(False), Path(directory), 42)
             self.assertEqual(client.updated, [])
 
+    def test_retry_reexecution_does_not_duplicate_history_after_intermediate_failure(self):
+        post = self.post()
+        post["status"] = "pending"
+        previous = WorkState(
+            state=LifecycleState.HUMAN_REQUIRED,
+            phase=Phase.MEDIA,
+            blocker=BlockerCode.FEATURED_MISSING,
+            relevance_approved=True,
+        )
+        post["meta"] = {
+            "_hermes_state": "awaiting_human",
+            "_hermes_work_state": json.dumps(previous.to_dict()),
+        }
+
+        class FailOnceClient(FakeClient):
+            fail_once = True
+            def update_post(self, post_id, payload):
+                if self.fail_once and "_hermes_work_state" in (payload.get("meta") or {}):
+                    self.fail_once = False
+                    raise WorkflowError("simulated V2 write interruption")
+                return super().update_post(post_id, payload)
+
+        client = FailOnceClient(post)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(WorkflowError):
+                retry_post(client, self.config(False), Path(directory), 42)
+            retry_post(client, self.config(False), Path(directory), 42)
+        history = json.loads(client.post["meta"]["_hermes_retry_history"])
+        self.assertEqual(len(history), 1)
+
     def test_retry_v2_preserves_policy_version_and_records_reset_history(self):
         post = self.post()
         post["status"] = "awaiting_human"
