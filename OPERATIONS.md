@@ -107,6 +107,16 @@ MediaRegistry em modo somente leitura.
 O limite de duração conta apenas o tempo de execução das sessões, não o
 intervalo em que o checkpoint ficou pausado entre invocações.
 
+### Identidades duráveis de retry
+
+`work/retry-operations/` é estado operacional persistente, não cache temporário.
+Cada arquivo identifica uma reabertura, seu estado anterior, o evento de histórico,
+o hash do conteúdo e as fases confirmadas por readback. Backups, snapshots,
+fast-forward/deploy e restaurações devem incluir esse diretório junto com
+`work/v2-cycle`, `work/v2-journal` e `work/media_registry.sqlite`. Nunca remova,
+regenere ou exclua esses arquivos durante limpeza; uma operação incompleta só
+pode ser retomada ou bloqueada após validar sua identidade e seus efeitos.
+
 ### Quarentena operacional por post
 
 `config/v2-quarantine.json` é uma política obrigatória para o scheduler. Um

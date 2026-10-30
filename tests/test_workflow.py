@@ -2765,6 +2765,50 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len([item for item in history if item.get("operation") == "retry"]), 1)
             self.assertEqual(client.post["status"], "pending")
 
+    def test_retry_rejects_adulterated_evidence_before_any_second_write(self):
+        for tamper in ("history", "duplicate", "content"):
+            post = self.post()
+            post["status"] = "awaiting_human"
+            previous = WorkState(
+                state=LifecycleState.HUMAN_REQUIRED,
+                phase=Phase.MEDIA,
+                blocker=BlockerCode.FEATURED_MISSING,
+                relevance_approved=True,
+            )
+            post["meta"] = {
+                "_hermes_state": "awaiting_human",
+                "_hermes_work_state": json.dumps(previous.to_dict()),
+            }
+            class LostHistoryClient(FakeClient):
+                failed = False
+                def update_post(self, post_id, payload):
+                    result = super().update_post(post_id, payload)
+                    if not self.failed and "_hermes_retry_history" in (payload.get("meta") or {}):
+                        self.failed = True
+                        raise WorkflowError("response lost after history write")
+                    return result
+                def move_to_status(self, post_id, status):
+                    self.post["status"] = status
+                    self.updated.append((post_id, {"status": status}))
+                    return {"id": post_id, "status": status}
+            client = LostHistoryClient(post)
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(WorkflowError):
+                    retry_post(client, self.config(False), Path(directory), 42)
+                history = json.loads(client.post["meta"]["_hermes_retry_history"])
+                if tamper == "history":
+                    history[0]["previous_retry"] = {"attempts": 999}
+                elif tamper == "duplicate":
+                    history.append(dict(history[0]))
+                else:
+                    client.post["content"]["raw"] += " adulterated"
+                if tamper in ("history", "duplicate"):
+                    client.post["meta"]["_hermes_retry_history"] = json.dumps(history)
+                writes_before = len(client.updated)
+                with self.assertRaises(WorkflowError):
+                    retry_post(client, self.config(False), Path(directory), 42)
+                self.assertEqual(len(client.updated), writes_before)
+
     def test_two_legitimate_reopens_with_equal_counters_get_distinct_operation_ids(self):
         post = self.post()
         post["status"] = "awaiting_human"
