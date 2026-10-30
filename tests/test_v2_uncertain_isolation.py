@@ -595,6 +595,9 @@ def test_prewriter_media_sidecar_identity_mismatch_is_not_eligible(tmp_path, fie
     assert evidence["artifacts_valid"] is False
     assert evidence["eligible"] is False
     assert "valid_media_artifacts" in evidence["missing_criteria"]
+    assert result["transaction_classification"] == "UNCERTAIN_ISOLATED"
+    assert result["eligible_for_apply"] is False
+    assert result["apply_blockers"] == [{"post_id": POST, "missing_criteria": ["valid_media_artifacts"]}]
 
 
 
@@ -627,6 +630,36 @@ def test_prewriter_media_sidecar_preview_and_apply_share_eligibility(tmp_path):
     archive = Path(applied["archive_dir"])
     assert (archive / f"editorial-partial-v2-{POST}.json").read_text(encoding="utf-8") == sidecar_path.read_text(encoding="utf-8")
     assert sidecar_path.read_text(encoding="utf-8") == json.dumps(sidecar)
+
+
+def test_prewriter_media_sidecar_hash_divergence_refuses_apply_without_writes(tmp_path):
+    args, original_journal, partial_bytes = _prewriter_media_fixture(tmp_path)
+    sidecar = {
+        "schema_version": 1,
+        "post_id": POST,
+        "run_id": RUN,
+        "cycle_id": CYCLE,
+        "cycle_round": 1,
+        "authorization_id": AUTH,
+        "checkpoint_sha256": "0" * 64,
+        "media_ids": [115775],
+    }
+    sidecar_path = tmp_path / "backups" / str(POST) / "editorial.partial.v2.json"
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    preview = isolate_uncertain_transaction(**args, apply=False)
+    assert preview["eligible_for_apply"] is False
+    writes_before = args["client"].write_calls
+    with pytest.raises(TransactionIsolationError, match="not eligible"):
+        isolate_uncertain_transaction(
+            **args,
+            apply=True,
+            preview=preview,
+            operator_authorization="test-operator-authorization",
+        )
+    assert args["client"].write_calls == writes_before == 0
+    assert sidecar_path.read_text(encoding="utf-8") == json.dumps(sidecar)
+    assert (tmp_path / "work" / "v2-journal" / f"{POST}.json").read_bytes() == original_journal
+    assert (tmp_path / "backups" / str(POST) / "editorial.partial.json").read_bytes() == partial_bytes
 
 
 @pytest.mark.parametrize(

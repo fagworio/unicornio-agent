@@ -2165,7 +2165,41 @@ def isolate_uncertain_transaction(
             "isolated_post": target_evidence,
             "round_post_evidence": round_post_evidence,
         }
+        apply_blockers: list[dict[str, Any]] = []
+        for isolated_id in isolated_ids:
+            detail = evidence_by_post[isolated_id]
+            journal_summary = detail.get("journal") or {}
+            same_authorized_round = (
+                journal_summary.get("present") is True
+                and journal_summary.get("cycle_id") == cycle_id
+                and journal_summary.get("cycle_round") == int(pending_round)
+                and journal_summary.get("authorization_id") == authorization_id
+            )
+            if same_authorized_round and journal_summary.get("writer_started") is False:
+                prewriter = detail.get("prewriter_media_isolation")
+                if not isinstance(prewriter, Mapping) or prewriter.get("eligible") is not True:
+                    apply_blockers.append({
+                        "post_id": isolated_id,
+                        "missing_criteria": list((prewriter or {}).get("missing_criteria") or ["prewriter_media_isolation"]),
+                    })
+        eligible_for_apply = not apply_blockers
+        evidence["apply_eligibility"] = {
+            "eligible_for_apply": eligible_for_apply,
+            "apply_blockers": apply_blockers,
+        }
         snapshot_hash = _hash_value(evidence)
+        if apply and not eligible_for_apply and not (
+            isinstance(preview, Mapping) and preview.get("eligible_for_apply") is True
+        ):
+            blocker_text = json.dumps(apply_blockers, ensure_ascii=False, sort_keys=True)
+            if any(
+                "complete_registry_and_attachment_evidence" in item["missing_criteria"]
+                for item in apply_blockers
+            ):
+                blocker_text += "; pre-writer media evidence is incomplete; attachment evidence is incomplete"
+            raise TransactionIsolationError(
+                "isolation preview is not eligible for --apply: " + blocker_text
+            )
         if apply:
             if not operator_authorization or not str(operator_authorization).strip():
                 raise TransactionIsolationError("explicit operator authorization is required")
@@ -2231,6 +2265,9 @@ def isolate_uncertain_transaction(
         return {
             "status": "preview",
             "classification": evidence["classification"],
+            "transaction_classification": evidence["classification"],
+            "eligible_for_apply": eligible_for_apply,
+            "apply_blockers": apply_blockers,
             "isolation_id": isolation_id,
             "snapshot_hash": snapshot_hash,
             "evidence": evidence,
