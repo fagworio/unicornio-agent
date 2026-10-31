@@ -32,6 +32,7 @@ ISOLATION_REASON = "uncertain_transaction"
 PREWRITER_MEDIA_STATUSES = {
     "running", "validated", "committing", "failed_pre_writer", "interrupted_pre_writer",
 }
+IDENTITYLESS_TERMINAL_JOURNAL_STATUSES = {"committed"}
 
 
 class TransactionIsolationError(RuntimeError):
@@ -52,6 +53,26 @@ def _hash_file(path: Path) -> str:
 
 def _hash_value(value: Any) -> str:
     return _hash_bytes(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _is_identityless_terminal_journal(journal: Mapping[str, Any] | None) -> bool:
+    """Recognize a legacy terminal journal without current-round identity.
+
+    A committed/read-back journal with no run or round identity is historical
+    evidence, not proof that the current authorization executed. It can only
+    be closed as ``NOT_EXECUTED`` when the independent no-write proof also
+    succeeds; active or pre-writer journals remain unresolved.
+    """
+    if not isinstance(journal, Mapping):
+        return False
+    if journal.get("status") not in IDENTITYLESS_TERMINAL_JOURNAL_STATUSES:
+        return False
+    if journal.get("readback") is not True:
+        return False
+    return not any(
+        str(journal.get(key) or "").strip()
+        for key in ("run_id", "cycle_id", "cycle_round", "authorization_id")
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -974,7 +995,7 @@ def _round_post_evidence(
         if no_write_evidence is not None:
             classification = "NOT_EXECUTED"
             reason = "no_journal_and_current_authorization_no_write_proven"
-    elif not journal_identity_matches:
+    elif journal is not None and journal_post_id and not journal_identity_matches:
         reason = "journal_post_identity_missing"
     elif current_identity:
         current_state = _wp_state(post)
@@ -1065,6 +1086,20 @@ def _round_post_evidence(
                 reason = "historical_journal_and_current_authorization_no_write_proven"
             else:
                 reason = "historical_journal_but_current_authorization_effects_unresolved"
+        elif correlation == "uncertain" and _is_identityless_terminal_journal(journal):
+            no_write_evidence = _post_no_write_evidence(
+                client,
+                root,
+                int(post_id),
+                cycle_id=cycle_id,
+                round_number=int(pending_round),
+                authorization_id=authorization_id,
+            )
+            if no_write_evidence is not None:
+                classification = "NOT_EXECUTED"
+                reason = "identityless_terminal_journal_and_current_authorization_no_write_proven"
+            else:
+                reason = "identityless_terminal_journal_but_current_authorization_effects_unresolved"
         elif correlation == "current":
             reason = "legacy_current_round_journal_lacks_authorization_identity"
         else:

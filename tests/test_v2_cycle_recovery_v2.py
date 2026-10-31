@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from unicornio_editor.pipeline_v2 import cycle_recovery_v2 as recovery
+from unicornio_editor.pipeline_v2 import transaction_admin
 
 CYCLE = "c" * 32
 AUTH = "a" * 32
@@ -97,6 +98,91 @@ def test_registry_unavailable_is_fail_closed(tmp_path, monkeypatch):
     })
     with pytest.raises(recovery.CycleRecoveryError, match="MediaRegistry"):
         recovery.recover_blocked_cycle(**_kwargs(root, committed_post_ids=[101, 102, 103, 104], uncertain_post_ids=[], not_executed_post_ids=[105]))
+
+
+def test_identityless_terminal_journal_with_no_write_proof_is_not_executed(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    journal_dir = root / "work" / "v2-journal"
+    (journal_dir / "105.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+    }))
+
+    monkeypatch.setattr(transaction_admin, "_registry_snapshot", lambda *args, **kwargs: {
+        "present": True,
+        "schema_complete": True,
+        "run": [],
+        "decisions": [],
+        "usages": [],
+        "operations": [],
+    })
+    monkeypatch.setattr(transaction_admin, "_post_no_write_evidence", lambda *args, **kwargs: {
+        "proof_of_absence": True,
+    })
+
+    class Client:
+        def get_post(self, post_id):
+            return {
+                "id": post_id,
+                "status": "pending",
+                "meta": {},
+                "content": {"raw": "body"},
+                "title": {"raw": "title"},
+                "featured_media": 0,
+            }
+
+    evidence = transaction_admin._round_post_evidence(
+        root,
+        Client(),
+        post_id=105,
+        cycle_id=CYCLE,
+        authorization_id=AUTH,
+        pending_round=3,
+    )
+    assert evidence["classification"] == "NOT_EXECUTED"
+    assert evidence["no_write_evidence"]["proof_of_absence"] is True
+
+
+def test_recovery_accepts_identityless_terminal_journal_with_no_write_proof(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+
+    def fake(*args, post_id, **kwargs):
+        if post_id == 105:
+            return {
+                "post_id": 105,
+                "classification": "NOT_EXECUTED",
+                "registry": {"present": True},
+                "wordpress": {"status": "pending"},
+                "journal": {
+                    "present": True,
+                    "status": "committed",
+                    "readback": True,
+                    "run_id": "",
+                    "cycle_id": None,
+                    "cycle_round": None,
+                    "authorization_id": None,
+                },
+                "no_write_evidence": {"proof_of_absence": True},
+            }
+        return {
+            "post_id": post_id,
+            "classification": "COMMITTED_NO_REPLAY",
+            "registry": {"present": True},
+            "wordpress": {"status": "pending"},
+            "journal": {"present": True, "run_id": RUNS.get(post_id, "")},
+        }
+
+    monkeypatch.setattr(recovery, "_round_post_evidence", fake)
+    kwargs = _kwargs(root)
+    kwargs.update(
+        committed_post_ids=[101, 102, 103, 104],
+        uncertain_post_ids=[],
+        not_executed_post_ids=[105],
+        run_ids=RUNS,
+    )
+    preview = recovery.recover_blocked_cycle(**kwargs)
+    assert preview["status"] == "preview"
+    assert preview["round_classifications"]["NOT_EXECUTED"] == [105]
 
 
 @pytest.mark.parametrize("target", ["transition", "archive-manifest.json", "v2-quarantine.json", "state.json", "journal.jsonl"])

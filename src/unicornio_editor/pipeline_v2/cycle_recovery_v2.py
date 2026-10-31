@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping
 from ..backup import atomic_write_text
 from .cycle_state import CycleState, SCHEMA_VERSION
 from .lock import RunSessionLock
-from .transaction_admin import _round_post_evidence
+from .transaction_admin import _is_identityless_terminal_journal, _round_post_evidence
 
 
 class CycleRecoveryError(RuntimeError):
@@ -28,6 +28,20 @@ class CycleRecoveryError(RuntimeError):
 
 TRANSITION_VERSION = 3
 CLASSIFICATIONS = {"COMMITTED_NO_REPLAY", "NOT_EXECUTED", "UNCERTAIN_ISOLATED", "PRE_WRITER_RECOVERABLE"}
+
+
+def _not_executed_evidence_is_complete(item: Mapping[str, Any]) -> bool:
+    """Accept no-write proof for a legacy terminal journal without identity."""
+    if item.get("classification") != "NOT_EXECUTED":
+        return False
+    journal = item.get("journal")
+    if not isinstance(journal, Mapping) or journal.get("present") is not True:
+        return True
+    return (
+        _is_identityless_terminal_journal(journal)
+        and isinstance(item.get("no_write_evidence"), Mapping)
+        and item["no_write_evidence"].get("proof_of_absence") is True
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -401,7 +415,7 @@ def recover_blocked_cycle(
             item["run_id_declared"] = run_id
             observed_run_id = str((item.get("journal") or {}).get("run_id") or "")
             if post_id in declared["NOT_EXECUTED"]:
-                if run_id or item.get("journal", {}).get("present") is True or item.get("classification") != "NOT_EXECUTED":
+                if run_id or not _not_executed_evidence_is_complete(item):
                     raise CycleRecoveryError(f"post {post_id} is not proven not-executed")
             elif not run_id or run_id != observed_run_id:
                 raise CycleRecoveryError(f"declared run_id diverges from journal for post {post_id}")
