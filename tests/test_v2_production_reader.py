@@ -1,6 +1,7 @@
+import json
 from datetime import datetime, timezone
 
-from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, RetryInfo, WorkState
+from unicornio_editor.pipeline_v2.model import BlockerCode, LifecycleState, Phase, RetryInfo, WorkState
 from unicornio_editor.pipeline_v2.production import ProductionCandidateReader
 
 
@@ -22,6 +23,93 @@ def test_candidate_reader_paginates_deduplicates_and_skips_terminal(tmp_path):
     assert [post_id for post_id, _ in candidates] == [1]
     assert candidates[0][1]["editorial"] is None
     assert candidates[0][1]["v2_state"].state is LifecycleState.PENDING
+
+
+def test_candidate_reader_reenters_editorial_for_legacy_draft_without_relevance(tmp_path):
+    body = "<p>" + ("Texto editorial recuperado com contexto suficiente para continuar. " * 8) + "</p>"
+    post = {
+        "id": 115900,
+        "status": "pending",
+        "title": {"raw": "Notícia de videogame"},
+        "content": {"raw": ""},
+        "meta": {
+            "_hermes_work_state": json.dumps(
+                WorkState(
+                    phase=Phase.MEDIA,
+                    blocker=BlockerCode.INLINE_MISSING,
+                    relevance_approved=True,
+                ).to_dict()
+            )
+        },
+    }
+
+    class Client:
+        def list_pending(self, *, page, per_page, status="pending"):
+            return [post] if page == 1 else []
+
+        def get_post(self, post_id):
+            return post
+
+    draft = tmp_path / "backups" / "115900" / "editorial.draft.json"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(json.dumps({"cleaned_html": body, "decision": "process"}), encoding="utf-8")
+
+    candidates = ProductionCandidateReader(Client(), tmp_path).snapshot(page_size=100)
+
+    recovered = candidates[0][1]["v2_state"]
+    assert recovered.state is LifecycleState.PENDING
+    assert recovered.phase is Phase.EDITORIAL
+    assert recovered.blocker is BlockerCode.SCHEMA
+    assert recovered.relevance_approved is False
+
+
+def test_candidate_reader_keeps_later_phase_for_valid_relevance_contract(tmp_path):
+    body = "<p>" + ("Texto editorial recuperado com contexto suficiente para continuar. " * 8) + "</p>"
+    post = {
+        "id": 115901,
+        "status": "pending",
+        "title": {"raw": "Notícia de videogame"},
+        "content": {"raw": ""},
+        "meta": {
+            "_hermes_work_state": json.dumps(
+                WorkState(
+                    phase=Phase.MEDIA,
+                    blocker=BlockerCode.INLINE_MISSING,
+                    relevance_approved=True,
+                ).to_dict()
+            )
+        },
+    }
+
+    class Client:
+        def list_pending(self, *, page, per_page, status="pending"):
+            return [post] if page == 1 else []
+
+        def get_post(self, post_id):
+            return post
+
+    draft = tmp_path / "backups" / "115901" / "editorial.draft.json"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(
+        json.dumps(
+            {
+                "cleaned_html": body,
+                "site_relevance": {
+                    "decision": "process",
+                    "confidence": 0.95,
+                    "reason": "assunto compatível",
+                    "matched_topics": ["games"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = ProductionCandidateReader(Client(), tmp_path).snapshot(page_size=100)
+
+    recovered = candidates[0][1]["v2_state"]
+    assert recovered.phase is Phase.MEDIA
+    assert recovered.blocker is BlockerCode.INLINE_MISSING
 
 
 def test_corrupt_candidate_artifact_is_isolated_and_not_reintroduced_as_new(tmp_path):

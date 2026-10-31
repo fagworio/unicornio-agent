@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from ..builder import strip_canonical_footer
 from .legacy import LegacyStateLoader
 from .media_accounting import account_visual_media
 from .media_layout import validate_normal_article_layout_policy
-from .model import FeaturedStatus, LifecycleState, MediaProgress, WorkState
+from .model import BlockerCode, FeaturedStatus, LifecycleState, MediaProgress, Phase, WorkState
 from .scheduler import _cooldown_expired
 from .state_store import StateStore
 from ..content_quality import word_count
@@ -72,6 +73,38 @@ def editorial_has_substantive_text(value: Any) -> bool:
 def _payload_editorial(payload: dict[str, Any]) -> dict[str, Any] | None:
     editorial = payload.get("editorial") if isinstance(payload.get("editorial"), dict) else payload
     return editorial if editorial_has_substantive_text(editorial) else None
+
+
+def _has_relevance_contract(editorial: Any) -> bool:
+    """Return whether a recovered draft can safely bypass editorial generation.
+
+    A persisted body can be useful recovery input without being a valid
+    editorial document. In particular, older drafts may contain only
+    ``cleaned_html`` (or a top-level legacy ``decision``), which must never be
+    allowed to reach the checklist as if site relevance had been approved.
+    """
+    if not isinstance(editorial, dict):
+        return False
+    relevance = editorial.get("site_relevance")
+    if not isinstance(relevance, dict):
+        return False
+    if relevance.get("decision") not in {"process", "skip"}:
+        return False
+    confidence = relevance.get("confidence")
+    if isinstance(confidence, bool):
+        return False
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        return False
+    if not 0 <= confidence_value <= 1:
+        return False
+    if not isinstance(relevance.get("reason"), str) or not relevance["reason"].strip():
+        return False
+    topics = relevance.get("matched_topics")
+    return isinstance(topics, list) and all(
+        isinstance(topic, str) and topic.strip() for topic in topics
+    )
 
 
 def _editorial_identity_hash(html: str) -> str:
@@ -385,6 +418,26 @@ class ProductionCandidateReader:
         active_journal = bool(journal) and journal_status != "committed"
         title = str(context.get("title") or "")
         editorial = context.get("editorial") or context.get("draft") or {}
+
+        # A pending post may resume in a later phase after an older process
+        # left a body-only or legacy editorial artifact behind. Do not let
+        # that artifact reach the checklist, where it would be misclassified
+        # as a relevance decision with confidence 0. Re-enter editorial while
+        # preserving verified media progress; the next normal run must obtain
+        # a fresh structured relevance decision before media/compose/validate.
+        if (
+            state.state is LifecycleState.PENDING
+            and state.phase in {Phase.MEDIA, Phase.COMPOSE, Phase.VALIDATE}
+            and editorial_has_substantive_text(editorial)
+            and not _has_relevance_contract(editorial)
+        ):
+            return replace(
+                state,
+                phase=Phase.EDITORIAL,
+                blocker=BlockerCode.SCHEMA,
+                relevance_approved=False,
+            )
+
         html = str(editorial.get("cleaned_html") or context.get("content") or "")
         current_media = state.media
         ideal_required = required_image_count_for_content(html, title=title)

@@ -73,7 +73,17 @@ def test_canary_preserves_upload_through_stage_runner_and_persistence(tmp_path, 
         retry=RetryInfo(attempts=35, no_progress=28), media=canary_media(),
     )
     paragraph = "A equipe detalhou o novo jogo, seus personagens e os sistemas de combate apresentados nesta semana."
-    editorial = {"decision": "process", "cleaned_html": f"<p>{paragraph}</p>" * 13, "seo": {}}
+    editorial = {
+        "decision": "process",
+        "cleaned_html": f"<p>{paragraph}</p>" * 13,
+        "seo": {},
+        "site_relevance": {
+            "decision": "process",
+            "confidence": 0.95,
+            "reason": "assunto compatível",
+            "matched_topics": ["games"],
+        },
+    }
     directory = tmp_path / "backups" / "115152"
     directory.mkdir(parents=True)
     (directory / "editorial.draft.json").write_text(json.dumps(editorial))
