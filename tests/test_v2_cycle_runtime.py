@@ -859,6 +859,178 @@ def test_historical_journals_reconcile_only_with_complete_no_effect_evidence(tmp
     assert all(item["outcome"] == "not_executed" for item in result.details)
 
 
+def test_identityless_journal_reconciles_when_current_authorization_has_no_effects(tmp_path):
+    _empty_media_registry(tmp_path)
+    cycle_journal = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    cycle_journal.parent.mkdir(parents=True, exist_ok=True)
+    cycle_journal.write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "current-cycle",
+        "round_number": 4,
+        "authorization_id": "current-authorization",
+        "at": "2026-10-22T10:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    # Legacy journals from before composite identity fields were introduced
+    # can still exist.  Their old effects must not be replayed, but the journal
+    # itself cannot be used to identify the current authorization.
+    (journal_dir / "115288.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+        "state": WorkState(
+            state=LifecycleState.PENDING,
+            phase=Phase.MEDIA,
+        ).to_dict(),
+    }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [115288],
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=4,
+        expected_authorization_id="current-authorization",
+    )
+
+    assert result is not None
+    assert result.reconciliation_blocked is False
+    assert result.reconciled_without_replay is True
+    assert result.executed_ids == ()
+    assert result.details[0]["outcome"] == "not_executed"
+    assert result.details[0]["journal_identity_uncertain"] is True
+    assert result.details[0]["no_write_evidence"]["proof_of_absence"] is True
+
+
+def test_identityless_journal_stays_blocked_without_complete_no_effect_evidence(tmp_path):
+    _empty_media_registry(tmp_path)
+    cycle_journal = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    cycle_journal.parent.mkdir(parents=True, exist_ok=True)
+    cycle_journal.write_text(json.dumps({
+        "event": "round_authorized",
+        "cycle_id": "current-cycle",
+        "round_number": 4,
+        "authorization_id": "current-authorization",
+        "at": "2026-10-22T10:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    (journal_dir / "115111.json").write_text(json.dumps({
+        "status": "committed",
+        "readback": True,
+    }), encoding="utf-8")
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
+        db.execute(
+            "INSERT INTO media_operations(post_id, run_id, cycle_id, cycle_round, authorization_id, started_at, operation_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (115111, "current-run", "current-cycle", 4, "current-authorization", "2026-10-22T10:00:01+00:00", "started"),
+        )
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return {"id": post_id, "status": "pending"}
+
+    result = cycle_runtime._reconcile_completed_round(
+        Client(), tmp_path, [115111],
+        expected_cycle_id="current-cycle",
+        expected_cycle_round=4,
+        expected_authorization_id="current-authorization",
+    )
+
+    assert result is not None
+    assert result.reconciliation_blocked is True
+    assert result.reconciliation_blocking_info["unresolved_posts"] == [
+        {"post_id": 115111, "reason": "journal_uncorrelated"}
+    ]
+
+
+def test_cycle_closes_five_post_identityless_round_without_replay(tmp_path, monkeypatch):
+    _empty_media_registry(tmp_path)
+    cycle_id = "identityless-five-post-cycle"
+    selected_ids = [115288, 115111, 115104, 115078, 115106]
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 5}, cycle_id=cycle_id)
+    state.phase = "DRAINING"
+    state.rounds = 3
+    state.seen_post_ids = [1, 2, 3, *selected_ids]
+    state.attempts_by_post = {1: 1, 2: 1, 3: 1}
+    state.stagnant_rounds = 3
+    store.save(state, event="seed_draining")
+    store.start_round(
+        state,
+        round_number=4,
+        request={
+            "round_number": 4,
+            "batch_size": 5,
+            "max_new_posts": 0,
+            "seen_post_ids": [1, 2, 3, *selected_ids],
+            "excluded_post_ids": [],
+            "attempts_by_post": {1: 1, 2: 1, 3: 1},
+        },
+    )
+    store.authorize_round(state, selected_ids)
+
+    pending_state = WorkState(state=LifecycleState.PENDING, phase=Phase.MEDIA)
+    posts = {
+        post_id: {
+            "id": post_id,
+            "status": "pending",
+            "title": {"raw": str(post_id)},
+            "content": {"raw": "<p>conteudo</p>"},
+            "meta": {"_hermes_work_state": json.dumps(pending_state.to_dict())},
+        }
+        for post_id in selected_ids
+    }
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True)
+    for post_id in selected_ids:
+        (journal_dir / f"{post_id}.json").write_text(json.dumps({
+            "status": "committed",
+            "readback": True,
+            "state": pending_state.to_dict(),
+        }), encoding="utf-8")
+
+    class Client:
+        def list_pending(self, *, page, per_page, status):
+            return []
+
+        def get_post(self, post_id):
+            return posts[post_id]
+
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if not kwargs.get("preview"):
+            raise AssertionError("identityless recovery must not enter write mode")
+        return {"preview": True, "queue": {"selected_ids": [], "eligible_ids": []}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(Client(), _config(), tmp_path)
+
+    assert report.stop_reason == "no_eligible_work"
+    assert report.rounds == 3
+    assert report.ready_count == 0
+    assert calls and all(call["preview"] is True for call in calls)
+    reconciled = next(
+        item for item in report.round_reports
+        if item.get("event") == "round_reconciled_without_replay"
+    )
+    assert [detail["post_id"] for detail in reconciled["post_results"]] == selected_ids
+    assert [detail["outcome"] for detail in reconciled["post_results"]] == [
+        "not_executed"
+    ] * len(selected_ids)
+    assert reconciled["state_readback_only_post_ids"] == selected_ids
+    assert cycle_runtime.CycleStateStore(tmp_path).load().pending_round is None
+
+
 def test_mixed_round_reconciles_committed_posts_before_live_pre_writer_journal(
     tmp_path,
 ):

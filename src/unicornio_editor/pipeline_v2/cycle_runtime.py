@@ -888,7 +888,42 @@ def _reconcile_completed_round(
                 ),
             )
             if historical is None:
-                unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+                # A legacy journal may not contain any usable identity at all.
+                # It is safe to close the current authorization as not executed
+                # only when the current WordPress state and registry provide a
+                # complete, temporally scoped proof that this authorization had
+                # no effects.  This deliberately does not try to prove what the
+                # old journal did; it only prevents replay of the current round.
+                if journal.get("status") in {
+                    "running", "validated", "interrupted_pre_writer", "failed_pre_writer",
+                }:
+                    unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+                    continue
+                no_write = _post_no_write_evidence(
+                    client,
+                    root,
+                    int(post_id),
+                    cycle_id=expected_cycle_id,
+                    round_number=expected_cycle_round,
+                    authorization_id=expected_authorization_id,
+                )
+                if no_write is None:
+                    unresolved.append({"post_id": int(post_id), "reason": "journal_uncorrelated"})
+                    continue
+                details.append({
+                    "post_id": int(post_id),
+                    "initial_state": "pending",
+                    "outcome": "not_executed",
+                    "readback": True,
+                    "wordpress_state_readback": True,
+                    "write_started": False,
+                    "transaction_readback": False,
+                    "write_readback_confirmed": False,
+                    "progress": False,
+                    "reconciled": True,
+                    "journal_identity_uncertain": True,
+                    "no_write_evidence": no_write,
+                })
                 continue
             no_write = _post_no_write_evidence(
                 client,
