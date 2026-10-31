@@ -1048,6 +1048,48 @@ def test_missing_usage_timestamps_keep_historical_posts_uncertain(tmp_path):
     assert by_id[115512]["reason"] == "historical_journal_but_current_authorization_effects_unresolved"
 
 
+def test_identityless_historical_journal_can_be_not_executed_with_current_no_write_proof(tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / "115512.json"
+    journal = json.loads(journal_path.read_text())
+    journal.pop("run_id", None)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    args["run_ids"].pop(115512, None)
+    with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as con:
+        con.execute("DELETE FROM media_usage WHERE post_id = 115512")
+    args["client"].posts[115512] = {
+        "id": 115512,
+        "status": "pending",
+        "featured_media": 0,
+        "meta": {
+            "_hermes_work_state": json.dumps({
+                "version": 2,
+                "state": "pending",
+                "phase": "media",
+                "blocker": None,
+            }),
+        },
+    }
+    result = isolate_uncertain_transaction(**args, apply=False)
+    by_id = {item["post_id"]: item for item in result["evidence"]["round_post_evidence"]}
+    assert by_id[115512]["classification"] == "NOT_EXECUTED"
+    assert by_id[115512]["reason"] == "identityless_journal_and_current_authorization_no_write_proven"
+    assert by_id[115512]["no_write_evidence"]["proof_of_absence"] is True
+
+
+def test_identityless_historical_journal_without_no_write_proof_stays_blocked(tmp_path):
+    _fixture(tmp_path)
+    args = _multi_isolation_args(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / "115512.json"
+    journal = json.loads(journal_path.read_text())
+    journal.pop("run_id", None)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    args["run_ids"].pop(115512, None)
+    with pytest.raises(TransactionIsolationError, match="missing run_id"):
+        isolate_uncertain_transaction(**args, apply=False)
+
+
 def test_registry_timestamp_audit_normalizes_iso_offsets_and_rejects_unknowns():
     parsed = _parse_registry_timestamp("2026-10-23T01:00:00-03:00")
     assert parsed is not None

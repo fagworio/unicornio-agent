@@ -1045,12 +1045,32 @@ def _round_post_evidence(
                 int(pending_round),
                 authorization_id=authorization_id,
             )
-            historical_journal_evidence = _historical_journal_evidence(
-                root,
-                int(post_id),
-                journal,
-                authorized_at=authorization_at,
-            )
+            if run_id:
+                historical_journal_evidence = _historical_journal_evidence(
+                    root,
+                    int(post_id),
+                    journal,
+                    authorized_at=authorization_at,
+                )
+            else:
+                no_write_evidence = _post_no_write_evidence(
+                    client,
+                    root,
+                    int(post_id),
+                    cycle_id=cycle_id,
+                    round_number=int(pending_round),
+                    authorization_id=authorization_id,
+                )
+                if no_write_evidence is not None:
+                    historical_journal_evidence = {
+                        "correlation": "identityless_no_write_proven",
+                        "run_id": "",
+                        "journal_cycle_id": journal.get("cycle_id"),
+                        "journal_cycle_round": journal.get("cycle_round"),
+                        "journal_authorization_id": journal.get("authorization_id"),
+                        "post_id": int(post_id),
+                    }
+
         if historical_journal_evidence is not None:
             no_write_evidence = _post_no_write_evidence(
                 client,
@@ -1062,7 +1082,11 @@ def _round_post_evidence(
             )
             if no_write_evidence is not None:
                 classification = "NOT_EXECUTED"
-                reason = "historical_journal_and_current_authorization_no_write_proven"
+                reason = (
+                    "identityless_journal_and_current_authorization_no_write_proven"
+                    if historical_journal_evidence.get("correlation") == "identityless_no_write_proven"
+                    else "historical_journal_and_current_authorization_no_write_proven"
+                )
             else:
                 reason = "historical_journal_but_current_authorization_effects_unresolved"
         elif correlation == "current":
@@ -2040,8 +2064,8 @@ def isolate_uncertain_transaction(
         int(value): str((run_ids or {}).get(int(value)) or (run_id if int(value) == int(post_id) else ""))
         for value in isolated_ids
     }
-    if any(not value for value in run_map.values()):
-        raise TransactionIsolationError("every isolated post requires its exact run_id")
+    if not run_map[int(post_id)]:
+        raise TransactionIsolationError("the primary isolated post requires its exact run_id")
     run_id = run_map[int(post_id)]
     lock = RunSessionLock(root / "work" / "v2-run.lock")
     if not lock.acquire():
@@ -2136,11 +2160,20 @@ def isolate_uncertain_transaction(
         evidence_by_post = {int(item["post_id"]): item for item in round_post_evidence}
         for isolated_id in isolated_ids:
             detail = evidence_by_post[isolated_id]
-            if str(detail["journal"].get("run_id") or "") != run_map[isolated_id]:
-                raise TransactionIsolationError(f"run_id diverged for isolated post {isolated_id}")
-            if detail["classification"] != "UNCERTAIN_ISOLATED":
+            expected_run_id = run_map[isolated_id]
+            actual_run_id = str(detail["journal"].get("run_id") or "")
+            if expected_run_id:
+                if actual_run_id != expected_run_id:
+                    raise TransactionIsolationError(f"run_id diverged for isolated post {isolated_id}")
+            elif detail["classification"] != "NOT_EXECUTED":
                 raise TransactionIsolationError(
-                    f"isolated post {isolated_id} is not uncertain: {detail['classification']}"
+                    f"missing run_id is permitted only for proven NOT_EXECUTED post {isolated_id}"
+                )
+            if detail["classification"] != "UNCERTAIN_ISOLATED" and not (
+                not expected_run_id and detail["classification"] == "NOT_EXECUTED"
+            ):
+                raise TransactionIsolationError(
+                    f"isolated post {isolated_id} is not uncertain or proven NOT_EXECUTED: {detail['classification']}"
                 )
         target_evidence = next(
             item for item in round_post_evidence if int(item["post_id"]) == int(post_id)
