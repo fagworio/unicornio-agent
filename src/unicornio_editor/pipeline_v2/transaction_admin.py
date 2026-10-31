@@ -1186,8 +1186,28 @@ def _validate_uncertain(
         raise TransactionIsolationError("target journal is not committing")
     if journal.get("readback") is True:
         raise TransactionIsolationError("transactional readback is already present; use committed reconciliation")
-    if journal.get("media_state") != "apply_not_attempted":
-        raise TransactionIsolationError("media_state is not apply_not_attempted")
+    media_state = journal.get("media_state")
+    if media_state == "accepted_working":
+        # A human-required result can have accepted media waiting for a later
+        # READY apply.  It is still safe to isolate after a writer interruption
+        # only when the journal proves that no media application/readback was
+        # attempted.  Preserve the accepted working set; never replay it here.
+        if journal.get("media_application_status") != "not_attempted":
+            raise TransactionIsolationError("accepted working media application was attempted")
+        if journal.get("media_readback_status") != "not_attempted":
+            raise TransactionIsolationError("accepted working media readback was attempted")
+        if journal.get("html_readback_status") != "not_attempted":
+            raise TransactionIsolationError("accepted working HTML readback was attempted")
+        records = journal.get("apply_media_records")
+        if not isinstance(records, list) or any(
+            not isinstance(record, Mapping)
+            or record.get("readback_status") != "not_attempted"
+            or record.get("destination") != "apply_pending_readback"
+            for record in records
+        ):
+            raise TransactionIsolationError("accepted working media records are not pending-only")
+    elif media_state != "apply_not_attempted":
+        raise TransactionIsolationError("media_state is not safely unapplied")
     if journal.get("writer_started") is not True:
         raise TransactionIsolationError("journal has no positive writer-start evidence for uncertain isolation")
 

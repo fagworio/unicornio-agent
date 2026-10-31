@@ -542,6 +542,68 @@ def test_prewriter_media_uncertainty_is_previewed_without_mutating_evidence(tmp_
     assert CycleStateStore(tmp_path).load().pending_round is not None
 
 
+def test_uncertain_isolation_accepts_pending_only_accepted_working_media(tmp_path):
+    _fixture(tmp_path)
+    args = _args(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / f"{POST}.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.update({
+        "media_state": "accepted_working",
+        "media_application_status": "not_attempted",
+        "media_readback_status": "not_attempted",
+        "html_readback_status": "not_attempted",
+        "media_ids": [115775],
+        "apply_media_records": [{
+            "role": "inline",
+            "media_id": 115775,
+            "readback_status": "not_attempted",
+            "destination": "apply_pending_readback",
+        }],
+    })
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    result = isolate_uncertain_transaction(**args, apply=False)
+
+    assert result["status"] == "preview"
+    assert result["classification"] == "UNCERTAIN_ISOLATED"
+    assert args["client"].write_calls == 0
+    assert args["client"].upload_calls == 0
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("media_application_status", "started"),
+        ("media_readback_status", "confirmed"),
+        ("html_readback_status", "attempted"),
+    ],
+)
+def test_uncertain_isolation_rejects_accepted_working_media_after_apply_started(
+    tmp_path, field, value
+):
+    _fixture(tmp_path)
+    args = _args(tmp_path)
+    journal_path = tmp_path / "work" / "v2-journal" / f"{POST}.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.update({
+        "media_state": "accepted_working",
+        "media_application_status": "not_attempted",
+        "media_readback_status": "not_attempted",
+        "html_readback_status": "not_attempted",
+        "apply_media_records": [{
+            "role": "inline",
+            "media_id": 115775,
+            "readback_status": "not_attempted",
+            "destination": "apply_pending_readback",
+        }],
+        field: value,
+    })
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransactionIsolationError, match="accepted working"):
+        isolate_uncertain_transaction(**args, apply=False)
+
+
 
 
 def test_prewriter_media_sidecar_with_matching_identity_is_preview_eligible(tmp_path):
