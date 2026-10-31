@@ -629,6 +629,47 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert "private-source-signature" not in serialized
         assert candidate["direct_image_url"] not in serialized
 
+    def test_url_audit_callback_has_telemetry_binding_before_engine_yield(self):
+        """A source verifier may invoke the audit callback during classification."""
+        from unicornio_editor import cli
+        from unicornio_editor.media.url_safety import URLSafetyFinding
+
+        candidate = self._candidate("https://cdn.example/1.jpg")
+        audit_calls = []
+
+        def verify_and_audit(cand, **kwargs):
+            audit = kwargs.get("audit")
+            assert audit is not None
+            audit_calls.append(True)
+            audit(URLSafetyFinding(cand["direct_image_url"], "audit-only finding"))
+            return self._verified_source_candidate(cand, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            side_effect=verify_and_audit,
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda approved, rejected, **kwargs: (approved, rejected),
+        ), mock.patch(
+            "unicornio_editor.observability.append_telemetry"
+        ) as telemetry:
+            approved, rejected, deferred = cli._enriquecer_candidatos(
+                [candidate],
+                subject="Redfall",
+                termo="Redfall jogo",
+                root=Path(directory),
+                post_id=42,
+            )
+
+        assert approved or rejected or deferred
+        assert audit_calls
+        audit_events = [
+            call for call in telemetry.call_args_list
+            if len(call.args) >= 2 and call.args[1] == "remote_url_audit"
+        ]
+        assert audit_events
+        assert audit_events[0].kwargs["reason"] == "audit-only finding"
+
     def test_invariant_telemetry_exposes_identity_collisions(self):
         from unicornio_editor import cli
         from unicornio_editor.workflow import MediaFunnelInvariantError

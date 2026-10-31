@@ -2328,6 +2328,11 @@ def _enriquecer_candidatos(
     from .media.evidence import evidence_score, source_context
     from .media.official_sources import official_source
     from .media.source_verify import validate_discovered_candidate
+    # This function defines nested candidate classifiers whose URL-audit
+    # callbacks capture append_telemetry.  Bind it before any classifier can
+    # run; a later local import (the engine-yield telemetry block) otherwise
+    # leaves the closure cell uninitialized and raises a misleading NameError.
+    from .observability import append_telemetry
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
