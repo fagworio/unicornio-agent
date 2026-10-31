@@ -1067,10 +1067,14 @@ def run_pre_publish_checklist(
 
     # 12. Text quality gates (keyword, dashes, AI phrasing, subheadings).
     try:
+        seo = editorial.get("seo") if isinstance(editorial.get("seo"), Mapping) else {}
+        post_title = post.get("title") if isinstance(post, Mapping) else ""
+        if isinstance(post_title, Mapping):
+            post_title = post_title.get("raw") or post_title.get("rendered") or ""
         quality = validate_content_quality(
             content,
-            title=str(editorial.get("seo", {}).get("title") or ""),
-            focus_keyword=str(editorial.get("seo", {}).get("focus_keyword") or ""),
+            title=str(seo.get("title") or editorial.get("title") or post_title or ""),
+            focus_keyword=str(seo.get("focus_keyword") or ""),
             matched_topics=relevance.get("matched_topics") or [],
             allowed_topics=config.site_topics,
         )

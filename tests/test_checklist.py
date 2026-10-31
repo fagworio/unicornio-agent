@@ -537,6 +537,19 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.statuses(result)["imagens_no_corpo"], "fail")
         self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
 
+    def test_text_quality_uses_current_post_title_when_seo_title_is_preserved(self):
+        editorial = editorial_payload()
+        editorial["seo"] = {
+            "title": "",
+            "meta_description": editorial_payload()["seo"]["meta_description"],
+            "focus_keyword": "videogame",
+        }
+        result = self._run_checklist(
+            post=make_post(title={"raw": "Notícia sobre videogame"}),
+            editorial=editorial,
+        )
+        self.assertEqual(self.statuses(result)["qualidade_texto"], "pass")
+
     def test_media_required_is_canonical_after_compose_changes_word_count(self):
         content = "<p>" + ("palavra videogame noticia lancamento " * 155) + "</p>"
         result = self._run_checklist(
