@@ -137,7 +137,7 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
      grava post que o publish bloquearia; o publish apenas confirma
 ```
 
-## Vision gate (custo controlado, gpt-4o-mini)
+## Vision gate (custo controlado)
 
 O `media-validate` executa antecipadamente o gate de visão da featured. A decisão
 é transferida pelo cache para a URL final do WordPress, e o checklist confirma o
@@ -153,7 +153,10 @@ manter o custo baixo:
 - **Cache por hash(imagem)+entidade** (`work/vision_cache.json`) evita re-analisar
   a mesma key art em varios posts.
 - **Limites mecanicos** de chamadas por post (`EDITOR_VISION_MAX_LOW`).
-- Chave: `OPENAI_API_KEY` (fallback `EDITOR_VISION_API_KEY`). Fail-closed.
+- Sem `EDITOR_VISION_API_KEY`, usa `hermes -t vision` e o provider/OAuth
+  configurado no Hermes; quando a chave existe, usa o backend OpenAI/GPT.
+  `HERMES_VISION_BASE_URL`/`HERMES_VISION_API_KEY` também permitem um endpoint
+  HTTP Hermes explícito. Falhas continuam fail-closed.
 - Custo medido localmente: ~US$ 0.44 por 1000 imagens em `detail: low`.
 
 Config em `.env`: `EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`,

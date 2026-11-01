@@ -166,6 +166,9 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
             config = load_config()
         self.assertTrue(config.vision_enabled)
+        self.assertEqual(config.vision_provider, "hermes")
+        self.assertEqual(config.vision_base_url, "hermes://cli")
+        self.assertEqual(config.vision_api_key, "hermes")
         self.assertEqual(config.vision_detail, "low")
         self.assertEqual(config.vision_mode, "ambiguous")
         self.assertEqual(config.vision_max_low, 12)
@@ -178,6 +181,8 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, values, clear=True):
             config = load_config()
         self.assertEqual(config.vision_api_key, "sk-test-openai")
+        self.assertEqual(config.vision_provider, "openai")
+        self.assertEqual(config.vision_base_url, "https://api.openai.com/v1")
 
     def test_vision_key_editor_overrides_openai(self):
         values = {
@@ -188,6 +193,7 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, values, clear=True):
             config = load_config()
         self.assertEqual(config.vision_api_key, "sk-test-editor")
+        self.assertEqual(config.vision_provider, "openai")
 
     def test_editorial_provider_configuration_is_independent(self):
         values = {

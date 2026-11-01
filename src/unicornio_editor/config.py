@@ -52,9 +52,9 @@ class Config:
     hermes_command: str = "hermes"
     hermes_model: str = ""
     hermes_timeout: float = 90.0
-    # A visão precisa de um endpoint multimodal. O CLI one-shot do Hermes não
-    # é uma API de imagens; quando não há endpoint Hermes explícito, o código
-    # continua exigindo a credencial legada e falha fechado sem visão.
+    # A visão usa o toolset multimodal do Hermes quando não existe uma chave
+    # OpenAI explícita. Uma URL Hermes compatível continua disponível para
+    # instalações que preferem HTTP, mas não é obrigatória.
     vision_provider: str = "auto"
     hermes_vision_api_key: str = field(default="", repr=False)
     hermes_vision_base_url: str = ""
@@ -316,20 +316,29 @@ def load_config() -> Config:
         else ""
     )
     hermes_vision_model = _env("HERMES_VISION_MODEL")
-    if vision_provider == "hermes" and (not hermes_vision_base or not hermes_vision_key):
+    if vision_provider == "hermes" and hermes_vision_base and not hermes_vision_key:
         raise ConfigError(
-            "EDITOR_VISION_PROVIDER=hermes requires HERMES_VISION_BASE_URL "
-            "and HERMES_VISION_API_KEY (or HERMES_API_KEY)"
+            "HERMES_VISION_BASE_URL requires HERMES_VISION_API_KEY "
+            "(or HERMES_API_KEY)"
         )
-    use_hermes_vision = vision_provider == "hermes" or (
-        vision_provider == "auto" and bool(hermes_vision_base and hermes_vision_key)
+    use_openai_vision = vision_provider == "openai" or (
+        vision_provider == "auto" and bool(legacy_vision_key)
     )
-    effective_vision_provider = "hermes" if use_hermes_vision else "openai"
-    effective_vision_key = hermes_vision_key if use_hermes_vision else legacy_vision_key
-    effective_vision_base = hermes_vision_base if use_hermes_vision else legacy_vision_base
-    effective_vision_model = (
-        hermes_vision_model or legacy_vision_model if use_hermes_vision else legacy_vision_model
+    use_hermes_vision = not use_openai_vision
+    use_hermes_http_vision = bool(use_hermes_vision and hermes_vision_base)
+    if use_hermes_http_vision and not hermes_vision_key:
+        raise ConfigError(
+            "HERMES_VISION_BASE_URL requires HERMES_VISION_API_KEY "
+            "(or HERMES_API_KEY)"
     )
+    effective_vision_provider = "openai" if use_openai_vision else "hermes"
+    effective_vision_key = legacy_vision_key if use_openai_vision else (hermes_vision_key or "hermes")
+    effective_vision_base = (
+        legacy_vision_base
+        if use_openai_vision
+        else (hermes_vision_base if use_hermes_http_vision else "hermes://cli")
+    )
+    effective_vision_model = hermes_vision_model if use_hermes_vision else legacy_vision_model
 
     return Config(
         content_source=content_source,

@@ -27,6 +27,7 @@ import binascii
 import hashlib
 import io
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -35,6 +36,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ..ai_provider import AIProviderError, call_hermes_oneshot
 from .downloader import download_image
 
 
@@ -204,6 +206,23 @@ def _valid_image_input(value: str) -> bool:
     if text.startswith(("http://", "https://")):
         return True
     return bool(re.fullmatch(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\\r\\n]+", text, re.IGNORECASE))
+
+
+def _materialize_for_hermes(value: str) -> tuple[str, Path | None]:
+    """Give Hermes a private local path instead of exposing image bytes in argv."""
+    data = _data_url_bytes(str(value or ""))
+    if data is None:
+        return str(value), None
+    fd, raw_path = tempfile.mkstemp(prefix="unicornio-hermes-vision-", suffix=".img")
+    os.close(fd)
+    path = Path(raw_path)
+    try:
+        path.chmod(0o600)
+        path.write_bytes(data)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+    return str(path), path
 
 
 def _http_error_context(exc: HTTPError) -> dict[str, str]:
@@ -392,6 +411,43 @@ def _call_vision(
     timeout: float,
     root: Any = None,
 ) -> dict[str, Any]:
+    if base_url == "hermes://cli":
+        hermes_image_url, temporary_image = _materialize_for_hermes(image_url)
+        hermes_prompt = (
+            "Use the Hermes vision_analyze tool with this exact image_url:\n"
+            f"{hermes_image_url}\n\n"
+            "Analyze the actual pixels and then return ONLY one JSON object, with no Markdown "
+            "and no commentary, using exactly these keys: status, confidence, visual_type, "
+            "relation, editorial_fit, role_fit. The allowed values are defined below.\n"
+            + json.dumps(_json_output_schema(), ensure_ascii=False, separators=(",", ":"))
+            + "\n\nQuestion for the image:\n"
+            + prompt
+        )
+        try:
+            try:
+                answer, usage = call_hermes_oneshot(
+                    hermes_prompt,
+                    command=os.environ.get("HERMES_COMMAND", "hermes"),
+                    model=model,
+                    toolsets="vision",
+                    timeout=timeout,
+                    cwd=Path.cwd(),
+                )
+            except AIProviderError as exc:
+                _registrar_chamada(
+                    root, detail=detail, model=model or "hermes-configured",
+                    base_url=base_url, erro=str(exc), provider="hermes",
+                )
+                raise VisionGateError(f"Hermes não conseguiu analisar a imagem: {exc}") from exc
+            _registrar_chamada(
+                root, detail=detail, model=model or "hermes-configured", base_url=base_url,
+                usage=usage, provider="hermes",
+            )
+            return _parse_response(answer)
+        finally:
+            if temporary_image is not None:
+                temporary_image.unlink(missing_ok=True)
+
     payload = {
         "model": model,
         "messages": [
@@ -479,6 +535,42 @@ def _call_visual_comparison(
 ) -> VisualComparison:
     if not (_valid_image_input(reference_image) and _valid_image_input(candidate_image)):
         raise VisionInputUnavailable("comparacao visual requer duas imagens materializadas")
+    if base_url == "hermes://cli":
+        temporary_images: list[Path] = []
+        hermes_reference, reference_path = _materialize_for_hermes(reference_image)
+        hermes_candidate, candidate_path = _materialize_for_hermes(candidate_image)
+        temporary_images.extend(path for path in (reference_path, candidate_path) if path is not None)
+        hermes_prompt = (
+            "Use Hermes vision_analyze on both images below, treating them as image A and image B. "
+            "Compare pixels only and return ONLY JSON with decision, confidence and reason.\n"
+            f"Image A URL: {hermes_reference}\nImage B URL: {hermes_candidate}\n"
+            + _VISUAL_COMPARISON_SYSTEM_PROMPT
+        )
+        try:
+            try:
+                answer, usage = call_hermes_oneshot(
+                    hermes_prompt, command=os.environ.get("HERMES_COMMAND", "hermes"), model=model,
+                    toolsets="vision", timeout=timeout, cwd=Path.cwd(),
+                )
+            except AIProviderError as exc:
+                _registrar_chamada(
+                    root, detail=detail, model=model or "hermes-configured", base_url=base_url,
+                    operation="visual_comparison", erro=str(exc), provider="hermes",
+                    candidate_ids=[reference_id, candidate_id],
+                )
+                raise VisionGateError(f"Hermes não conseguiu comparar as imagens: {exc}") from exc
+            _registrar_chamada(
+                root, detail=detail, model=model or "hermes-configured", base_url=base_url,
+                operation="visual_comparison", usage=usage, provider="hermes",
+                candidate_ids=[reference_id, candidate_id],
+            )
+            return _parse_visual_comparison(
+                answer, reference_id=reference_id, candidate_id=candidate_id
+            )
+        finally:
+            for path in temporary_images:
+                path.unlink(missing_ok=True)
+
     payload = {
         "model": model,
         "messages": [
@@ -567,6 +659,19 @@ def _call_vision_batch(
         return {}
     if len(items) > 20:
         raise VisionGateError("batch de visao excede o limite seguro de 20 imagens")
+    if base_url == "hermes://cli":
+        output: dict[str, dict[str, Any]] = {}
+        for item in items:
+            prompt = _build_user_prompt(
+                str(item.get("subject") or ""),
+                context=str(item.get("context") or ""),
+                require_key_art=bool(item.get("require_key_art")),
+            )
+            output[str(item["candidate_id"])] = _call_vision(
+                image_url=str(item["image_url"]), prompt=prompt, api_key=api_key,
+                base_url=base_url, model=model, detail=detail, timeout=timeout, root=root,
+            )
+        return output
     content: list[dict[str, Any]] = [
         {
             "type": "text",

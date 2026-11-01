@@ -36,6 +36,7 @@ def call_hermes_oneshot(
     *,
     command: str = "hermes",
     model: str = "",
+    toolsets: str = "",
     timeout: float = 60.0,
     cwd: Path | str | None = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -58,6 +59,8 @@ def call_hermes_oneshot(
     argv = [executable, "-z", str(prompt)]
     if str(model or "").strip():
         argv[1:1] = ["-m", str(model).strip()]
+    if str(toolsets or "").strip():
+        argv[1:1] = ["-t", str(toolsets).strip()]
     usage_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix="unicornio-hermes-usage-", suffix=".json", delete=False) as handle:

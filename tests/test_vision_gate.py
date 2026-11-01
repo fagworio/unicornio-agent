@@ -531,6 +531,29 @@ class VisionGateTests(unittest.TestCase):
         details = [c["messages"][1]["content"][1]["image_url"].get("detail") for c in VisionHandler.calls]
         self.assertEqual(details, ["low"])  # apenas 1 chamada
 
+    @mock.patch("unicornio_editor.media.vision_gate.call_hermes_oneshot")
+    def test_hermes_default_vision_uses_toolset_without_openai_key(self, call_hermes):
+        call_hermes.return_value = (
+            json.dumps({
+                "status": "MATCH",
+                "confidence": 0.97,
+                "visual_type": "key_art",
+                "relation": "direct",
+                "editorial_fit": "suitable",
+                "role_fit": "suitable",
+            }),
+            {"input_tokens": 10, "output_tokens": 8},
+        )
+        ok, reason = self._verify(
+            api_key="hermes", base_url="hermes://cli", model="", detail="low"
+        )
+        self.assertTrue(ok, reason)
+        call_hermes.assert_called_once()
+        self.assertEqual(call_hermes.call_args.kwargs["toolsets"], "vision")
+        prompt = call_hermes.call_args.args[0]
+        self.assertIn("vision_analyze", prompt)
+        self.assertNotIn("data:image/", prompt)
+
     def test_vision_config_ready(self):
         ok, _ = vision_config_ready(enabled=False, api_key="")
         self.assertFalse(ok)
