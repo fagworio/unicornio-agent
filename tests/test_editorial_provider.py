@@ -177,8 +177,9 @@ class EditorialProviderTests(unittest.TestCase):
                 {"post_id": 2, "cleaned_html": "<p>B</p>"},
             ],
         }), encoding="utf-8")
+        api_key = kwargs.pop("api_key", "test-key")
         return generate_editorial_batch(
-            source, api_key="test-key", base_url=self.base, model="editorial-test", root=root, **kwargs
+            source, api_key=api_key, base_url=self.base, model="editorial-test", root=root, **kwargs
         )
 
     def test_generates_one_provider_request_and_preserves_partial_retry(self):
@@ -192,6 +193,50 @@ class EditorialProviderTests(unittest.TestCase):
             self.assertEqual(payload["results"][1]["status"], "needs_retry")
             telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
             self.assertIn('"event": "editorial_model_request"', telemetry)
+
+    @mock.patch("unicornio_editor.editorial_provider.hermes_command_available", return_value=True)
+    @mock.patch("unicornio_editor.editorial_provider.call_hermes_oneshot")
+    def test_auto_provider_uses_hermes_without_legacy_key(self, call_hermes, _available):
+        response = {
+            "batch_id": "editorial-test",
+            "results": [
+                {
+                    "post_id": 1,
+                    "status": "ok",
+                    "reason": "",
+                    "retry_kind": "none",
+                    "editorial": _EDITORIAL,
+                },
+                {
+                    "post_id": 2,
+                    "status": "needs_retry",
+                    "reason": "fato inconsistente",
+                    "retry_kind": "facts",
+                    "editorial": _EDITORIAL,
+                },
+            ],
+        }
+        call_hermes.return_value = ("```json\n" + json.dumps(response) + "\n```", {"input_tokens": 11, "output_tokens": 7})
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run(
+                Path(directory),
+                api_key="",
+                provider="auto",
+                hermes_command="hermes",
+                hermes_model="configured-by-hermes",
+            )
+        self.assertEqual(result["provider_requests"], 1)
+        call_hermes.assert_called_once()
+        prompt = call_hermes.call_args.args[0]
+        self.assertIn('"batch_id": "editorial-test"', prompt)
+        self.assertIn('"additionalProperties":false', prompt)
+
+    @mock.patch("unicornio_editor.editorial_provider.hermes_command_available", return_value=False)
+    def test_auto_provider_falls_back_to_legacy_key(self, _available):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run(Path(directory), provider="auto", api_key="test-key")
+        self.assertEqual(result["provider_requests"], 1)
+        self.assertEqual(len(EditorialHandler.calls), 1)
 
     def test_provider_joins_retry_mode_from_input_after_model_response(self):
         with tempfile.TemporaryDirectory() as directory:

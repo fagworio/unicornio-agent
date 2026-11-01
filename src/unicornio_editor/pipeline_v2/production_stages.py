@@ -586,6 +586,10 @@ class ProductionEditorialStage:
                 min_confidence=self.config.min_relevance_confidence,
                 root=self.root,
                 output_path=self.root / "work" / "v2-editorial" / f"{post_id}.json",
+                provider=getattr(self.config, "editorial_provider", "auto"),
+                hermes_command=getattr(self.config, "hermes_command", "hermes"),
+                hermes_model=getattr(self.config, "hermes_model", ""),
+                hermes_timeout=getattr(self.config, "hermes_timeout", self.config.http_timeout),
             )
             envelope = load_editorial_batch(generated["output"])
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)

@@ -15,6 +15,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .ai_provider import AIProviderError, call_hermes_oneshot, hermes_command_available
 from .batch import BATCH_SCHEMA_VERSION, BatchError, batch_directory, validate_batch_id
 from .editorial_schema import EditorialValidationError, validate_editorial
 
@@ -213,6 +214,11 @@ def _response_text(body: dict[str, Any]) -> str:
 
 
 def _parse_json(text: str) -> dict[str, Any]:
+    text = str(text or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -399,14 +405,42 @@ def generate_editorial_batch(
     min_confidence: float = 0.8,
     root: Path | str | None = None,
     output_path: Path | str | None = None,
+    provider: str = "openai",
+    hermes_command: str = "hermes",
+    hermes_model: str = "",
+    hermes_timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Generate and validate one editorial batch with exactly one HTTP call."""
-    if not api_key:
+    """Generate and validate one editorial batch.
+
+    ``provider=auto`` prefers the installed Hermes CLI and falls back to the
+    legacy OpenAI-compatible endpoint only when Hermes is unavailable. The
+    default remains ``openai`` for direct library callers and old tests; the
+    production ``Config`` passes ``auto`` explicitly.
+    """
+    selected_provider = str(provider or "openai").strip().lower()
+    if selected_provider not in {"auto", "openai", "hermes"}:
         raise EditorialProviderError(
-            "EDITORIAL_API_KEY/OPENAI_API_KEY ausente",
+            f"provedor editorial inválido: {provider!r}",
             failure_class="configuration_error",
             retryable=False,
         )
+    if selected_provider == "auto":
+        selected_provider = "hermes" if hermes_command_available(hermes_command) else "openai"
+    if selected_provider == "openai" and not api_key:
+        raise EditorialProviderError(
+            "EDITORIAL_API_KEY/OPENAI_API_KEY ausente e Hermes não disponível",
+            failure_class="configuration_error",
+            retryable=False,
+        )
+    if selected_provider == "hermes" and not hermes_command_available(hermes_command):
+        if api_key:
+            selected_provider = "openai"
+        else:
+            raise EditorialProviderError(
+                f"Hermes não disponível e EDITORIAL_API_KEY/OPENAI_API_KEY ausente: {hermes_command}",
+                failure_class="configuration_error",
+                retryable=False,
+            )
     batch_id, posts = _read_input(input_path)
     request_payload = {
         "model": model,
@@ -435,46 +469,75 @@ def generate_editorial_batch(
             },
         },
     }
-    request = Request(
-        f"{base_url.rstrip('/')}/chat/completions",
-        data=json.dumps(request_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            response_bytes = response.read()
-    except HTTPError as exc:
-        retryable = exc.code in {408, 425, 429} or 500 <= int(exc.code) < 600
-        raise EditorialProviderError(
-            f"API editorial respondeu HTTP {exc.code}",
-            failure_class="api_http_error",
-            retryable=retryable,
-            http_status=int(exc.code),
-        ) from exc
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
-        reason = getattr(exc, "reason", exc)
-        reason_text = str(reason).casefold()
-        failure_class = (
-            "timeout"
-            if isinstance(reason, (TimeoutError, socket.timeout))
-            or "timed out" in reason_text
-            or "timeout" in reason_text
-            else "transport_error"
+    usage: dict[str, Any] = {}
+    if selected_provider == "hermes":
+        hermes_prompt = (
+            f"{_SYSTEM_PROMPT}\n\n"
+            "Return the JSON object directly, with no Markdown fences and no commentary. "
+            "It must conform exactly to this JSON Schema:\n"
+            + json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nInput envelope:\n"
+            + json.dumps(
+                {"batch_id": batch_id, "posts": posts}, ensure_ascii=False
+            )
         )
-        raise EditorialProviderError(
-            f"falha na API editorial: {exc}",
-            failure_class=failure_class,
-            retryable=True,
-        ) from exc
-    try:
-        body = json.loads(response_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EditorialProviderError(
-            "resposta HTTP editorial nao e JSON valido",
-            failure_class="invalid_response",
-            retryable=True,
-        ) from exc
+        try:
+            response_text, usage = call_hermes_oneshot(
+                hermes_prompt,
+                command=hermes_command,
+                model=hermes_model,
+                timeout=hermes_timeout if hermes_timeout is not None else timeout,
+                cwd=Path(input_path).resolve().parent,
+            )
+        except AIProviderError as exc:
+            raise EditorialProviderError(
+                str(exc), failure_class=exc.failure_class, retryable=exc.retryable
+            ) from exc
+        body = {
+            "choices": [{"message": {"content": response_text}}],
+            "usage": usage,
+        }
+    else:
+        request = Request(
+            f"{base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(request_payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                response_bytes = response.read()
+        except HTTPError as exc:
+            retryable = exc.code in {408, 425, 429} or 500 <= int(exc.code) < 600
+            raise EditorialProviderError(
+                f"API editorial respondeu HTTP {exc.code}",
+                failure_class="api_http_error",
+                retryable=retryable,
+                http_status=int(exc.code),
+            ) from exc
+        except (URLError, OSError, TimeoutError, ValueError) as exc:
+            reason = getattr(exc, "reason", exc)
+            reason_text = str(reason).casefold()
+            failure_class = (
+                "timeout"
+                if isinstance(reason, (TimeoutError, socket.timeout))
+                or "timed out" in reason_text
+                or "timeout" in reason_text
+                else "transport_error"
+            )
+            raise EditorialProviderError(
+                f"falha na API editorial: {exc}",
+                failure_class=failure_class,
+                retryable=True,
+            ) from exc
+        try:
+            body = json.loads(response_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EditorialProviderError(
+                "resposta HTTP editorial nao e JSON valido",
+                failure_class="invalid_response",
+                retryable=True,
+            ) from exc
 
     normalized = _normalize_output(
         _parse_json(_response_text(body)),
@@ -503,12 +566,14 @@ def generate_editorial_batch(
     destination = Path(output_path) if output_path else batch_directory(root or Path(input_path).parent, batch_id) / "editorial.output.json"
     output = _write_json(destination, normalized)
     usage = body.get("usage") or {}
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
     if root is not None:
         from .config import editorial_price_per_1m
         from .observability import append_telemetry, usage_cost_usd
 
-        entrada = int(usage.get("prompt_tokens") or 0)
-        saida = int(usage.get("completion_tokens") or 0)
+        entrada = input_tokens
+        saida = output_tokens
         detalhes = usage.get("prompt_tokens_details") or {}
         preco_in, preco_out = editorial_price_per_1m()
         custo = usage_cost_usd(
@@ -521,8 +586,9 @@ def generate_editorial_batch(
             "input_tokens": entrada,
             "output_tokens": saida,
             "cached_tokens": int(detalhes.get("cached_tokens") or 0),
-            "model": model,
-            "provider": base_url[:120],
+            "model": hermes_model if selected_provider == "hermes" and hermes_model else model,
+            "provider": "hermes" if selected_provider == "hermes" else base_url[:120],
+            "backend": selected_provider,
         }
         # Custo da chamada DIRETA: o gate (`cost_guard`) prefere este numero ao
         # preco do ambiente, porque registra o preco vigente na hora da chamada.
@@ -546,8 +612,8 @@ def generate_editorial_batch(
         "ok": sum(1 for item in normalized["results"] if item["status"] == "ok"),
         "needs_retry": sum(1 for item in normalized["results"] if item["status"] == "needs_retry"),
         "output": output,
-        "input_tokens": int(usage.get("prompt_tokens") or 0),
-        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
     }
 
 

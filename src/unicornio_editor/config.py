@@ -44,6 +44,21 @@ class Config:
     editorial_api_key: str = field(default="", repr=False)
     editorial_base_url: str = "https://api.openai.com/v1"
     editorial_model: str = "gpt-4o-mini"
+    # ``auto`` prefere o Hermes local (``hermes -z``), que usa o provider/OAuth
+    # já configurado no Hermes. ``openai`` mantém o backend legado explícito.
+    # Direct ``Config(...)`` callers stay test-safe; ``load_config`` selects
+    # ``auto`` for production from EDITORIAL_PROVIDER's default.
+    editorial_provider: str = "openai"
+    hermes_command: str = "hermes"
+    hermes_model: str = ""
+    hermes_timeout: float = 90.0
+    # A visão precisa de um endpoint multimodal. O CLI one-shot do Hermes não
+    # é uma API de imagens; quando não há endpoint Hermes explícito, o código
+    # continua exigindo a credencial legada e falha fechado sem visão.
+    vision_provider: str = "auto"
+    hermes_vision_api_key: str = field(default="", repr=False)
+    hermes_vision_base_url: str = ""
+    hermes_vision_model: str = ""
     # Limites mecanicos de custo (o LLM nao decide; o codigo impoe):
     max_posts_per_run: int = 5  # cards por lote / posts processados por run
     # P0 (auditoria de contexto): a META de producao (READY por run) e o TETO
@@ -126,6 +141,7 @@ class Config:
             f"publish_limit={self.publish_limit!r}, "
             f"vision_enabled={self.vision_enabled!r}, vision_detail={self.vision_detail!r}, "
             f"vision_mode={self.vision_mode!r}, vision_model={self.vision_model!r}, "
+            f"editorial_provider={self.editorial_provider!r}, "
             f"v2_admission_after={self.v2_admission_after!r})"
         )
 
@@ -287,6 +303,34 @@ def load_config() -> Config:
     if not dry_run and (not app_user or not app_password):
         raise ConfigError("write mode requires WORDPRESS_APP_USER and WORDPRESS_APP_PASSWORD")
 
+    vision_provider = _choice("EDITOR_VISION_PROVIDER", "auto", {"auto", "openai", "hermes"})
+    legacy_vision_key = _env("EDITOR_VISION_API_KEY") or _env("OPENAI_API_KEY")
+    legacy_vision_base = _validate_url(
+        "EDITOR_VISION_BASE_URL", _env("EDITOR_VISION_BASE_URL", "https://api.openai.com/v1")
+    )
+    legacy_vision_model = _env("EDITOR_VISION_MODEL", "gpt-4o-mini")
+    hermes_vision_key = _env("HERMES_VISION_API_KEY") or _env("HERMES_API_KEY")
+    hermes_vision_base = (
+        _validate_url("HERMES_VISION_BASE_URL", _env("HERMES_VISION_BASE_URL"))
+        if _env("HERMES_VISION_BASE_URL")
+        else ""
+    )
+    hermes_vision_model = _env("HERMES_VISION_MODEL")
+    if vision_provider == "hermes" and (not hermes_vision_base or not hermes_vision_key):
+        raise ConfigError(
+            "EDITOR_VISION_PROVIDER=hermes requires HERMES_VISION_BASE_URL "
+            "and HERMES_VISION_API_KEY (or HERMES_API_KEY)"
+        )
+    use_hermes_vision = vision_provider == "hermes" or (
+        vision_provider == "auto" and bool(hermes_vision_base and hermes_vision_key)
+    )
+    effective_vision_provider = "hermes" if use_hermes_vision else "openai"
+    effective_vision_key = hermes_vision_key if use_hermes_vision else legacy_vision_key
+    effective_vision_base = hermes_vision_base if use_hermes_vision else legacy_vision_base
+    effective_vision_model = (
+        hermes_vision_model or legacy_vision_model if use_hermes_vision else legacy_vision_model
+    )
+
     return Config(
         content_source=content_source,
         wordpress_url=wordpress_url,
@@ -308,12 +352,13 @@ def load_config() -> Config:
         publish_enabled=_bool("PUBLISH_ENABLED", False),
         publish_limit=_int("PUBLISH_LIMIT", 5, 0, 100),
         vision_enabled=_bool("EDITOR_VISION_ENABLED", True),
-        # Producao usa OPENAI_API_KEY; EDITOR_VISION_API_KEY e fallback.
-        vision_api_key=_env("EDITOR_VISION_API_KEY") or _env("OPENAI_API_KEY"),
-        vision_base_url=_validate_url(
-            "EDITOR_VISION_BASE_URL", _env("EDITOR_VISION_BASE_URL", "https://api.openai.com/v1")
-        ),
-        vision_model=_env("EDITOR_VISION_MODEL", "gpt-4o-mini"),
+        vision_api_key=effective_vision_key,
+        vision_base_url=effective_vision_base,
+        vision_model=effective_vision_model,
+        vision_provider=effective_vision_provider,
+        hermes_vision_api_key=hermes_vision_key,
+        hermes_vision_base_url=hermes_vision_base,
+        hermes_vision_model=hermes_vision_model,
         vision_detail=_env("EDITOR_VISION_DETAIL", "low"),
         vision_mode=_choice("EDITOR_VISION_MODE", "ambiguous", {"always", "ambiguous"}),
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
@@ -324,6 +369,10 @@ def load_config() -> Config:
             "EDITORIAL_BASE_URL", _env("EDITORIAL_BASE_URL", "https://api.openai.com/v1")
         ),
         editorial_model=_env("EDITORIAL_MODEL", "gpt-4o-mini"),
+        editorial_provider=_choice("EDITORIAL_PROVIDER", "auto", {"auto", "openai", "hermes"}),
+        hermes_command=_env("HERMES_COMMAND", "hermes"),
+        hermes_model=_env("HERMES_MODEL"),
+        hermes_timeout=_float("HERMES_TIMEOUT", 90.0, 1.0, 600.0),
         max_posts_per_run=_int("EDITOR_MAX_POSTS_PER_RUN", 5, 1, 10),
         target_ready_per_run=_int("EDITOR_TARGET_READY_PER_RUN", 5, 1, 10),
         max_posts_touched_per_run=_int("EDITOR_MAX_POSTS_TOUCHED_PER_RUN", 2, 0, 20),

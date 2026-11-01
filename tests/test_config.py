@@ -203,6 +203,37 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.editorial_base_url, "https://editorial.test/v1")
         self.assertEqual(config.editorial_model, "editorial-model")
 
+    def test_editorial_defaults_to_hermes_auto_backend(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
+            config = load_config()
+        self.assertEqual(config.editorial_provider, "auto")
+        self.assertEqual(config.hermes_command, "hermes")
+
+    def test_editorial_openai_backend_remains_explicitly_available(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "EDITORIAL_PROVIDER": "openai",
+            "EDITORIAL_API_KEY": "legacy-key",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.editorial_provider, "openai")
+        self.assertEqual(config.editorial_api_key, "legacy-key")
+
+    def test_auto_vision_uses_explicit_hermes_multimodal_endpoint(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "HERMES_VISION_BASE_URL": "http://hermes.test/v1",
+            "HERMES_VISION_API_KEY": "hermes-vision-key",
+            "HERMES_VISION_MODEL": "hermes-vision-model",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.vision_provider, "hermes")
+        self.assertEqual(config.vision_api_key, "hermes-vision-key")
+        self.assertEqual(config.vision_base_url, "http://hermes.test/v1")
+        self.assertEqual(config.vision_model, "hermes-vision-model")
+
     def test_vision_can_be_disabled(self):
         values = {
             "WORDPRESS_URL": "http://wp.test",

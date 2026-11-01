@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from .backup import SnapshotStore
+from .ai_provider import hermes_command_available
 from .batch import (
     load_editorial_batch,
     load_media_resolve_batch,
@@ -2108,9 +2109,17 @@ def _canary_preflight(
         posts.append(row)
     provider = {
         "wordpress_credentials_present": bool(config.app_user and config.app_password),
-        "editorial_provider_configured": bool(config.editorial_api_key),
+        "editorial_provider_configured": (
+            hermes_command_available(getattr(config, "hermes_command", "hermes"))
+            if getattr(config, "editorial_provider", "openai") in {"auto", "hermes"}
+            else bool(config.editorial_api_key)
+        ),
         "vision_provider_configured": bool(not config.vision_enabled or config.vision_api_key),
-        "editorial_model": config.editorial_model,
+        "editorial_model": (
+            getattr(config, "hermes_model", "") or "hermes-configured-model"
+            if getattr(config, "editorial_provider", "openai") in {"auto", "hermes"}
+            else config.editorial_model
+        ),
         "vision_model": config.vision_model if config.vision_enabled else None,
         "dry_run": bool(config.dry_run),
     }
@@ -3389,6 +3398,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_confidence=config.min_relevance_confidence,
                     root=args.root,
                     output_path=args.output,
+                    provider=getattr(config, "editorial_provider", "auto"),
+                    hermes_command=getattr(config, "hermes_command", "hermes"),
+                    hermes_model=getattr(config, "hermes_model", ""),
+                    hermes_timeout=getattr(config, "hermes_timeout", config.http_timeout),
                 )
             finally:
                 if previous_batch is None:

@@ -232,7 +232,10 @@ unicornio-editor media-resolve-batch media-batch.json --compact
 de microbatch usa `{schema_version: 1, batch_id, results: [{post_id, status, editorial}]}`;
 um item pode ser `needs_retry` sem invalidar o outro.
 `editorial-generate-batch` faz diretamente uma única chamada estruturada ao
-provider configurado por `EDITORIAL_*`, sem tools ou loop Hermes, e grava
+backend selecionado por `EDITORIAL_PROVIDER`. O padrão `auto` usa o provider e
+o OAuth já configurados no Hermes por meio de `hermes -z`; `EDITORIAL_PROVIDER=openai`
+mantém o endpoint compatível legado e suas chaves. O resultado continua sendo
+validado pelo schema estrito antes de ser gravado em
 `editorial.output.json`, que pode ser enviado ao `apply-batch`.
 O `apply-batch` valida o envelope antes de começar e chama o `apply` normal para
 cada item; uma falha, lock, rework ou estado READY nunca é compartilhado com os
