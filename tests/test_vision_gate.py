@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 from unicornio_editor.media.vision_gate import (
     VisionGateError,
     VisionInputUnavailable,
+    _call_vision_batch,
     prepare_vision_image_input,
     verify_image_subject,
     verify_image_subject_decision,
@@ -553,6 +554,24 @@ class VisionGateTests(unittest.TestCase):
         prompt = call_hermes.call_args.args[0]
         self.assertIn("vision_analyze", prompt)
         self.assertNotIn("data:image/", prompt)
+
+    @mock.patch("unicornio_editor.media.vision_gate._call_vision")
+    def test_hermes_batch_rejects_expired_total_budget_before_submitting(self, call_vision):
+        with self.assertRaisesRegex(VisionGateError, "orçamento total"):
+            _call_vision_batch(
+                items=[{
+                    "candidate_id": "A1",
+                    "image_url": "https://a.test/a.webp",
+                    "subject": "A",
+                }],
+                api_key="hermes",
+                base_url="hermes://cli",
+                model="",
+                detail="low",
+                timeout=30,
+                total_timeout=0,
+            )
+        call_vision.assert_not_called()
 
     def test_vision_config_ready(self):
         ok, _ = vision_config_ready(enabled=False, api_key="")

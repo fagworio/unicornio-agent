@@ -32,7 +32,12 @@ import re
 import shutil
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    wait,
+)
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
@@ -669,16 +674,20 @@ def _call_vision_batch(
         # the operation still has one hard deadline and each child has its own
         # provider timeout. This avoids a batch of 12 images consuming 12x the
         # single-image timeout while preserving fail-closed correlation.
+        if total_timeout is not None and float(total_timeout) <= 0:
+            raise VisionGateError("batch Hermes Vision excedeu o orçamento total")
         deadline = (
-            time.monotonic() + max(1.0, float(total_timeout))
+            time.monotonic() + float(total_timeout)
             if total_timeout is not None else None
         )
 
         def evaluate(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-            remaining = (
-                max(1.0, deadline - time.monotonic())
-                if deadline is not None else float(timeout)
-            )
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise VisionGateError("batch Hermes Vision excedeu o orçamento total")
+            else:
+                remaining = float(timeout)
             child_timeout = min(float(timeout), remaining)
             prompt = _build_user_prompt(
                 str(item.get("subject") or ""),
@@ -694,23 +703,45 @@ def _call_vision_batch(
 
         output: dict[str, dict[str, Any]] = {}
         max_workers = min(3, len(items))
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes-vision") as pool:
-            futures = [pool.submit(evaluate, item) for item in items]
-            try:
-                for future in as_completed(
-                    futures,
-                    timeout=(max(1.0, float(total_timeout)) if total_timeout is not None else None),
-                ):
+        pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes-vision")
+        futures = []
+        try:
+            # Do not enqueue work after the global deadline.  Each worker also
+            # checks the deadline immediately before invoking Hermes because a
+            # queued task may start after another task has consumed the budget.
+            for item in items:
+                if deadline is not None and deadline - time.monotonic() <= 0:
+                    raise VisionGateError("batch Hermes Vision excedeu o orçamento total")
+                futures.append(pool.submit(evaluate, item))
+
+            pending = set(futures)
+            while pending:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise FuturesTimeoutError()
+                done, pending = wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    raise FuturesTimeoutError()
+                for future in done:
                     candidate_id, result = future.result()
                     output[candidate_id] = result
-            except FuturesTimeoutError as exc:
-                for future in futures:
-                    future.cancel()
-                raise VisionGateError("batch Hermes Vision excedeu o orçamento total") from exc
-            except Exception:
-                for future in futures:
-                    future.cancel()
-                raise
+        except FuturesTimeoutError as exc:
+            for future in futures:
+                future.cancel()
+            raise VisionGateError("batch Hermes Vision excedeu o orçamento total") from exc
+        except Exception:
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            # Do not wait for already-running provider calls here.  Their
+            # child Hermes processes receive the remaining per-call timeout;
+            # the caller must regain control at the batch deadline.
+            pool.shutdown(wait=False, cancel_futures=True)
         return output
     content: list[dict[str, Any]] = [
         {
@@ -1076,8 +1107,10 @@ def verify_image_subject_batch(
             }
         )
     detail = detail if detail in {"low", "high"} else "low"
+    if total_timeout is not None and float(total_timeout) <= 0:
+        raise VisionGateError("operação de visão excedeu o orçamento total")
     deadline = (
-        time.monotonic() + max(1.0, float(total_timeout))
+        time.monotonic() + float(total_timeout)
         if total_timeout is not None else None
     )
 

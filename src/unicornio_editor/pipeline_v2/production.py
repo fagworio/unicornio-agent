@@ -606,6 +606,10 @@ class ProductionCandidateReader:
 
     def snapshot(self, *, page_size: int = 100, max_pages: int = 100) -> list[tuple[int, dict[str, Any]]]:
         """Return all pending posts, including cooldown/terminal V2 states."""
+        # WordPress REST accepts at most 100 records per request.  Keep the
+        # reader defensive because callers such as the monitor may use a
+        # larger logical batch size while pagination remains page-based.
+        page_size = min(100, max(1, int(page_size)))
         candidates: list[tuple[int, dict[str, Any]]] = []
         self.load_errors = []
         self.pagination = {"truncated": False, "next_page": None}

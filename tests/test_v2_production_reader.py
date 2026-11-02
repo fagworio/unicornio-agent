@@ -25,6 +25,23 @@ def test_candidate_reader_paginates_deduplicates_and_skips_terminal(tmp_path):
     assert candidates[0][1]["v2_state"].state is LifecycleState.PENDING
 
 
+def test_candidate_reader_clamps_wordpress_page_size(tmp_path):
+    calls = []
+    post = {"id": 3, "status": "pending", "title": {"raw": "new"}, "content": {"raw": "x"}, "meta": {}}
+
+    class Client:
+        def list_pending(self, *, page, per_page, status="pending"):
+            calls.append(per_page)
+            assert 1 <= per_page <= 100
+            return [post] if page == 1 else []
+
+        def get_post(self, post_id):
+            return post
+
+    ProductionCandidateReader(Client(), tmp_path).snapshot(page_size=1000)
+    assert calls == [100]
+
+
 def test_candidate_reader_reenters_editorial_for_legacy_draft_without_relevance(tmp_path):
     body = "<p>" + ("Texto editorial recuperado com contexto suficiente para continuar. " * 8) + "</p>"
     post = {

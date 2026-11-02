@@ -2236,6 +2236,95 @@ def _v2_recovery_monitor_marker(root: Path) -> str | None:
     )
 
 
+def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
+    """Project a pending V2 authorization without selecting or locking work.
+
+    A monitor must describe the checkpoint the cycle will actually resume,
+    rather than running a new selector while an authorization is pending.
+    This helper is intentionally read-only: it only reads the checkpoint and
+    post journals and never contacts WordPress or changes recovery state.
+    ``None`` means that a fresh, read-only selector preview is appropriate.
+    """
+    state_path = Path(root) / "work" / "v2-cycle" / "state.json"
+    if not state_path.is_file():
+        return None
+
+    base = {
+        "selected_ids": [],
+        "not_admitted": 0,
+        "cooldown": 0,
+        "quarantined": 0,
+        "recovery_blocked": 0,
+        "checkpoint_recovery_pending": 0,
+        "writer_uncertain": 0,
+        "lock_busy": 0,
+        "selector_error": 0,
+    }
+
+    try:
+        value = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
+        return base
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
+        return base
+    if value.get("status") not in {"running", "completed", "failed"}:
+        base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
+        return base
+    if value.get("status") != "running":
+        return None
+
+    pending = value.get("pending_round")
+    if pending is None:
+        return None
+    if not isinstance(pending, dict):
+        base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
+        return base
+
+    selected_ids = pending.get("preview_selected_ids")
+    if (
+        not isinstance(selected_ids, list)
+        or any(isinstance(post_id, bool) or not isinstance(post_id, int) or post_id <= 0 for post_id in selected_ids)
+        or len(selected_ids) != len(set(selected_ids))
+    ):
+        base.update({
+            "checkpoint_recovery_pending": 1,
+            "recovery_blocked": 1,
+            "selector_error": 1,
+            "preview_error": "checkpoint_selection_missing",
+        })
+        return base
+
+    base.update({
+        "selected_ids": list(selected_ids),
+        "checkpoint_recovery_pending": 1,
+        "preview_error": "checkpoint_recovery_pending",
+    })
+    journal_dir = Path(root) / "work" / "v2-journal"
+    for post_id in selected_ids:
+        journal_path = journal_dir / f"{post_id}.json"
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            base["recovery_blocked"] += 1
+            continue
+        if not isinstance(journal, dict):
+            base["recovery_blocked"] += 1
+            continue
+
+        status = str(journal.get("status") or "")
+        readback_confirmed = journal.get("readback") is True
+        if status != "committed" or not readback_confirmed:
+            base["recovery_blocked"] += 1
+        if (
+            status in {"committing", "writer_failed", "media_readback_failed"}
+            or journal.get("writer_started") is True and not readback_confirmed
+        ):
+            base["writer_uncertain"] += 1
+    return base
+
+
 def _monitor_line(report: dict, root: Path | None = None) -> str:
     """Linha ESTAVEL do monitor (hasheada pelo cron).
 
@@ -2257,7 +2346,11 @@ def _monitor_line(report: dict, root: Path | None = None) -> str:
             f"admission={int(effective_v2.get('not_admitted', 0) or 0)},"
             f"cooldown={int(effective_v2.get('cooldown', 0) or 0)},"
             f"quarantine={int(effective_v2.get('quarantined', 0) or 0)},"
-            f"recovery={int(effective_v2.get('recovery_blocked', 0) or 0)}"
+            f"recovery={int(effective_v2.get('recovery_blocked', 0) or 0)},"
+            f"checkpoint={int(effective_v2.get('checkpoint_recovery_pending', 0) or 0)},"
+            f"writer={int(effective_v2.get('writer_uncertain', 0) or 0)},"
+            f"selector={int(effective_v2.get('selector_error', 0) or 0)},"
+            f"lock={int(effective_v2.get('lock_busy', 0) or 0)}"
         )
     else:
         parts += [str(pid) for pid in report.get("v2_eligible_ids", [])]
@@ -3311,47 +3404,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # selector used by v2-run. The old monitor only inspected the
                 # broad WordPress queue and could stay awake even when the
                 # executor selected zero posts.
-                try:
-                    from .pipeline_v2.runtime import run_v2
+                checkpoint_projection = _v2_checkpoint_monitor_projection(args.root)
+                if checkpoint_projection is not None:
+                    # A pending authorization is authoritative.  Do not run
+                    # a fresh selector or contend for the executor lock.
+                    report["v2_effective"] = checkpoint_projection
+                else:
+                    try:
+                        from .pipeline_v2.runtime import run_v2
 
-                    preview = run_v2(
-                        client,
-                        config,
-                        args.root,
-                        limit=1000,
-                        preview=True,
-                    )
-                    if isinstance(preview, dict):
-                        effective = preview.get("queue")
-                        if isinstance(effective, dict):
-                            effective = dict(effective)
-                            effective["not_admitted"] = int(
-                                effective.get("admission_blocked", 0) or 0
-                            ) + int(effective.get("historical_excluded", 0) or 0)
-                            effective["recovery_blocked"] = int(
-                                effective.get("candidate_load_errors", 0)
-                                if isinstance(effective.get("candidate_load_errors"), int)
-                                else len(effective.get("candidate_load_errors") or [])
-                            ) + int(effective.get("epoch_protected_count", 0) or 0)
-                            report["v2_effective"] = effective
-                        elif preview.get("locked"):
-                            report["v2_effective"] = {
-                                "selected_ids": [],
-                                "not_admitted": 0,
-                                "cooldown": 0,
-                                "quarantined": 0,
-                                "recovery_blocked": 1,
-                                "preview_error": "v2_run_lock_busy",
-                            }
-                except Exception as exc:  # monitor must remain stable on diagnostics failure
-                    report["v2_effective"] = {
-                        "selected_ids": [],
-                        "not_admitted": 0,
-                        "cooldown": 0,
-                        "quarantined": 0,
-                        "recovery_blocked": 1,
-                        "preview_error": type(exc).__name__,
-                    }
+                        preview = run_v2(
+                            client,
+                            config,
+                            args.root,
+                            # WordPress caps per_page at 100.  The reader also
+                            # clamps defensively, but keep the monitor's
+                            # request valid at this boundary too.
+                            limit=100,
+                            preview=True,
+                            lock_held=True,
+                        )
+                        if isinstance(preview, dict):
+                            effective = preview.get("queue")
+                            if isinstance(effective, dict):
+                                effective = dict(effective)
+                                effective["not_admitted"] = int(
+                                    effective.get("admission_blocked", 0) or 0
+                                ) + int(effective.get("historical_excluded", 0) or 0)
+                                effective["recovery_blocked"] = int(
+                                    effective.get("candidate_load_errors", 0)
+                                    if isinstance(effective.get("candidate_load_errors"), int)
+                                    else len(effective.get("candidate_load_errors") or [])
+                                ) + int(effective.get("epoch_protected_count", 0) or 0)
+                                effective.setdefault("checkpoint_recovery_pending", 0)
+                                effective.setdefault("writer_uncertain", 0)
+                                effective.setdefault("selector_error", 0)
+                                effective.setdefault("lock_busy", 0)
+                                report["v2_effective"] = effective
+                            elif preview.get("locked"):
+                                report["v2_effective"] = {
+                                    "selected_ids": [],
+                                    "not_admitted": 0,
+                                    "cooldown": 0,
+                                    "quarantined": 0,
+                                    "recovery_blocked": 0,
+                                    "checkpoint_recovery_pending": 0,
+                                    "writer_uncertain": 0,
+                                    "selector_error": 0,
+                                    "lock_busy": 1,
+                                    "preview_error": "v2_run_lock_busy",
+                                }
+                    except Exception as exc:  # monitor must remain stable on diagnostics failure
+                        report["v2_effective"] = {
+                            "selected_ids": [],
+                            "not_admitted": 0,
+                            "cooldown": 0,
+                            "quarantined": 0,
+                            "recovery_blocked": 0,
+                            "checkpoint_recovery_pending": 0,
+                            "writer_uncertain": 0,
+                            "selector_error": 1,
+                            "lock_busy": 0,
+                            "preview_error": type(exc).__name__,
+                        }
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
                 print(_monitor_line(report, args.root))

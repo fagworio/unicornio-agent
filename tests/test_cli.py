@@ -22,6 +22,7 @@ from unicornio_editor.cli import (
     _json_default,
     _monitor_line,
     _record_cmd_output,
+    _v2_checkpoint_monitor_projection,
 )
 from unicornio_editor.pipeline_v2.cycle import CycleReport
 
@@ -430,6 +431,61 @@ class CompactOutputTests(unittest.TestCase):
             first = _monitor_line(report, root)
             self.assertEqual(first, "recovery_error=v2:checkpoint_invalid")
             self.assertEqual(first, _monitor_line(report, root))
+
+    def test_v2_checkpoint_projection_reports_recovery_and_writer_uncertainty(self):
+        state = {
+            "schema_version": 1,
+            "cycle_id": "cycle-7f401e9",
+            "status": "running",
+            "phase": "DRAINING",
+            "pending_round": {
+                "round_number": 4,
+                "preview_selected_ids": [115975, 115976],
+                "authorization_id": "authorization-4",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "work" / "v2-cycle" / "state.json"
+            journal_dir = root / "work" / "v2-journal"
+            state_path.parent.mkdir(parents=True)
+            journal_dir.mkdir(parents=True)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            (journal_dir / "115975.json").write_text(
+                json.dumps({"status": "committing", "writer_started": True}),
+                encoding="utf-8",
+            )
+            projection = _v2_checkpoint_monitor_projection(root)
+
+        self.assertEqual(projection["selected_ids"], [115975, 115976])
+        self.assertEqual(projection["checkpoint_recovery_pending"], 1)
+        self.assertEqual(projection["recovery_blocked"], 2)
+        self.assertEqual(projection["writer_uncertain"], 1)
+        self.assertEqual(projection["selector_error"], 0)
+
+    def test_queue_monitor_uses_safe_preview_limit_and_does_not_take_global_lock(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch.object(cli, "build_queue_report", return_value={
+                        "eligible_rework_ids": [], "v2_eligible_ids": [],
+                        "unprocessed_ids": [], "posts": [],
+                    }), \
+                    mock.patch("unicornio_editor.pipeline_v2.runtime.run_v2", return_value={
+                        "queue": {"selected_ids": [115900]},
+                    }) as run_v2, \
+                    mock.patch.object(cli, "_record_cmd_output"):
+                code = cli.main(["queue", "--monitor", "--root", str(root)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(run_v2.call_args.kwargs["limit"], 100)
+        self.assertTrue(run_v2.call_args.kwargs["lock_held"])
 
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})
