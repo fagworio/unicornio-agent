@@ -454,9 +454,30 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("unresolved @PROJECT_ROOT@", result.stderr)
 
     def test_cron_install_renders_monitor_and_is_idempotent(self):
-        script = ROOT / "hermes" / "cron-install.sh"
+        protected_paths = (
+            ROOT / ".env",
+            ROOT / "hermes" / "cron-install.sh",
+            ROOT / "hermes" / "monitor.sh",
+            ROOT / "hermes" / "validate-monitor.sh",
+        )
+        protected_before = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in protected_paths
+        }
         with tempfile.TemporaryDirectory() as directory:
-            hermes_home = Path(directory) / "hermes"
+            project = Path(directory) / "project"
+            project_hermes = project / "hermes"
+            project_hermes.mkdir(parents=True)
+            for name in ("cron-install.sh", "monitor.sh", "validate-monitor.sh", "SKILL.md"):
+                shutil.copy2(ROOT / "hermes" / name, project_hermes / name)
+            shutil.copytree(
+                ROOT / "hermes" / "references",
+                project_hermes / "references",
+            )
+            (project / ".env").write_text(
+                "HERMES_EDITORIAL_CRON_JOB_ID=original\n", encoding="utf-8"
+            )
+            hermes_home = Path(directory) / "hermes-home"
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             fake_hermes = fake_bin / "hermes"
@@ -468,6 +489,8 @@ import sys
 from pathlib import Path
 
 home = Path(os.environ["HERMES_HOME"])
+if os.environ.get("FAKE_HERMES_FAIL") == "1":
+    raise SystemExit(42)
 jobs_file = home / "cron" / "jobs.json"
 jobs_file.parent.mkdir(parents=True, exist_ok=True)
 data = json.loads(jobs_file.read_text()) if jobs_file.exists() else {"jobs": []}
@@ -492,16 +515,24 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
             }
             first = subprocess.run(
-                ["bash", str(script), "every 2h"],
-                cwd=ROOT,
+                ["bash", str(project_hermes / "cron-install.sh"), "every 2h"],
+                cwd=project,
                 env=env,
                 capture_output=True,
                 text=True,
             )
             second = subprocess.run(
-                ["bash", str(script), "every 2h"],
-                cwd=ROOT,
+                ["bash", str(project_hermes / "cron-install.sh"), "every 2h"],
+                cwd=project,
                 env=env,
+                capture_output=True,
+                text=True,
+            )
+            env_before_failure = (project / ".env").read_bytes()
+            failed = subprocess.run(
+                ["bash", str(project_hermes / "cron-install.sh"), "every 2h"],
+                cwd=project,
+                env={**env, "FAKE_HERMES_FAIL": "1"},
                 capture_output=True,
                 text=True,
             )
@@ -513,14 +544,23 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
             monitor_executable = os.access(monitor, os.X_OK)
             rendered = monitor.read_text(encoding="utf-8") if monitor_exists else ""
             job_count = len(jobs)
+            env_after_failure = (project / ".env").read_bytes()
 
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotEqual(failed.returncode, 0)
         self.assertTrue(monitor_exists)
         self.assertTrue(monitor_executable)
         self.assertNotIn("@PROJECT_ROOT@", rendered)
-        self.assertIn(f'ROOT="{ROOT}"', rendered)
+        self.assertIn(f'ROOT="{project}"', rendered)
         self.assertEqual(job_count, 1)
+        self.assertEqual(env_after_failure, env_before_failure)
+        for path, before in protected_before.items():
+            self.assertEqual(
+                path.read_bytes() if path.is_file() else None,
+                before,
+                f"operational file changed during isolated cron install: {path}",
+            )
 
     def test_cron_installer_is_idempotent(self):
         # Nao duplica jobs: o install DEVE editar um job existente (em vez de
