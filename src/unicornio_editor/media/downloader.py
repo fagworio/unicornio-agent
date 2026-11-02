@@ -96,6 +96,12 @@ def download_image(
                 time.sleep(_retry_delay(attempt, exc.headers))
                 continue
             raise MediaDownloadError(f"image download failed (HTTP {exc.code})") from exc
+        except MediaDownloadError:
+            # Validation can fail while the response is being streamed (for
+            # example, when Content-Length is absent).  Remove the partial
+            # destination before exposing the failure to the caller.
+            destination.unlink(missing_ok=True)
+            raise
         except (URLError, OSError, ValueError, URLSafetyError, HTTPException) as exc:
             # HTTPException cobre IncompleteRead (stream cortado). Nao herda de
             # OSError: escapava do retry e deixava o arquivo PARCIAL no disco.

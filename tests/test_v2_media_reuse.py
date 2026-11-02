@@ -192,6 +192,58 @@ def test_resolver_materializes_legacy_identity_before_noop_return(monkeypatch, t
     assert recovered.visual_verification["decision"] == "DIFFERENT"
 
 
+def test_resolver_does_not_treat_unavailable_registry_as_empty(monkeypatch, tmp_path):
+    import unicornio_editor.media.registry as registry
+
+    previous = MediaProgress(
+        required=1,
+        inline=(InlineMedia(
+            115152,
+            "https://wp.test/115152.webp",
+            0,
+            sha256="a" * 64,
+            phash="a" * 16,
+            visual_group_id="visual:" + "a" * 24,
+            visual_verification={"decision": "DIFFERENT"},
+        ),),
+        featured=FeaturedProgress(
+            FeaturedStatus.VALID,
+            115153,
+            "https://wp.test/115153.webp",
+            sha256="b" * 64,
+            phash="b" * 16,
+            visual_group_id="visual:" + "b" * 24,
+            visual_verification={"decision": "INITIAL"},
+        ),
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("registry temporarily unavailable")
+
+    class Client:
+        def get_media(self, _media_id):
+            raise AssertionError("WordPress media must not be consulted")
+
+    monkeypatch.setattr(registry, "load_v2_media", unavailable)
+
+    with pytest.raises(StageError) as error:
+        ProductionMediaResolver(Client(), Config(), tmp_path)(
+            {
+                "post_id": 115152,
+                "title": "Test",
+                "post": {"featured_media": 115153, "content": {"raw": "<p>Conteúdo</p>"}},
+            },
+            SimpleNamespace(media=previous),
+            {"cleaned_html": _article_html(), "seo": {}},
+            previous,
+        )
+
+    assert error.value.blocker.value == "provider_error"
+    assert error.value.phase.value == "media"
+    assert error.value.failure_class == "media_registry_unavailable"
+    assert error.value.media_progress == previous
+
+
 def test_identity_recovery_does_not_mark_inline_initial_when_featured_is_unavailable(monkeypatch, tmp_path):
     import unicornio_editor.pipeline_v2.visual_media as visual_media
     from PIL import Image

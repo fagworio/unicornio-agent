@@ -2025,8 +2025,21 @@ class ProductionMediaResolver:
         try:
             from ..media.registry import load_v2_media
             registry_media = load_v2_media(self.root, post_id=int(context["post_id"]))
-        except Exception:
-            registry_media = []
+        except Exception as exc:
+            # An unreadable registry is not the same as a registry with no
+            # rows.  Treating the former as empty would make historical media
+            # look absent and could authorize a duplicate acquisition.
+            from .errors import StageError
+            from .model import BlockerCode
+
+            raise StageError(
+                BlockerCode.PROVIDER_ERROR,
+                Phase.MEDIA,
+                f"media_registry_unavailable: {type(exc).__name__}",
+                media_progress=previous,
+                failure_class="media_registry_unavailable",
+                retryable=True,
+            ) from exc
         current_inline = list(previous.inline)
         registry_by_media_id = {
             int(row.get("wordpress_media_id") or 0): row

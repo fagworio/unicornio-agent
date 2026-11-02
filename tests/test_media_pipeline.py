@@ -100,6 +100,35 @@ class MediaPipelineTests(unittest.TestCase):
             with self.assertRaises(MediaDownloadError):
                 download_image(self.url, Path(directory) / "source.png", max_bytes=2)
 
+    def test_streaming_size_overflow_removes_partial_destination(self):
+        class Response:
+            class Headers:
+                def get_content_type(self): return "image/png"
+                def get(self, _key, default=None): return default
+            headers = Headers()
+
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+
+            def __init__(self):
+                self.chunks = [b"a" * 1024, b"b"]
+
+            def read(self, _size=-1):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.media.downloader.urlopen_remote", return_value=Response()
+        ):
+            destination = Path(directory) / "overflow.png"
+            with self.assertRaisesRegex(MediaDownloadError, "exceeds size limit"):
+                download_image(
+                    self.url,
+                    destination,
+                    max_bytes=1024,
+                    max_attempts=1,
+                )
+            self.assertFalse(destination.exists())
+
     def test_legacy_local_upload_uses_effective_source_for_fallback(self):
         local = "http://wordpress.dvl.to:8080/wp-content/uploads/2019/06/old.jpg"
         effective = "https://cdn.example/current.webp"
