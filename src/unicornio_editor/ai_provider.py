@@ -56,6 +56,20 @@ def call_hermes_oneshot(
             failure_class="configuration_error",
             retryable=False,
         )
+    try:
+        timeout_seconds = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise AIProviderError(
+            "timeout Hermes inválido",
+            failure_class="configuration_error",
+            retryable=False,
+        ) from exc
+    if timeout_seconds <= 0:
+        raise AIProviderError(
+            "Hermes excedeu o timeout da chamada editorial",
+            failure_class="timeout",
+            retryable=True,
+        )
     argv = [executable, "-z", str(prompt)]
     if str(model or "").strip():
         argv[1:1] = ["-m", str(model).strip()]
@@ -72,7 +86,7 @@ def call_hermes_oneshot(
                 cwd=str(cwd) if cwd is not None else None,
                 capture_output=True,
                 text=True,
-                timeout=max(1.0, float(timeout)),
+                timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:

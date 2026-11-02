@@ -2257,6 +2257,7 @@ def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
         "recovery_blocked": 0,
         "checkpoint_recovery_pending": 0,
         "writer_uncertain": 0,
+        "identity_mismatch": 0,
         "lock_busy": 0,
         "selector_error": 0,
     }
@@ -2275,8 +2276,21 @@ def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
     if value.get("status") != "running":
         return None
 
+    phase = value.get("phase")
+    if phase not in _V2_CYCLE_PHASES:
+        base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
+        return base
+
     pending = value.get("pending_round")
     if pending is None:
+        if phase == "DRAINING":
+            # DRAINING may only retry work already admitted by the cycle.  A
+            # fresh selector preview would incorrectly advertise NEW posts.
+            base.update({
+                "draining": 1,
+                "preview_error": "draining_without_pending_round",
+            })
+            return base
         return None
     if not isinstance(pending, dict):
         base.update({"selector_error": 1, "preview_error": "checkpoint_invalid"})
@@ -2301,6 +2315,23 @@ def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
         "checkpoint_recovery_pending": 1,
         "preview_error": "checkpoint_recovery_pending",
     })
+    expected_cycle_id = str(value.get("cycle_id") or "").strip()
+    expected_round = pending.get("round_number")
+    expected_authorization_id = str(pending.get("authorization_id") or "").strip()
+    if (
+        not expected_cycle_id
+        or not expected_authorization_id
+        or isinstance(expected_round, bool)
+        or not isinstance(expected_round, int)
+    ):
+        base.update({
+            "recovery_blocked": len(selected_ids) or 1,
+            "identity_mismatch": len(selected_ids) or 1,
+            "selector_error": 1,
+            "preview_error": "checkpoint_identity_missing",
+        })
+        return base
+
     journal_dir = Path(root) / "work" / "v2-journal"
     for post_id in selected_ids:
         journal_path = journal_dir / f"{post_id}.json"
@@ -2313,8 +2344,23 @@ def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
             base["recovery_blocked"] += 1
             continue
 
+        try:
+            journal_post_id = int(journal.get("post_id") or 0)
+        except (TypeError, ValueError):
+            journal_post_id = 0
+        identity_matches = (
+            journal_post_id == int(post_id)
+            and str(journal.get("run_id") or "").strip() != ""
+            and str(journal.get("cycle_id") or "").strip() == expected_cycle_id
+            and str(journal.get("authorization_id") or "").strip() == expected_authorization_id
+            and str(journal.get("cycle_round") or "") == str(expected_round)
+        )
         status = str(journal.get("status") or "")
         readback_confirmed = journal.get("readback") is True
+        if not identity_matches:
+            base["recovery_blocked"] += 1
+            base["identity_mismatch"] += 1
+            continue
         if status != "committed" or not readback_confirmed:
             base["recovery_blocked"] += 1
         if (
@@ -2349,6 +2395,8 @@ def _monitor_line(report: dict, root: Path | None = None) -> str:
             f"recovery={int(effective_v2.get('recovery_blocked', 0) or 0)},"
             f"checkpoint={int(effective_v2.get('checkpoint_recovery_pending', 0) or 0)},"
             f"writer={int(effective_v2.get('writer_uncertain', 0) or 0)},"
+            f"identity={int(effective_v2.get('identity_mismatch', 0) or 0)},"
+            f"draining={int(effective_v2.get('draining', 0) or 0)},"
             f"selector={int(effective_v2.get('selector_error', 0) or 0)},"
             f"lock={int(effective_v2.get('lock_busy', 0) or 0)}"
         )
@@ -3426,7 +3474,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                         if isinstance(preview, dict):
                             effective = preview.get("queue")
-                            if isinstance(effective, dict):
+                            if (
+                                isinstance(effective, dict)
+                                and not preview.get("epoch_protection_fail_closed")
+                            ):
                                 effective = dict(effective)
                                 effective["not_admitted"] = int(
                                     effective.get("admission_blocked", 0) or 0
@@ -3438,9 +3489,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 ) + int(effective.get("epoch_protected_count", 0) or 0)
                                 effective.setdefault("checkpoint_recovery_pending", 0)
                                 effective.setdefault("writer_uncertain", 0)
+                                effective.setdefault("identity_mismatch", 0)
+                                effective.setdefault("draining", 0)
                                 effective.setdefault("selector_error", 0)
                                 effective.setdefault("lock_busy", 0)
                                 report["v2_effective"] = effective
+                            elif preview.get("epoch_protection_fail_closed"):
+                                report["v2_effective"] = {
+                                    "selected_ids": [],
+                                    "not_admitted": 0,
+                                    "cooldown": 0,
+                                    "quarantined": 0,
+                                    "recovery_blocked": 0,
+                                    "checkpoint_recovery_pending": 0,
+                                    "writer_uncertain": 0,
+                                    "identity_mismatch": 0,
+                                    "draining": 0,
+                                    "selector_error": 1,
+                                    "lock_busy": 0,
+                                    "preview_error": "epoch_protection_fail_closed",
+                                }
                             elif preview.get("locked"):
                                 report["v2_effective"] = {
                                     "selected_ids": [],
@@ -3450,9 +3518,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     "recovery_blocked": 0,
                                     "checkpoint_recovery_pending": 0,
                                     "writer_uncertain": 0,
+                                    "identity_mismatch": 0,
+                                    "draining": 0,
                                     "selector_error": 0,
                                     "lock_busy": 1,
                                     "preview_error": "v2_run_lock_busy",
+                                }
+                            else:
+                                report["v2_effective"] = {
+                                    "selected_ids": [],
+                                    "not_admitted": 0,
+                                    "cooldown": 0,
+                                    "quarantined": 0,
+                                    "recovery_blocked": 0,
+                                    "checkpoint_recovery_pending": 0,
+                                    "writer_uncertain": 0,
+                                    "identity_mismatch": 0,
+                                    "draining": 0,
+                                    "selector_error": 1,
+                                    "lock_busy": 0,
+                                    "preview_error": "selector_invalid_result",
                                 }
                     except Exception as exc:  # monitor must remain stable on diagnostics failure
                         report["v2_effective"] = {
@@ -3463,6 +3548,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "recovery_blocked": 0,
                             "checkpoint_recovery_pending": 0,
                             "writer_uncertain": 0,
+                            "identity_mismatch": 0,
+                            "draining": 0,
                             "selector_error": 1,
                             "lock_busy": 0,
                             "preview_error": type(exc).__name__,
