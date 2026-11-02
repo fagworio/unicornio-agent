@@ -213,7 +213,12 @@ def _new_state(cycle_id: str, config: Mapping[str, Any]) -> tuple[dict[str, Any]
 def _class_sets(evidence: list[Mapping[str, Any]]) -> dict[str, list[int]]:
     result = {name: [] for name in CLASSIFICATIONS}
     for item in evidence:
-        classification = str(item.get("classification") or "UNCERTAIN_ISOLATED")
+        raw_classification = item.get("classification")
+        if not isinstance(raw_classification, str) or not raw_classification.strip():
+            raise CycleRecoveryError(
+                f"missing transaction classification for post {item.get('post_id')}"
+            )
+        classification = raw_classification.strip()
         if classification not in CLASSIFICATIONS:
             raise CycleRecoveryError(f"unknown transaction classification: {classification}")
         result[classification].append(int(item["post_id"]))

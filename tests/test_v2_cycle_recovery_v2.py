@@ -55,6 +55,11 @@ def _kwargs(root: Path, **extra):
     return value
 
 
+def test_missing_transaction_classification_is_fail_closed():
+    with pytest.raises(recovery.CycleRecoveryError, match="missing transaction classification"):
+        recovery._class_sets([{"post_id": 101}])
+
+
 def test_real_five_way_partition_and_committed_posts_not_quarantined(tmp_path, monkeypatch):
     root = _root(tmp_path); _evidence(monkeypatch)
     preview = recovery.recover_blocked_cycle(**_kwargs(root))
