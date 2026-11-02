@@ -153,14 +153,19 @@ manter o custo baixo:
 - **Cache por hash(imagem)+entidade** (`work/vision_cache.json`) evita re-analisar
   a mesma key art em varios posts.
 - **Limites mecanicos** de chamadas por post (`EDITOR_VISION_MAX_LOW`).
+- Timeout de visão separado do HTTP REST: `EDITOR_VISION_TIMEOUT` limita cada
+  chamada e `EDITOR_VISION_BATCH_TIMEOUT_SECONDS` limita a operação completa.
 - Sem `EDITOR_VISION_API_KEY`, usa `hermes -t vision` e o provider/OAuth
   configurado no Hermes; quando a chave existe, usa o backend OpenAI/GPT.
   `HERMES_VISION_BASE_URL`/`HERMES_VISION_API_KEY` também permitem um endpoint
   HTTP Hermes explícito. Falhas continuam fail-closed.
 - Custo medido localmente: ~US$ 0.44 por 1000 imagens em `detail: low`.
 
-Config em `.env`: `EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`,
-`EDITOR_VISION_MAX_LOW`.
+Quando o backend é o Hermes CLI, candidatos independentes são processados com
+fan-out limitado a três processos e um orçamento total; uma falha, timeout ou
+correlação incompleta continua bloqueando o lote. Config em `.env`:
+`EDITOR_VISION_ENABLED`, `EDITOR_VISION_DETAIL`, `EDITOR_VISION_MAX_LOW`,
+`EDITOR_VISION_TIMEOUT` e `EDITOR_VISION_BATCH_TIMEOUT_SECONDS`.
 
 ## Instalacao
 

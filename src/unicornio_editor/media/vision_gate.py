@@ -29,7 +29,10 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
@@ -647,6 +650,7 @@ def _call_vision_batch(
     model: str,
     detail: str,
     timeout: float,
+    total_timeout: float | None = None,
     root: Any = None,
 ) -> dict[str, dict[str, Any]]:
     """Evaluate several independent images with one HTTP request.
@@ -660,17 +664,53 @@ def _call_vision_batch(
     if len(items) > 20:
         raise VisionGateError("batch de visao excede o limite seguro de 20 imagens")
     if base_url == "hermes://cli":
-        output: dict[str, dict[str, Any]] = {}
-        for item in items:
+        # ``vision_analyze`` currently accepts one image per Hermes invocation.
+        # Run a small bounded fan-out instead of serialising every candidate;
+        # the operation still has one hard deadline and each child has its own
+        # provider timeout. This avoids a batch of 12 images consuming 12x the
+        # single-image timeout while preserving fail-closed correlation.
+        deadline = (
+            time.monotonic() + max(1.0, float(total_timeout))
+            if total_timeout is not None else None
+        )
+
+        def evaluate(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+            remaining = (
+                max(1.0, deadline - time.monotonic())
+                if deadline is not None else float(timeout)
+            )
+            child_timeout = min(float(timeout), remaining)
             prompt = _build_user_prompt(
                 str(item.get("subject") or ""),
                 context=str(item.get("context") or ""),
                 require_key_art=bool(item.get("require_key_art")),
             )
-            output[str(item["candidate_id"])] = _call_vision(
+            result = _call_vision(
                 image_url=str(item["image_url"]), prompt=prompt, api_key=api_key,
-                base_url=base_url, model=model, detail=detail, timeout=timeout, root=root,
+                base_url=base_url, model=model, detail=detail,
+                timeout=child_timeout, root=root,
             )
+            return str(item["candidate_id"]), result
+
+        output: dict[str, dict[str, Any]] = {}
+        max_workers = min(3, len(items))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes-vision") as pool:
+            futures = [pool.submit(evaluate, item) for item in items]
+            try:
+                for future in as_completed(
+                    futures,
+                    timeout=(max(1.0, float(total_timeout)) if total_timeout is not None else None),
+                ):
+                    candidate_id, result = future.result()
+                    output[candidate_id] = result
+            except FuturesTimeoutError as exc:
+                for future in futures:
+                    future.cancel()
+                raise VisionGateError("batch Hermes Vision excedeu o orçamento total") from exc
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
         return output
     content: list[dict[str, Any]] = [
         {
@@ -996,6 +1036,7 @@ def verify_image_subject_batch(
     base_url: str,
     model: str,
     timeout: float = 30.0,
+    total_timeout: float | None = None,
     detail: str = "low",
     allow_high: bool = False,
     root: Any = None,
@@ -1035,13 +1076,27 @@ def verify_image_subject_batch(
             }
         )
     detail = detail if detail in {"low", "high"} else "low"
+    deadline = (
+        time.monotonic() + max(1.0, float(total_timeout))
+        if total_timeout is not None else None
+    )
+
+    def remaining_timeout() -> float:
+        if deadline is None:
+            return float(timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise VisionGateError("operação de visão excedeu o orçamento total")
+        return min(float(timeout), remaining)
+
     raw = _call_vision_batch(
         items=normalized,
         api_key=api_key,
         base_url=base_url,
         model=model,
         detail=detail,
-        timeout=timeout,
+        timeout=remaining_timeout(),
+        total_timeout=remaining_timeout() if deadline is not None else None,
         root=root,
     )
     output: dict[str, dict[str, Any]] = {}
@@ -1070,7 +1125,8 @@ def verify_image_subject_batch(
                 base_url=base_url,
                 model=model,
                 detail="high",
-                timeout=timeout,
+                timeout=remaining_timeout(),
+                total_timeout=remaining_timeout() if deadline is not None else None,
                 root=root,
             )
             for item in ambiguous:
@@ -1093,12 +1149,16 @@ def verify_image_subject_batch(
     return output
 
 
-def vision_config_ready(*, enabled: bool, api_key: str) -> tuple[bool, str]:
+def vision_config_ready(
+    *, enabled: bool, api_key: str, base_url: str = "", command: str = "hermes"
+) -> tuple[bool, str]:
     """Report whether the vision gate is configured to run."""
     if not enabled:
         return False, "gate de visao desativado (EDITOR_VISION_ENABLED=false)"
     if not api_key:
         return False, "chave de visao ausente (OPENAI_API_KEY / EDITOR_VISION_API_KEY)"
+    if base_url == "hermes://cli" and not shutil.which(str(command or "hermes")):
+        return False, f"executável Hermes não encontrado: {command or 'hermes'}"
     return True, "gate de visao ativo"
 
 

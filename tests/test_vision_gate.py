@@ -562,6 +562,14 @@ class VisionGateTests(unittest.TestCase):
         ok, _ = vision_config_ready(enabled=True, api_key="x")
         self.assertTrue(ok)
 
+    @mock.patch("unicornio_editor.media.vision_gate.shutil.which", return_value=None)
+    def test_hermes_vision_config_requires_an_executable(self, _which):
+        ok, reason = vision_config_ready(
+            enabled=True, api_key="hermes", base_url="hermes://cli", command="hermes"
+        )
+        self.assertFalse(ok)
+        self.assertIn("executável Hermes", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

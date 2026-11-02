@@ -220,6 +220,24 @@ class CompactOutputTests(unittest.TestCase):
         }
         self.assertEqual(_monitor_line(report), "2 9")
 
+    def test_monitor_line_prefers_effective_v2_selection(self):
+        report = {
+            "eligible_rework_ids": [],
+            "v2_eligible_ids": [99],
+            "unprocessed_ids": [],
+            "posts": [{"id": 99, "v2": True, "state": "pending"}],
+            "v2_effective": {
+                "selected_ids": [],
+                "not_admitted": 1,
+                "cooldown": 0,
+                "quarantined": 0,
+                "recovery_blocked": 0,
+            },
+        }
+        line = _monitor_line(report)
+        self.assertNotIn("99 ", line)
+        self.assertIn("v2-blocked:admission=1", line)
+
     def test_monitor_line_wakes_for_old_pending(self):
         # Backlog antigo (>7d, fora de recent_unprocessed_ids) TAMBEM acorda o
         # agente: a linha do monitor usa unprocessed_ids (todo pending nao

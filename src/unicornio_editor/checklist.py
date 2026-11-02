@@ -1106,7 +1106,10 @@ def run_pre_publish_checklist(
     #     passed the deterministic relevance gate + source byte-verification,
     #     so the pixel check is reserved for the single most visible image.
     vision_ready, vision_msg = vision_config_ready(
-        enabled=config.vision_enabled, api_key=config.vision_api_key
+        enabled=config.vision_enabled,
+        api_key=config.vision_api_key,
+        base_url=getattr(config, "vision_base_url", ""),
+        command=getattr(config, "hermes_command", "hermes"),
     )
     prior_failures = [item for item in items if item["status"] == "fail"]
     search_exhaustion_candidate = bool(
@@ -1184,7 +1187,7 @@ def run_pre_publish_checklist(
             try:
                 vision_input = prepare_vision_image_input(
                     url,
-                    timeout=config.http_timeout,
+                    timeout=float(getattr(config, "vision_timeout", config.http_timeout)),
                     url_policy=config.remote_url_policy,
                 )
                 image_sha256 = image_input_sha256(vision_input)
@@ -1210,7 +1213,7 @@ def run_pre_publish_checklist(
                     api_key=config.vision_api_key,
                     base_url=config.vision_base_url,
                     model=config.vision_model,
-                    timeout=config.http_timeout,
+                    timeout=float(getattr(config, "vision_timeout", config.http_timeout)),
                     context=context,
                     category=category,
                     alt=subject,

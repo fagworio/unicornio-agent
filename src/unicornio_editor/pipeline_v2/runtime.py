@@ -3445,7 +3445,10 @@ class ProductionMediaResolver:
                 api_key=self.config.vision_api_key,
                 base_url=self.config.vision_base_url,
                 model=self.config.vision_model,
-                timeout=self.config.http_timeout,
+                timeout=float(getattr(self.config, "vision_timeout", self.config.http_timeout)),
+                total_timeout=float(
+                    getattr(self.config, "vision_batch_timeout_seconds", 600.0)
+                ),
                 detail=self.config.vision_detail,
                 allow_high=False,
                 root=self.root,
@@ -3462,7 +3465,10 @@ class ProductionMediaResolver:
                 api_key=self.config.vision_api_key,
                 base_url=self.config.vision_base_url,
                 model=self.config.vision_model,
-                timeout=self.config.http_timeout,
+                timeout=float(getattr(self.config, "vision_timeout", self.config.http_timeout)),
+                total_timeout=float(
+                    getattr(self.config, "vision_batch_timeout_seconds", 600.0)
+                ),
                 detail="high",
                 allow_high=False,
                 root=self.root,

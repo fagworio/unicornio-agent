@@ -2246,7 +2246,21 @@ def _monitor_line(report: dict, root: Path | None = None) -> str:
     bucket de parede — evita rework eterno queimando tokens.
     """
     parts = [str(pid) for pid in report.get("eligible_rework_ids", [])]
-    parts += [str(pid) for pid in report.get("v2_eligible_ids", [])]
+    effective_v2 = report.get("v2_effective")
+    if isinstance(effective_v2, dict):
+        # The V2 executor is authoritative. Do not wake Hermes merely because
+        # the legacy queue projection calls a pending post "eligible" when
+        # admission, quarantine, epoch, or recovery filters will reject it.
+        parts += [f"v2:{pid}" for pid in effective_v2.get("selected_ids", [])]
+        parts.append(
+            "v2-blocked:"
+            f"admission={int(effective_v2.get('not_admitted', 0) or 0)},"
+            f"cooldown={int(effective_v2.get('cooldown', 0) or 0)},"
+            f"quarantine={int(effective_v2.get('quarantined', 0) or 0)},"
+            f"recovery={int(effective_v2.get('recovery_blocked', 0) or 0)}"
+        )
+    else:
+        parts += [str(pid) for pid in report.get("v2_eligible_ids", [])]
     v2_ids = {
         int(row["id"]) for row in (report.get("posts") or [])
         if row.get("v2") and isinstance(row.get("id"), int)
@@ -3293,6 +3307,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
+                # Reuse the exact read-only admission/cooldown/quarantine
+                # selector used by v2-run. The old monitor only inspected the
+                # broad WordPress queue and could stay awake even when the
+                # executor selected zero posts.
+                try:
+                    from .pipeline_v2.runtime import run_v2
+
+                    preview = run_v2(
+                        client,
+                        config,
+                        args.root,
+                        limit=1000,
+                        preview=True,
+                    )
+                    if isinstance(preview, dict):
+                        effective = preview.get("queue")
+                        if isinstance(effective, dict):
+                            effective = dict(effective)
+                            effective["not_admitted"] = int(
+                                effective.get("admission_blocked", 0) or 0
+                            ) + int(effective.get("historical_excluded", 0) or 0)
+                            effective["recovery_blocked"] = int(
+                                effective.get("candidate_load_errors", 0)
+                                if isinstance(effective.get("candidate_load_errors"), int)
+                                else len(effective.get("candidate_load_errors") or [])
+                            ) + int(effective.get("epoch_protected_count", 0) or 0)
+                            report["v2_effective"] = effective
+                        elif preview.get("locked"):
+                            report["v2_effective"] = {
+                                "selected_ids": [],
+                                "not_admitted": 0,
+                                "cooldown": 0,
+                                "quarantined": 0,
+                                "recovery_blocked": 1,
+                                "preview_error": "v2_run_lock_busy",
+                            }
+                except Exception as exc:  # monitor must remain stable on diagnostics failure
+                    report["v2_effective"] = {
+                        "selected_ids": [],
+                        "not_admitted": 0,
+                        "cooldown": 0,
+                        "quarantined": 0,
+                        "recovery_blocked": 1,
+                        "preview_error": type(exc).__name__,
+                    }
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
                 print(_monitor_line(report, args.root))
@@ -4133,7 +4192,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     api_key=config.vision_api_key,
                     base_url=config.vision_base_url,
                     model=config.vision_model,
-                    timeout=config.http_timeout,
+                    timeout=float(getattr(config, "vision_timeout", config.http_timeout)),
+                    total_timeout=float(
+                        getattr(config, "vision_batch_timeout_seconds", 600.0)
+                    ),
                     detail=config.vision_detail,
                     allow_high=True,
                     root=args.root,

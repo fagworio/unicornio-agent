@@ -34,6 +34,11 @@ class Config:
     vision_api_key: str = field(default="", repr=False)
     vision_base_url: str = ""
     vision_model: str = "gpt-4o-mini"
+    # Vision has a separate budget from ordinary WordPress/HTTP requests.
+    # Hermes vision may start a tool call and wait for model output longer than
+    # the short REST timeout used by the rest of the pipeline.
+    vision_timeout: float = 120.0
+    vision_batch_timeout_seconds: float = 600.0
     vision_detail: str = "low"  # OpenAI image detail: low | high (low = 2833 tok)
     vision_mode: str = "ambiguous"  # ambiguous = pula apenas fontes oficiais fortemente evidenciadas
     vision_max_low: int = 12  # chamadas low por post (2/4/6 imagens + featured)
@@ -364,6 +369,10 @@ def load_config() -> Config:
         vision_api_key=effective_vision_key,
         vision_base_url=effective_vision_base,
         vision_model=effective_vision_model,
+        vision_timeout=_float("EDITOR_VISION_TIMEOUT", 120.0, 1.0, 900.0),
+        vision_batch_timeout_seconds=_float(
+            "EDITOR_VISION_BATCH_TIMEOUT_SECONDS", 600.0, 1.0, 3600.0
+        ),
         vision_provider=effective_vision_provider,
         hermes_vision_api_key=hermes_vision_key,
         hermes_vision_base_url=hermes_vision_base,

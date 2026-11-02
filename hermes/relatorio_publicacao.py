@@ -19,6 +19,39 @@ from pathlib import Path
 ROOT = Path(os.environ.get("UNICORNIO_EDITOR_ROOT", "/www/wwwroot/hermes/unicornio-agent"))
 STATE_DB = Path(os.environ.get("HERMES_STATE_DB", "/root/.hermes/state.db"))
 LOG = ROOT / "work" / "publish-window.log"
+EDITORIAL_JOB_NAME = "UnicornioHater editorial pending"
+
+
+def _editorial_job_id() -> str:
+    """Resolve stale env IDs against Hermes' local cron catalog.
+
+    A placeholder such as ``fake-editorial`` must never turn a real editorial
+    run into an apparently healthy ``0 runs`` report. Ambiguous catalogs stay
+    unknown instead of guessing a different job.
+    """
+    configured = os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip()
+    jobs_file = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "cron" / "jobs.json"
+    if not jobs_file.is_file():
+        return configured
+    try:
+        payload = json.loads(jobs_file.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return ""
+    ids = [
+        str(job.get("id") or "")
+        for job in (payload.get("jobs") or [])
+        if isinstance(job, dict)
+        and str(job.get("name") or "") == EDITORIAL_JOB_NAME
+        and str(job.get("id") or "")
+    ]
+    if configured and configured in ids:
+        return configured
+    # A catalog from an older Hermes may not carry the canonical name at all;
+    # preserve the explicit ID in that case. Only an ambiguous canonical
+    # catalog is treated as unknown instead of guessing.
+    if not ids:
+        return configured
+    return ids[0] if len(ids) == 1 else ""
 
 
 def _load_window_json() -> dict | None:
@@ -77,7 +110,7 @@ def _custo_24h() -> tuple[float, int, str] | None:
 
         measured = cost_measurement_in_last_24h(
             STATE_DB,
-            os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip(),
+            _editorial_job_id(),
             str(ROOT),
         )
         return measured

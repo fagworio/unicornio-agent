@@ -19,7 +19,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.min_skip_confidence, 0.90)
         self.assertEqual(config.site_topics, ())
         self.assertEqual(config.uncertain_second_pass_limit, 5)
+        self.assertEqual(config.vision_timeout, 120.0)
+        self.assertEqual(config.vision_batch_timeout_seconds, 600.0)
         self.assertIsNone(config.v2_admission_after)
+
+    def test_vision_timeouts_are_separate_from_http_timeout(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_HTTP_TIMEOUT": "15",
+                "EDITOR_VISION_TIMEOUT": "180",
+                "EDITOR_VISION_BATCH_TIMEOUT_SECONDS": "720",
+            },
+            clear=True,
+        ):
+            config = load_config()
+        self.assertEqual(config.http_timeout, 15.0)
+        self.assertEqual(config.vision_timeout, 180.0)
+        self.assertEqual(config.vision_batch_timeout_seconds, 720.0)
 
     def test_v2_admission_cutoff_is_normalized_to_utc(self):
         with patch.dict(

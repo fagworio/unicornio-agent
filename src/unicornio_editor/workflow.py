@@ -1932,6 +1932,8 @@ def _validate_featured_candidate_vision(
     vision_ready, vision_message = vision_config_ready(
         enabled=bool(getattr(config, "vision_enabled", False)),
         api_key=str(getattr(config, "vision_api_key", "")),
+        base_url=str(getattr(config, "vision_base_url", "")),
+        command=str(getattr(config, "hermes_command", "hermes")),
     )
     # An existing attachment is only fetched when the vision gate can actually
     # validate it. This keeps disabled-vision planning independent of the
@@ -2008,7 +2010,7 @@ def _validate_featured_candidate_vision(
                 api_key=str(getattr(config, "vision_api_key", "")),
                 base_url=str(getattr(config, "vision_base_url", "")),
                 model=str(getattr(config, "vision_model", "gpt-4o-mini")),
-                timeout=float(getattr(config, "http_timeout", 30)),
+                timeout=float(getattr(config, "vision_timeout", getattr(config, "http_timeout", 30))),
                 context=(
                     f"{editorial_context} | preflight da imagem de destaque"
                     if editorial_context else "preflight da imagem de destaque do artigo"
@@ -2696,7 +2698,7 @@ def _execute_media_plan(
                                     api_key=config.vision_api_key,
                                     base_url=config.vision_base_url,
                                     model=config.vision_model,
-                                    timeout=config.http_timeout,
+                                    timeout=float(getattr(config, "vision_timeout", config.http_timeout)),
                                     context=(
                                         f"{resolve_editorial_identity(vision_editorial).get('news_context')} | validação final da featured"
                                         if resolve_editorial_identity(vision_editorial).get("news_context")
@@ -4957,6 +4959,7 @@ def build_queue_report(
     except TypeError:
         awaiting_wp = []
     _pending_ids = {p.get("id") for p in posts if isinstance(p.get("id"), int)}
+    wordpress_pending_count = len(_pending_ids)
     for p in awaiting_wp:
         if isinstance(p.get("id"), int) and p["id"] not in _pending_ids:
             p["_wp_awaiting_human"] = True
@@ -5110,7 +5113,12 @@ def build_queue_report(
     uncertain_second_pass_ids.sort()
     skipped_ids.sort()
     return {
-        "pending": len(rows),
+        # Keep ``pending`` aligned with the native WordPress status. The
+        # combined queue still includes awaiting_human for diagnostics, but
+        # it must not inflate the pending counter shown to operators.
+        "pending": wordpress_pending_count,
+        "wordpress_pending": wordpress_pending_count,
+        "total_queue": len(rows),
         "edited": len(ready_ids),
         "blocked": len(blocked_ids),
         "partial": len(partial_ids),
