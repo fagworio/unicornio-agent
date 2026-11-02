@@ -61,6 +61,27 @@ class PublicationReportCostTests(unittest.TestCase):
         self.assertEqual((cost, runs), (0.20, 1))
         self.assertEqual(scope, "job editorial editorial")
 
+    def test_explicit_job_id_wins_over_ambient_catalog_when_db_proves_it_exists(self):
+        path = self._database(with_job_id=True)
+        with tempfile.TemporaryDirectory() as directory:
+            hermes_home = Path(directory) / "hermes"
+            (hermes_home / "cron").mkdir(parents=True)
+            (hermes_home / "cron" / "jobs.json").write_text(
+                json.dumps({"jobs": [{"id": "actual", "name": report.EDITORIAL_JOB_NAME}]}),
+                encoding="utf-8",
+            )
+            with patch.object(report, "STATE_DB", path), patch.dict(
+                os.environ,
+                {
+                    "HERMES_EDITORIAL_CRON_JOB_ID": "editorial",
+                    "HERMES_HOME": str(hermes_home),
+                },
+                clear=False,
+            ):
+                cost, runs, scope = report._custo_24h()
+        self.assertEqual((cost, runs), (0.20, 1))
+        self.assertEqual(scope, "job editorial editorial")
+
     def test_cost_uses_project_scope_when_schema_has_no_job(self):
         path = self._database(with_job_id=False, with_project=True)
         with patch.object(report, "STATE_DB", path), patch.dict(

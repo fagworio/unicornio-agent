@@ -22,6 +22,28 @@ LOG = ROOT / "work" / "publish-window.log"
 EDITORIAL_JOB_NAME = "UnicornioHater editorial pending"
 
 
+def _configured_job_exists_in_state_db(job_id: str) -> bool:
+    """Keep an explicit ID when the database being reported proves it exists."""
+    if not job_id or not STATE_DB.is_file():
+        return False
+    try:
+        with sqlite3.connect(STATE_DB) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+            job_column = next((name for name in ("cron_job_id", "job_id") if name in columns), None)
+            if job_column:
+                return db.execute(
+                    f"SELECT 1 FROM sessions WHERE {job_column} = ? LIMIT 1", (job_id,)
+                ).fetchone() is not None
+            if "id" in columns:
+                return db.execute(
+                    "SELECT 1 FROM sessions WHERE id LIKE ? LIMIT 1",
+                    (f"cron_{job_id}_%",),
+                ).fetchone() is not None
+    except (OSError, sqlite3.Error):
+        return False
+    return False
+
+
 def _editorial_job_id() -> str:
     """Resolve stale env IDs against Hermes' local cron catalog.
 
@@ -30,6 +52,8 @@ def _editorial_job_id() -> str:
     unknown instead of guessing a different job.
     """
     configured = os.environ.get("HERMES_EDITORIAL_CRON_JOB_ID", "").strip()
+    if _configured_job_exists_in_state_db(configured):
+        return configured
     jobs_file = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "cron" / "jobs.json"
     if not jobs_file.is_file():
         return configured
