@@ -18,6 +18,7 @@ from typing import Any
 
 from ..backup import atomic_write_text
 from .cycle_state import CycleState, CycleStateStore, SCHEMA_VERSION
+from .journal_reader import CycleJournalError, read_cycle_journal
 from .lock import RunSessionLock
 from .transaction_admin import (
     TransactionIsolationError,
@@ -157,6 +158,20 @@ def _apply_from_transition(root: Path, transition: dict[str, Any]) -> dict[str, 
     new_journal_path = archive / "new-journal.jsonl"
     if not new_state_path.is_file() or not new_journal_path.is_file():
         raise CycleAbandonError("transition is missing prepared new checkpoint")
+    try:
+        archived_journal = read_cycle_journal(archive / "journal.jsonl")
+        new_journal = read_cycle_journal(new_journal_path)
+        new_state = CycleState.from_dict(_read_json(new_state_path))
+    except (CycleJournalError, ValueError) as exc:
+        raise CycleAbandonError(f"transition journal/checkpoint is invalid: {exc}") from exc
+    if (
+        not archived_journal.records
+        or len(new_journal.records) != 1
+        or new_journal.records[0].event.get("event") != "cycle_started"
+        or new_journal.records[0].event.get("cycle_id") != new_state.cycle_id
+        or new_state.cycle_id != transition.get("new_cycle_id")
+    ):
+        raise CycleAbandonError("transition journal identity is invalid")
     atomic_write_text(state_path, new_state_path.read_text(encoding="utf-8"))
     atomic_write_text(journal_path, new_journal_path.read_text(encoding="utf-8"))
     if transition.get("post_115282_excluded"):
@@ -223,6 +238,11 @@ def abandon_cycle(
                 "wordpress_writes": 0,
             }
 
+        try:
+            store._events()
+        except RuntimeError as exc:
+            raise CycleAbandonError(f"active cycle journal is invalid: {exc}") from exc
+
         state = store.load()
         if state is None:
             raise CycleAbandonError("active checkpoint is absent")
@@ -233,6 +253,10 @@ def abandon_cycle(
             selected_ids=selected_ids,
             pending_round=pending_round,
         )
+        try:
+            store.audit_round_authorization(state)
+        except RuntimeError as exc:
+            raise CycleAbandonError(f"active checkpoint/journal authorization is invalid: {exc}") from exc
         if new_cycle_id is None:
             new_cycle_id = uuid.uuid4().hex
         if new_cycle_id == cycle_id:

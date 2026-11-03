@@ -50,6 +50,25 @@ keeps the round blocked. This audit never completes the authorization or
 executes Writer; the normal cycle may only resume the exact persisted selection
 after the evidence has been reviewed.
 
+### Aggregate journal format and integrity
+
+`work/v2-cycle/journal.jsonl` is an append-only history and may contain events
+from more than one cycle. New events are JSONL; the read-only parser also
+accepts valid historical pretty-printed JSON objects separated by JSON
+whitespace. Reading an older format never normalizes or rewrites it. Before a
+checkpoint save or journal append, the writer takes the journal file lock and
+validates the complete existing stream. It adds a record delimiter when a
+valid historical object has no trailing newline.
+
+Invalid UTF-8, truncated or malformed objects, duplicate object keys, exact
+duplicate event records, invalid event identities, or conflicting
+`cycle_id`/round/authorization/selection values fail closed. A damaged journal
+is not repaired by adding a newline or skipping a bad record: preserve its
+bytes and investigate from a read-only copy. Since the file can contain
+multiple cycles, authorization is correlated using the composite identity
+`cycle_id + round_number + authorization_id`; an event from another cycle is
+historical evidence, not authorization for the current checkpoint.
+
 ## Reconciling a stale per-post lock record
 
 Lock reconciliation is separate from cycle recovery and defaults to a
@@ -66,17 +85,57 @@ PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
 ```
 
 Apply only the exact `owner_record_sha256` returned by the preview, and only
-after reviewing the evidence:
+after reviewing the evidence. The apply call must also include the exact device,
+inode, mtime, and raw-record hash from that same preview:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
   v2-lock-reconcile POST_ID --root "$ROOT" --apply \
-  --expected-sha256 OWNER_RECORD_SHA256
+  --expected-sha256 OWNER_RECORD_SHA256 \
+  --expected-device DEVICE --expected-inode INODE \
+  --expected-mtime-ns MTIME_NS --expected-bytes-sha256 RAW_BYTES_SHA256
 ```
 
 The apply path reacquires the kernel lock and revalidates the exact record and
 process identity. It does not touch WordPress, cycle checkpoints, journals, or
 the MediaRegistry. Repeated apply is idempotent.
+
+An unreleased owner record with missing or unverifiable host/process identity
+is not eligible for this stale-owner command, even when its timestamp is old
+and the kernel lock is currently free. `LockManager.acquire()` will not
+replace it based on TTL. The separate legacy command is preview-only by
+default:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-legacy-reconcile POST_ID --root "$ROOT" \
+  > /caminho-protegido/legacy-lock-preview.json
+```
+
+Applying a legacy proposal requires the exact saved preview, an external proof
+bundle, and explicit operator/authorization identifiers:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-legacy-reconcile POST_ID --root "$ROOT" --apply \
+  --preview-evidence /caminho-protegido/legacy-lock-preview.json \
+  --external-proof /caminho-protegido/external-proof.json \
+  --authorized-by OPERADOR --authorization-id TICKET_AUDITAVEL
+```
+
+The external proof JSON must bind the same `post_id`, `owner_record_sha256`,
+`owner_record_bytes_sha256`, `owner_device`, `owner_inode`, and
+`owner_mtime_ns` from the preview, and assert `owner_source_verified: true`,
+`writer_processes_stopped: true`, plus a `proof_reference_sha256` identifying
+the separately retained evidence. The CLI checks the structure and exact
+snapshot binding; it cannot independently verify those external assertions or
+the truth of the operator's authorization. Do not fabricate the proof file.
+The apply path reopens and locks the file, repeats the byte/inode/mtime CAS,
+writes a redacted private audit record, updates the owner record in place, and
+checks readback. An interrupted or divergent audit stays blocked for review.
+Releasing a per-post lock is not proof that a cycle, Writer, WordPress post,
+or MediaRegistry operation is safe to replay; it does not resume a cycle or
+authorize a post write.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \

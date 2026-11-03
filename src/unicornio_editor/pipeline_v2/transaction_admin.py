@@ -23,6 +23,7 @@ from .cycle_runtime import (
     _post_no_write_evidence,
     _round_authorized_at,
 )
+from .journal_reader import CycleJournalError, read_cycle_journal
 from .lock import RunSessionLock
 
 
@@ -263,6 +264,10 @@ def _validate_checkpoint(
     policy_path = Path(root) / "config" / "v2-quarantine.json"
     if not all(path.is_file() for path in (state_path, journal_path, target_path, policy_path)):
         raise TransactionIsolationError("checkpoint, aggregate journal, target journal, or quarantine is missing")
+    try:
+        CycleStateStore(root)._events()
+    except RuntimeError as exc:
+        raise TransactionIsolationError(f"invalid cycle event journal: {exc}") from exc
     state = _read_json(state_path)
     pending = state.get("pending_round")
     if state.get("cycle_id") != cycle_id or state.get("status") != "running":
@@ -416,33 +421,15 @@ def _event_records(root: Path, isolation_id: str) -> list[dict[str, Any]]:
     path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
     if not path.is_file():
         return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            value = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if (
-            isinstance(value, dict)
-            and value.get("event") == ISOLATION_EVENT
-            and value.get("isolation_id") == isolation_id
-        ):
-            records.append(value)
-    return records
-
-
-def _ensure_journal_append_boundary(path: Path) -> None:
-    """Keep a torn final JSONL record from absorbing the recovery event."""
-    if not path.is_file() or path.stat().st_size == 0:
-        return
-    with path.open("rb") as handle:
-        handle.seek(-1, os.SEEK_END)
-        last_byte = handle.read(1)
-    if last_byte != b"\n":
-        with path.open("ab") as handle:
-            handle.write(b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+    try:
+        events = read_cycle_journal(path).events
+    except CycleJournalError as exc:
+        raise TransactionIsolationError(f"invalid cycle event journal: {exc}") from exc
+    return [
+        value for value in events
+        if value.get("event") == ISOLATION_EVENT
+        and value.get("isolation_id") == isolation_id
+    ]
 
 
 def _wp_state(post: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2044,7 +2031,6 @@ def _apply_transition(root: Path, transition: dict[str, Any], client) -> dict[st
             "archive_dir": transition["archive_dir"],
         }
         state.round_reports.append(report)
-        _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
     elif not events:
         # CycleStateStore writes the checkpoint before appending its event.
@@ -2069,7 +2055,6 @@ def _apply_transition(root: Path, transition: dict[str, Any], client) -> dict[st
                 "archive_dir": transition["archive_dir"],
             }
             state.round_reports.append(report)
-        _ensure_journal_append_boundary(store.journal_path)
         store.save(state, event=ISOLATION_EVENT, **fields)
     events = _event_records(root, str(transition["isolation_id"]))
     if len(events) != 1 or not _event_matches_transition(events[0], transition):

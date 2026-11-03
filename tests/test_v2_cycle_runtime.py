@@ -2220,6 +2220,46 @@ def test_no_write_proof_blocks_registry_rows_without_timestamps(tmp_path):
     ) is None
 
 
+def test_round_authorized_at_reads_multiline_cycle_journal_and_rejects_corruption(tmp_path):
+    journal = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    journal.parent.mkdir(parents=True)
+    rows = [
+        {
+            "event": "cycle_started",
+            "cycle_id": "cycle-time",
+            "at": "2026-11-03T10:00:00Z",
+            "schema_version": 1,
+            "note": "legacy",
+        },
+        {
+            "event": "round_authorized",
+            "cycle_id": "cycle-time",
+            "round_number": 1,
+            "authorization_id": "authorization-time",
+            "selected_ids": [77],
+            "at": "2026-11-03T10:01:00Z",
+        },
+    ]
+    journal.write_text(
+        json.dumps(rows[0], ensure_ascii=False, indent=2)
+        + "\n"
+        + json.dumps(rows[1], ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    before = journal.read_bytes()
+    assert cycle_runtime._round_authorized_at(
+        tmp_path, "cycle-time", 1, authorization_id="authorization-time"
+    ) == "2026-11-03T10:01:00Z"
+    assert journal.read_bytes() == before
+
+    journal.write_bytes(before + b"{truncated")
+    with pytest.raises(RuntimeError, match="cannot establish round authorization time"):
+        cycle_runtime._round_authorized_at(
+            tmp_path, "cycle-time", 1, authorization_id="authorization-time"
+        )
+
+
 def test_exact_current_registry_identity_overrides_same_second_timestamp_truncation(tmp_path):
     _empty_media_registry(tmp_path)
     authorized_at = "2026-10-23T23:37:47.140176+00:00"

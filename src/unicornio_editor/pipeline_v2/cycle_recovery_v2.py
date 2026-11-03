@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 
 from ..backup import atomic_write_text
 from .cycle_state import CycleState, SCHEMA_VERSION
+from .journal_reader import CycleJournalError, read_cycle_journal
 from .lock import RunSessionLock
 from .transaction_admin import _is_identityless_terminal_journal, _round_post_evidence
 
@@ -298,7 +299,23 @@ def _validate_active(root: Path, cycle_id: str, authorization_id: str, pending_r
         raise CycleRecoveryError("authorization identity does not match active checkpoint")
     if [int(v) for v in (pending.get("preview_selected_ids") or [])] != selected:
         raise CycleRecoveryError("selected IDs do not match active checkpoint")
-    return state, _sha256(state_path), _sha256(journal_path), _hash_value(_read_json(root / "config" / "v2-quarantine.json"))
+    try:
+        journal = read_cycle_journal(journal_path)
+    except CycleJournalError as exc:
+        raise CycleRecoveryError(f"active cycle journal is invalid: {exc}") from exc
+    matching_authorizations = [
+        event for event in journal.events
+        if event.get("cycle_id") == cycle_id
+        and event.get("event") == "round_authorized"
+        and event.get("round_number") == pending_round
+        and event.get("authorization_id") == authorization_id
+    ]
+    if (
+        len(matching_authorizations) != 1
+        or matching_authorizations[0].get("selected_ids") != selected
+    ):
+        raise CycleRecoveryError("active cycle journal does not uniquely authorize the checkpoint selection")
+    return state, _sha256(state_path), journal.sha256, _hash_value(_read_json(root / "config" / "v2-quarantine.json"))
 
 
 def _verify_completed(root: Path, transition: Mapping[str, Any]) -> None:
@@ -330,6 +347,20 @@ def _validate_prepared_archive(root: Path, transition: Mapping[str, Any]) -> tup
     new_journal_hash = _file_hash(new_journal_path)
     if new_state_hash != transition.get("new_state_prepared_sha256") or new_journal_hash != transition.get("new_journal_prepared_sha256"):
         raise CycleRecoveryError("prepared checkpoint snapshot hash diverged")
+    try:
+        archived_journal = read_cycle_journal(archive / "cycle" / "journal.jsonl")
+        new_journal = read_cycle_journal(new_journal_path)
+        new_state = CycleState.from_dict(_read_json(new_state_path))
+    except (CycleJournalError, ValueError, TypeError) as exc:
+        raise CycleRecoveryError(f"archived cycle journal/checkpoint is invalid: {exc}") from exc
+    if (
+        not archived_journal.records
+        or len(new_journal.records) != 1
+        or new_journal.records[0].event.get("event") != "cycle_started"
+        or new_journal.records[0].event.get("cycle_id") != new_state.cycle_id
+        or new_state.cycle_id != transition.get("new_cycle_id")
+    ):
+        raise CycleRecoveryError("prepared recovery journal identity is invalid")
     for name, expected in (manifest.get("archive_file_hashes") or {}).items():
         path = Path(name)
         if not path.is_absolute():

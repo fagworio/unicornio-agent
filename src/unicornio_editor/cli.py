@@ -201,6 +201,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="hash do owner_record_sha256 obtido no preview; obrigatório com --apply",
     )
+    v2_lock_reconcile_parser.add_argument("--expected-device", type=int, default=None)
+    v2_lock_reconcile_parser.add_argument("--expected-inode", type=int, default=None)
+    v2_lock_reconcile_parser.add_argument("--expected-mtime-ns", type=int, default=None)
+    v2_lock_reconcile_parser.add_argument("--expected-bytes-sha256", default=None)
+
+    v2_legacy_lock_parser = subparsers.add_parser(
+        "v2-lock-legacy-reconcile",
+        help="prepara ou aplica recuperação explicitamente autorizada de lock legado sem identidade completa",
+    )
+    v2_legacy_lock_parser.add_argument("post_id", type=int)
+    v2_legacy_lock_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_legacy_lock_parser.add_argument("--apply", action="store_true")
+    v2_legacy_lock_parser.add_argument("--preview-evidence", type=Path, default=None)
+    v2_legacy_lock_parser.add_argument("--external-proof", type=Path, default=None)
+    v2_legacy_lock_parser.add_argument("--authorized-by", default=None)
+    v2_legacy_lock_parser.add_argument("--authorization-id", default=None)
 
     v2_audit_pending_round_parser = subparsers.add_parser(
         "v2-audit-pending-round",
@@ -3104,14 +3120,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get("status") == "ok" else 2
-        if args.command == "v2-lock-reconcile":
-            from .locking import reconcile_stale_post_lock
+        if args.command in {"v2-lock-reconcile", "v2-lock-legacy-reconcile"}:
+            from .locking import reconcile_legacy_post_lock, reconcile_stale_post_lock
+
+            if args.command == "v2-lock-legacy-reconcile":
+                def load_private_object(path: Path | None) -> dict[str, Any] | None:
+                    if path is None:
+                        return None
+                    if path.is_symlink() or not path.is_file():
+                        raise ValueError("evidence file must be a regular non-symlink file")
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(value, dict):
+                        raise ValueError("evidence file must contain a JSON object")
+                    return value
+
+                try:
+                    result = reconcile_legacy_post_lock(
+                        args.root,
+                        args.post_id,
+                        apply=bool(args.apply),
+                        preview=load_private_object(args.preview_evidence),
+                        external_proof=load_private_object(args.external_proof),
+                        authorized_by=args.authorized_by,
+                        authorization_id=args.authorization_id,
+                    )
+                except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+                    result = {
+                        "status": "blocked",
+                        "reason": "authorization_evidence_invalid",
+                        "error_class": type(exc).__name__,
+                        "lock_writes": 0,
+                    }
+                print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+                return 0 if result.get("status") in {
+                    "legacy_recovery_proposed", "reconciled", "already_reconciled", "already_released", "no_lock_record"
+                } else 2
 
             result = reconcile_stale_post_lock(
                 args.root,
                 args.post_id,
                 apply=bool(args.apply),
                 expected_sha256=args.expected_sha256,
+                expected_device=args.expected_device,
+                expected_inode=args.expected_inode,
+                expected_mtime_ns=args.expected_mtime_ns,
+                expected_bytes_sha256=args.expected_bytes_sha256,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
             return 0 if result.get("status") in {

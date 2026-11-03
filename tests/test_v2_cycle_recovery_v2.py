@@ -30,7 +30,18 @@ def _root(tmp_path: Path) -> Path:
         "schema_version": 3, "cycle_id": CYCLE, "status": "running", "phase": "ADMISSION",
         "pending_round": {"round_number": 3, "authorization_id": AUTH, "preview_selected_ids": SELECTED},
     }))
-    (tmp_path / "work" / "v2-cycle" / "journal.jsonl").write_text("{}\n")
+    journal_events = [
+        {"event": "cycle_started", "cycle_id": CYCLE},
+        {"event": "round_started", "cycle_id": CYCLE, "round_number": 3, "round_intent_id": AUTH},
+        {"event": "round_authorization_prepared", "cycle_id": CYCLE, "round_number": 3,
+         "round_intent_id": AUTH, "authorization_id": AUTH, "selected_ids": SELECTED},
+        {"event": "round_authorized", "cycle_id": CYCLE, "round_number": 3,
+         "round_intent_id": AUTH, "authorization_id": AUTH, "selected_ids": SELECTED},
+    ]
+    (tmp_path / "work" / "v2-cycle" / "journal.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in journal_events),
+        encoding="utf-8",
+    )
     (tmp_path / "config" / "v2-quarantine.json").write_text(json.dumps({
         "version": 1, "posts": [{"post_id": i, "reason_code": "legacy", "reason": "existing"} for i in range(200, 209)],
         "release_history": [],
@@ -364,7 +375,7 @@ def test_real_reconciler_fixture_uses_journals_registry_and_wordpress_readback(t
             conn.execute("INSERT INTO media_runs VALUES (?,?,?,?,?,?,?)", (run_id, post_id, "2026-01-01T00:00:00Z", CYCLE, 3, AUTH, "started"))
             conn.execute("INSERT INTO media_operations VALUES (?,?,?,?,?,?,?,?,?,?,?)", (post_id, run_id, CYCLE, 3, AUTH, "2026-01-01T00:00:00Z", "started", 0, 0, None, "started"))
         conn.commit()
-    (root / "work" / "v2-cycle" / "journal.jsonl").write_text(json.dumps({"event": "round_authorized", "cycle_id": CYCLE, "round_number": 3, "authorization_id": AUTH, "at": "2026-01-01T00:00:00+00:00"}) + "\n")
+    (root / "work" / "v2-cycle" / "journal.jsonl").write_text(json.dumps({"event": "round_authorized", "cycle_id": CYCLE, "round_number": 3, "authorization_id": AUTH, "selected_ids": SELECTED, "at": "2026-01-01T00:00:00+00:00"}) + "\n")
     state_value = {"phase": "media", "state": "pending"}
     for post_id in (101, 102, 103, 104):
         (root / "work" / "v2-journal" / f"{post_id}.json").write_text(json.dumps({

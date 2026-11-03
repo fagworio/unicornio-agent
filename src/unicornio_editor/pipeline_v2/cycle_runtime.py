@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping
 from ..locking import LockError, LockManager
 from .cycle import CycleConfig, CycleReport, CycleRoundRequest, CycleRoundResult, run_cycle
 from .cycle_state import CycleState, CycleStateStore
+from .journal_reader import CycleJournalError, read_cycle_journal
 from .lock import RunSessionLock
 from .model import LifecycleState, WorkState
 from .production import ProductionCandidateReader
@@ -164,14 +165,10 @@ def _round_authorized_at(
     if not path.is_file():
         return None
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except (TypeError, ValueError):
-            continue
+        events = read_cycle_journal(path).events
+    except CycleJournalError as exc:
+        raise RuntimeError(f"cannot establish round authorization time: {exc}") from exc
+    for event in reversed(events):
         if (
             event.get("event") == event_name
             and str(event.get("cycle_id") or "") == str(cycle_id)

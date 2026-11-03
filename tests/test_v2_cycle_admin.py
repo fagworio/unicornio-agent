@@ -23,13 +23,17 @@ def _fixture(root: Path):
     state = CycleState(cycle_id=OLD, phase="DRAINING", status="running", config={"ready_target": 5})
     state.rounds = 3
     state.seen_post_ids = list(SELECTED)
-    state.pending_round = {
+    store.save(state, event="cycle_started")
+    request = {
         "round_number": 4,
-        "authorization_id": AUTH,
-        "preview_selected_ids": list(SELECTED),
-        "request": {"max_new_posts": 0, "batch_size": 5},
+        "max_new_posts": 0,
+        "batch_size": 5,
+        "seen_post_ids": list(SELECTED),
+        "excluded_post_ids": [],
+        "attempts_by_post": {},
     }
-    store.save(state, event="round_authorized", round_number=4, authorization_id=AUTH, selected_ids=SELECTED)
+    store.start_round(state, round_number=4, request=request, authorization_id=AUTH)
+    store.authorize_round(state, SELECTED)
     return store
 
 

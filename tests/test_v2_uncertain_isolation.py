@@ -1402,37 +1402,24 @@ def test_crash_after_checkpoint_before_event_resumes_idempotently(monkeypatch, t
     assert json.loads((tmp_path / "work/v2-journal" / f"{POST}.json").read_text())["status"] == "committing"
 
 
-def test_torn_event_append_is_separated_before_recovery_event(monkeypatch, tmp_path):
+def test_torn_event_append_blocks_recovery_without_rewriting_evidence(tmp_path):
     _fixture(tmp_path)
     args = _args(tmp_path)
     preview = isolate_uncertain_transaction(**args, apply=False)
-    original_save = CycleStateStore.save
-
-    def crash_during_event_append(self, state, *, event, **fields):
-        state.touch()
-        self.directory.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            self.state_path,
-            json.dumps(state.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        )
-        with self.journal_path.open("a", encoding="utf-8") as handle:
-            handle.write('{"event":"transaction_uncertain_isolated"')
-            handle.flush()
-        raise RuntimeError("crash during event append")
-
-    monkeypatch.setattr(CycleStateStore, "save", crash_during_event_append)
-    with pytest.raises(RuntimeError, match="during event append"):
+    store = CycleStateStore(tmp_path)
+    state_before = store.state_path.read_bytes()
+    with store.journal_path.open("ab") as handle:
+        handle.write(b'{"event":"transaction_uncertain_isolated"')
+    journal_after_corruption = store.journal_path.read_bytes()
+    quarantine_path = tmp_path / "config" / "v2-quarantine.json"
+    quarantine_before = quarantine_path.read_bytes()
+    with pytest.raises(TransactionIsolationError, match="invalid cycle event journal|invalid cycle journal"):
         isolate_uncertain_transaction(
             **args, apply=True, preview=preview, operator_authorization="joao"
         )
-    monkeypatch.setattr(CycleStateStore, "save", original_save)
-    resumed = isolate_uncertain_transaction(
-        **args, apply=True, preview=preview, operator_authorization="joao"
-    )
-    assert resumed["status"] == "applied"
-    lines = (tmp_path / "work/v2-cycle/journal.jsonl").read_text().splitlines()
-    assert lines[-2] == '{"event":"transaction_uncertain_isolated"'
-    assert len(transaction_admin._event_records(tmp_path, preview["isolation_id"])) == 1
+    assert store.state_path.read_bytes() == state_before
+    assert store.journal_path.read_bytes() == journal_after_corruption
+    assert quarantine_path.read_bytes() == quarantine_before
 
 
 def test_crash_after_event_before_transition_phase_does_not_duplicate_event(monkeypatch, tmp_path):
@@ -1462,6 +1449,37 @@ def test_crash_after_event_before_transition_phase_does_not_duplicate_event(monk
         if json.loads(line).get("event") == "transaction_uncertain_isolated"
     ]
     assert len(events) == 1
+
+
+def test_isolation_event_reader_accepts_legacy_multiline_but_rejects_corruption(tmp_path):
+    path = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [
+        {"event": "cycle_started", "cycle_id": CYCLE, "at": "2026-11-03T10:00:00Z"},
+        {
+            "event": "transaction_uncertain_isolated",
+            "cycle_id": CYCLE,
+            "isolation_id": "isolation-test-0001",
+            "post_id": POST,
+            "round_number": 1,
+            "authorization_id": AUTH,
+            "selected_ids": [POST],
+            "at": "2026-11-03T10:01:00Z",
+        },
+    ]
+    path.write_text(
+        json.dumps(rows[0], ensure_ascii=False, indent=2)
+        + "\n"
+        + json.dumps(rows[1], ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    assert len(transaction_admin._event_records(tmp_path, "isolation-test-0001")) == 1
+    before = path.read_bytes()
+    path.write_bytes(before + b"\xff")
+    with pytest.raises(TransactionIsolationError, match="invalid cycle event journal"):
+        transaction_admin._event_records(tmp_path, "isolation-test-0001")
+    assert path.read_bytes() == before + b"\xff"
 
 
 def test_partial_archive_is_resumed_without_replacing_snapshot(monkeypatch, tmp_path):

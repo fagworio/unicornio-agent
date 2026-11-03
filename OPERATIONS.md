@@ -231,3 +231,71 @@ idempotente da mesma operação é `already_applied`; uma operação com outro
 `replay: false` são obrigatórios tanto no preview
 quanto no resultado da aplicação. Não execute `--fresh`, Writer, upload ou
 retry como parte desta transição.
+
+### Integridade do journal agregado do ciclo
+
+`work/v2-cycle/journal.jsonl` é histórico append-only e pode conter eventos de
+vários ciclos. O leitor estrito aceita JSONL e objetos JSON históricos
+multilinha, sem reformatar o arquivo. Os novos appends são serializados com
+`flock`, validam o fluxo completo antes de salvar o checkpoint e acrescentam
+um delimitador quando um objeto legado válido não termina com newline.
+
+UTF-8 inválido, evento truncado, JSON malformado, chave duplicada, evento
+duplicado ou identidade conflitante bloqueiam a operação; não acrescente
+newline, não descarte linhas e não edite o journal manualmente. Faça primeiro
+uma cópia somente leitura e investigue a origem. A validação correlaciona cada
+autorização por `cycle_id + round_number + authorization_id`; múltiplos ciclos
+históricos no mesmo arquivo são normais, mas não podem autorizar um checkpoint
+de outro ciclo.
+
+### Ciclo de vida e reconciliação dos locks por post
+
+`work/locks/<post_id>.lock` combina o lock do kernel com um registro de owner.
+TTL é apenas informação de heartbeat; não autoriza substituir um registro
+unreleased. Identidades completas podem ser classificadas como ativas ou
+encerradas com prova local de processo/PID. Locks legados sem host ou identidade
+de processo são `legacy_unverifiable` e permanecem bloqueados, mesmo quando o
+lock do kernel está livre. Não remova o arquivo nem tente novamente o Writer
+para contornar esse bloqueio.
+
+`v2-lock-reconcile` é para owner local cujo processo encerrado foi comprovado.
+O preview deve ser preservado e o apply exige o hash lógico e o snapshot exato
+do arquivo:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-reconcile POST_ID --root "$ROOT"
+
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-reconcile POST_ID --root "$ROOT" --apply \
+  --expected-sha256 OWNER_RECORD_SHA256 \
+  --expected-device DEVICE --expected-inode INODE \
+  --expected-mtime-ns MTIME_NS --expected-bytes-sha256 RAW_BYTES_SHA256
+```
+
+Para registros legados ambíguos, `v2-lock-legacy-reconcile` só propõe uma
+recuperação. Apply é uma ação administrativa separada: requer o preview exato,
+um arquivo externo de prova que vincule os hashes/inode/mtime observados e
+declare que a origem foi verificada e todos os writers estão parados, mais
+`--authorized-by` e `--authorization-id`. O programa valida formato e vínculo
+ao snapshot, mas não consegue verificar a verdade dessas afirmações externas;
+elas precisam ser confirmadas independentemente e referenciadas por hash. A
+auditoria local é privada (modo 0600), redigida e idempotente. Divergência,
+auditoria interrompida ou readback inconsistente permanece bloqueada.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-legacy-reconcile POST_ID --root "$ROOT" \
+  > /caminho-protegido/legacy-lock-preview.json
+
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-legacy-reconcile POST_ID --root "$ROOT" --apply \
+  --preview-evidence /caminho-protegido/legacy-lock-preview.json \
+  --external-proof /caminho-protegido/external-proof.json \
+  --authorized-by OPERADOR --authorization-id TICKET_AUDITAVEL
+```
+
+Reconciliar um lock só atualiza seu registro administrativo; não confirma o
+estado do ciclo, do WordPress ou do MediaRegistry, não remove quarentena e não
+autoriza replay. Esta documentação não implica nem executa operação em
+produção.

@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..backup import atomic_write_text
+from ..locking import classify_lock_owner_record
 from .cycle_recovery_v2 import _not_executed_evidence_is_complete
 from .cycle_state import CycleStateStore
+from .journal_reader import CycleJournalError, read_cycle_journal
 from .lock import RunSessionLock
 from .quarantine import load_quarantine
 from .transaction_admin import _hash_value, _round_post_evidence
@@ -183,6 +185,13 @@ def _probe_lock(
             acquired = True
         except BlockingIOError:
             return "busy"
+        locked_stat = os.fstat(fd)
+        locked_path_stat = path.stat()
+        if (locked_stat.st_dev, locked_stat.st_ino) != (
+            locked_path_stat.st_dev,
+            locked_path_stat.st_ino,
+        ):
+            return "ambiguous_replaced_during_probe"
         os.lseek(fd, 0, os.SEEK_SET)
         raw = os.read(fd, 8192)
         if raw:
@@ -190,14 +199,16 @@ def _probe_lock(
                 record = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
                 record = None
-            if isinstance(record, dict) and record.get("token") and not record.get("released"):
-                return "ambiguous_stale_owner_record"
-            if not isinstance(record, dict) and time.time() - fd_stat.st_mtime <= legacy_ttl:
-                return "ambiguous_recent_lock_record"
+            owner_status, _reason = classify_lock_owner_record(record)
+            if owner_status == "released":
+                return "unlocked"
+            return owner_status
         elif empty_recent_is_ambiguous and time.time() - fd_stat.st_mtime <= legacy_ttl:
             # LockManager treats a recently-created empty file as an
             # uninitialized legacy owner; do the same without taking it over.
             return "ambiguous_recent_lock_record"
+        elif empty_recent_is_ambiguous:
+            return "corrupt"
         return "unlocked"
     except OSError:
         return "unavailable"
@@ -248,6 +259,43 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
             "cycle_journal": _file_sha256(journal_path, required=False),
             "quarantine": _file_sha256(quarantine_path, required=False),
         }
+        if before_hashes["cycle_journal"] is None:
+            return {
+                "status": "blocked",
+                "reason": "journal_corrupt_or_missing",
+                "journal_error": "required_cycle_journal_missing",
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "wordpress_writes": 0,
+                "registry_writes": 0,
+                "replay": False,
+            }
+        try:
+            cycle_journal = read_cycle_journal(journal_path)
+        except CycleJournalError as exc:
+            return {
+                "status": "blocked",
+                "reason": "journal_corrupt",
+                "journal_error": exc.reason,
+                "journal_line": exc.line,
+                "journal_byte_offset": exc.byte_offset,
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "wordpress_writes": 0,
+                "registry_writes": 0,
+                "replay": False,
+            }
+        if cycle_journal.sha256 != before_hashes["cycle_journal"]:
+            return {
+                "status": "blocked",
+                "reason": "journal_changed_during_initial_read",
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "wordpress_writes": 0,
+                "registry_writes": 0,
+                "replay": False,
+            }
+        journal_format = cycle_journal.format
         state = CycleStateStore(root).load()
         pending = state.pending_round if state and isinstance(state.pending_round, Mapping) else None
         if not state or not pending:
@@ -364,6 +412,7 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
             return {
                 "status": "preauthorization_interrupted",
                 "classification": "SAFE_TO_RESUME_PREVIEW",
+                "journal_format": "journal_format_legacy_valid" if journal_format != "jsonl" else "jsonl_valid",
                 "read_only": True,
                 "git_sha": _git_head(root),
                 "cycle_id": state.cycle_id,
@@ -601,6 +650,7 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
             }
         return {
             "status": "ok" if stable else "snapshot_changed",
+            "journal_format": "journal_format_legacy_valid" if journal_format != "jsonl" else "jsonl_valid",
             "read_only": True,
             "git_sha": _git_head(root),
             "cycle_id": state.cycle_id,

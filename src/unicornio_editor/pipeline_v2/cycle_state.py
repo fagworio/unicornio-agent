@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import fcntl
 import os
 import re
 import sqlite3
+import stat
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +24,7 @@ from urllib.parse import quote
 
 from ..backup import atomic_write_text
 from .epoch_protection import load_epoch_protection
+from .journal_reader import CycleJournalError, parse_cycle_journal_bytes, read_cycle_journal
 
 
 SCHEMA_VERSION = 1
@@ -159,8 +163,10 @@ class CycleStateStore:
     def save(self, state: CycleState, *, event: str, **fields: Any) -> None:
         state.touch()
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._write_checkpoint(state)
-        self._append_event(state, event, **fields)
+        with self._locked_journal() as (fd, raw):
+            payload = self._event_payload(raw, state, event, **fields)
+            self._write_checkpoint(state)
+            self._append_event_payload_locked(fd, payload)
 
     def _write_checkpoint(self, state: CycleState) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -171,6 +177,72 @@ class CycleStateStore:
 
     def _append_event(self, state: CycleState, event: str, **fields: Any) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
+        with self._locked_journal() as (fd, raw):
+            self._append_event_locked(fd, raw, state, event, **fields)
+
+    @contextmanager
+    def _locked_journal(self):
+        """Serialize journal writers and validate the existing boundary first."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.journal_path, flags, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            info = os.fstat(fd)
+            current = self.journal_path.stat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise RuntimeError("cycle journal identity changed before append")
+            if info.st_size > 32 * 1024 * 1024:
+                raise RuntimeError("cycle journal exceeds size limit")
+            chunks: list[bytes] = []
+            remaining = 32 * 1024 * 1024 + 1
+            os.lseek(fd, 0, os.SEEK_SET)
+            while remaining > 0:
+                chunk = os.read(fd, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > 32 * 1024 * 1024:
+                raise RuntimeError("cycle journal exceeds size limit")
+            after_read = os.fstat(fd)
+            after_path = self.journal_path.stat()
+            if (
+                (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                != (after_read.st_dev, after_read.st_ino, after_read.st_size, after_read.st_mtime_ns)
+                or (after_read.st_dev, after_read.st_ino) != (after_path.st_dev, after_path.st_ino)
+                or len(raw) != after_read.st_size
+            ):
+                raise RuntimeError("cycle journal changed while acquiring append snapshot")
+            try:
+                parse_cycle_journal_bytes(raw)
+            except CycleJournalError as exc:
+                raise RuntimeError(f"cannot append to invalid cycle journal: {exc}") from exc
+            yield fd, raw
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def _append_event_locked(
+        self,
+        fd: int,
+        existing: bytes,
+        state: CycleState,
+        event: str,
+        **fields: Any,
+    ) -> None:
+        payload = self._event_payload(existing, state, event, **fields)
+        self._append_event_payload_locked(fd, payload)
+
+    @staticmethod
+    def _event_payload(existing: bytes, state: CycleState, event: str, **fields: Any) -> bytes:
         journal_event = {
             "schema_version": SCHEMA_VERSION,
             "cycle_id": state.cycle_id,
@@ -178,24 +250,32 @@ class CycleStateStore:
             "at": state.updated_at,
             **fields,
         }
-        with self.journal_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(journal_event, ensure_ascii=False, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        payload = (json.dumps(journal_event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        if existing and existing[-1] not in b" \t\r\n":
+            payload = b"\n" + payload
+        try:
+            parse_cycle_journal_bytes(existing + payload)
+        except CycleJournalError as exc:
+            raise RuntimeError(f"new cycle event would invalidate journal: {exc}") from exc
+        return payload
+
+    @staticmethod
+    def _append_event_payload_locked(fd: int, payload: bytes) -> None:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while appending cycle journal")
+            view = view[written:]
+        os.fsync(fd)
 
     def _events(self) -> list[dict[str, Any]]:
         if not self.journal_path.is_file():
             return []
-        events: list[dict[str, Any]] = []
-        for line_number, line in enumerate(self.journal_path.read_text(encoding="utf-8").splitlines(), 1):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(f"invalid cycle journal line {line_number}") from exc
-            if not isinstance(value, dict):
-                raise RuntimeError(f"invalid cycle journal event at line {line_number}")
-            events.append(value)
-        return events
+        try:
+            return read_cycle_journal(self.journal_path).events
+        except CycleJournalError as exc:
+            raise RuntimeError(f"invalid cycle journal: {exc}") from exc
 
     @staticmethod
     def _open_authorizations(

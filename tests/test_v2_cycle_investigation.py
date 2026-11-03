@@ -311,6 +311,55 @@ def test_pending_round_audit_classifies_pre_authorization_interruption_read_only
     assert after == before
 
 
+def test_pending_round_audit_reads_legacy_multiline_event_and_reports_format(tmp_path):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="legacy-multiline-audit")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    events = store._events()
+    pretty = json.dumps(
+        {**events[0], "legacy_fixture": "compat"}, ensure_ascii=False, indent=2
+    )
+    rest = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in events[1:])
+    store.journal_path.write_text(pretty + "\n" + rest, encoding="utf-8")
+    before = store.journal_path.read_bytes()
+
+    report = audit_pending_round_readonly(tmp_path, object())
+
+    assert report["status"] == "preauthorization_interrupted"
+    assert report["journal_format"] == "journal_format_legacy_valid"
+    assert store.journal_path.read_bytes() == before
+
+
+def test_pending_round_audit_reports_corrupt_journal_before_any_wordpress_read(tmp_path):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="corrupt-audit")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    store.journal_path.write_bytes(store.journal_path.read_bytes() + b"{truncated")
+    before = store.journal_path.read_bytes()
+
+    class NoReadback:
+        def get_post(self, _post_id):
+            raise AssertionError("corrupt cycle journal must block before WordPress readback")
+
+    report = audit_pending_round_readonly(tmp_path, NoReadback())
+    assert report["status"] == "blocked"
+    assert report["reason"] == "journal_corrupt"
+    assert report["journal_error"] == "invalid_or_truncated_json_event"
+    assert report["wordpress_writes"] == report["registry_writes"] == 0
+    assert report["replay"] is False
+    assert store.journal_path.read_bytes() == before
+
+
 def test_pending_round_audit_blocks_journaled_auth_absent_from_checkpoint(tmp_path):
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     (tmp_path / "config" / "v2-quarantine.json").write_text(
