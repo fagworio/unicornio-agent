@@ -415,11 +415,11 @@ def _read_private_audit(path: Path) -> dict[str, Any]:
             raise ValueError("audit_changed_during_read")
     finally:
         os.close(fd)
-        value = json.loads(
-            raw.decode("utf-8", errors="strict"),
-            object_pairs_hook=_strict_json_object,
-            parse_constant=_reject_nonstandard_json,
-        )
+    value = json.loads(
+        raw.decode("utf-8", errors="strict"),
+        object_pairs_hook=_strict_json_object,
+        parse_constant=_reject_nonstandard_json,
+    )
     if not isinstance(value, dict):
         raise ValueError("audit_not_object")
     return value

@@ -23,11 +23,36 @@ from unicornio_editor.cli import (
     _monitor_line,
     _record_cmd_output,
     _v2_checkpoint_monitor_projection,
+    main,
 )
 from unicornio_editor.pipeline_v2.cycle import CycleReport
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_legacy_lock_preview_is_successful_read_only_cli_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path = root / "work" / "locks" / "115975.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text(
+                json.dumps({"token": "legacy-token", "pid": 1942977, "released": False}),
+                encoding="utf-8",
+            )
+            before = lock_path.read_bytes()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main([
+                    "v2-lock-legacy-reconcile", "115975", "--root", str(root)
+                ])
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(result["status"], "legacy_recovery_proposed")
+            self.assertTrue(result["read_only"])
+            self.assertFalse(result["automatic_recovery"])
+            self.assertEqual(result["lock_writes"], 0)
+            self.assertEqual(lock_path.read_bytes(), before)
+
     def test_json_default_serializes_cycle_report(self):
         payload = json.dumps(
             CycleReport(ready_count=1, phase="COMPLETED"),

@@ -15,6 +15,7 @@ from unicornio_editor.locking import (
     LockError,
     LockManager,
     _process_start_identity,
+    _read_private_audit,
     classify_lock_owner_record,
     reconcile_legacy_post_lock,
     reconcile_stale_post_lock,
@@ -58,6 +59,28 @@ def _legacy_external_proof(preview: dict) -> dict:
 
 
 class SnapshotAndLockTests(unittest.TestCase):
+    def test_private_audit_preserves_io_error_before_payload_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+
+            original_close = os.close
+            closed_fds: list[int] = []
+
+            def close_and_record(fd: int) -> None:
+                closed_fds.append(fd)
+                original_close(fd)
+
+            with mock.patch(
+                "unicornio_editor.locking.os.fstat",
+                side_effect=OSError("injected fstat failure"),
+            ), mock.patch("unicornio_editor.locking.os.close", side_effect=close_and_record):
+                with self.assertRaisesRegex(OSError, "injected fstat failure"):
+                    _read_private_audit(path)
+
+            self.assertEqual(len(closed_fds), 1)
+
     def test_snapshot_is_atomic_json_and_can_be_loaded(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SnapshotStore(Path(directory))
