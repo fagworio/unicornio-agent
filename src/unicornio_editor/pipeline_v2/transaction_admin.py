@@ -893,6 +893,7 @@ def _round_post_evidence(
     pending_round: int,
     target_journal: Mapping[str, Any] | None = None,
     capture_media_artifacts: bool = False,
+    prepared_authorization: bool = False,
 ) -> dict[str, Any]:
     journal_path = Path(root) / "work" / "v2-journal" / f"{int(post_id)}.json"
     journal = None
@@ -917,6 +918,7 @@ def _round_post_evidence(
         raise TransactionIsolationError(f"post journal identity diverged for {post_id}")
     run_id = str((journal or {}).get("run_id") or "") or None
     registry = _registry_snapshot(root, post_id=post_id, run_id=run_id)
+    wordpress_readbacks = 1
     post = client.get_post(int(post_id))
     if not isinstance(post, dict) or int(post.get("id") or 0) != int(post_id):
         raise TransactionIsolationError(f"WordPress post identity diverged for {post_id}")
@@ -946,6 +948,9 @@ def _round_post_evidence(
     artifacts: dict[str, Any] | None = None
     attachments: dict[str, Any] | None = None
     prewriter_media_isolation: dict[str, Any] | None = None
+    no_write_baseline_event = (
+        "round_authorization_prepared" if prepared_authorization else "round_authorized"
+    )
     if capture_media_artifacts:
         artifacts = _media_artifact_snapshot(root, int(post_id))
         media_ids = {int(value) for value in artifacts.get("partial_media_ids", [])}
@@ -984,6 +989,7 @@ def _round_post_evidence(
         )
 
     if journal is None:
+        wordpress_readbacks += 1
         no_write_evidence = _post_no_write_evidence(
             client,
             root,
@@ -991,6 +997,7 @@ def _round_post_evidence(
             cycle_id=cycle_id,
             round_number=int(pending_round),
             authorization_id=authorization_id,
+            baseline_event=no_write_baseline_event,
         )
         if no_write_evidence is not None:
             classification = "NOT_EXECUTED"
@@ -1073,6 +1080,7 @@ def _round_post_evidence(
                 authorized_at=authorization_at,
             )
         if historical_journal_evidence is not None:
+            wordpress_readbacks += 1
             no_write_evidence = _post_no_write_evidence(
                 client,
                 root,
@@ -1080,6 +1088,7 @@ def _round_post_evidence(
                 cycle_id=cycle_id,
                 round_number=int(pending_round),
                 authorization_id=authorization_id,
+                baseline_event=no_write_baseline_event,
             )
             if no_write_evidence is not None:
                 classification = "NOT_EXECUTED"
@@ -1087,6 +1096,7 @@ def _round_post_evidence(
             else:
                 reason = "historical_journal_but_current_authorization_effects_unresolved"
         elif correlation == "uncertain" and _is_identityless_terminal_journal(journal):
+            wordpress_readbacks += 1
             no_write_evidence = _post_no_write_evidence(
                 client,
                 root,
@@ -1094,6 +1104,7 @@ def _round_post_evidence(
                 cycle_id=cycle_id,
                 round_number=int(pending_round),
                 authorization_id=authorization_id,
+                baseline_event=no_write_baseline_event,
             )
             if no_write_evidence is not None:
                 classification = "NOT_EXECUTED"
@@ -1107,6 +1118,7 @@ def _round_post_evidence(
 
     return {
         "post_id": int(post_id),
+        "wordpress_readbacks": wordpress_readbacks,
         "classification": classification,
         "reason": reason,
         "journal": {

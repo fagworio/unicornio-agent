@@ -189,6 +189,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     v2_investigation_queue_parser.add_argument("--root", type=Path, default=Path("."))
 
+    v2_lock_reconcile_parser = subparsers.add_parser(
+        "v2-lock-reconcile",
+        help="inspeciona um lock por post e reconcilia registro de owner comprovadamente morto",
+    )
+    v2_lock_reconcile_parser.add_argument("post_id", type=int)
+    v2_lock_reconcile_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_lock_reconcile_parser.add_argument("--apply", action="store_true")
+    v2_lock_reconcile_parser.add_argument(
+        "--expected-sha256",
+        default=None,
+        help="hash do owner_record_sha256 obtido no preview; obrigatório com --apply",
+    )
+
     v2_audit_pending_round_parser = subparsers.add_parser(
         "v2-audit-pending-round",
         help="classifica duas vezes a rodada V2 pendente com WordPress readback; não escreve nem recupera",
@@ -3091,6 +3104,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get("status") == "ok" else 2
+        if args.command == "v2-lock-reconcile":
+            from .locking import reconcile_stale_post_lock
+
+            result = reconcile_stale_post_lock(
+                args.root,
+                args.post_id,
+                apply=bool(args.apply),
+                expected_sha256=args.expected_sha256,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+            return 0 if result.get("status") in {
+                "reconciliation_available", "reconciled", "already_reconciled", "already_released", "no_lock_record"
+            } else 2
         _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):
@@ -3101,7 +3127,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             result = audit_pending_round_readonly(args.root, client)
             print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
-            return 0 if result.get("status") in {"ok", "no_pending_round"} else 2
+            return 0 if result.get("status") in {
+                "ok", "no_pending_round", "preauthorization_interrupted"
+            } else 2
         elif args.command == "v2-investigation-queue":
             from .pipeline_v2.cycle_investigation import build_investigation_queue
 

@@ -71,6 +71,40 @@ def _empty_media_registry(root):
         )
 
 
+def test_release_post_lock_batch_surfaces_errors_after_releasing_every_handle():
+    released = []
+
+    class Handle:
+        def __init__(self, post_id, fails=False):
+            self.post_id = post_id
+            self.fails = fails
+
+        def __exit__(self, *_args):
+            released.append(self.post_id)
+            if self.fails:
+                raise LockError("release token changed")
+
+    with pytest.raises(LockError, match="failed to release 1 post lock"):
+        cycle_runtime._release_post_lock_batch(
+            {1: Handle(1), 2: Handle(2, fails=True), 3: Handle(3)}
+        )
+    assert released == [3, 2, 1]
+
+
+def test_release_post_lock_batch_attaches_cleanup_failure_without_masking_work_error():
+    class Handle:
+        def __exit__(self, *_args):
+            raise LockError("release token changed")
+
+    with pytest.raises(ValueError, match="writer failed") as captured:
+        try:
+            raise ValueError("writer failed")
+        except ValueError:
+            cycle_runtime._release_post_lock_batch({1: Handle()})
+            raise
+    assert any("post lock cleanup also failed" in note for note in captured.value.__notes__)
+
+
 def test_registry_temporal_audit_distinguishes_accepted_unapplied_from_unknown(tmp_path):
     _empty_media_registry(tmp_path)
     with sqlite3.connect(tmp_path / "work" / "media_registry.sqlite") as db:
@@ -236,15 +270,96 @@ def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path
     assert [call["preview"] for call in calls] == [True, False, True, False]
     assert all(call["cycle_id"] == report.cycle_id for call in calls)
     assert [call["cycle_round"] for call in calls] == [1, 1, 2, 2]
-    assert calls[0]["authorization_id"]
-    assert calls[0]["authorization_id"] == calls[1]["authorization_id"]
-    assert calls[2]["authorization_id"]
-    assert calls[2]["authorization_id"] == calls[3]["authorization_id"]
-    assert calls[0]["authorization_id"] != calls[2]["authorization_id"]
+    assert calls[0]["authorization_id"] is None
+    assert calls[2]["authorization_id"] is None
+    assert calls[1]["authorization_id"]
+    assert calls[3]["authorization_id"]
+    assert calls[1]["authorization_id"] != calls[3]["authorization_id"]
     state = json.loads((tmp_path / "work" / "v2-cycle" / "state.json").read_text())
     assert state["status"] == "completed"
     assert state["stop_reason"] == "ready_target"
     assert state["rounds"] == 2
+
+
+def test_interrupted_pre_authorization_round_resumes_preview_before_write(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="resume-before-auth")
+    store.start_round(
+        state,
+        round_number=1,
+        request={
+            "round_number": 1,
+            "batch_size": 1,
+            "max_new_posts": 1,
+            "seen_post_ids": [],
+            "excluded_post_ids": [],
+            "attempts_by_post": {},
+        },
+    )
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        if kwargs["preview"]:
+            return {"preview": True, "queue": {"selected_ids": [41]}}
+        return {"details": [_ready_detail(41)], "locked": False, "selection_mismatch": False}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    report = cycle_runtime.run_v2_cycle(
+        object(),
+        _config(),
+        tmp_path,
+        cycle_config=cycle_runtime.CycleConfig(
+            ready_target=1,
+            new_batch_size=1,
+            max_unique_posts=1,
+            max_total_attempts=1,
+            max_attempts_per_post_per_cycle=1,
+            max_stagnant_rounds=1,
+            max_drain_rounds=1,
+            max_duration_seconds=60,
+        ),
+    )
+    assert report.stop_reason == "ready_target"
+    assert [call["preview"] for call in calls] == [True, False]
+    assert calls[0]["authorization_id"] is None
+    assert calls[1]["authorization_id"]
+    persisted = store.load()
+    assert persisted.pending_round is None
+    events = [
+        json.loads(line)["event"]
+        for line in store.journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "round_authorization_prepared" in events
+    assert "round_authorized" in events
+
+
+def test_pre_authorization_checkpoint_journal_divergence_blocks_without_preview(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="preauth-divergent")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+    store._append_event(
+        state,
+        "round_authorized",
+        round_number=1,
+        selected_ids=[41],
+        authorization_id=intent_id,
+        round_intent_id=intent_id,
+    )
+    state_before = store.state_path.read_bytes()
+    journal_before = store.journal_path.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "run_v2",
+        lambda *_args, **kwargs: calls.append(kwargs) or {},
+    )
+    report = cycle_runtime.run_v2_cycle(object(), _config(), tmp_path)
+    assert report["stop_reason"] == "recovery_uncertain"
+    assert calls == []
+    assert report["checkpoint_transitioned"] is False
+    assert store.state_path.read_bytes() == state_before
+    assert store.journal_path.read_bytes() == journal_before
 
 
 def test_production_cycle_refuses_fresh_when_interrupted_checkpoint_exists(tmp_path, monkeypatch):

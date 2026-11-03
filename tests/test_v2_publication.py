@@ -270,12 +270,13 @@ def test_lost_post_lock_blocks_guarded_wordpress_mutation(tmp_path):
     lock_root = tmp_path / "locks"
     handle = LockManager(lock_root, ttl=60).acquire(client.post["id"])
     guarded = _guard_post_client(client, handle)
-    with handle:
-        replacement = lock_root / "replacement.lock"
-        replacement.write_text('{"token":"new-owner","released":true}', encoding="utf-8")
-        replacement.replace(lock_root / f"{client.post['id']}.lock")
-        with pytest.raises(LockError, match="replaced"):
-            guarded.update_post(client.post["id"], {"meta": {"_hermes_state": "blocked"}})
+    with pytest.raises(LockError, match="replaced"):
+        with handle:
+            replacement = lock_root / "replacement.lock"
+            replacement.write_text('{"token":"new-owner","released":true}', encoding="utf-8")
+            replacement.replace(lock_root / f"{client.post['id']}.lock")
+            with pytest.raises(LockError, match="replaced"):
+                guarded.update_post(client.post["id"], {"meta": {"_hermes_state": "blocked"}})
     assert client.updates == []
 
 

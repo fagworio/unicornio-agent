@@ -106,6 +106,7 @@ def _safe_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
     journal = evidence.get("journal") if isinstance(evidence.get("journal"), Mapping) else {}
     wordpress = evidence.get("wordpress") if isinstance(evidence.get("wordpress"), Mapping) else {}
     registry = evidence.get("registry") if isinstance(evidence.get("registry"), Mapping) else {}
+    no_write = evidence.get("no_write_evidence") if isinstance(evidence.get("no_write_evidence"), Mapping) else {}
     return {
         "classification": evidence.get("classification"),
         "reason": (
@@ -132,6 +133,7 @@ def _safe_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
             **({"snapshot_sha256": registry["snapshot_sha256"]}
                if re.fullmatch(r"[0-9a-f]{64}", str(registry.get("snapshot_sha256") or "")) else {}),
         },
+        "no_write_proof_of_absence": no_write.get("proof_of_absence") is True,
     }
 
 
@@ -270,6 +272,123 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
         selected_ids = pending.get("preview_selected_ids")
         authorization_id = str(pending.get("authorization_id") or "")
         pending_round = pending.get("round_number")
+        if selected_ids is None:
+            registry_path = root / "work" / "media_registry.sqlite"
+            post_journal_dir = root / "work" / "v2-journal"
+            initial_post_journals = sorted(post_journal_dir.glob("*.json")) if post_journal_dir.is_dir() else []
+            initial_post_hash = hashlib.sha256(
+                "\n".join(
+                    f"{path.name}:{_file_sha256(path)}" for path in initial_post_journals
+                ).encode("utf-8")
+            ).hexdigest()
+            initial_registry_hash = _file_sha256(registry_path, required=False)
+            try:
+                preauthorization = CycleStateStore(root).validate_pre_authorization(state)
+            except RuntimeError as exc:
+                return {
+                    "status": "blocked",
+                    "reason": "preauthorization_checkpoint_journal_mismatch",
+                    "detail": str(exc)[:240],
+                    "read_only": True,
+                    "git_sha": _git_head(root),
+                    "cycle_id": state.cycle_id,
+                    "pending_round": pending_round,
+                    "authorization_id": None,
+                    "selected_ids": None,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            global_lock = _probe_lock(
+                root / "work" / "v2-run.lock",
+                empty_recent_is_ambiguous=False,
+            )
+            if global_lock not in {"unlocked", "missing"} or (root / "work" / "v2-maintenance.lock").exists():
+                return {
+                    "status": "busy_or_ambiguous",
+                    "reason": "cycle_or_maintenance_lock_not_idle",
+                    "lock_status": global_lock,
+                    "read_only": True,
+                    "git_sha": _git_head(root),
+                    "cycle_id": state.cycle_id,
+                    "pending_round": pending_round,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            post_journal_dir = root / "work" / "v2-journal"
+            post_journals = sorted(post_journal_dir.glob("*.json")) if post_journal_dir.is_dir() else []
+            registry_path = root / "work" / "media_registry.sqlite"
+            post_journal_inventory = "\n".join(
+                f"{path.name}:{_file_sha256(path)}" for path in post_journals
+            )
+            registry_hash = _file_sha256(registry_path, required=False)
+            after_hashes = {
+                "state": _file_sha256(state_path),
+                "cycle_journal": _file_sha256(journal_path),
+                "quarantine": _file_sha256(quarantine_path),
+                "registry": _file_sha256(registry_path, required=False),
+                "post_journals": hashlib.sha256(post_journal_inventory.encode("utf-8")).hexdigest(),
+            }
+            if initial_post_hash != after_hashes["post_journals"]:
+                return {
+                    "status": "blocked",
+                    "reason": "preauthorization_evidence_changed_during_audit",
+                    "read_only": True,
+                    "git_sha": _git_head(root),
+                    "cycle_id": state.cycle_id,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            if any(before_hashes[key] != after_hashes[key] for key in before_hashes) or initial_registry_hash != after_hashes["registry"]:
+                return {
+                    "status": "blocked",
+                    "reason": "preauthorization_evidence_changed_during_audit",
+                    "read_only": True,
+                    "git_sha": _git_head(root),
+                    "cycle_id": state.cycle_id,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            if _probe_lock(
+                root / "work" / "v2-run.lock",
+                empty_recent_is_ambiguous=False,
+            ) not in {"unlocked", "missing"}:
+                return {
+                    "status": "busy_or_ambiguous",
+                    "reason": "cycle_lock_changed_during_audit",
+                    "read_only": True,
+                    "git_sha": _git_head(root),
+                    "cycle_id": state.cycle_id,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            return {
+                "status": "preauthorization_interrupted",
+                "classification": "SAFE_TO_RESUME_PREVIEW",
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "cycle_id": state.cycle_id,
+                "pending_round": pending_round,
+                "round_intent_id": preauthorization["round_intent_id"],
+                "authorization_id": None,
+                "selected_ids": None,
+                "evidence": {
+                    "matching_round_started_event": True,
+                    "round_authorized_event_after_start": False,
+                    "global_lock": global_lock,
+                    "post_journal_count": len(post_journals),
+                    "post_journal_inventory_sha256": after_hashes["post_journals"],
+                    "media_registry_sha256": registry_hash,
+                    "cycle_checkpoint_sha256": before_hashes["state"],
+                    "cycle_journal_sha256": before_hashes["cycle_journal"],
+                    "quarantine_sha256": before_hashes["quarantine"],
+                    "writer_possible_by_protocol": False,
+                },
+                "wordpress_writes": 0,
+                "wordpress_readbacks": 0,
+                "registry_writes": 0,
+                "replay": False,
+                "next_action": "resume_preview_only; authorization will be created only after selection is persisted",
+            }
         if (
             not isinstance(selected_ids, list)
             or not selected_ids
@@ -287,6 +406,24 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
                 "git_sha": _git_head(root),
                 "wordpress_writes": 0,
             }
+
+        try:
+            authorization_audit = CycleStateStore(root).audit_round_authorization(state)
+        except RuntimeError as exc:
+            return {
+                "status": "blocked",
+                "reason": "round_authorization_checkpoint_journal_mismatch",
+                "detail": str(exc)[:240],
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "cycle_id": state.cycle_id,
+                "authorization_id": authorization_id,
+                "pending_round": pending_round,
+                "selected_ids": selected_ids,
+                "wordpress_writes": 0,
+                "replay": False,
+            }
+        prepared_authorization = authorization_audit.get("status") == "prepared_recoverable"
 
         quarantine, quarantine_error = load_quarantine(quarantine_path)
         if quarantine_error:
@@ -359,6 +496,7 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
                 authorization_id=authorization_id,
                 pending_round=pending_round,
                 capture_media_artifacts=False,
+                prepared_authorization=prepared_authorization,
             )
             for post_id in selected_ids
         ]
@@ -371,6 +509,7 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
                 authorization_id=authorization_id,
                 pending_round=pending_round,
                 capture_media_artifacts=False,
+                prepared_authorization=prepared_authorization,
             )
             for post_id in selected_ids
         ]
@@ -417,6 +556,49 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
             })
         if not stable:
             classification_counts = {"UNSTABLE": len(selected_ids)}
+        wordpress_readbacks = sum(
+            int(evidence.get("wordpress_readbacks") or 0)
+            for evidence in first_pass + second_pass
+        )
+        if prepared_authorization:
+            no_write_proven = bool(
+                stable
+                and len(posts) == len(selected_ids)
+                and all(row["no_write_proven"] and row["registry_complete"] for row in posts)
+            )
+            return {
+                "status": (
+                    "authorization_prepared_recoverable"
+                    if no_write_proven else "blocked"
+                ),
+                "reason": None if no_write_proven else "prepared_round_effects_or_evidence_uncertain",
+                "read_only": True,
+                "git_sha": _git_head(root),
+                "cycle_id": state.cycle_id,
+                "authorization_id": authorization_id,
+                "pending_round": pending_round,
+                "selected_ids": selected_ids,
+                "checkpoint_hashes": before_hashes,
+                "lock_status": {"before": locks_before, "after": locks_after},
+                "classification_counts": dict(sorted(classification_counts.items())),
+                "posts": posts,
+                "evidence": {
+                    "prepared_event_matches_checkpoint": True,
+                    "round_authorized_event_present": False,
+                    "checkpoint_and_journal_stable": stable,
+                    "all_posts_independently_prove_no_write": no_write_proven,
+                    "writer_started": False if no_write_proven else None,
+                },
+                "wordpress_writes": 0,
+                "wordpress_readbacks": wordpress_readbacks,
+                "registry_writes": 0,
+                "replay": False,
+                "automatic_recovery": False,
+                "next_action": (
+                    "resume_the_exact_prepared_authorization_without_new_selection"
+                    if no_write_proven else "preserve_checkpoint_and_escalate_uncertain_post_evidence"
+                ),
+            }
         return {
             "status": "ok" if stable else "snapshot_changed",
             "read_only": True,
@@ -434,6 +616,7 @@ def audit_pending_round_readonly(root: str | Path, client) -> dict[str, Any]:
             "classification_counts": dict(sorted(classification_counts.items())),
             "posts": posts,
             "wordpress_writes": 0,
+            "wordpress_readbacks": wordpress_readbacks,
             "replay": False,
             "safe_for_operator_review": stable and all(row["registry_complete"] for row in posts),
             "automatic_recovery": False,

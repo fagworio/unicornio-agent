@@ -1,4 +1,6 @@
 import json
+import sqlite3
+import stat
 
 import pytest
 
@@ -36,6 +38,7 @@ def test_cycle_state_store_writes_atomic_checkpoint_and_append_only_journal(tmp_
     assert events == [
         "cycle_started",
         "round_started",
+        "round_authorization_prepared",
         "round_authorized",
         "round_completed",
         "cycle_finished",
@@ -141,3 +144,233 @@ def test_cycle_store_invalidates_authorization_as_distinct_audit_event(tmp_path)
     assert events[-1]["event"] == "round_authorization_invalidated"
     assert events[-1]["executed_ids"] == []
     assert not any(event["event"] == "round_completed" for event in events)
+
+
+def test_round_intent_is_not_authorization_until_selection_is_durable(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="intent-only")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+    assert state.pending_round["authorization_id"] is None
+    assert state.pending_round["preview_selected_ids"] is None
+    start_event = json.loads(store.journal_path.read_text().splitlines()[-1])
+    assert start_event["event"] == "round_started"
+    assert start_event["round_intent_id"] == intent_id
+    assert "authorization_id" not in start_event
+    with pytest.raises(RuntimeError, match="authorized selection"):
+        store.validate_round_authorization(state)
+
+
+def test_pre_authorization_round_resumes_only_with_matching_start_event(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="resume-preview")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    assert store.validate_pre_authorization(state)["status"] == "preauthorization_safe_to_resume"
+    store.authorize_round(state, [21])
+    assert store.validate_round_authorization(state) == state.pending_round["authorization_id"]
+    with pytest.raises(RuntimeError, match="cannot replace"):
+        store.authorize_round(state, [22])
+
+
+def test_checkpoint_journal_authorization_divergence_fails_closed(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="journal-divergence")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    store.authorize_round(state, [21])
+    rows = [json.loads(line) for line in store.journal_path.read_text().splitlines()]
+    rows = [
+        row for row in rows
+        if row["event"] not in {"round_authorization_prepared", "round_authorized"}
+    ]
+    store.journal_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(RuntimeError, match="missing its prepared journal event"):
+        store.validate_round_authorization(state)
+
+
+def test_interrupted_authorization_is_completed_from_matching_prepared_event(tmp_path, monkeypatch):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="auth-interrupted")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    original_append = store._append_event
+
+    def interrupt_before_authorized(current, event, **fields):
+        if event == "round_authorized":
+            raise OSError("simulated interruption")
+        return original_append(current, event, **fields)
+
+    monkeypatch.setattr(store, "_append_event", interrupt_before_authorized)
+    with pytest.raises(OSError, match="simulated interruption"):
+        store.authorize_round(state, [31])
+    assert state.pending_round["authorization_status"] == "prepared"
+    monkeypatch.setattr(store, "_append_event", original_append)
+    recovered_id = store.validate_round_authorization(state)
+    assert recovered_id == state.pending_round["authorization_id"]
+    assert state.pending_round["authorization_status"] == "authorized"
+    events = [json.loads(line)["event"] for line in store.journal_path.read_text().splitlines()]
+    assert events.count("round_authorization_prepared") == 1
+    assert events.count("round_authorized") == 1
+
+
+def test_orphan_prepared_event_blocks_cycle_without_pending_checkpoint(tmp_path, monkeypatch):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="orphan-prepared")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    original_append = store._append_event
+
+    def interrupt(current, event, **fields):
+        if event == "round_authorized":
+            raise OSError("simulated crash after prepare")
+        return original_append(current, event, **fields)
+
+    monkeypatch.setattr(store, "_append_event", interrupt)
+    with pytest.raises(OSError):
+        store.authorize_round(state, [41])
+    state.pending_round = None  # checkpoint/journal mismatch under audit
+    store._write_checkpoint(state)
+
+    with pytest.raises(RuntimeError, match="prepared cycle authorization"):
+        store.validate_no_unresolved_authorizations(state)
+
+
+def test_later_preview_cannot_pass_an_earlier_orphan_prepared_event(tmp_path, monkeypatch):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="prior-orphan-prepared")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    original_append = store._append_event
+
+    def interrupt(current, event, **fields):
+        if event == "round_authorized":
+            raise OSError("simulated crash after prepare")
+        return original_append(current, event, **fields)
+
+    monkeypatch.setattr(store, "_append_event", interrupt)
+    with pytest.raises(OSError):
+        store.authorize_round(state, [43])
+    monkeypatch.setattr(store, "_append_event", original_append)
+    state.pending_round = None
+    state.rounds = 1
+    store._write_checkpoint(state)
+    store.start_round(state, round_number=2, request={"batch_size": 1})
+
+    with pytest.raises(RuntimeError, match="prepared cycle authorization"):
+        store.validate_pre_authorization(state)
+
+
+def test_round_intent_mismatch_in_authorized_event_fails_closed(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="auth-intent-mismatch")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    store.authorize_round(state, [42])
+    events = [json.loads(line) for line in store.journal_path.read_text().splitlines()]
+    for event in events:
+        if event["event"] == "round_authorized":
+            event["round_intent_id"] = "different-intent"
+    store.journal_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+    with pytest.raises(RuntimeError, match="conflicts with checkpoint"):
+        store.validate_round_authorization(state)
+
+
+def test_pre_authorization_journal_with_authorized_event_is_blocked(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="preauth-divergence")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+    store._append_event(
+        state,
+        "round_authorized",
+        round_number=1,
+        selected_ids=[44],
+        authorization_id=intent_id,
+        round_intent_id=intent_id,
+    )
+    with pytest.raises(RuntimeError, match="authorization absent from checkpoint"):
+        store.validate_pre_authorization(state)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_start", "does not match cycle journal"),
+        ("invalid_time", "timestamp is invalid"),
+        ("divergent_request", "request diverges"),
+    ],
+)
+def test_pre_authorization_checkpoint_requires_complete_matching_event(tmp_path, mutation, message):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id=f"invalid-{mutation}")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    rows = [json.loads(line) for line in store.journal_path.read_text().splitlines()]
+    if mutation == "missing_start":
+        rows = [row for row in rows if row["event"] != "round_started"]
+        store.journal_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    elif mutation == "invalid_time":
+        for row in rows:
+            if row["event"] == "round_started":
+                row["at"] = "not-a-timestamp"
+        store.journal_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    else:
+        state.pending_round["request"]["batch_size"] = 9
+        store._write_checkpoint(state)
+    with pytest.raises(RuntimeError, match=message):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_blocks_if_earlier_authorized_round_is_unresolved(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 2}, cycle_id="earlier-round-open")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    store.authorize_round(state, [61])
+    state.pending_round = None
+    state.rounds = 1
+    store.start_round(state, round_number=2, request={"batch_size": 1})
+    with pytest.raises(RuntimeError, match="earlier authorized round remains unresolved"):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_blocks_post_journal_or_registry_changes_after_start(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="post-start-effects")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    post_journal = tmp_path / "work" / "v2-journal" / "77.json"
+    post_journal.parent.mkdir(parents=True, exist_ok=True)
+    post_journal.write_text(json.dumps({"post_id": 77, "writer_started": True}))
+    with pytest.raises(RuntimeError, match="post or media evidence changed"):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_blocks_media_registry_effect_after_start(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="media-after-start")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    with sqlite3.connect(registry) as db:
+        db.execute("CREATE TABLE unexpected_media_effect (id INTEGER)")
+    with pytest.raises(RuntimeError, match="post or media evidence changed"):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_recovery_archives_checkpoint_journal_registry_and_preview(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="archive-preview")
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(registry) as db:
+        db.execute("CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT)")
+        db.execute("INSERT INTO evidence(value) VALUES ('preserved')")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+
+    result = store.archive_pre_authorization(state)
+    archive = tmp_path / result["path"]
+    manifest = json.loads((archive / "manifest.json").read_text())
+    assert result["status"] == "archived"
+    assert manifest["round_intent_id"] == intent_id
+    assert manifest["files"]["media_registry.sqlite"]["status"] == "archived"
+    assert manifest["preview"]["status"] == "not_run_yet"
+    assert stat.S_IMODE((archive / "state.json").stat().st_mode) == 0o600
+    with sqlite3.connect(archive / "media_registry.sqlite") as db:
+        assert db.execute("SELECT value FROM evidence").fetchone()[0] == "preserved"
+
+    store.record_round_preview(state, [51], preview_sha256="a" * 64)
+    manifest = json.loads((archive / "manifest.json").read_text())
+    assert manifest["preview"]["selected_ids"] == [51]
+    assert manifest["preview"]["sha256"] == "a" * 64
+    assert store.validate_pre_authorization(state)["status"] == "preauthorization_safe_to_resume"

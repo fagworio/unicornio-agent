@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 
+import pytest
+
 from unicornio_editor.media.registry import connect
 from unicornio_editor.pipeline_v2.cycle_investigation import (
     _probe_lock,
@@ -255,6 +257,18 @@ def test_lock_probe_uses_read_only_shared_lock_and_fails_closed(tmp_path):
     assert _probe_lock(post_lock.path) == "unlocked"
 
 
+def test_five_post_lock_contexts_leave_released_records_not_ambiguous_owners(tmp_path):
+    lock_root = tmp_path / "work" / "locks"
+    manager = LockManager(lock_root, ttl=60)
+    for post_id in range(115970, 115975):
+        with manager.acquire(post_id):
+            pass
+        lock_path = lock_root / f"{post_id}.lock"
+        record = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert record["released"] is True
+        assert _probe_lock(lock_path) == "unlocked"
+
+
 def test_pending_round_audit_cli_is_exposed_as_read_only_preflight(tmp_path, monkeypatch, capsys):
     parsed = build_parser().parse_args(["v2-audit-pending-round", "--root", str(tmp_path)])
     assert parsed.command == "v2-audit-pending-round"
@@ -268,6 +282,228 @@ def test_pending_round_audit_cli_is_exposed_as_read_only_preflight(tmp_path, mon
     assert output["read_only"] is True
     assert output["wordpress_writes"] == 0
     assert output["replay"] is False
+
+
+def test_pending_round_audit_classifies_pre_authorization_interruption_read_only(tmp_path):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="audit-preauthorization")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    before = {
+        "state": hashlib.sha256(store.state_path.read_bytes()).hexdigest(),
+        "journal": hashlib.sha256(store.journal_path.read_bytes()).hexdigest(),
+    }
+    report = audit_pending_round_readonly(tmp_path, object())
+    after = {
+        "state": hashlib.sha256(store.state_path.read_bytes()).hexdigest(),
+        "journal": hashlib.sha256(store.journal_path.read_bytes()).hexdigest(),
+    }
+    assert report["status"] == "preauthorization_interrupted"
+    assert report["classification"] == "SAFE_TO_RESUME_PREVIEW"
+    assert report["authorization_id"] is None
+    assert report["selected_ids"] is None
+    assert report["wordpress_writes"] == report["wordpress_readbacks"] == 0
+    assert report["evidence"]["writer_possible_by_protocol"] is False
+    assert after == before
+
+
+def test_pending_round_audit_blocks_journaled_auth_absent_from_checkpoint(tmp_path):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="audit-divergent")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+    store._append_event(
+        state,
+        "round_authorized",
+        round_number=1,
+        selected_ids=[49],
+        authorization_id=intent_id,
+        round_intent_id=intent_id,
+    )
+    report = audit_pending_round_readonly(tmp_path, object())
+    assert report["status"] == "blocked"
+    assert report["reason"] == "preauthorization_checkpoint_journal_mismatch"
+    assert report["wordpress_writes"] == 0
+
+
+def test_pending_round_audit_blocks_authorization_journal_mismatch_before_readback(tmp_path):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="authorized-audit-divergence")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    store.authorize_round(state, [59])
+    rows = [json.loads(line) for line in store.journal_path.read_text().splitlines()]
+    rows = [row for row in rows if row["event"] != "round_authorized"]
+    store.journal_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    class NoReadback:
+        reads = 0
+
+        def get_post(self, _post_id):
+            self.reads += 1
+            raise AssertionError("divergent authorization must block before WordPress readback")
+
+    client = NoReadback()
+    report = audit_pending_round_readonly(tmp_path, client)
+    assert report["status"] == "blocked"
+    assert report["reason"] == "round_authorization_checkpoint_journal_mismatch"
+    assert client.reads == 0
+
+
+def _prepared_authorization_fixture(tmp_path, monkeypatch, *, post_id=115980):
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="prepared-audit-cycle")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    original_append = store._append_event
+
+    def interrupt_before_authorized(state_arg, event, **payload):
+        if event == "round_authorized":
+            raise OSError("simulated interruption after durable preparation")
+        return original_append(state_arg, event, **payload)
+
+    monkeypatch.setattr(store, "_append_event", interrupt_before_authorized)
+    with pytest.raises(OSError, match="simulated interruption"):
+        store.authorize_round(state, [post_id])
+    # Schema exists and is complete, but a zero-row Registry is not evidence of
+    # a write; the audit still needs to establish this against the prepared time.
+    with connect(tmp_path):
+        pass
+    return store
+
+
+def test_prepared_authorization_requires_two_pass_no_write_proof(tmp_path, monkeypatch):
+    store = _prepared_authorization_fixture(tmp_path, monkeypatch)
+
+    class PendingReadback:
+        writes = 0
+
+        def __init__(self):
+            self.reads = 0
+
+        def get_post(self, post_id):
+            self.reads += 1
+            return {"id": post_id, "status": "pending", "meta": {}}
+
+    client = PendingReadback()
+    checkpoint_before = store.state_path.read_bytes()
+    journal_before = store.journal_path.read_bytes()
+
+    report = audit_pending_round_readonly(tmp_path, client)
+
+    assert report["status"] == "authorization_prepared_recoverable"
+    assert report["reason"] is None
+    assert report["evidence"]["all_posts_independently_prove_no_write"] is True
+    assert report["evidence"]["writer_started"] is False
+    assert report["posts"][0]["classification"] == "NOT_EXECUTED"
+    assert report["posts"][0]["no_write_proven"] is True
+    assert report["posts"][0]["registry_complete"] is True
+    assert report["wordpress_readbacks"] == client.reads == 4
+    assert report["wordpress_writes"] == report["registry_writes"] == 0
+    assert report["automatic_recovery"] is False
+    assert report["replay"] is False
+    assert store.state_path.read_bytes() == checkpoint_before
+    assert store.journal_path.read_bytes() == journal_before
+
+
+def test_prepared_authorization_with_post_writer_evidence_remains_blocked(tmp_path, monkeypatch):
+    post_id = 115981
+    store = _prepared_authorization_fixture(tmp_path, monkeypatch, post_id=post_id)
+    pending = store.load().pending_round
+    (tmp_path / "work" / "v2-journal").mkdir(parents=True)
+    (tmp_path / "work" / "v2-journal" / f"{post_id}.json").write_text(
+        json.dumps({
+            "post_id": post_id,
+            "run_id": "possibly-started-run",
+            "cycle_id": "prepared-audit-cycle",
+            "cycle_round": 1,
+            "authorization_id": pending["authorization_id"],
+            "status": "running",
+            "writer_started": True,
+            "readback": False,
+            "state": {"state": "pending"},
+        }),
+        encoding="utf-8",
+    )
+
+    class PendingReadback:
+        def __init__(self):
+            self.reads = 0
+
+        def get_post(self, requested_id):
+            self.reads += 1
+            return {"id": requested_id, "status": "pending", "meta": {}}
+
+    client = PendingReadback()
+    checkpoint_before = store.state_path.read_bytes()
+    journal_before = store.journal_path.read_bytes()
+    post_journal_before = (tmp_path / "work" / "v2-journal" / f"{post_id}.json").read_bytes()
+
+    report = audit_pending_round_readonly(tmp_path, client)
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "prepared_round_effects_or_evidence_uncertain"
+    assert report["evidence"]["all_posts_independently_prove_no_write"] is False
+    assert report["evidence"]["writer_started"] is None
+    assert report["posts"][0]["no_write_proven"] is False
+    assert report["wordpress_readbacks"] == client.reads == 2
+    assert report["wordpress_writes"] == report["registry_writes"] == 0
+    assert store.state_path.read_bytes() == checkpoint_before
+    assert store.journal_path.read_bytes() == journal_before
+    assert (tmp_path / "work" / "v2-journal" / f"{post_id}.json").read_bytes() == post_journal_before
+
+
+def test_prepared_authorization_with_registry_effect_remains_blocked(tmp_path, monkeypatch):
+    post_id = 115982
+    store = _prepared_authorization_fixture(tmp_path, monkeypatch, post_id=post_id)
+    pending = store.load().pending_round
+    with connect(tmp_path) as db:
+        db.execute(
+            """INSERT INTO media_operations(
+                post_id, run_id, cycle_id, cycle_round, authorization_id,
+                phase, operation_status, started_at, write_started
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                post_id,
+                "registry-effect-run",
+                "prepared-audit-cycle",
+                1,
+                pending["authorization_id"],
+                "writer",
+                "started",
+                "2026-11-03T12:00:01+00:00",
+                1,
+            ),
+        )
+
+    class PendingReadback:
+        def get_post(self, requested_id):
+            return {"id": requested_id, "status": "pending", "meta": {}}
+
+    report = audit_pending_round_readonly(tmp_path, PendingReadback())
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "prepared_round_effects_or_evidence_uncertain"
+    assert report["posts"][0]["classification"] == "UNCERTAIN_ISOLATED"
+    assert report["posts"][0]["no_write_proven"] is False
+    assert report["evidence"]["writer_started"] is None
+    assert report["wordpress_writes"] == report["registry_writes"] == 0
 
 
 def test_pending_round_audit_classifies_five_posts_read_only_with_real_classifier(tmp_path):
@@ -322,13 +558,16 @@ def test_pending_round_audit_classifies_five_posts_read_only_with_real_classifie
         seen_post_ids=post_ids,
         attempts_by_post={post_id: 3 for post_id in post_ids},
         rounds=ROUND - 1,
-        pending_round={
-            "round_number": ROUND,
-            "authorization_id": AUTH_ID,
-            "preview_selected_ids": post_ids,
-        },
     )
-    CycleStateStore(tmp_path).save(state, event="round_authorized", selected_ids=post_ids)
+    store = CycleStateStore(tmp_path)
+    store.save(state, event="cycle_started")
+    store.start_round(
+        state,
+        round_number=ROUND,
+        request={"batch_size": len(post_ids)},
+        authorization_id=AUTH_ID,
+    )
+    store.authorize_round(state, post_ids)
 
     class ReadbackClient:
         writes = 0

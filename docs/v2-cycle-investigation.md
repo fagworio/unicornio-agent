@@ -29,6 +29,55 @@ Registry schema is complete; `automatic_recovery` remains false. Compare
 separate, explicitly authorized operation. Do not treat a successful fixture
 or a local checkout SHA as evidence of the production installation.
 
+If the checkpoint is interrupted before selection authorization, the audit can
+return `preauthorization_interrupted` / `SAFE_TO_RESUME_PREVIEW`. That result
+requires one matching `round_started` event and no later authorization event;
+it has no selected IDs and does not authorize writes. The normal cycle may
+resume only its preview, archives the checkpoint, cycle journal, Registry
+snapshot (when present), and preview evidence, then creates an authorization
+only after persisting the selected IDs. Any checkpoint/journal divergence stays
+blocked as `recovery_uncertain`.
+
+If interruption occurs after selection and the durable
+`round_authorization_prepared` event but before `round_authorized`,
+`v2-audit-pending-round` performs two read-only evidence passes for every
+selected post. It reports `authorization_prepared_recoverable` only when the
+checkpoint and journal remain unchanged, every post is classified
+`NOT_EXECUTED`, the complete Registry proves no operation after preparation,
+WordPress readback remains `pending`, and all locks remain idle. A current
+Writer journal, Registry operation, incomplete evidence, or changing snapshot
+keeps the round blocked. This audit never completes the authorization or
+executes Writer; the normal cycle may only resume the exact persisted selection
+after the evidence has been reviewed.
+
+## Reconciling a stale per-post lock record
+
+Lock reconciliation is separate from cycle recovery and defaults to a
+read-only preview. A record is eligible only when the kernel lock is free, the
+record is intact, the owner host matches this machine, and process identity
+proves the original owner exited (including PID-reuse detection). Missing or
+legacy identity fields, an active process, a different host, or a busy lock
+remain blocked. The operation never unlinks the lock file and preserves a
+redacted, mode-0600 audit record before marking the old owner record released.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-reconcile POST_ID --root "$ROOT"
+```
+
+Apply only the exact `owner_record_sha256` returned by the preview, and only
+after reviewing the evidence:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
+  v2-lock-reconcile POST_ID --root "$ROOT" --apply \
+  --expected-sha256 OWNER_RECORD_SHA256
+```
+
+The apply path reacquires the kernel lock and revalidates the exact record and
+process identity. It does not touch WordPress, cycle checkpoints, journals, or
+the MediaRegistry. Repeated apply is idempotent.
+
 ```bash
 PYTHONPATH=src .venv/bin/python -m unicornio_editor.cli \
   v2-investigation-queue --root "$ROOT"

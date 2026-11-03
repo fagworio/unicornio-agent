@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,11 +67,26 @@ def _reserve_post_lock_batch(
 
 
 def _release_post_lock_batch(handles: Mapping[int, Any]) -> None:
+    failures: list[Exception] = []
+    active_exception = sys.exc_info()[1]
+    exit_args = sys.exc_info()
     for handle in reversed(list(handles.values())):
         try:
-            handle.__exit__(None, None, None)
-        except Exception:
-            pass
+            handle.__exit__(*exit_args)
+        except Exception as exc:  # release every handle, but surface cleanup failure
+            failures.append(exc)
+    if failures:
+        if active_exception is not None:
+            if hasattr(active_exception, "add_note"):
+                active_exception.add_note(
+                    "post lock cleanup also failed: "
+                    + ", ".join(type(error).__name__ for error in failures)
+                )
+            return
+        raise LockError(
+            f"failed to release {len(failures)} post lock(s): "
+            + ", ".join(type(error).__name__ for error in failures)
+        ) from failures[0]
 
 
 def _selection_budget_violation(
@@ -142,6 +158,7 @@ def _round_authorized_at(
     round_number: int,
     *,
     authorization_id: str | None = None,
+    event_name: str = "round_authorized",
 ) -> str | None:
     path = Path(root) / "work" / "v2-cycle" / "journal.jsonl"
     if not path.is_file():
@@ -156,7 +173,7 @@ def _round_authorized_at(
         except (TypeError, ValueError):
             continue
         if (
-            event.get("event") == "round_authorized"
+            event.get("event") == event_name
             and str(event.get("cycle_id") or "") == str(cycle_id)
             and int(event.get("round_number", -1)) == int(round_number)
             and (
@@ -567,6 +584,7 @@ def _post_no_write_evidence(
     cycle_id: str,
     round_number: int,
     authorization_id: str | None = None,
+    baseline_event: str = "round_authorized",
 ) -> dict[str, Any] | None:
     """Prove that one post has no effect belonging to the current round."""
     try:
@@ -580,6 +598,7 @@ def _post_no_write_evidence(
         cycle_id,
         round_number,
         authorization_id=authorization_id,
+        event_name=baseline_event,
     )
     if authorization_id and not authorized_at:
         return None
@@ -1625,20 +1644,59 @@ def run_v2_cycle(
 
     def execute_round(request: CycleRoundRequest) -> CycleRoundResult:
         pending = state.pending_round if isinstance(state.pending_round, dict) else None
+        if pending and int(pending.get("round_number", -1)) != request.round_number:
+            return CycleRoundResult(
+                reconciliation_blocked=True,
+                reconciliation_blocking_info={
+                    "authorization_status": "pending_round_number_mismatch",
+                    "pending_round": pending.get("round_number"),
+                    "requested_round": request.round_number,
+                    "write_replayed": False,
+                },
+            )
         pending_ids = (
             [int(value) for value in pending.get("preview_selected_ids")]
             if pending
-            and int(pending.get("round_number", -1)) == request.round_number
             and isinstance(pending.get("preview_selected_ids"), list)
             else None
         )
         authorized_pending = pending_ids is not None
+        preauthorization_pending = bool(
+            pending is not None and pending.get("preview_selected_ids") is None
+        )
         authorization_id = None
         if authorized_pending:
-            authorization_id = store.ensure_round_authorization_id(state)
+            try:
+                authorization_id = store.ensure_round_authorization_id(state)
+            except RuntimeError as exc:
+                return CycleRoundResult(
+                    preview_selected_ids=tuple(pending_ids or ()),
+                    reconciliation_blocked=True,
+                    reconciliation_blocking_info={
+                        "authorization_status": "round_authorization_journal_mismatch",
+                        "error": str(exc)[:240],
+                        "write_replayed": False,
+                    },
+                )
+        elif preauthorization_pending:
+            try:
+                store.validate_pre_authorization(state)
+                store.archive_pre_authorization(state)
+            except Exception as exc:
+                return CycleRoundResult(
+                    reconciliation_blocked=True,
+                    reconciliation_blocking_info={
+                        "authorization_status": "preauthorization_recovery_evidence_invalid",
+                        "error": str(exc)[:240],
+                        "error_class": type(exc).__name__,
+                        "write_replayed": False,
+                    },
+                )
         authorization_request = (
             pending.get("request")
-            if authorized_pending and pending and isinstance(pending.get("request"), dict)
+            if (authorized_pending or preauthorization_pending)
+            and pending
+            and isinstance(pending.get("request"), dict)
             else {}
         )
         authorized_seen_ids = [
@@ -1654,20 +1712,21 @@ def run_v2_cycle(
         authorized_excluded_ids = authorization_request.get(
             "excluded_post_ids", request.excluded_post_ids
         )
-        executor_limit = authorized_batch_size if authorized_pending else request.batch_size
+        pending_request_exists = authorized_pending or preauthorization_pending
+        executor_limit = authorized_batch_size if pending_request_exists else request.batch_size
         executor_retry_ids = (
             tuple(authorized_seen_ids)
-            if authorized_pending
+            if pending_request_exists
             else request.seen_post_ids
         )
         executor_excluded_ids = (
             authorized_excluded_ids
-            if authorized_pending
+            if pending_request_exists
             else request.excluded_post_ids
         )
         executor_max_new_posts = (
             authorized_max_new_posts
-            if authorized_pending
+            if pending_request_exists
             else request.max_new_posts
         )
         if pending_ids is not None:
@@ -1765,26 +1824,34 @@ def run_v2_cycle(
                 )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
         else:
-            authorization_id = store.start_round(
-                state,
-                round_number=request.round_number,
-                request=_request_dict(request),
-            )
+            if not preauthorization_pending:
+                store.start_round(
+                    state,
+                    round_number=request.round_number,
+                    request=_request_dict(request),
+                )
             preview = run_v2(
                 client,
                 config,
                 root,
-                limit=request.batch_size,
+                limit=executor_limit,
                 preview=True,
-                retry_post_ids=request.seen_post_ids,
-                excluded_post_ids=request.excluded_post_ids,
-                max_new_posts=request.max_new_posts,
+                retry_post_ids=executor_retry_ids,
+                excluded_post_ids=executor_excluded_ids,
+                max_new_posts=executor_max_new_posts,
                 lock_held=True,
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
-                authorization_id=authorization_id,
+                authorization_id=None,
             )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
+            store.record_round_preview(
+                state,
+                selected_ids,
+                preview_sha256=hashlib.sha256(
+                    json.dumps(preview, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest(),
+            )
             if preview.get("selection_mismatch"):
                 return CycleRoundResult(selection_mismatch=True)
 
@@ -1926,6 +1993,14 @@ def run_v2_cycle(
                     int(value)
                     for value in preview.get("queue", {}).get("selected_ids", ())
                 ]
+                if not authorized_pending:
+                    store.record_round_preview(
+                        state,
+                        selected_ids,
+                        preview_sha256=hashlib.sha256(
+                            json.dumps(preview, sort_keys=True, default=str).encode("utf-8")
+                        ).hexdigest(),
+                    )
                 budget_violation = _selection_budget_violation(
                     selected_ids,
                     seen_post_ids=authorized_seen_ids,
@@ -1939,15 +2014,28 @@ def run_v2_cycle(
                         budget_violation=budget_violation,
                     )
         if not authorized_pending:
+            if not selected_ids:
+                if preauthorization_pending:
+                    store.close_empty_pre_authorization_round(state)
+                return CycleRoundResult()
             pending_request = state.pending_round.get("request")
             if isinstance(pending_request, dict):
                 pending_request["excluded_post_ids"] = sorted(
                     int(value) for value in (round_excluded_post_ids or ())
                 )
-            store.authorize_round(state, selected_ids)
+            authorization_id = store.authorize_round(state, selected_ids)
 
         if not selected_ids:
             return CycleRoundResult()
+        if not authorization_id:
+            return CycleRoundResult(
+                preview_selected_ids=tuple(selected_ids),
+                reconciliation_blocked=True,
+                reconciliation_blocking_info={
+                    "authorization_status": "authorization_identity_missing",
+                    "write_replayed": False,
+                },
+            )
         try:
             result = run_v2(
                 client,
@@ -2065,6 +2153,34 @@ def run_v2_cycle(
                 "replay": False,
             }
         existing = store.load()
+        if existing is not None:
+            try:
+                if existing.pending_round is not None:
+                    if existing.status != "running":
+                        raise RuntimeError("non-running cycle contains a pending round")
+                    pending_selection = existing.pending_round.get("preview_selected_ids")
+                    if pending_selection is None:
+                        store.validate_pre_authorization(existing)
+                        store.archive_pre_authorization(existing)
+                    elif isinstance(pending_selection, list):
+                        store.validate_round_authorization(existing)
+                    else:
+                        raise RuntimeError("pending round selection has an invalid shape")
+                else:
+                    store.validate_no_unresolved_authorizations(existing)
+            except Exception as exc:
+                return {
+                    "selected": 0,
+                    "status": "blocked",
+                    "stop_reason": "recovery_uncertain",
+                    "reason": "cycle_checkpoint_journal_preflight_failed",
+                    "error": str(exc)[:240],
+                    "error_class": type(exc).__name__,
+                    "checkpoint_transitioned": False,
+                    "wordpress_writes": 0,
+                    "registry_writes": 0,
+                    "replay": False,
+                }
         if existing and existing.status == "running":
             if fresh:
                 raise ValueError("an interrupted V2 cycle exists; resume it or remove it explicitly")
