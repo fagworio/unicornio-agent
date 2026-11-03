@@ -15,6 +15,7 @@ from unicornio_editor.pipeline_v2.model import (
     Phase,
     WorkState,
 )
+from unicornio_editor.media.registry import connect as connect_media_registry
 from unicornio_editor.locking import LockError, LockManager
 
 
@@ -1665,6 +1666,133 @@ def test_cycle_runtime_auto_isolates_uncertain_post_without_replaying_writer(
     ).read_text(encoding="utf-8").splitlines()
     assert len(journal_lines) == 1
     assert json.loads(journal_lines[0])["cycle_id"] == persisted.cycle_id
+
+
+def test_cycle_runtime_reconciles_115975_without_isolation_and_preserves_cycle_accounting(
+    tmp_path, monkeypatch
+):
+    post_id = 115975
+    cycle_config = cycle_runtime.CycleConfig(
+        ready_target=1,
+        new_batch_size=1,
+        max_unique_posts=1,
+        max_total_attempts=1,
+        max_attempts_per_post_per_cycle=1,
+        max_stagnant_rounds=2,
+        max_drain_rounds=2,
+        max_duration_seconds=60,
+    )
+    store = CycleStateStore(tmp_path)
+    state = store.create(cycle_config.__dict__, cycle_id="cycle-115975-recovery")
+    state.seen_post_ids = [post_id]
+    state.attempts_by_post = {post_id: 0}
+    authorization_id = store.start_round(
+        state,
+        round_number=1,
+        request={
+            "round_number": 1,
+            "batch_size": 1,
+            "max_new_posts": 0,
+            "seen_post_ids": [post_id],
+            "excluded_post_ids": [],
+            "attempts_by_post": {},
+        },
+    )
+    store.authorize_round(state, [post_id])
+
+    state_path = tmp_path / "work" / "v2-cycle" / "state.json"
+    journal_path = tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.touch(exist_ok=True)
+    policy_path = tmp_path / "config" / "v2-quarantine.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+
+    work_state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    ).to_dict()
+    run_id = "run-115975-current-round"
+    journal = {
+        "post_id": post_id,
+        "run_id": run_id,
+        "cycle_id": state.cycle_id,
+        "cycle_round": 1,
+        "authorization_id": authorization_id,
+        "status": "committed",
+        "writer_started": True,
+        "readback": True,
+        "state": work_state,
+        "media_readback_status": "confirmed",
+    }
+    post_journal = tmp_path / "work" / "v2-journal" / f"{post_id}.json"
+    post_journal.parent.mkdir(parents=True, exist_ok=True)
+    post_journal.write_text(json.dumps(journal), encoding="utf-8")
+    with connect_media_registry(tmp_path) as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            (run_id, post_id, "2026-11-03T12:00:00+00:00"),
+        )
+
+    class ReadbackClient:
+        def get_post(self, requested_id):
+            assert requested_id == post_id
+            return {
+                "id": post_id,
+                "status": "pending",
+                "modified": "2026-11-03T12:00:02",
+                "featured_media": 9001,
+                "meta": {"_hermes_work_state": work_state},
+                "content": {"raw": "body"},
+                "title": {"raw": "title"},
+            }
+
+    def blocked_reconciliation(_client, _root, selected, **_kwargs):
+        assert selected == [post_id]
+        return cycle_runtime.CycleRoundResult(
+            preview_selected_ids=tuple(selected),
+            reconciliation_blocked=True,
+            reconciliation_blocking_info={
+                "authorization_status": "partially_reconciled",
+                "unresolved_posts": [{"post_id": post_id, "reason": "candidate_context_invalid"}],
+            },
+        )
+
+    monkeypatch.setattr(cycle_runtime, "_reconcile_completed_round", blocked_reconciliation)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "run_v2",
+        lambda _client, _config, _root, **kwargs: {
+            "preview": True,
+            "queue": {"selected_ids": [post_id]},
+        },
+    )
+
+    report = cycle_runtime.run_v2_cycle(
+        ReadbackClient(),
+        _config(),
+        tmp_path,
+        cycle_config=cycle_config,
+    )
+
+    assert report.stop_reason == "ready_target", report.round_reports
+    assert report.ready_post_ids == [post_id]
+    assert report.rounds == 1
+    assert report.attempts_total == 1
+    persisted = store.load()
+    assert persisted.cycle_id == state.cycle_id
+    assert persisted.pending_round is None
+    assert persisted.ready_post_ids == [post_id]
+    assert persisted.attempts_by_post == {post_id: 1}
+    assert persisted.round_reports[-1]["event"] == "round_reconciled_without_replay"
+    assert persisted.round_reports[-1]["authorization_status"] == "fully_reconciled_without_isolation"
+    assert persisted.round_reports[-1]["write_replayed"] is False
+    assert json.loads(policy_path.read_text(encoding="utf-8"))["posts"] == []
+    assert not list((tmp_path / "work" / "v2-cycle" / "transitions").glob("*.json"))
 
 
 def test_draining_budget_is_checked_before_v2_write(tmp_path, monkeypatch):

@@ -183,6 +183,30 @@ def build_parser() -> argparse.ArgumentParser:
     v2_isolate_parser.add_argument("--operator-authorization", default=None)
     v2_isolate_parser.add_argument("--apply", action="store_true")
 
+    v2_investigation_queue_parser = subparsers.add_parser(
+        "v2-investigation-queue",
+        help="lista isolamentos V2, evidências atuais, idade, causas recorrentes e próxima ação (read-only)",
+    )
+    v2_investigation_queue_parser.add_argument("--root", type=Path, default=Path("."))
+
+    v2_audit_pending_round_parser = subparsers.add_parser(
+        "v2-audit-pending-round",
+        help="classifica duas vezes a rodada V2 pendente com WordPress readback; não escreve nem recupera",
+    )
+    v2_audit_pending_round_parser.add_argument("--root", type=Path, default=Path("."))
+
+    v2_release_isolated_parser = subparsers.add_parser(
+        "v2-release-isolated",
+        help="libera um post isolado somente após classificação segura e autorização explícita; preview por padrão",
+    )
+    v2_release_isolated_parser.add_argument("post_id", type=int)
+    v2_release_isolated_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_release_isolated_parser.add_argument("--authorization-id", required=True)
+    v2_release_isolated_parser.add_argument("--authorized-by", required=True)
+    v2_release_isolated_parser.add_argument("--reason", required=True)
+    v2_release_isolated_parser.add_argument("--preview-evidence", type=Path, default=None)
+    v2_release_isolated_parser.add_argument("--apply", action="store_true")
+
     v2_recover_interrupted_parser = subparsers.add_parser(
         "v2-recover-interrupted",
         help="recupera um journal protocol-v2 interrompido antes do writer; dry-run por padrão",
@@ -278,6 +302,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--project-root", dest="project_root", type=str, default="",
         help="atribuicao por diretorio quando o banco nao expoe a coluna de job",
     )
+
+    media_funnel_parser = subparsers.add_parser(
+        "v2-media-funnel-report",
+        help="resume o funil V2 no MediaRegistry local em modo somente leitura",
+    )
+    media_funnel_parser.add_argument("--root", type=Path, default=Path("."))
+    media_funnel_parser.add_argument("--since-days", type=int, default=7)
+    media_funnel_parser.add_argument("--top-posts", type=int, default=20)
 
     canary_parser = subparsers.add_parser(
         "canary-preflight",
@@ -3049,12 +3081,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "v2-media-funnel-report":
+            from .media.funnel_report import media_funnel_report
+
+            result = media_funnel_report(
+                args.root,
+                since_days=args.since_days,
+                top_posts=args.top_posts,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("status") == "ok" else 2
         _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):
             config = replace(config, dry_run=True)
         client = WordPressClient(config)
-        if args.command == "v2-audit-publication":
+        if args.command == "v2-audit-pending-round":
+            from .pipeline_v2.cycle_investigation import audit_pending_round_readonly
+
+            result = audit_pending_round_readonly(args.root, client)
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+            return 0 if result.get("status") in {"ok", "no_pending_round"} else 2
+        elif args.command == "v2-investigation-queue":
+            from .pipeline_v2.cycle_investigation import build_investigation_queue
+
+            result = build_investigation_queue(args.root, client)
+        elif args.command == "v2-release-isolated":
+            from .pipeline_v2.cycle_investigation import release_isolated_post
+
+            preview_evidence = (
+                json.loads(args.preview_evidence.read_text(encoding="utf-8"))
+                if args.preview_evidence
+                else None
+            )
+            result = release_isolated_post(
+                args.root,
+                client,
+                post_id=int(args.post_id),
+                authorization_id=args.authorization_id,
+                authorized_by=args.authorized_by,
+                reason=args.reason,
+                preview=preview_evidence,
+                apply=bool(args.apply),
+            )
+        elif args.command == "v2-audit-publication":
             from .pipeline_v2.publication import audit_publication_posts
 
             result = audit_publication_posts(

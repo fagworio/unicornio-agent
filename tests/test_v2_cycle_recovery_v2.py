@@ -8,7 +8,9 @@ import pytest
 
 from unicornio_editor.pipeline_v2 import cycle_recovery_v2 as recovery
 from unicornio_editor.pipeline_v2 import transaction_admin
+from unicornio_editor.media.registry import connect as connect_media_registry
 from unicornio_editor.pipeline_v2.lock import RunSessionLock
+from unicornio_editor.pipeline_v2.model import LifecycleState, Phase, WorkState
 from unicornio_editor.pipeline_v2.cycle_runtime import (
     _release_post_lock_batch,
     _reserve_post_lock_batch,
@@ -33,12 +35,90 @@ def _root(tmp_path: Path) -> Path:
         "version": 1, "posts": [{"post_id": i, "reason_code": "legacy", "reason": "existing"} for i in range(200, 209)],
         "release_history": [],
     }))
-    db = tmp_path / "work" / "media_registry.sqlite"
-    with sqlite3.connect(db) as conn:
-        for table in ("media_runs", "media_operations", "media_decisions", "media_usage"):
-            conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, marker TEXT)")
-        conn.commit()
+    with connect_media_registry(tmp_path):
+        pass
     return tmp_path
+
+
+def test_115975_representative_journal_registry_and_wordpress_readback_use_real_classifier(tmp_path):
+    root = _root(tmp_path)
+    post_id = 115975
+    run_id = "run-115975-current-round"
+    state = WorkState(
+        state=LifecycleState.READY,
+        phase=Phase.VALIDATE,
+        relevance_approved=True,
+    ).to_dict()
+    journal = {
+        "post_id": post_id,
+        "run_id": run_id,
+        "cycle_id": CYCLE,
+        "cycle_round": 3,
+        "authorization_id": AUTH,
+        "status": "committed",
+        "writer_started": True,
+        "readback": True,
+        "state": state,
+    }
+    journal_path = root / "work" / "v2-journal" / f"{post_id}.json"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with connect_media_registry(root) as db:
+        db.execute(
+            "INSERT INTO media_runs(run_id, post_id, created_at) VALUES (?, ?, ?)",
+            (run_id, post_id, "2026-11-03T12:00:00+00:00"),
+        )
+        db.execute(
+            """INSERT INTO media_operations(
+                post_id, run_id, cycle_id, cycle_round, authorization_id,
+                phase, operation_status, started_at, completed_at,
+                write_started, readback_confirmed, outcome
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                post_id,
+                run_id,
+                CYCLE,
+                3,
+                AUTH,
+                "writer",
+                "committed",
+                "2026-11-03T12:00:01+00:00",
+                "2026-11-03T12:00:02+00:00",
+                1,
+                1,
+                "ready",
+            ),
+        )
+
+    class ReadbackClient:
+        def get_post(self, requested_id):
+            assert requested_id == post_id
+            return {
+                "id": post_id,
+                "status": "pending",
+                "modified": "2026-11-03T12:00:02",
+                "featured_media": 9001,
+                "meta": {"_hermes_work_state": state},
+                "content": {"raw": "body"},
+                "title": {"raw": "title"},
+            }
+
+    evidence = transaction_admin._round_post_evidence(
+        root,
+        ReadbackClient(),
+        post_id=post_id,
+        cycle_id=CYCLE,
+        authorization_id=AUTH,
+        pending_round=3,
+    )
+
+    assert evidence["classification"] == "COMMITTED_NO_REPLAY"
+    assert evidence["reason"] == "current_authorization_commit_registry_run_and_wordpress_state_match"
+    assert evidence["journal"]["sha256"]
+    assert evidence["registry"]["present"] is True
+    assert evidence["registry"]["schema_complete"] is True
+    assert evidence["registry"]["operation_count"] == 1
+    assert evidence["wordpress"]["work_state_sha256"]
 
 
 def _evidence(monkeypatch):
@@ -342,6 +422,97 @@ def test_automatic_recovery_classifies_full_round_and_isolates_only_uncertain_po
     assert journal["recovery_mode"] == "automatic"
     policy = json.loads((root / "config" / "v2-quarantine.json").read_text())
     assert [row["post_id"] for row in policy["posts"]][-1] == 104
+
+
+def test_automatic_recovery_reconciles_resolved_round_without_reset_or_quarantine(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    original_state = (root / "work" / "v2-cycle" / "state.json").read_bytes()
+    original_policy = (root / "config" / "v2-quarantine.json").read_bytes()
+
+    def resolved(*_args, post_id, **_kwargs):
+        if post_id == 105:
+            return {
+                "post_id": post_id,
+                "classification": "NOT_EXECUTED",
+                "registry": {"present": True, "schema_complete": True},
+                "journal": {"present": False},
+                "no_write_evidence": {"proof_of_absence": True},
+            }
+        return {
+            "post_id": post_id,
+            "classification": "COMMITTED_NO_REPLAY",
+            "registry": {"present": True, "schema_complete": True},
+            "journal": {"present": True, "run_id": RUNS[post_id]},
+        }
+
+    monkeypatch.setattr(recovery, "_round_post_evidence", resolved)
+    session_lock = RunSessionLock(root / "work" / "v2-run.lock")
+    assert session_lock.acquire()
+    handles, locked_post_id, _error = _reserve_post_lock_batch(root, SELECTED, lock_ttl=60)
+    assert locked_post_id is None
+    try:
+        result = recovery.auto_recover_blocked_cycle(
+            root,
+            object(),
+            cycle_id=CYCLE,
+            authorization_id=AUTH,
+            pending_round=3,
+            selected_ids=SELECTED,
+            session_lock=session_lock,
+            post_lock_handles=handles,
+        )
+    finally:
+        _release_post_lock_batch(handles)
+        session_lock.release()
+
+    assert result["status"] == "reconciled"
+    assert result["reason"] == "round_resolved_without_isolation"
+    assert result["round_classifications"]["UNCERTAIN_ISOLATED"] == []
+    assert result["wordpress_writes"] == 0
+    assert result["replay"] is False
+    assert (root / "work" / "v2-cycle" / "state.json").read_bytes() == original_state
+    assert (root / "config" / "v2-quarantine.json").read_bytes() == original_policy
+    assert list((root / "work" / "v2-cycle" / "transitions").glob("*.json")) == []
+
+
+def test_automatic_recovery_blocks_resolved_round_without_complete_no_write_proof(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    original_state = (root / "work" / "v2-cycle" / "state.json").read_bytes()
+
+    def incomplete(*_args, post_id, **_kwargs):
+        classification = "NOT_EXECUTED" if post_id == 105 else "COMMITTED_NO_REPLAY"
+        return {
+            "post_id": post_id,
+            "classification": classification,
+            "registry": {"present": True, "schema_complete": True},
+            "journal": {"present": False} if post_id == 105 else {"present": True, "run_id": RUNS[post_id]},
+            "no_write_evidence": {"proof_of_absence": False} if post_id == 105 else None,
+        }
+
+    monkeypatch.setattr(recovery, "_round_post_evidence", incomplete)
+    session_lock = RunSessionLock(root / "work" / "v2-run.lock")
+    assert session_lock.acquire()
+    handles, locked_post_id, _error = _reserve_post_lock_batch(root, SELECTED, lock_ttl=60)
+    assert locked_post_id is None
+    try:
+        result = recovery.auto_recover_blocked_cycle(
+            root,
+            object(),
+            cycle_id=CYCLE,
+            authorization_id=AUTH,
+            pending_round=3,
+            selected_ids=SELECTED,
+            session_lock=session_lock,
+            post_lock_handles=handles,
+        )
+    finally:
+        _release_post_lock_batch(handles)
+        session_lock.release()
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "not_executed_evidence_incomplete"
+    assert (root / "work" / "v2-cycle" / "state.json").read_bytes() == original_state
+    assert list((root / "work" / "v2-cycle" / "transitions").glob("*.json")) == []
 
 
 def test_automatic_recovery_refuses_incomplete_registry_without_mutating_cycle(tmp_path, monkeypatch):

@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from ..locking import LockError, LockManager
 from .cycle import CycleConfig, CycleReport, CycleRoundRequest, CycleRoundResult, run_cycle
 from .cycle_state import CycleState, CycleStateStore
 from .lock import RunSessionLock
-from .model import LifecycleState
+from .model import LifecycleState, WorkState
 from .production import ProductionCandidateReader
 from .runtime import (
     _media_effect_evidence,
@@ -1298,6 +1299,165 @@ def _cycle_config_from_config(config) -> CycleConfig:
     )
 
 
+def _project_resolved_round_without_replay(
+    client,
+    root: Path,
+    state: CycleState,
+    authorization_id: str,
+    selected_ids: list[int],
+    recovery: Mapping[str, Any],
+    *,
+    lock_ttl: int,
+    preauthorized_new_post_ids: Iterable[int] = (),
+) -> tuple[CycleRoundResult | None, dict[str, Any] | None]:
+    """Revalidate and project an already-classified round while post locks are held."""
+    handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+        root, selected_ids, lock_ttl=lock_ttl
+    )
+    if locked_post_id is not None:
+        return None, {
+            "reason": "post_lock_busy_during_round_projection",
+            "locked_post_id": int(locked_post_id),
+            "lock_error": lock_error,
+        }
+    try:
+        from .transaction_admin import (
+            _hash_value,
+            _journal_matches_authorized_round,
+            _round_post_evidence,
+            _wp_state,
+        )
+
+        evidence_rows = recovery.get("evidence")
+        if not isinstance(evidence_rows, list):
+            raise ValueError("classified round evidence is missing")
+        evidence_ids = [int(row["post_id"]) for row in evidence_rows if isinstance(row, Mapping)]
+        if len(evidence_ids) != len(evidence_rows) or sorted(evidence_ids) != sorted(selected_ids):
+            raise ValueError("classified round evidence does not match the authorized selection")
+
+        pending_round = int((state.pending_round or {}).get("round_number") or 0)
+        if pending_round < 1:
+            raise ValueError("pending round identity is invalid")
+        details: list[dict[str, Any]] = []
+        executed_ids: list[int] = []
+        for evidence in evidence_rows:
+            post_id = int(evidence["post_id"])
+            classification = str(evidence.get("classification") or "")
+            fresh = _round_post_evidence(
+                root,
+                client,
+                post_id=post_id,
+                cycle_id=state.cycle_id,
+                authorization_id=authorization_id,
+                pending_round=pending_round,
+                capture_media_artifacts=False,
+            )
+            if fresh != evidence:
+                raise ValueError(f"evidence changed while reconciling post {post_id}")
+
+            if classification == "NOT_EXECUTED":
+                no_write = evidence.get("no_write_evidence")
+                if not isinstance(no_write, Mapping) or no_write.get("proof_of_absence") is not True:
+                    raise ValueError(f"post {post_id} lacks complete no-write proof")
+                details.append({
+                    "post_id": post_id,
+                    "initial_state": "pending",
+                    "outcome": "not_executed",
+                    "readback": True,
+                    "wordpress_state_readback": True,
+                    "write_started": False,
+                    "transaction_readback": False,
+                    "write_readback_confirmed": False,
+                    "progress": False,
+                    "reconciled": True,
+                    "recovery_classification": classification,
+                    "no_write_evidence": dict(no_write),
+                    "write_replayed": False,
+                })
+                continue
+
+            if classification not in {"COMMITTED_NO_REPLAY", "PRE_WRITER_RECOVERABLE"}:
+                raise ValueError(f"post {post_id} is not safely reconcilable")
+            journal_info = evidence.get("journal")
+            if not isinstance(journal_info, Mapping):
+                raise ValueError(f"post {post_id} journal evidence is missing")
+            journal_path = root / "work" / "v2-journal" / f"{post_id}.json"
+            journal_bytes = journal_path.read_bytes()
+            if hashlib.sha256(journal_bytes).hexdigest() != journal_info.get("sha256"):
+                raise ValueError(f"post {post_id} journal changed during reconciliation")
+            journal = json.loads(journal_bytes.decode("utf-8"))
+            if not isinstance(journal, dict) or not _journal_matches_authorized_round(
+                journal,
+                post_id=post_id,
+                cycle_id=state.cycle_id,
+                authorization_id=authorization_id,
+                pending_round=pending_round,
+            ):
+                raise ValueError(f"post {post_id} journal identity changed")
+            post = client.get_post(post_id)
+            if not isinstance(post, dict) or int(post.get("id") or 0) != post_id:
+                raise ValueError(f"post {post_id} WordPress readback identity changed")
+            journal_state = journal.get("state")
+            current_state = _wp_state(post)
+            wordpress_evidence = evidence.get("wordpress")
+            if (
+                not isinstance(journal_state, Mapping)
+                or current_state != dict(journal_state)
+                or not isinstance(wordpress_evidence, Mapping)
+                or _hash_value(dict(journal_state)) != wordpress_evidence.get("work_state_sha256")
+            ):
+                raise ValueError(f"post {post_id} WordPress state diverged from journal")
+            work_state = WorkState.from_dict(dict(journal_state))
+            detail = _reconciled_detail(
+                post_id,
+                journal,
+                work_state,
+                wordpress_status=str(post.get("status") or ""),
+            )
+            if detail is None:
+                raise ValueError(f"post {post_id} lifecycle state is unsupported")
+            if classification == "COMMITTED_NO_REPLAY" and (
+                journal.get("status") != "committed" or journal.get("readback") is not True
+            ):
+                raise ValueError(f"post {post_id} lacks committed transactional readback")
+            if classification == "PRE_WRITER_RECOVERABLE" and not (
+                journal.get("status") in {"interrupted_pre_writer", "failed_pre_writer"}
+                and journal.get("writer_started") is False
+                and journal.get("resumable") is True
+                and journal.get("readback") is not True
+            ):
+                raise ValueError(f"post {post_id} pre-writer proof changed")
+            detail.update({"recovery_classification": classification, "write_replayed": False})
+            details.append(detail)
+            executed_ids.append(post_id)
+
+        return CycleRoundResult(
+            preview_selected_ids=tuple(selected_ids),
+            executed_ids=tuple(executed_ids),
+            details=tuple(details),
+            reconciled_without_replay=True,
+            reconciled_execution=bool(executed_ids),
+            preauthorized_new_post_ids=tuple(int(value) for value in preauthorized_new_post_ids),
+            reconciliation_info={
+                "authorization_status": "fully_reconciled_without_isolation",
+                "round_classifications": recovery.get("round_classifications"),
+                "reconciled_post_ids": [int(row["post_id"]) for row in details],
+                "not_executed_post_ids": [
+                    int(row["post_id"]) for row in details
+                    if row.get("recovery_classification") == "NOT_EXECUTED"
+                ],
+                "write_replayed": False,
+            },
+        ), None
+    except Exception as exc:
+        return None, {
+            "reason": "resolved_round_projection_failed",
+            "error_class": type(exc).__name__,
+        }
+    finally:
+        _release_post_lock_batch(handles)
+
+
 def run_v2_cycle(
     client,
     config,
@@ -1428,6 +1588,27 @@ def run_v2_cycle(
             }
         finally:
             _release_post_lock_batch(handles)
+        if recovery.get("status") == "reconciled":
+            projected, projection_error = _project_resolved_round_without_replay(
+                client,
+                root,
+                state,
+                str(authorization_id),
+                ids,
+                recovery,
+                lock_ttl=int(getattr(config, "lock_ttl", 900)),
+                preauthorized_new_post_ids=result.preauthorized_new_post_ids,
+            )
+            if projected is not None:
+                return projected
+            else:
+                recovery = {
+                    "status": "blocked",
+                    **(projection_error or {"reason": "resolved_round_projection_failed"}),
+                    "wordpress_writes": 0,
+                    "registry_writes": 0,
+                    "replay": False,
+                }
         if recovery.get("status") in {"applied", "already_applied"}:
             return CycleRoundResult(
                 preview_selected_ids=tuple(ids),

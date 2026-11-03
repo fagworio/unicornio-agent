@@ -103,6 +103,12 @@ Hermes cron
   -> publisher separado: somente posts READY
 ```
 
+Para auditar isolamentos sem replay, revisar evidências e gerar métricas
+agregadas de conversão de mídia, consulte o [procedimento de investigação do
+ciclo V2](docs/v2-cycle-investigation.md). A fila é read-only; liberar um post
+exige preview atualizado, classificação segura e autorização administrativa
+explícita.
+
 O diagrama abaixo descreve o pipeline histórico de etapas internas; os
 comandos legados não devem ser usados pelo cron.
 

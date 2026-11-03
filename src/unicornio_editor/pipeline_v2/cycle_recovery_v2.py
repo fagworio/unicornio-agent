@@ -673,13 +673,6 @@ def auto_recover_blocked_cycle(
 
     actual = _class_sets(evidence)
     uncertain = actual["UNCERTAIN_ISOLATED"]
-    if not uncertain:
-        return {
-            "status": "blocked",
-            "reason": "no_uncertain_post_to_isolate",
-            "round_classifications": actual,
-            "wordpress_writes": 0,
-        }
 
     run_ids: dict[int, str] = {}
     for item in evidence:
@@ -696,6 +689,34 @@ def auto_recover_blocked_cycle(
                 "post_id": post_id,
                 "wordpress_writes": 0,
             }
+
+    if not uncertain:
+        incomplete = [
+            int(item["post_id"])
+            for item in evidence
+            if item.get("classification") == "NOT_EXECUTED"
+            and not _not_executed_evidence_is_complete(item)
+        ]
+        if incomplete:
+            return {
+                "status": "blocked",
+                "reason": "not_executed_evidence_incomplete",
+                "post_ids": incomplete,
+                "round_classifications": actual,
+                "wordpress_writes": 0,
+                "replay": False,
+            }
+        # No transaction needs isolation. Hand the positively classified
+        # evidence back to the cycle runtime so it can account the round in
+        # the existing checkpoint and continue without resetting its budget.
+        return {
+            "status": "reconciled",
+            "reason": "round_resolved_without_isolation",
+            "round_classifications": actual,
+            "evidence": evidence,
+            "wordpress_writes": 0,
+            "replay": False,
+        }
 
     new_cycle_id = "recovery-" + _hash_value({
         "cycle_id": cycle_id,
