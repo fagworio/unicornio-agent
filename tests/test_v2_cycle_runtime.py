@@ -1549,6 +1549,124 @@ def test_cycle_blocks_write_when_incomplete_journal_is_detected(tmp_path, monkey
     assert persisted.pending_round["preview_selected_ids"] == [7]
 
 
+def test_cycle_runtime_auto_isolates_uncertain_post_without_replaying_writer(
+    tmp_path, monkeypatch
+):
+    from unicornio_editor.pipeline_v2 import cycle_recovery_v2
+
+    cycle_id = "blocked-editorial-cycle"
+    selected_ids = [501, 502]
+    _empty_media_registry(tmp_path)
+    policy_path = tmp_path / "config" / "v2-quarantine.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"version": 1, "posts": [], "release_history": []}),
+        encoding="utf-8",
+    )
+
+    store = CycleStateStore(tmp_path)
+    cycle_config = cycle_runtime.CycleConfig(
+        ready_target=3,
+        new_batch_size=2,
+        max_unique_posts=5,
+        max_total_attempts=10,
+        max_attempts_per_post_per_cycle=2,
+        max_stagnant_rounds=2,
+        max_drain_rounds=2,
+        max_duration_seconds=60,
+    )
+    state = store.create(cycle_config.__dict__, cycle_id=cycle_id)
+    state.seen_post_ids = selected_ids.copy()
+    state.attempts_by_post = {501: 0, 502: 0}
+    request = {
+        "round_number": 1,
+        "batch_size": 2,
+        "max_new_posts": 0,
+        "seen_post_ids": selected_ids.copy(),
+        "excluded_post_ids": [],
+        "attempts_by_post": {},
+    }
+    authorization_id = store.start_round(
+        state, round_number=1, request=request
+    )
+    store.authorize_round(state, selected_ids)
+
+    journal_dir = tmp_path / "work" / "v2-journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    for post_id in selected_ids:
+        (journal_dir / f"{post_id}.json").write_text(
+            json.dumps({"post_id": post_id, "status": "running", "run_id": f"run-{post_id}"}),
+            encoding="utf-8",
+        )
+
+    def blocked_reconciliation(_client, _root, ids, **_kwargs):
+        assert ids == selected_ids
+        return cycle_runtime.CycleRoundResult(
+            preview_selected_ids=tuple(ids),
+            reconciliation_blocked=True,
+            reconciliation_blocking_info={
+                "authorization_status": "partially_reconciled",
+                "unresolved_posts": [{"post_id": 502, "reason": "journal_uncorrelated"}],
+            },
+        )
+
+    monkeypatch.setattr(
+        cycle_runtime, "_reconcile_completed_round", blocked_reconciliation
+    )
+
+    classes = {
+        501: "COMMITTED_NO_REPLAY",
+        502: "UNCERTAIN_ISOLATED",
+    }
+
+    def round_evidence(_root, _client, *, post_id, **_kwargs):
+        return {
+            "post_id": post_id,
+            "classification": classes[post_id],
+            "registry": {"present": True, "schema_complete": True},
+            "wordpress": {"status": "pending"},
+            "journal": {
+                "present": True,
+                "run_id": f"run-{post_id}",
+                "status": "running",
+            },
+        }
+
+    monkeypatch.setattr(
+        cycle_recovery_v2, "_round_post_evidence", round_evidence
+    )
+
+    calls = []
+
+    def preview_only(_client, _config, _root, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["preview"] is True
+        return {"preview": True, "queue": {"selected_ids": selected_ids}}
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", preview_only)
+    report = cycle_runtime.run_v2_cycle(
+        object(), _config(), tmp_path, cycle_config=cycle_config
+    )
+
+    assert report.stop_reason == "recovery_transition_applied"
+    assert report.rounds == 0
+    assert report.attempts_total == 0
+    assert len(calls) == 1
+    assert calls[0]["authorization_id"] == authorization_id
+    persisted = store.load()
+    assert persisted.cycle_id != cycle_id
+    assert persisted.pending_round is None
+    assert persisted.rounds == 0
+    assert persisted.attempts_by_post == {}
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    assert [row["post_id"] for row in policy["posts"]] == [502]
+    journal_lines = (
+        tmp_path / "work" / "v2-cycle" / "journal.jsonl"
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(journal_lines) == 1
+    assert json.loads(journal_lines[0])["cycle_id"] == persisted.cycle_id
+
+
 def test_draining_budget_is_checked_before_v2_write(tmp_path, monkeypatch):
     store = cycle_runtime.CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="draining-budget")

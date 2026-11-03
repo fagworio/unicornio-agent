@@ -149,6 +149,35 @@ def test_cycle_classifies_busy_lock_as_skipped_and_resumable():
     }]
 
 
+def test_cycle_transition_stops_without_saving_over_replacement_checkpoint():
+    events = []
+    state = CycleState(
+        cycle_id="old-cycle",
+        pending_round={"round_number": 4, "preview_selected_ids": [10, 11]},
+    )
+
+    report = run_cycle(
+        lambda _request: CycleRoundResult(
+            preview_selected_ids=(10, 11),
+            cycle_transitioned=True,
+            cycle_transition_info={
+                "status": "applied",
+                "new_cycle_id": "replacement-cycle",
+                "isolated_post_ids": [11],
+            },
+        ),
+        state=state,
+        checkpoint=lambda _state, event, _fields: events.append(event),
+    )
+
+    assert report.stop_reason == "recovery_transition_applied"
+    assert report.rounds == 0
+    assert report.attempts_total == 0
+    assert report.round_reports[0]["event"] == "cycle_recovery_auto_isolated"
+    assert report.round_reports[0]["new_cycle_id"] == "replacement-cycle"
+    assert events == []
+
+
 def test_cycle_excludes_posts_that_reached_attempt_budget():
     requests = []
 

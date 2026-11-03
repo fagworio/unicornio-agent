@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -1377,6 +1378,70 @@ def run_v2_cycle(
             return
         store.save(current, event=event, **fields)
 
+    def auto_isolate_blocked_round(
+        result: CycleRoundResult,
+        selected_ids: list[int] | tuple[int, ...],
+        authorization_id: str | None,
+    ) -> CycleRoundResult:
+        if not result.reconciliation_blocked or result.locked or not authorization_id:
+            return result
+        ids = [int(value) for value in selected_ids]
+        handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+            root,
+            ids,
+            lock_ttl=int(getattr(config, "lock_ttl", 900)),
+        )
+        if locked_post_id is not None:
+            return replace(
+                result,
+                locked=True,
+                reconciliation_blocking_info={
+                    **dict(result.reconciliation_blocking_info or {}),
+                    "automatic_isolation": {
+                        "status": "blocked",
+                        "reason": "post_lock_busy",
+                        "locked_post_id": int(locked_post_id),
+                        "lock_error": lock_error,
+                        "wordpress_writes": 0,
+                    },
+                },
+            )
+        try:
+            from .cycle_recovery_v2 import auto_recover_blocked_cycle
+
+            recovery = auto_recover_blocked_cycle(
+                root,
+                client,
+                cycle_id=state.cycle_id,
+                authorization_id=str(authorization_id),
+                pending_round=int(state.pending_round.get("round_number") or 0),
+                selected_ids=ids,
+                session_lock=lock,
+                post_lock_handles=handles,
+            )
+        except Exception as exc:
+            recovery = {
+                "status": "blocked",
+                "reason": "automatic_recovery_failed",
+                "error_class": type(exc).__name__,
+                "wordpress_writes": 0,
+            }
+        finally:
+            _release_post_lock_batch(handles)
+        if recovery.get("status") in {"applied", "already_applied"}:
+            return CycleRoundResult(
+                preview_selected_ids=tuple(ids),
+                cycle_transitioned=True,
+                cycle_transition_info=recovery,
+            )
+        return replace(
+            result,
+            reconciliation_blocking_info={
+                **dict(result.reconciliation_blocking_info or {}),
+                "automatic_isolation": recovery,
+            },
+        )
+
     def execute_round(request: CycleRoundRequest) -> CycleRoundResult:
         pending = state.pending_round if isinstance(state.pending_round, dict) else None
         pending_ids = (
@@ -1469,7 +1534,9 @@ def run_v2_cycle(
                     lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
-                    return reconciled
+                    return auto_isolate_blocked_round(
+                        reconciled, pending_ids, authorization_id
+                    )
                 if budget_violation:
                     evidence = _confirm_round_has_no_write(
                         client,
@@ -1560,7 +1627,9 @@ def run_v2_cycle(
                     lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
-                    return reconciled
+                    return auto_isolate_blocked_round(
+                        reconciled, selected_ids, authorization_id
+                    )
                 evidence = _confirm_round_has_no_write(
                     client,
                     root,
@@ -1603,7 +1672,9 @@ def run_v2_cycle(
                     lock_ttl=int(getattr(config, "lock_ttl", 900)),
                 )
                 if reconciled is not None:
-                    return reconciled
+                    return auto_isolate_blocked_round(
+                        reconciled, pending_ids, authorization_id
+                    )
 
         reserved_post_locks: dict[int, Any] = {}
         round_excluded_post_ids = executor_excluded_ids
@@ -1716,7 +1787,7 @@ def run_v2_cycle(
         finally:
             _release_post_lock_batch(reserved_post_locks)
         if result.get("journal_conflict"):
-            return CycleRoundResult(
+            blocked = CycleRoundResult(
                 preview_selected_ids=tuple(selected_ids),
                 reconciliation_blocked=True,
                 reconciliation_blocking_info={
@@ -1724,6 +1795,9 @@ def run_v2_cycle(
                     "write_replayed": False,
                     "journal_conflicts": list(result.get("journal_conflicts") or []),
                 },
+            )
+            return auto_isolate_blocked_round(
+                blocked, selected_ids, authorization_id
             )
         executed_ids = tuple(
             int(detail["post_id"])
@@ -1766,6 +1840,49 @@ def run_v2_cycle(
     try:
         # No checkpoint read/create is allowed before the global lock. This
         # prevents two Hermes invocations from racing on state.json.
+        from .cycle_recovery_v2 import resume_staged_cycle_recovery
+
+        staged_recovery = resume_staged_cycle_recovery(
+            root,
+            session_lock=lock,
+            client=client,
+        )
+        if staged_recovery is not None:
+            recovered = staged_recovery.get("status") == "resumed"
+            try:
+                from ..observability import append_telemetry
+
+                append_telemetry(
+                    root,
+                    "v2_cycle_recovery_transition_resumed"
+                    if recovered
+                    else "v2_cycle_recovery_transition_blocked",
+                    status="recovered" if recovered else "blocked",
+                    stop_reason=(
+                        "recovery_transition_resumed"
+                        if recovered
+                        else "recovery_uncertain"
+                    ),
+                    recovery={
+                        key: value
+                        for key, value in staged_recovery.items()
+                        if key != "status"
+                    },
+                )
+            except Exception:
+                pass
+            return {
+                "selected": 0,
+                "status": "recovered" if recovered else "blocked",
+                "stop_reason": (
+                    "recovery_transition_resumed"
+                    if recovered
+                    else "recovery_uncertain"
+                ),
+                "recovery": staged_recovery,
+                "wordpress_writes": 0,
+                "replay": False,
+            }
         existing = store.load()
         if existing and existing.status == "running":
             if fresh:
@@ -1794,11 +1911,25 @@ def run_v2_cycle(
                 (
                     "v2_cycle_skipped_locked"
                     if report.stop_reason == "skipped_locked"
+                    else "v2_cycle_recovery_auto_isolated"
+                    if report.stop_reason == "recovery_transition_applied"
                     else "v2_cycle"
                 ),
-                status=("skipped" if report.stop_reason == "skipped_locked" else "completed"),
+                status=(
+                    "skipped"
+                    if report.stop_reason == "skipped_locked"
+                    else "recovered"
+                    if report.stop_reason == "recovery_transition_applied"
+                    else "completed"
+                ),
                 cycle_id=state.cycle_id,
                 stop_reason=report.stop_reason,
+                recovery_transition=(
+                    report.round_reports[-1]
+                    if report.stop_reason == "recovery_transition_applied"
+                    and report.round_reports
+                    else None
+                ),
                 ready=report.ready_count,
                 unique_posts=report.unique_posts,
                 attempts=report.attempts_total,

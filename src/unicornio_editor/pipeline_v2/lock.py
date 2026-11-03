@@ -10,6 +10,10 @@ class RunSessionLock:
         self.allow_maintenance = allow_maintenance
         self._handle = None
 
+    @property
+    def is_acquired(self) -> bool:
+        return self._handle is not None and not self._handle.closed
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         maintenance = self.path.parent / "v2-maintenance.lock"

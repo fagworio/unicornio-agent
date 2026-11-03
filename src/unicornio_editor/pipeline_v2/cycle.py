@@ -73,6 +73,8 @@ class CycleRoundResult:
     reconciliation_blocking_info: Mapping[str, Any] | None = None
     historical_reconciliation: bool = False
     historical_reconciliation_info: Mapping[str, Any] | None = None
+    cycle_transitioned: bool = False
+    cycle_transition_info: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -159,6 +161,12 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
         historical_reconciliation_info=(
             dict(value["historical_reconciliation_info"])
             if isinstance(value.get("historical_reconciliation_info"), Mapping)
+            else None
+        ),
+        cycle_transitioned=bool(value.get("cycle_transitioned", False)),
+        cycle_transition_info=(
+            dict(value["cycle_transition_info"])
+            if isinstance(value.get("cycle_transition_info"), Mapping)
             else None
         ),
     )
@@ -288,6 +296,20 @@ def run_cycle(
             report.round_reports.append({
                 "round": request.round_number,
                 "error": str(exc)[:400],
+            })
+            break
+
+        if result.cycle_transitioned:
+            transition = dict(result.cycle_transition_info or {})
+            report.stop_reason = "recovery_transition_applied"
+            report.round_reports.append({
+                "event": "cycle_recovery_auto_isolated",
+                "round": request.round_number,
+                "phase": phase,
+                "preview_selected_ids": list(result.preview_selected_ids),
+                "executed_ids": [],
+                "write_replayed": False,
+                **transition,
             })
             break
 
@@ -553,7 +575,8 @@ def run_cycle(
         }
         else phase
     )
-    save("cycle_finished", stop_reason=report.stop_reason)
+    if report.stop_reason != "recovery_transition_applied":
+        save("cycle_finished", stop_reason=report.stop_reason)
     return report
 
 

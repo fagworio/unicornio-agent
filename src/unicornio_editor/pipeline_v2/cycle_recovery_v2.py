@@ -31,16 +31,19 @@ CLASSIFICATIONS = {"COMMITTED_NO_REPLAY", "NOT_EXECUTED", "UNCERTAIN_ISOLATED", 
 
 
 def _not_executed_evidence_is_complete(item: Mapping[str, Any]) -> bool:
-    """Accept no-write proof for a legacy terminal journal without identity."""
+    """Require independent no-write proof for every NOT_EXECUTED classification."""
     if item.get("classification") != "NOT_EXECUTED":
         return False
+    no_write = item.get("no_write_evidence")
+    if not isinstance(no_write, Mapping) or no_write.get("proof_of_absence") is not True:
+        return False
     journal = item.get("journal")
-    if not isinstance(journal, Mapping) or journal.get("present") is not True:
+    if not isinstance(journal, Mapping) or journal.get("present") is False:
         return True
+    if journal.get("present") is not True:
+        return False
     return (
         _is_identityless_terminal_journal(journal)
-        and isinstance(item.get("no_write_evidence"), Mapping)
-        and item["no_write_evidence"].get("proof_of_absence") is True
     )
 
 
@@ -58,6 +61,10 @@ def _hash_value(value: Any) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+
+def _jsonl(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -102,6 +109,23 @@ def _write_once(path: Path, content: str) -> None:
     if path.exists():
         if not path.is_file() or path.read_text(encoding="utf-8") != content:
             raise CycleRecoveryError(f"prepared artifact diverged: {path}")
+        return
+    atomic_write_text(path, content)
+
+
+def _write_journal_once(path: Path, payload: Mapping[str, Any], *, allow_normalize: bool) -> None:
+    """Prepare exactly one valid JSONL record; normalize only unprepared intents."""
+    content = _jsonl(dict(payload))
+    if path.is_symlink():
+        raise CycleRecoveryError(f"prepared path is a symlink: {path}")
+    if path.exists():
+        current = _read_json(path)
+        if current != dict(payload):
+            raise CycleRecoveryError(f"prepared journal payload diverged: {path}")
+        if path.read_text(encoding="utf-8") != content:
+            if not allow_normalize:
+                return
+            atomic_write_text(path, content)
         return
     atomic_write_text(path, content)
 
@@ -203,11 +227,22 @@ def _ids(values: Iterable[int]) -> list[int]:
     return result
 
 
-def _new_state(cycle_id: str, config: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _new_state(
+    cycle_id: str,
+    config: Mapping[str, Any],
+    *,
+    recovery_mode: str = "operator",
+) -> tuple[dict[str, Any], dict[str, Any]]:
     now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     state = CycleState(cycle_id=cycle_id, config=dict(config), started_at=now, updated_at=now)
-    return state.to_dict(), {"schema_version": SCHEMA_VERSION, "cycle_id": cycle_id, "event": "cycle_started", "at": now,
-                             "administrative_transition": "recover_blocked_cycle_without_replay"}
+    return state.to_dict(), {
+        "schema_version": SCHEMA_VERSION,
+        "cycle_id": cycle_id,
+        "event": "cycle_started",
+        "at": now,
+        "administrative_transition": "recover_blocked_cycle_without_replay",
+        "recovery_mode": recovery_mode,
+    }
 
 
 def _class_sets(evidence: list[Mapping[str, Any]]) -> dict[str, list[int]]:
@@ -251,8 +286,12 @@ def _validate_active(root: Path, cycle_id: str, authorization_id: str, pending_r
     journal_path = root / "work" / "v2-cycle" / "journal.jsonl"
     state = _read_json(state_path)
     pending = state.get("pending_round")
-    if state.get("cycle_id") != cycle_id or state.get("status") != "running" or state.get("phase") != "ADMISSION":
-        raise CycleRecoveryError("active checkpoint is not the expected running ADMISSION cycle")
+    if (
+        state.get("cycle_id") != cycle_id
+        or state.get("status") != "running"
+        or state.get("phase") not in {"ADMISSION", "DRAINING"}
+    ):
+        raise CycleRecoveryError("active checkpoint is not the expected running cycle")
     if not isinstance(pending, Mapping) or int(pending.get("round_number", -1)) != pending_round:
         raise CycleRecoveryError("pending round does not match active checkpoint")
     if str(pending.get("authorization_id") or "") != authorization_id:
@@ -375,10 +414,13 @@ def recover_blocked_cycle(
     not_executed_post_ids: Iterable[int],
     pre_writer_recoverable_post_ids: Iterable[int] = (),
     run_ids: Mapping[int, str],
-    operator_authorization: str,
+    operator_authorization: str | None,
     new_cycle_id: str | None = None,
     preview: Mapping[str, Any] | None = None,
     apply: bool = False,
+    recovery_mode: str = "operator",
+    session_lock: RunSessionLock | None = None,
+    post_lock_handles: Mapping[int, Any] | None = None,
 ) -> dict[str, Any]:
     """Preview/apply a five-way evidence-gated, no-WordPress-write recovery."""
     root = Path(root)
@@ -386,12 +428,57 @@ def recover_blocked_cycle(
     declared = {"COMMITTED_NO_REPLAY": _ids(committed_post_ids), "UNCERTAIN_ISOLATED": _ids(uncertain_post_ids),
                 "NOT_EXECUTED": _ids(not_executed_post_ids), "PRE_WRITER_RECOVERABLE": _ids(pre_writer_recoverable_post_ids)}
     new_cycle_id = str(new_cycle_id or uuid.uuid4().hex)
-    if not operator_authorization.strip() or new_cycle_id == cycle_id:
-        raise CycleRecoveryError("explicit operator authorization and a distinct new cycle are required")
+    if recovery_mode not in {"operator", "automatic"}:
+        raise CycleRecoveryError("unsupported recovery mode")
+    if recovery_mode == "operator" and not str(operator_authorization or "").strip():
+        raise CycleRecoveryError("explicit operator authorization is required")
+    if recovery_mode == "automatic" and (
+        session_lock is None
+        or not session_lock.is_acquired
+        or post_lock_handles is None
+    ):
+        raise CycleRecoveryError("automatic recovery requires held global and per-post locks")
+    if post_lock_handles is not None and session_lock is None:
+        raise CycleRecoveryError("provided post locks require their owning global lock")
+    if new_cycle_id == cycle_id:
+        raise CycleRecoveryError("new cycle_id must differ from the interrupted cycle")
     isolation_id = _operation_id(cycle_id=cycle_id, authorization_id=authorization_id, pending_round=int(pending_round), selected=selected, uncertain=declared["UNCERTAIN_ISOLATED"], new_cycle_id=new_cycle_id)
-    lock = RunSessionLock(root / "work" / "v2-run.lock")
-    if not lock.acquire():
-        return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
+    expected_lock_path = (root / "work" / "v2-run.lock").resolve()
+    lock = session_lock or RunSessionLock(expected_lock_path)
+    owns_session_lock = session_lock is None
+    if owns_session_lock:
+        if not lock.acquire():
+            return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
+    elif not lock.is_acquired or lock.path.resolve() != expected_lock_path:
+        raise CycleRecoveryError("provided global lock does not protect this recovery root")
+
+    owns_post_locks = post_lock_handles is None
+    handles: Mapping[int, Any] = post_lock_handles or {}
+    if owns_post_locks:
+        from .cycle_runtime import _reserve_post_lock_batch, _release_post_lock_batch
+
+        acquired, locked_post_id, lock_error = _reserve_post_lock_batch(
+            root, selected, lock_ttl=900
+        )
+        if locked_post_id is not None:
+            if owns_session_lock:
+                lock.release()
+            return {
+                "status": "blocked",
+                "reason": "post_lock_busy",
+                "locked_post_id": int(locked_post_id),
+                "lock_error": lock_error,
+                "wordpress_writes": 0,
+            }
+        handles = acquired
+    else:
+        if set(int(value) for value in handles) != set(selected):
+            raise CycleRecoveryError("per-post locks do not cover the complete authorized round")
+        try:
+            for handle in handles.values():
+                handle.assert_owned()
+        except Exception as exc:
+            raise CycleRecoveryError("per-post lock ownership is not valid") from exc
     try:
         transition_path = _transition_path(root, isolation_id)
         existing = _read_json(transition_path) if transition_path.is_file() else None
@@ -399,14 +486,16 @@ def recover_blocked_cycle(
             if (existing.get("cycle_id") != cycle_id or existing.get("authorization_id") != authorization_id
                     or int(existing.get("pending_round", -1)) != int(pending_round)
                     or existing.get("selected_ids") != selected or existing.get("new_cycle_id") != new_cycle_id
-                    or existing.get("isolation_id") != isolation_id):
+                    or existing.get("isolation_id") != isolation_id
+                    or str(existing.get("recovery_mode") or "operator") != recovery_mode):
                 raise CycleRecoveryError("a completed transition exists for a different recovery operation")
             _verify_completed(root, existing)
             return {"status": "already_applied", "isolation_id": existing["isolation_id"], "new_cycle_id": existing["new_cycle_id"], "archive_dir": existing["archive_dir"], "wordpress_writes": 0, "replay": False}
         if existing and existing.get("phase") in {"prepared", "quarantine_applied", "checkpoint_applied", "journal_applied"}:
             if (existing.get("cycle_id") != cycle_id or existing.get("authorization_id") != authorization_id
                     or int(existing.get("pending_round", -1)) != int(pending_round)
-                    or existing.get("selected_ids") != selected):
+                    or existing.get("selected_ids") != selected
+                    or str(existing.get("recovery_mode") or "operator") != recovery_mode):
                 raise CycleRecoveryError("unfinished transition identity diverged")
             return _resume_transition(root, existing)
         state, state_hash, journal_hash, quarantine_hash = _validate_active(root, cycle_id, authorization_id, int(pending_round), selected)
@@ -414,7 +503,11 @@ def recover_blocked_cycle(
         evidence: list[dict[str, Any]] = []
         for post_id in selected:
             run_id = str(run_ids.get(post_id) or "")
-            if post_id not in declared["NOT_EXECUTED"] and not run_id:
+            if (
+                post_id not in declared["NOT_EXECUTED"]
+                and not run_id
+                and recovery_mode == "operator"
+            ):
                 raise CycleRecoveryError(f"post {post_id} requires its exact run_id")
             item = dict(_round_post_evidence(root, client, post_id=post_id, cycle_id=cycle_id, authorization_id=authorization_id, pending_round=int(pending_round), capture_media_artifacts=post_id in declared["UNCERTAIN_ISOLATED"]))
             item["run_id_declared"] = run_id
@@ -422,13 +515,25 @@ def recover_blocked_cycle(
             if post_id in declared["NOT_EXECUTED"]:
                 if run_id or not _not_executed_evidence_is_complete(item):
                     raise CycleRecoveryError(f"post {post_id} is not proven not-executed")
-            elif not run_id or run_id != observed_run_id:
+            elif run_id != observed_run_id or (
+                recovery_mode == "operator" and not run_id
+            ):
                 raise CycleRecoveryError(f"declared run_id diverges from journal for post {post_id}")
+            elif (
+                recovery_mode == "automatic"
+                and item.get("classification") != "UNCERTAIN_ISOLATED"
+                and not run_id
+            ):
+                raise CycleRecoveryError(f"post {post_id} requires a correlated run_id")
             evidence.append(item)
         actual = _class_sets(evidence)
         _validate_partition(actual, declared, selected)
-        if any(item.get("registry", {}).get("present") is not True for item in evidence):
-            raise CycleRecoveryError("MediaRegistry evidence unavailable; refusing classification")
+        if any(
+            item.get("registry", {}).get("present") is not True
+            or item.get("registry", {}).get("schema_complete") is not True
+            for item in evidence
+        ):
+            raise CycleRecoveryError("MediaRegistry evidence unavailable or incomplete; refusing classification")
         classes = {str(item["post_id"]): item["classification"] for item in evidence}
         isolation_id = _operation_id(cycle_id=cycle_id, authorization_id=authorization_id, pending_round=int(pending_round), selected=selected, uncertain=declared["UNCERTAIN_ISOLATED"], new_cycle_id=new_cycle_id)
         snapshot = {"cycle_id": cycle_id, "authorization_id": authorization_id, "pending_round": int(pending_round), "selected_ids": selected, "classes": classes, "evidence": evidence, "state_sha256": state_hash, "journal_sha256": journal_hash, "quarantine_sha256": quarantine_hash, "new_cycle_id": new_cycle_id, "isolation_id": isolation_id}
@@ -442,7 +547,7 @@ def recover_blocked_cycle(
             raise CycleRecoveryError("unfinished transition belongs to another recovery")
         transition_path.parent.mkdir(parents=True, exist_ok=True)
         transition = dict(existing or {})
-        transition.update({"version": TRANSITION_VERSION, "phase": transition.get("phase", "intent"), "isolation_id": isolation_id, "cycle_id": cycle_id, "authorization_id": authorization_id, "pending_round": int(pending_round), "selected_ids": selected, "new_cycle_id": new_cycle_id, "archive_dir": result["archive_dir"], "snapshot_hash": snapshot_hash, "classes": classes, "operator_authorization": operator_authorization, "created_at": transition.get("created_at", time.time())})
+        transition.update({"version": TRANSITION_VERSION, "phase": transition.get("phase", "intent"), "isolation_id": isolation_id, "cycle_id": cycle_id, "authorization_id": authorization_id, "pending_round": int(pending_round), "selected_ids": selected, "new_cycle_id": new_cycle_id, "archive_dir": result["archive_dir"], "snapshot_hash": snapshot_hash, "classes": classes, "recovery_mode": recovery_mode, "operator_authorization": operator_authorization, "created_at": transition.get("created_at", time.time())})
         _write_transition(transition_path, transition)
         archive = Path(result["archive_dir"]); archive.mkdir(parents=True, exist_ok=True)
         hashes: dict[str, str] = {}
@@ -455,13 +560,21 @@ def recover_blocked_cycle(
         if registry_info.get("status") != "AVAILABLE":
             raise CycleRecoveryError("MediaRegistry snapshot unavailable; refusing transition")
         after = _quarantine_after(policy, declared["UNCERTAIN_ISOLATED"], isolation_id)
-        new_state, new_event = _new_state(new_cycle_id, state.get("config") or {})
+        new_state, new_event = _new_state(
+            new_cycle_id,
+            state.get("config") or {},
+            recovery_mode=recovery_mode,
+        )
         if (archive / "new-state.json").is_file():
             new_state = _read_json(archive / "new-state.json")
         if (archive / "new-journal.jsonl").is_file():
             new_event = _read_json(archive / "new-journal.jsonl")
         _write_once(archive / "new-state.json", _json(new_state))
-        _write_once(archive / "new-journal.jsonl", _json(new_event))
+        _write_journal_once(
+            archive / "new-journal.jsonl",
+            new_event,
+            allow_normalize=not (archive / "archive-manifest.json").exists(),
+        )
         _write_once(archive / "quarantine-after.json", _json(after))
         archive_files = {str(path): _sha256(path) for path in archive.rglob("*") if path.is_file() and path.name != "archive-manifest.json"}
         manifest = {**transition, "phase": "prepared", "archive_hashes": hashes, "archive_file_hashes": archive_files, "registry_snapshot": registry_info, "reconciliation_evidence": evidence, "quarantine_before": policy, "quarantine_after": after, "old_state_sha256": state_hash, "old_journal_sha256": journal_hash, "quarantine_before_sha256": quarantine_hash, "quarantine_after_hash": _hash_value(after), "new_state_prepared_sha256": _sha256(archive / "new-state.json"), "new_journal_prepared_sha256": _sha256(archive / "new-journal.jsonl")}
@@ -482,7 +595,7 @@ def recover_blocked_cycle(
         if transition["phase"] == "checkpoint_applied":
             _validate_resume_phase(root, transition)
             if _sha256(root / "work" / "v2-cycle" / "journal.jsonl") != transition["new_journal_prepared_sha256"]:
-                atomic_write_text(root / "work" / "v2-cycle" / "journal.jsonl", _json(new_event))
+                atomic_write_text(root / "work" / "v2-cycle" / "journal.jsonl", _jsonl(new_event))
             transition["phase"] = "journal_applied"; _write_transition(transition_path, transition)
         if transition["phase"] == "journal_applied":
             _validate_resume_phase(root, transition)
@@ -490,7 +603,274 @@ def recover_blocked_cycle(
         _verify_completed(root, transition)
         return {"status": "applied", "isolation_id": isolation_id, "new_cycle_id": new_cycle_id, "archive_dir": str(archive), "classes": classes, "wordpress_writes": 0, "replay": False}
     finally:
-        lock.release()
+        if owns_post_locks:
+            from .cycle_runtime import _release_post_lock_batch
+
+            _release_post_lock_batch(handles)
+        if owns_session_lock:
+            lock.release()
 
 
-__all__ = ["CycleRecoveryError", "recover_blocked_cycle"]
+def auto_recover_blocked_cycle(
+    root: Path,
+    client,
+    *,
+    cycle_id: str,
+    authorization_id: str,
+    pending_round: int,
+    selected_ids: Iterable[int],
+    session_lock: RunSessionLock,
+    post_lock_handles: Mapping[int, Any],
+) -> dict[str, Any]:
+    """Classify a whole blocked round and isolate only uncertain posts.
+
+    Automatic recovery is allowed only while the global and every selected
+    post lock are held and the evidence classifier can inspect every post and
+    a complete MediaRegistry. It never writes to WordPress.
+    """
+    root = Path(root)
+    selected = _ids(selected_ids)
+    if not session_lock.is_acquired:
+        return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
+    try:
+        if session_lock.path.resolve() != (root / "work" / "v2-run.lock").resolve():
+            return {"status": "blocked", "reason": "global_lock_root_mismatch", "wordpress_writes": 0}
+        if set(int(value) for value in post_lock_handles) != set(selected):
+            return {"status": "blocked", "reason": "post_lock_set_incomplete", "wordpress_writes": 0}
+        for handle in post_lock_handles.values():
+            handle.assert_owned()
+    except Exception:
+        return {"status": "blocked", "reason": "post_lock_ownership_uncertain", "wordpress_writes": 0}
+
+    evidence: list[dict[str, Any]] = []
+    try:
+        for post_id in selected:
+            item = dict(_round_post_evidence(
+                root,
+                client,
+                post_id=post_id,
+                cycle_id=cycle_id,
+                authorization_id=authorization_id,
+                pending_round=int(pending_round),
+                capture_media_artifacts=False,
+            ))
+            registry = item.get("registry")
+            if not isinstance(registry, Mapping) or registry.get("present") is not True or registry.get("schema_complete") is not True:
+                return {
+                    "status": "blocked",
+                    "reason": "registry_evidence_unavailable",
+                    "post_id": int(post_id),
+                    "wordpress_writes": 0,
+                }
+            evidence.append(item)
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "reason": "round_evidence_unavailable",
+            "error_class": type(exc).__name__,
+            "wordpress_writes": 0,
+        }
+
+    actual = _class_sets(evidence)
+    uncertain = actual["UNCERTAIN_ISOLATED"]
+    if not uncertain:
+        return {
+            "status": "blocked",
+            "reason": "no_uncertain_post_to_isolate",
+            "round_classifications": actual,
+            "wordpress_writes": 0,
+        }
+
+    run_ids: dict[int, str] = {}
+    for item in evidence:
+        post_id = int(item["post_id"])
+        classification = str(item["classification"])
+        journal = item.get("journal")
+        run_id = str(journal.get("run_id") or "") if isinstance(journal, Mapping) else ""
+        if run_id and classification != "NOT_EXECUTED":
+            run_ids[post_id] = run_id
+        elif classification in {"COMMITTED_NO_REPLAY", "PRE_WRITER_RECOVERABLE"}:
+            return {
+                "status": "blocked",
+                "reason": "required_run_identity_missing",
+                "post_id": post_id,
+                "wordpress_writes": 0,
+            }
+
+    new_cycle_id = "recovery-" + _hash_value({
+        "cycle_id": cycle_id,
+        "authorization_id": authorization_id,
+        "pending_round": int(pending_round),
+        "selected_ids": selected,
+    })[:24]
+    kwargs = {
+        "root": root,
+        "client": client,
+        "cycle_id": cycle_id,
+        "authorization_id": authorization_id,
+        "pending_round": int(pending_round),
+        "selected_ids": selected,
+        "committed_post_ids": actual["COMMITTED_NO_REPLAY"],
+        "uncertain_post_ids": uncertain,
+        "not_executed_post_ids": actual["NOT_EXECUTED"],
+        "pre_writer_recoverable_post_ids": actual["PRE_WRITER_RECOVERABLE"],
+        "run_ids": run_ids,
+        "operator_authorization": None,
+        "new_cycle_id": new_cycle_id,
+        "recovery_mode": "automatic",
+        "session_lock": session_lock,
+        "post_lock_handles": post_lock_handles,
+    }
+    preview = recover_blocked_cycle(**kwargs)
+    if preview.get("status") != "preview":
+        return preview
+    result = recover_blocked_cycle(**kwargs, preview=preview, apply=True)
+    return {
+        **result,
+        "recovery_mode": "automatic",
+        "round_classifications": actual,
+        "isolated_post_ids": uncertain,
+    }
+
+
+def resume_staged_cycle_recovery(
+    root: Path,
+    *,
+    session_lock: RunSessionLock,
+    client=None,
+) -> dict[str, Any] | None:
+    """Resume or safely block a staged recovery before reading the checkpoint."""
+    root = Path(root)
+    expected_lock = (root / "work" / "v2-run.lock").resolve()
+    if not session_lock.is_acquired or session_lock.path.resolve() != expected_lock:
+        return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
+    transitions = root / "work" / "v2-cycle" / "transitions"
+    if not transitions.is_dir():
+        return None
+    pending: list[dict[str, Any]] = []
+    for path in sorted(transitions.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            return {"status": "blocked", "reason": "transition_file_invalid", "wordpress_writes": 0}
+        try:
+            value = _read_json(path)
+        except CycleRecoveryError:
+            return {"status": "blocked", "reason": "transition_file_invalid", "wordpress_writes": 0}
+        if value.get("phase") in {
+            "intent", "prepared", "quarantine_applied", "checkpoint_applied", "journal_applied"
+        }:
+            if value.get("version") != TRANSITION_VERSION:
+                return {
+                    "status": "blocked",
+                    "reason": "transition_version_unsupported",
+                    "wordpress_writes": 0,
+                }
+            pending.append(value)
+    if not pending:
+        return None
+    if len(pending) != 1:
+        return {"status": "blocked", "reason": "multiple_staged_recoveries", "wordpress_writes": 0}
+    transition = pending[0]
+    try:
+        selected = _ids(transition.get("selected_ids") or [])
+        if transition.get("phase") == "intent":
+            if transition.get("recovery_mode") != "automatic" or client is None:
+                return {
+                    "status": "blocked",
+                    "reason": "incomplete_operator_transition_requires_explicit_recovery"
+                    if transition.get("recovery_mode") == "operator"
+                    else "incomplete_transition_cannot_be_revalidated",
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            from .cycle_runtime import _reserve_post_lock_batch, _release_post_lock_batch
+
+            handles, locked_post_id, lock_error = _reserve_post_lock_batch(
+                root, selected, lock_ttl=900
+            )
+            if locked_post_id is not None:
+                return {
+                    "status": "blocked",
+                    "reason": "post_lock_busy",
+                    "locked_post_id": int(locked_post_id),
+                    "lock_error": lock_error,
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            try:
+                result = auto_recover_blocked_cycle(
+                    root,
+                    client,
+                    cycle_id=str(transition.get("cycle_id") or ""),
+                    authorization_id=str(transition.get("authorization_id") or ""),
+                    pending_round=int(transition.get("pending_round")),
+                    selected_ids=selected,
+                    session_lock=session_lock,
+                    post_lock_handles=handles,
+                )
+            finally:
+                _release_post_lock_batch(handles)
+            if result.get("status") not in {"applied", "already_applied"}:
+                return {
+                    **result,
+                    "status": "blocked",
+                    "reason": "incomplete_automatic_transition_revalidation_failed",
+                    "wordpress_writes": 0,
+                    "replay": False,
+                }
+            return {
+                **result,
+                "status": "resumed",
+                "wordpress_writes": 0,
+                "replay": False,
+            }
+        classes_map = transition.get("classes")
+        if not isinstance(classes_map, Mapping):
+            raise CycleRecoveryError("staged recovery classifications are missing")
+        groups = {name: [] for name in CLASSIFICATIONS}
+        for raw_post_id, classification in classes_map.items():
+            post_id = int(raw_post_id)
+            if classification not in groups:
+                raise CycleRecoveryError("staged recovery classification is invalid")
+            groups[str(classification)].append(post_id)
+        actual = {key: sorted(value) for key, value in groups.items()}
+        _validate_partition(actual, actual, selected)
+        from .cycle_runtime import _reserve_post_lock_batch, _release_post_lock_batch
+
+        handles, locked_post_id, lock_error = _reserve_post_lock_batch(root, selected, lock_ttl=900)
+        if locked_post_id is not None:
+            return {
+                "status": "blocked",
+                "reason": "post_lock_busy",
+                "locked_post_id": int(locked_post_id),
+                "lock_error": lock_error,
+                "wordpress_writes": 0,
+            }
+        try:
+            _resume_transition(root, transition)
+        finally:
+            _release_post_lock_batch(handles)
+        return {
+            "status": "resumed",
+            "new_cycle_id": str(transition.get("new_cycle_id") or ""),
+            "isolation_id": str(transition.get("isolation_id") or ""),
+            "archive_dir": str(transition.get("archive_dir") or ""),
+            "round_classifications": actual,
+            "isolated_post_ids": actual["UNCERTAIN_ISOLATED"],
+            "wordpress_writes": 0,
+            "replay": False,
+        }
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "reason": "staged_recovery_resume_failed",
+            "error_class": type(exc).__name__,
+            "wordpress_writes": 0,
+        }
+
+
+__all__ = [
+    "CycleRecoveryError",
+    "auto_recover_blocked_cycle",
+    "recover_blocked_cycle",
+    "resume_staged_cycle_recovery",
+]
