@@ -143,6 +143,9 @@ def test_candidate_decision_persists_hashed_provenance_without_signed_url(tmp_pa
     assert reference["gate"] == "relevance"
     assert reference["matched"] == ["page_title", "query"]
     assert reference["penalties"] == ["not_in_source"]
+    assert reference["failure_stage"] == ""
+    assert reference["failure_kind"] == ""
+    assert reference["failure_recoverable"] is False
     assert reference["source_comparison_proved"] is True
     assert "must not persist" not in row[0]
     assert "private title" not in row[0]

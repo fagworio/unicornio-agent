@@ -5,11 +5,13 @@ import threading
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
 from pathlib import Path
 
 from PIL import Image
 
 from unicornio_editor.media.source_verify import (
+    _fetch,
     _normalized_url,
     validate_discovered_candidate,
     verify_downloaded_against_source,
@@ -73,6 +75,38 @@ class SourcePageHandler(BaseHTTPRequestHandler):
 
 
 class SourceVerifyTests(unittest.TestCase):
+    def test_fetch_preserves_safe_http_failure_diagnostics(self):
+        diagnostics = {}
+        with mock.patch(
+            "unicornio_editor.media.source_verify.urlopen_remote",
+            side_effect=HTTPError("https://source.test/image.jpg", 404, "not found", {}, None),
+        ):
+            result = _fetch(
+                "https://source.test/image.jpg",
+                "image/*",
+                1024,
+                [1024],
+                diagnostics=diagnostics,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostics["failure_kind"], "http_404")
+        self.assertEqual(diagnostics["http_status"], 404)
+        self.assertFalse(diagnostics["recoverable"])
+
+    def test_verification_result_preserves_safe_failure_stage(self):
+        from unicornio_editor.media.source_verify import verification_result
+
+        result = verification_result(
+            False,
+            "source_bytes_mismatch: CDN served different bytes",
+        )
+
+        self.assertEqual(result["reason_code"], "source_bytes_mismatch")
+        self.assertEqual(result["failure_stage"], "source_comparison")
+        self.assertEqual(result["failure_kind"], "mismatch")
+        self.assertFalse(result["recoverable"])
+
     def test_normalized_url_encodes_spaces_without_changing_source_identity(self):
         self.assertEqual(
             _normalized_url("https://cdn.test/art work.jpg"),

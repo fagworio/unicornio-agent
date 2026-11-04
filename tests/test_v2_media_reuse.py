@@ -2200,9 +2200,11 @@ def test_media_resolver_uses_same_query_replacement_after_final_rejection(
         }),
     ]
     attempted_urls = []
+    attempt_ids = []
 
     def fake_resolve(_client, _config, _root, batch, **_kwargs):
         assert batch["posts"][0]["replacement_reserve"] == 2
+        attempt_ids.append(_kwargs.get("attempt_id"))
         return {"posts": [{
             "reuse": [],
             "audit_candidates": candidates,
@@ -2268,6 +2270,7 @@ def test_media_resolver_uses_same_query_replacement_after_final_rejection(
         "https://cdn.test/first.webp",
         "https://cdn.test/replacement.webp",
     ]
+    assert attempt_ids == ["candidate-replacement-run"]
     assert result.accepted == int(replacement_succeeds)
     if replacement_succeeds:
         assert result.search.completed is True

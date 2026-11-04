@@ -65,12 +65,31 @@ def verification_result(ok: bool, reason: str) -> dict[str, Any]:
     reason_code = code.strip() if separator and code.strip() else (
         "source_verified" if ok else "source_mismatch"
     )
+    failure_stage = ""
+    failure_kind = ""
+    if not ok:
+        if reason_code == "source_page_unavailable":
+            failure_stage, failure_kind = "source_page_fetch", "source_page_unavailable"
+        elif reason_code in {"source_asset_unavailable", "source_decode_failed"}:
+            failure_stage, failure_kind = "source_asset_fetch", (
+                "decode_error" if reason_code == "source_decode_failed" else "source_asset_unavailable"
+            )
+        elif reason_code == "candidate_asset_unavailable":
+            failure_stage, failure_kind = "candidate_asset", "candidate_asset_unavailable"
+        elif reason_code == "source_scan_incomplete":
+            failure_stage, failure_kind = "source_comparison", "scan_incomplete"
+        elif reason_code in {"source_mismatch", "source_bytes_mismatch"}:
+            failure_stage, failure_kind = "source_comparison", "mismatch"
+        else:
+            failure_stage, failure_kind = "source_verify", reason_code
     return {
         "ok": bool(ok),
         "reason_code": reason_code,
         "reason": raw,
         "detail": detail.strip() if separator else raw,
         "recoverable": reason_code in SOURCE_VERIFICATION_RETRYABLE_CODES,
+        "failure_stage": failure_stage,
+        "failure_kind": failure_kind,
         # This helper is used after the downloaded candidate was compared to
         # assets read from the source page.  A mere EXACT_URL/SLUG_MATCH from
         # the HTML preflight never reaches this path and is not proof of bytes.
@@ -106,13 +125,19 @@ def discover_article_source_candidates(
             })
         return []
     budget = [_VERIFY_TOTAL_MAX_BYTES]
-    payload = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
+    fetch_diagnostics: dict[str, Any] = {}
+    payload = _fetch(
+        page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy,
+        diagnostics=fetch_diagnostics,
+    )
     if payload is None:
         if stats is not None:
             stats.update({
                 "source_status": "unavailable",
                 "reason_code": "source_page_unavailable",
                 "retryable": True,
+                "failure_kind": fetch_diagnostics.get("failure_kind", "unavailable"),
+                "http_status": int(fetch_diagnostics.get("http_status") or 0),
             })
         return []
     html = payload.decode("utf-8", "ignore")
@@ -325,8 +350,19 @@ def _fetch(
     budget: list[int],
     audit=None,
     url_policy: str = "audit",
+    diagnostics: dict[str, Any] | None = None,
 ) -> bytes | None:
+    def mark(kind: str, *, http_status: int = 0, recoverable: bool = True) -> None:
+        if diagnostics is None:
+            return
+        diagnostics.update({
+            "failure_kind": kind,
+            "http_status": int(http_status or 0),
+            "recoverable": bool(recoverable),
+        })
+
     if budget[0] <= 0:
+        mark("byte_budget_exhausted", recoverable=True)
         return None
     host = (urlparse(url).hostname or "").casefold()
     if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
@@ -348,6 +384,7 @@ def _fetch(
             data = response.read(min(max_bytes, budget[0]) + 1)
             if len(data) > max_bytes:
                 data = None
+                mark("size_limit", recoverable=False)
             else:
                 budget[0] -= len(data)
             if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
@@ -355,6 +392,12 @@ def _fetch(
                     _WIKIMEDIA_CACHE[url] = data
             return data
     except HTTPError as exc:
+        status = int(exc.code or 0)
+        mark(
+            f"http_{status}" if status < 500 else "http_5xx",
+            http_status=status,
+            recoverable=status in {408, 425, 429} or status >= 500,
+        )
         if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"} and exc.code == 429:
             retry = exc.headers.get("Retry-After", "60") if exc.headers else "60"
             try:
@@ -365,7 +408,15 @@ def _fetch(
                 _WIKIMEDIA_RETRY_UNTIL = monotonic() + delay
                 _WIKIMEDIA_CACHE.pop(url, None)
         return None
-    except (URLError, OSError, ValueError, InvalidURL):
+    except URLError as exc:
+        reason = str(getattr(exc, "reason", "") or exc).casefold()
+        mark("timeout" if "timed out" in reason or "timeout" in reason else "network_error")
+        return None
+    except InvalidURL:
+        mark("invalid_url", recoverable=False)
+        return None
+    except (OSError, ValueError):
+        mark("io_error")
         return None
 
 
@@ -539,7 +590,11 @@ def _validate_discovered_candidate(
     budget = [_VERIFY_TOTAL_MAX_BYTES]
     if page_url not in cache:
         fetch_started = monotonic()
-        pagina = _fetch(page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy)
+        page_fetch_diagnostics: dict[str, Any] = {}
+        pagina = _fetch(
+            page_url, "text/html", _PAGE_MAX_BYTES, budget, audit, url_policy,
+            diagnostics=page_fetch_diagnostics,
+        )
         resultado["verification_stage_durations_ms"]["source_page_fetch"] = round(
             (monotonic() - fetch_started) * 1000, 1
         )
@@ -555,6 +610,10 @@ def _validate_discovered_candidate(
         # relevância sem baixar a página uma segunda vez.
         if cache_html is not None and texto:
             cache_html[page_url] = texto
+        if page_fetch_diagnostics:
+            resultado["failure_stage"] = "source_page_fetch"
+            resultado["failure_kind"] = page_fetch_diagnostics.get("failure_kind", "")
+            resultado["http_status"] = int(page_fetch_diagnostics.get("http_status") or 0)
     listadas = cache[page_url]
     if listadas is None:
         resultado["reason_code"] = "source_page_unavailable"
@@ -646,7 +705,11 @@ def _validate_discovered_candidate(
     try:
         resultado["verification_stage"] = "candidate_image_fetch"
         candidate_fetch_started = monotonic()
-        candidate_bytes = _fetch(image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+        candidate_fetch_diagnostics: dict[str, Any] = {}
+        candidate_bytes = _fetch(
+            image_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy,
+            diagnostics=candidate_fetch_diagnostics,
+        )
         resultado["verification_stage_durations_ms"]["candidate_image_fetch"] = round(
             (monotonic() - candidate_fetch_started) * 1000, 1
         )
@@ -659,6 +722,9 @@ def _validate_discovered_candidate(
                     "bytes da candidata indisponíveis para comparação com a origem",
                 ),
             })
+            resultado["failure_stage"] = "candidate_image_fetch"
+            resultado["failure_kind"] = candidate_fetch_diagnostics.get("failure_kind", "unavailable")
+            resultado["http_status"] = int(candidate_fetch_diagnostics.get("http_status") or 0)
             return resultado
         resultado["verification_stage"] = "visual_comparison"
         compared = 0
@@ -666,7 +732,11 @@ def _validate_discovered_candidate(
         decode_failed = False
         for listed_url in scan_urls:
             source_fetch_started = monotonic()
-            asset_bytes = _fetch(listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy)
+            source_fetch_diagnostics: dict[str, Any] = {}
+            asset_bytes = _fetch(
+                listed_url, "image/*", _IMG_MAX_BYTES, budget, audit, url_policy,
+                diagnostics=source_fetch_diagnostics,
+            )
             resultado["verification_stage_durations_ms"]["source_asset_fetch"] = round(
                 resultado["verification_stage_durations_ms"].get("source_asset_fetch", 0.0)
                 + (monotonic() - source_fetch_started) * 1000,
@@ -674,6 +744,9 @@ def _validate_discovered_candidate(
             )
             if asset_bytes is None:
                 unavailable += 1
+                if source_fetch_diagnostics and "failure_kind" not in resultado:
+                    resultado["failure_kind"] = source_fetch_diagnostics.get("failure_kind", "unavailable")
+                    resultado["http_status"] = int(source_fetch_diagnostics.get("http_status") or 0)
                 resultado["verification_stage"] = "source_asset_fetch"
                 continue
             resultado["verification_stage"] = "visual_comparison"

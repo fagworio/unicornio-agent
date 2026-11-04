@@ -18,9 +18,13 @@ def test_media_funnel_report_aggregates_failures_without_writing_or_leaking_evid
         )
         db.execute(
             """INSERT INTO media_runs
-            (run_id, post_id, queries_attempted, acquisition_outcome, completion_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            ("run-complete", 115976, 2, "target_reached", "TARGET_REACHED", "2026-11-03T11:00:00+00:00"),
+            (run_id, post_id, planned_deficits, queries_attempted, acquisition_outcome, completion_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "run-complete", 115976,
+                '{"final":{"phase":"MEDIA","search_completion_reason":"TARGET_REACHED"}}',
+                2, "target_reached", "TARGET_REACHED", "2026-11-03T11:00:00+00:00",
+            ),
         )
         db.execute(
             """INSERT INTO media_decisions
@@ -61,6 +65,11 @@ def test_media_funnel_report_aggregates_failures_without_writing_or_leaking_evid
     assert result["metrics"]["media_runs"] == 2
     assert result["metrics"]["queries_attempted"] == 5
     assert result["metrics"]["search_incomplete_runs"] == 1
+    assert result["metrics"]["media_phase_runs"] == 1
+    assert result["metrics"]["search_completion_reasons"] == {
+        "SEARCH_INCOMPLETE": 1,
+        "TARGET_REACHED": 1,
+    }
     assert result["metrics"]["source_mismatch"] == 2
     assert result["metrics"]["unresolved_source"] == 1
     assert result["metrics"]["featured_rejections"] == 1

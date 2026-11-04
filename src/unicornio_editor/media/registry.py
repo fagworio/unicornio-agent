@@ -396,12 +396,15 @@ def record_v2_observation(
     checkpoints, candidate selection and publication gates remain authoritative.
     """
     media = getattr(state, "media", None)
+    search = getattr(media, "search", None)
     current_metrics = {
         "required": int(getattr(media, "required", 0) or 0),
         "accepted": int(getattr(media, "accepted", 0) or 0),
         "missing": int(getattr(media, "missing", 0) or 0),
         "phase": phase,
         "queries_attempted": int(getattr(getattr(media, "search", None), "queries_attempted", 0) or 0),
+        "search_completed": bool(getattr(search, "completed", False)),
+        "search_completion_reason": str(getattr(search, "completion_reason", "") or ""),
     }
     observed_at = _utc_timestamp()
     with connect(root) as db:
@@ -609,7 +612,8 @@ def record_v2_candidate_decision(
         "baseline_identity_unavailable",
         "duplicate_existing_frame", "duplicate_frame", "unrelated",
         "width_below_minimum", "resolution", "identity_mismatch",
-        "vision_provider_error",
+        "vision_provider_error", "media_conversion_error", "media_upload_error",
+        "media_processing_error",
     }
     matched = evidence.get("matched")
     penalties = evidence.get("penalties")
@@ -669,6 +673,9 @@ def record_v2_candidate_decision(
             if key in vision
         },
         "vision_policy_version": str(evidence.get("vision_policy_version") or ""),
+        "failure_stage": str(candidate.get("failure_stage") or "")[:48],
+        "failure_kind": str(candidate.get("failure_kind") or "")[:48],
+        "failure_recoverable": candidate.get("recoverable") is True,
         "decision_causes": decision_causes,
     }, sort_keys=True)
     safe_reason_code = str(reason_code or "").casefold().strip()

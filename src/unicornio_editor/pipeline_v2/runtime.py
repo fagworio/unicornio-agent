@@ -91,11 +91,13 @@ _MEDIA_RETRYABLE_REASON_CODES = frozenset({
     "unresolved_source", "vision_input_unavailable", "vision_provider_error",
     "baseline_identity_unavailable", "visual_identity_pending",
     "transient_provider_failure",
+    "media_download_error", "media_upload_error", "media_processing_error",
 })
 _MEDIA_DEFINITIVE_REASON_CODES = frozenset({
     "source_mismatch", "source_bytes_mismatch", "duplicate_existing_frame",
     "duplicate_frame", "unrelated", "subject_mismatch", "role_unsuitable",
     "width_below_minimum", "resolution", "identity_mismatch",
+    "media_conversion_error",
 })
 
 
@@ -2565,7 +2567,12 @@ class ProductionMediaResolver:
                 self.client, self.config, self.root, batch, full=True, allow_reuse=True,
                 excluded_urls=blocked_urls,
                 excluded_fingerprints=blocked_fingerprints,
-                attempt_id=str(context.get("run_id") or context.get("batch_id") or ""),
+                attempt_id=str(
+                    context.get("v2_run_id")
+                    or context.get("run_id")
+                    or context.get("batch_id")
+                    or ""
+                ),
             )
             row = (resolved.get("posts") or [{}])[0]
             if role == "inline":
@@ -2734,6 +2741,9 @@ class ProductionMediaResolver:
                         item["source_comparison_proved"] = True
                     reason_code, temporary, definitive = _classify_media_result(result)
                     accepted = str(result.get("status") or "").casefold() in {"accepted", "ok"}
+                    for key in ("failure_stage", "failure_kind", "recoverable"):
+                        if key in result:
+                            item[key] = result[key]
                     record_v2_candidate_decision(
                         self.root, post_id=int(context["post_id"]), run_id=run_id,
                         candidate=item, role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),

@@ -3166,7 +3166,15 @@ def test_execute_media_plan_rejects_final_duplicate_before_upload(tmp_path):
             previous_inline_phashes=("ccc04d9fb063ed1c",),
         )
     upload.assert_not_called()
-    assert results == [{"paragraph_index": 0, "status": "rejected", "detail": "duplicate_existing_frame"}]
+    assert results == [{
+        "paragraph_index": 0,
+        "status": "rejected",
+        "detail": "duplicate_existing_frame",
+        "reason_code": "duplicate_existing_frame",
+        "failure_stage": "preflight",
+        "failure_kind": "duplicate_frame",
+        "recoverable": False,
+    }]
 
 
 def test_execute_media_plan_preserves_rejected_preflight_vision_without_upload(tmp_path):
@@ -3448,7 +3456,45 @@ def test_execute_media_plan_does_not_upload_when_identity_verification_fails(tmp
     upload.assert_not_called()
     assert results[0]["status"] == "deferred"
     assert results[0]["reason_code"] == "visual_identity_pending"
+    assert results[0]["failure_stage"] == "visual_identity"
+    assert results[0]["failure_kind"] == "comparison_error"
+    assert results[0]["recoverable"] is True
     assert "visual_identity_unverified" in results[0]["detail"]
+
+
+def test_execute_media_plan_preserves_download_failure_classification(tmp_path):
+    from unicornio_editor.media.downloader import MediaDownloadError
+
+    item = {
+        "paragraph_index": 0,
+        "source_page_url": "https://source.example/wolverine",
+        "direct_image_url": "https://source.example/wolverine-new.jpg",
+        "alt_text": "Wolverine novo",
+        "is_featured": False,
+    }
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Wolverine videogame.</p>",
+        "media_plan": [item],
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch(
+             "unicornio_editor.workflow.download_image",
+             side_effect=MediaDownloadError("image download failed (HTTP 404)"),
+         ), \
+         mock.patch("unicornio_editor.workflow.upload_image") as upload:
+        results, _, _ = _execute_media_plan(
+            editorial, config, object(), tmp_path,
+            preflight={"rejected": [], "featured_vision": []}, post_id=115088,
+        )
+
+    upload.assert_not_called()
+    assert results[0]["status"] == "error"
+    assert results[0]["reason_code"] == "candidate_asset_unavailable"
+    assert results[0]["failure_stage"] == "download"
+    assert results[0]["failure_kind"] == "http_404"
+    assert results[0]["recoverable"] is True
 
 
 def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp_path):

@@ -43,7 +43,7 @@ from .media.converter import (
     image_is_mostly_flat,
     prepare_featured_webp,
 )
-from .media.downloader import download_image
+from .media.downloader import MediaDownloadError, download_image
 from .media.diagnostics import diagnostic_url_domain
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
@@ -119,6 +119,39 @@ def _diagnostic_media_engine(item: dict[str, Any]) -> str:
 # liberam o GIL durante E/S. Falhas de item são registradas no próprio item;
 # nunca reexecutamos um lote parcial, pois upload é efeito colateral.
 _MEDIA_WORKERS = 4
+
+
+def _structured_media_failure(
+    exc: Exception,
+    *,
+    stage: str,
+    reason_code: str,
+    recoverable: bool,
+) -> dict[str, Any]:
+    """Return bounded failure metadata without copying provider/URL details."""
+    text = str(exc or "").casefold()
+    http_match = re.search(r"\bHTTP[\s_-]*(\d{3})\b", text, re.IGNORECASE)
+    if http_match:
+        status = int(http_match.group(1))
+        failure_kind = f"http_{status}" if status < 500 else "http_5xx"
+    elif "timeout" in text or "timed out" in text:
+        failure_kind = "timeout"
+    elif "size limit" in text or "exceeds size" in text:
+        failure_kind = "size_limit"
+    elif "decode" in text or "invalid image" in text or "not an image" in text:
+        failure_kind = "decode_error"
+    elif "network" in text or "unreachable" in text or "connection" in text:
+        failure_kind = "network_error"
+    else:
+        failure_kind = "exception"
+    return {
+        "status": "error",
+        "reason_code": reason_code,
+        "failure_stage": stage,
+        "failure_kind": failure_kind,
+        "recoverable": bool(recoverable),
+        "detail": f"{stage} failed ({failure_kind})",
+    }
 
 
 class WorkflowError(RuntimeError):
@@ -1950,7 +1983,14 @@ def _validate_featured_candidate_vision(
     else:
         image_url = str(item.get("direct_image_url") or "").strip()
     if not image_url or not subject:
-        return {"status": "rejected", "reason": "featured sem URL ou assunto para validar por visao"}
+        return {
+            "status": "rejected",
+            "reason": "featured sem URL ou assunto para validar por visao",
+            "reason_code": "incomplete_provenance",
+            "failure_stage": "featured_validation",
+            "failure_kind": "missing_input",
+            "recoverable": False,
+        }
 
     if getattr(config, "vision_mode", "ambiguous") == "ambiguous" and not media_id:
         deterministic_reason = trusted_featured_evidence(
@@ -2053,29 +2093,39 @@ def _validate_featured_candidate_vision(
             "decision": decision,
         }
     except (VisionGateError, VisionInputUnavailable) as exc:
-        return {
-            "status": "error",
-            "technical": True,
-            "reason": f"visao da featured falhou: {exc}",
-            "cached": False,
-        }
+        result = _structured_media_failure(
+            exc,
+            stage="featured_vision",
+            reason_code=(
+                "vision_input_unavailable"
+                if isinstance(exc, VisionInputUnavailable)
+                else "vision_provider_error"
+            ),
+            recoverable=True,
+        )
+        result.update({"technical": True, "reason": result["detail"], "cached": False})
+        return result
     except MediaConversionError as exc:
         # A portrait/invalid source is a deterministic candidate rejection,
         # not an outage of the vision provider.  Keeping this distinction
         # prevents an endless technical retry loop for an incompatible image.
-        return {
-            "status": "rejected",
-            "technical": False,
-            "reason": f"featured incompatível com a normalização: {exc}",
-            "cached": False,
-        }
+        result = _structured_media_failure(
+            exc,
+            stage="featured_conversion",
+            reason_code="media_conversion_error",
+            recoverable=False,
+        )
+        result.update({"status": "rejected", "technical": False, "reason": result["detail"], "cached": False})
+        return result
     except Exception as exc:  # noqa: BLE001 - fail closed
-        return {
-            "status": "error",
-            "technical": True,
-            "reason": f"visao da featured falhou: {exc}",
-            "cached": False,
-        }
+        result = _structured_media_failure(
+            exc,
+            stage="featured_vision",
+            reason_code="vision_provider_error",
+            recoverable=True,
+        )
+        result.update({"technical": True, "reason": result["detail"], "cached": False})
+        return result
 
 
 def _listicle_media_capacity(
@@ -2498,15 +2548,24 @@ def _execute_media_plan(
                 download_url = (
                     attachment.get("source_url") if attachment is not None else item["direct_image_url"]
                 )
-                source = download_image(
-                    str(download_url),
-                    tmp / f"source_{position}{suffix}",
-                    max_attempts=config.max_source_retries + 1,
-                    url_policy=config.remote_url_policy,
-                    audit=lambda finding: append_telemetry(
-                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
-                    ),
-                )
+                try:
+                    source = download_image(
+                        str(download_url),
+                        tmp / f"source_{position}{suffix}",
+                        max_attempts=config.max_source_retries + 1,
+                        url_policy=config.remote_url_policy,
+                        audit=lambda finding: append_telemetry(
+                            root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
+                        ),
+                    )
+                except MediaDownloadError as exc:
+                    _funnel("download", "error", item, position, type(exc).__name__)
+                    return position, _structured_media_failure(
+                        exc,
+                        stage="download",
+                        reason_code="candidate_asset_unavailable",
+                        recoverable=True,
+                    ) | {"paragraph_index": item.get("paragraph_index")}
                 _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
@@ -2543,6 +2602,8 @@ def _execute_media_plan(
                         "detail": f"verificacao de origem: {verify_reason}",
                         "reason_code": verification["reason_code"],
                         "recoverable": verification["recoverable"],
+                        "failure_stage": verification["failure_stage"],
+                        "failure_kind": verification["failure_kind"],
                         "source_comparison_proved": verification[
                             "source_comparison_proved"
                         ],
@@ -2569,12 +2630,25 @@ def _execute_media_plan(
                             "paragraph_index": item.get("paragraph_index"),
                             "status": "rejected",
                             "detail": "inline vision evidence does not match downloaded source bytes",
+                            "reason_code": "identity_mismatch",
+                            "failure_stage": "inline_vision_evidence",
+                            "failure_kind": "sha256_mismatch",
+                            "recoverable": False,
                         }
                 transparency = "flattened" if image_has_transparency(source) else "none"
-                if is_featured:
-                    webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
-                else:
-                    webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+                try:
+                    if is_featured:
+                        webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
+                    else:
+                        webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
+                except MediaConversionError as exc:
+                    _funnel("conversion", "error", item, position, type(exc).__name__)
+                    return position, _structured_media_failure(
+                        exc,
+                        stage="conversion",
+                        reason_code="media_conversion_error",
+                        recoverable=False,
+                    ) | {"paragraph_index": item.get("paragraph_index")}
                 from .media.visual_hash import phash_from_path
 
                 final_phash = phash_from_path(str(webp)) or str(item.get("phash") or "")
@@ -2586,6 +2660,10 @@ def _execute_media_plan(
                         "status": "rejected",
                         "detail": "featured aparenta ser so texto/arte plana sem conteudo visual; "
                         "escolha uma key art/imagem real da obra",
+                        "reason_code": "role_unsuitable",
+                        "failure_stage": "conversion",
+                        "failure_kind": "featured_flat_art",
+                        "recoverable": False,
                     }
                 width, height = image_dimensions(webp)
                 _funnel("conversion", "passed", item, position, f"{width}x{height}")
@@ -2596,6 +2674,10 @@ def _execute_media_plan(
                             "paragraph_index": item.get("paragraph_index"),
                             "status": "rejected",
                             "detail": "duplicate_existing_frame",
+                            "reason_code": "duplicate_existing_frame",
+                            "failure_stage": "preflight",
+                            "failure_kind": "duplicate_frame",
+                            "recoverable": False,
                         }
                     from .media.visual_identity import verify_candidate_identity
                     try:
@@ -2616,6 +2698,8 @@ def _execute_media_plan(
                             "status": "deferred",
                             "detail": detail,
                             "reason_code": "visual_identity_pending",
+                            "failure_stage": "visual_identity",
+                            "failure_kind": "comparison_error",
                             "recoverable": True,
                         }
                     if visual_baseline_unavailable:
@@ -2628,6 +2712,8 @@ def _execute_media_plan(
                             "status": "deferred",
                             "detail": detail,
                             "reason_code": "visual_identity_pending",
+                            "failure_stage": "visual_identity",
+                            "failure_kind": "unverified",
                             "recoverable": True,
                         }
                     if not identity.sha256 or not identity.phash or not identity.visual_group_id:
@@ -2638,11 +2724,21 @@ def _execute_media_plan(
                             "status": "deferred",
                             "detail": detail,
                             "reason_code": "visual_identity_pending",
+                            "failure_stage": "visual_identity",
+                            "failure_kind": "identity_incomplete",
                             "recoverable": True,
                         }
                     if visual.decision in {"SAME_IMAGE", "SAME_ART_CROP"}:
                         _funnel("visual_identity", "rejected", item, position, visual.reason)
-                        return position, {"paragraph_index": item.get("paragraph_index"), "status": "rejected", "detail": "duplicate_existing_frame"}
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"),
+                            "status": "rejected",
+                            "detail": "duplicate_existing_frame",
+                            "reason_code": "duplicate_existing_frame",
+                            "failure_stage": "preflight",
+                            "failure_kind": "duplicate_frame",
+                            "recoverable": False,
+                        }
                 if is_featured and config.vision_enabled and config.vision_api_key:
                     vision_preflight = preflight_vision.get(position) or {}
                     expected_sha256 = str(vision_preflight.get("image_sha256") or "")
@@ -2762,21 +2858,50 @@ def _execute_media_plan(
                     if not decision.get("accepted"):
                         reason = str(decision.get("reason") or "featured não confirmada visualmente")
                         _funnel("featured_vision_final_bytes", "rejected", item, position, reason)
+                        vision_reason_code = (
+                            "vision_provider_error"
+                            if str(decision.get("status") or "").casefold() == "error"
+                            or str(decision.get("verdict") or "").casefold() == "error"
+                            else "role_unsuitable"
+                            if str(decision.get("role_fit") or "") == "unsuitable"
+                            else "subject_mismatch"
+                        )
                         return position, {
                             "paragraph_index": item.get("paragraph_index"),
                             "status": "rejected",
                             "detail": reason[:200],
+                            "reason_code": vision_reason_code,
+                            "failure_stage": "featured_vision",
+                            "failure_kind": str(decision.get("verdict") or "vision_rejected")[:48],
+                            "recoverable": vision_reason_code == "vision_provider_error",
                             **({"vision_evidence": vision_evidence_record} if vision_evidence_record else {}),
                         }
                     _funnel(
                         "featured_vision_final_bytes", "passed", item, position,
                         "same_sha256_as_preflight" if expected_sha256 == identity.sha256 else "validated_before_upload",
                     )
-                media = upload_image(client, webp, evidence)
+                try:
+                    media = upload_image(client, webp, evidence)
+                except Exception as exc:  # noqa: BLE001 - upload failure is candidate-scoped
+                    _funnel("upload", "error", item, position, type(exc).__name__)
+                    return position, _structured_media_failure(
+                        exc,
+                        stage="upload",
+                        reason_code="media_upload_error",
+                        recoverable=True,
+                    ) | {"paragraph_index": item.get("paragraph_index")}
                 media_id = media.get("id")
                 media_url = media.get("source_url")
                 if not media_id or not media_url:
-                    raise WorkflowError(f"media upload returned no id/source_url (item {position})")
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "error",
+                        "reason_code": "media_upload_error",
+                        "failure_stage": "upload",
+                        "failure_kind": "missing_response_fields",
+                        "recoverable": True,
+                        "detail": "upload returned incomplete media identity",
+                    }
                 visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
                 accepted_result = {
                     "status": "accepted",
@@ -2846,8 +2971,13 @@ def _execute_media_plan(
                 except Exception as exc:  # noqa: BLE001 - report one failed item
                     if on_accepted is not None and position in confirmed_uploads:
                         raise
-                    _funnel("worker", "error", item, position, str(exc))
-                    processed.append((position, {"paragraph_index": item.get("paragraph_index"), "status": "error", "detail": f"processamento de midia: {str(exc)[:160]}"}))
+                    _funnel("worker", "error", item, position, type(exc).__name__)
+                    processed.append((position, _structured_media_failure(
+                        exc,
+                        stage="worker",
+                        reason_code="media_processing_error",
+                        recoverable=True,
+                    ) | {"paragraph_index": item.get("paragraph_index")}))
 
             for position, result in processed:
                 outcomes[position] = result

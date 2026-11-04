@@ -26,6 +26,11 @@ _SOURCE_FAILURES = {
 }
 _REJECT_DISPOSITIONS = {"reject", "rejected", "reject_final", "candidate_rejected"}
 _GENERIC_REASONS = {"unknown", "candidate_rejected", "candidate_accepted"}
+_SEARCH_COMPLETION_REASONS = {
+    "SEARCH_INCOMPLETE", "TARGET_REACHED", "EXHAUSTED_VERIFIED",
+    "SOURCE_VERIFICATION_INCOMPLETE", "INCOMPLETE_PROVIDER", "NOT_REQUIRED",
+    "INTERRUPTED",
+}
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -98,7 +103,7 @@ def media_funnel_report(
                     "read_only": True,
                 }
             required = {
-                "media_runs": {"post_id", "queries_attempted", "acquisition_outcome", "completion_reason", "created_at"},
+                "media_runs": {"post_id", "queries_attempted", "acquisition_outcome", "completion_reason", "planned_deficits", "created_at"},
                 "media_decisions": {"post_id", "role", "reason_code", "disposition", "evidence_reference", "created_at"},
             }
             for table, expected in required.items():
@@ -110,7 +115,7 @@ def media_funnel_report(
                         "read_only": True,
                     }
             runs = db.execute(
-                "SELECT post_id, queries_attempted, acquisition_outcome, completion_reason, created_at FROM media_runs"
+                "SELECT post_id, queries_attempted, acquisition_outcome, completion_reason, planned_deficits, created_at FROM media_runs"
             ).fetchall()
             decisions = db.execute(
                 "SELECT post_id, role, reason_code, disposition, evidence_reference, created_at FROM media_decisions"
@@ -123,9 +128,11 @@ def media_funnel_report(
         }
 
     run_total = 0
+    media_phase_runs = 0
     queries_total = 0
     bad_timestamps = 0
     completion_counts: Counter[str] = Counter()
+    search_completion_counts: Counter[str] = Counter()
     outcome_counts: Counter[str] = Counter()
     post_counts: dict[int, Counter[str]] = defaultdict(Counter)
     for row in runs:
@@ -142,10 +149,28 @@ def media_funnel_report(
             pass
         completion = str(row["completion_reason"] or "unknown")
         outcome = str(row["acquisition_outcome"] or "unknown")
+        search_completion = ""
+        try:
+            planned = json.loads(row["planned_deficits"] or "{}")
+            final_metrics = planned.get("final") if isinstance(planned, dict) else {}
+            if isinstance(final_metrics, dict):
+                search_completion = str(final_metrics.get("search_completion_reason") or "")
+                if str(final_metrics.get("phase") or "").casefold() == "media":
+                    media_phase_runs += 1
+        except (TypeError, ValueError, json.JSONDecodeError):
+            search_completion = ""
         completion_counts[completion] += 1
         outcome_counts[outcome] += 1
+        if search_completion:
+            search_completion_counts[search_completion] += 1
+        elif completion in _SEARCH_COMPLETION_REASONS:
+            # Older rows stored the search result directly in completion_reason.
+            search_completion_counts[completion] += 1
         post_id = int(row["post_id"] or 0)
-        if post_id > 0 and completion == "SEARCH_INCOMPLETE":
+        if post_id > 0 and (
+            search_completion == "SEARCH_INCOMPLETE"
+            or (not search_completion and completion == "SEARCH_INCOMPLETE")
+        ):
             post_counts[post_id]["search_incomplete_runs"] += 1
 
     decision_total = 0
@@ -214,8 +239,10 @@ def media_funnel_report(
             "media_runs": run_total,
             "queries_attempted": queries_total,
             "completion_reasons": dict(sorted(completion_counts.items())),
+            "search_completion_reasons": dict(sorted(search_completion_counts.items())),
             "acquisition_outcomes": dict(sorted(outcome_counts.items())),
-            "search_incomplete_runs": completion_counts.get("SEARCH_INCOMPLETE", 0),
+            "media_phase_runs": media_phase_runs,
+            "search_incomplete_runs": search_completion_counts.get("SEARCH_INCOMPLETE", 0),
             "media_decisions": decision_total,
             "candidate_decisions": candidate_decisions,
             "decision_roles": dict(sorted(role_counts.items())),
