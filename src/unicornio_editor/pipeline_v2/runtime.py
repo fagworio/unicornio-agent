@@ -559,6 +559,11 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                         item.get("original_rejected_reason")
                         or row.get("original_rejected_reason")
                     ),
+                    "retry_same_source": (
+                        item.get("retry_same_source")
+                        if "retry_same_source" in item
+                        else row.get("retry_same_source")
+                    ),
                     "original_gate": item.get("original_gate") or row.get("original_gate"),
                     "evidence": item.get("evidence") or row.get("evidence"),
                 }
@@ -566,13 +571,17 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             )
             verdict = str((row.get("evidence") or {}).get("verdict") or "").casefold()
             raw_disposition = str(row.get("disposition") or "").casefold()
-            if raw_disposition == "defer_retry":
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            retry_same_source = row.get("retry_same_source")
+            if not isinstance(retry_same_source, bool):
+                retry_same_source = evidence.get("retry_same_source")
+            non_retryable_same_source = retry_same_source is False
+            if raw_disposition == "defer_retry" and not non_retryable_same_source:
                 continue
             raw_reason_value = str(row.get("rejected_reason") or row.get("reason") or row.get("detail") or "").casefold()
             # This is a derived guard, not original gate evidence.  Do not let
             # its own label become the reason for a permanent blacklist.
             derived_rejection = "previously_rejected_candidate" in raw_reason_value or verdict == "previously_rejected_candidate"
-            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
             evidence_verdict = str(evidence.get("verdict") or "").casefold()
             if _is_legacy_rights_only_media_decision(row):
                 # Historical license-only decisions are retained as audit data,
@@ -599,9 +608,9 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 or any(token in original_cause for token in definitive_causes)
             )
             has_transient_cause = any(token in original_cause for token in transient_causes)
-            if has_transient_cause and not has_definitive_cause:
+            if has_transient_cause and not has_definitive_cause and not non_retryable_same_source:
                 continue
-            if derived_rejection and not has_definitive_cause:
+            if derived_rejection and not has_definitive_cause and not non_retryable_same_source:
                 continue
             # ``unresolved_source`` is an inconclusive provider/provenance
             # result, not proof that a URL is permanently invalid. Keep it
@@ -611,7 +620,7 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 evidence_verdict == "unresolved_source"
                 or "unresolved_source" in raw_reason_value
             )
-            if unresolved_source and not has_definitive_cause:
+            if unresolved_source and not has_definitive_cause and not non_retryable_same_source:
                 continue
             evidence_score_value = evidence.get("score")
             try:
@@ -630,7 +639,10 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 and not evidence.get("vision_decision")
             )
             if needs_revalidation:
-                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
+                for key in (
+                    "url", "media_url", "direct_image_url", "source_image_url",
+                    "source_page_url",
+                ):
                     value = str(row.get(key) or "").strip()
                     if value:
                         revalidation_urls.add(_canonical_embedded_media_url(value))
@@ -691,7 +703,10 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 and historical_policy != VISION_POLICY_VERSION
             )
             if not stale_semantic_rejection:
-                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
+                for key in (
+                    "url", "media_url", "direct_image_url", "source_image_url",
+                    "source_page_url",
+                ):
                     value = str(row.get(key) or "").strip()
                     if value:
                         urls.add(_canonical_embedded_media_url(value))

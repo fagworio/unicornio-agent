@@ -451,6 +451,42 @@ def test_deferred_invalid_media_does_not_blacklist_url(tmp_path):
     assert "source_page_unreachable" not in history["reasons"]
 
 
+def test_non_retryable_source_failure_blocks_same_url_but_keeps_alternative_eligible(tmp_path):
+    batch = tmp_path / "work" / "batches" / "batch-http-404"
+    batch.mkdir(parents=True)
+    rejected_url = "https://cdn.test/missing.webp"
+    rejected_source = "https://source.test/missing-page"
+    alternative_url = "https://cdn.test/alternative.webp"
+    (batch / "media.manifest.json").write_text(
+        json.dumps({"posts": [{"post_id": 115234, "audit_candidates": [{
+            "candidate_id": "http-404",
+            "disposition": "defer_retry",
+            "reason": "source_page_unavailable",
+            "source_page_url": rejected_source,
+            "direct_image_url": rejected_url,
+            "failure_kind": "http_404",
+            "http_status": 404,
+            "retry_same_source": False,
+        }]}]}),
+        encoding="utf-8",
+    )
+
+    history = _media_rejection_history(tmp_path, 115234)
+    candidates = [
+        {"source_page_url": rejected_source, "direct_image_url": rejected_url},
+        {"source_page_url": "https://source.test/alternative-page", "direct_image_url": alternative_url},
+    ]
+    eligible = [
+        candidate for candidate in candidates
+        if candidate["direct_image_url"] not in history["urls"]
+        and candidate["source_page_url"] not in history["urls"]
+    ]
+
+    assert rejected_url in history["urls"]
+    assert rejected_source in history["urls"]
+    assert eligible == [candidates[1]]
+
+
 def test_derived_previous_rejection_is_not_root_evidence(tmp_path):
     batch = tmp_path / "work" / "batches" / "batch-derived"
     batch.mkdir(parents=True)
