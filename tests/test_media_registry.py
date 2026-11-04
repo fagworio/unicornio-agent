@@ -8,7 +8,8 @@ import pytest
 
 import unicornio_editor.media.registry as media_registry
 from unicornio_editor.media.registry import (
-    RegistryError, connect, invalidate_v2_media, load_v2_media, migrate_legacy_index,
+    RegistryError, connect, invalidate_v2_media, load_v2_candidate_rejection_history,
+    load_v2_media, migrate_legacy_index,
     record_v2_candidate_decision, record_v2_observation, registry_path,
 )
 from unicornio_editor.media.library_index import register as register_library_media
@@ -314,6 +315,34 @@ def test_registry_persists_bounded_source_failure_diagnostics(tmp_path):
     assert reference["http_status"] == 404
     assert reference["failure_recoverable"] is False
     assert reference["retry_same_source"] is False
+
+
+def test_registry_rejection_history_returns_only_hashed_source_identities(tmp_path):
+    image_url = "https://cdn.example/missing.webp?signature=secret"
+    source_page_url = "https://source.example/missing-page"
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=15,
+        run_id="run-source-http-404-history",
+        candidate={
+            "candidate_id": "candidate-source-http-404-history",
+            "source_page_url": source_page_url,
+            "direct_image_url": image_url,
+            "retry_same_source": False,
+            "evidence": {"verdict": "unresolved_source"},
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="source_page_unavailable",
+    )
+
+    history = load_v2_candidate_rejection_history(tmp_path, post_id=15)
+
+    assert hashlib.sha256(image_url.encode()).hexdigest() in history["url_hashes"]
+    assert hashlib.sha256(source_page_url.encode()).hexdigest() in history["source_page_url_hashes"]
+    serialized_history = json.dumps({key: sorted(value) for key, value in history.items()})
+    assert image_url not in serialized_history
+    assert source_page_url not in serialized_history
 
 
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):

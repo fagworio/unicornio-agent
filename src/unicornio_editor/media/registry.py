@@ -577,6 +577,47 @@ def load_v2_media(root: str | Path, *, post_id: int) -> list[dict[str, Any]]:
     return result
 
 
+def load_v2_candidate_rejection_history(
+    root: str | Path, *, post_id: int,
+) -> dict[str, set[str]]:
+    """Return hashed source identities that must not be retried for a post.
+
+    Candidate decisions intentionally persist only SHA-256 identities for
+    image and source-page URLs. This lets the resolver apply a permanent
+    ``retry_same_source=false`` decision without putting signed URLs back into
+    a history file or exposing them to later diagnostics.
+    """
+    image_url_hashes: set[str] = set()
+    source_page_url_hashes: set[str] = set()
+    with connect(root) as db:
+        rows = db.execute(
+            """SELECT disposition, evidence_reference
+               FROM media_decisions
+               WHERE post_id = ?
+                 AND scope = 'candidate'
+                 AND disposition IN ('defer_retry', 'reject_final')""",
+            (int(post_id),),
+        ).fetchall()
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_reference"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(evidence, dict) or evidence.get("retry_same_source") is not False:
+            continue
+        for field, target in (
+            ("direct_image_url_sha256", image_url_hashes),
+            ("source_page_url_sha256", source_page_url_hashes),
+        ):
+            value = str(evidence.get(field) or "").casefold()
+            if len(value) == 64 and all(char in "0123456789abcdef" for char in value):
+                target.add(value)
+    return {
+        "url_hashes": image_url_hashes,
+        "source_page_url_hashes": source_page_url_hashes,
+    }
+
+
 def record_v2_candidate_decision(
     root: str | Path,
     *,
@@ -680,7 +721,11 @@ def record_v2_candidate_decision(
             if str(candidate.get("http_status") or "").isdigit() else 0
         ),
         "failure_recoverable": candidate.get("recoverable") is True,
-        "retry_same_source": candidate.get("retry_same_source") is True,
+        "retry_same_source": (
+            candidate.get("retry_same_source")
+            if isinstance(candidate.get("retry_same_source"), bool)
+            else None
+        ),
         "decision_causes": decision_causes,
     }, sort_keys=True)
     safe_reason_code = str(reason_code or "").casefold().strip()
@@ -722,6 +767,7 @@ def invalidate_v2_media(
 
 __all__ = [
     "SCHEMA_VERSION", "connect", "load_v2_media", "migrate_legacy_index",
-    "record_v2_candidate_decision", "record_v2_observation", "registry_path",
+    "record_v2_candidate_decision", "load_v2_candidate_rejection_history",
+    "record_v2_observation", "registry_path",
     "invalidate_v2_media",
 ]

@@ -479,12 +479,202 @@ def test_non_retryable_source_failure_blocks_same_url_but_keeps_alternative_elig
     eligible = [
         candidate for candidate in candidates
         if candidate["direct_image_url"] not in history["urls"]
-        and candidate["source_page_url"] not in history["urls"]
+        and candidate["source_page_url"] not in history["source_page_urls"]
     ]
 
     assert rejected_url in history["urls"]
-    assert rejected_source in history["urls"]
+    assert rejected_source in history["source_page_urls"]
     assert eligible == [candidates[1]]
+
+
+def test_two_consecutive_v2_selections_use_registry_history_and_retry_timeout(
+    monkeypatch, tmp_path,
+):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.evidence as evidence
+    import unicornio_editor.media.search as search
+    import unicornio_editor.media.source_resolver as source_resolver
+    import unicornio_editor.media.source_verify as source_verify
+    import unicornio_editor.media.visual_hash as visual_hash
+    from unicornio_editor.media.registry import record_v2_candidate_decision
+
+    post_id = 115234
+    missing_url = "https://cdn.test/missing.webp"
+    missing_page = "https://source.test/missing-page"
+    timeout_url = "https://cdn.test/timeout.webp"
+    timeout_page = "https://source.test/timeout-page"
+    alternative_url = "https://cdn.test/alternative.webp"
+    alternative_page = "https://source.test/alternative-page"
+    calls = []
+
+    def candidate(candidate_id, image_url, source_page_url):
+        return {
+            "candidate_id": candidate_id,
+            "direct_image_url": image_url,
+            "source_page_url": source_page_url,
+            "usable": True,
+            "engine": "controlled",
+            "query": "Game",
+        }
+
+    def fake_validate(item, **_kwargs):
+        calls.append(item["direct_image_url"])
+        if item["direct_image_url"] == missing_url:
+            return {
+                "valid": False,
+                "reason": "source_page_unavailable: HTTP 404",
+                "reason_code": "source_page_unavailable",
+                "recoverable": False,
+                "failure_stage": "source_page_fetch",
+                "failure_kind": "http_404",
+                "http_status": 404,
+                "retry_same_source": False,
+                "images_in_page": 0,
+            }
+        if item["direct_image_url"] == timeout_url:
+            return {
+                "valid": False,
+                "reason": "source_page_unavailable: timeout",
+                "reason_code": "source_page_unavailable",
+                "recoverable": True,
+                "failure_stage": "source_page_fetch",
+                "failure_kind": "timeout",
+                "http_status": 0,
+                "retry_same_source": True,
+                "images_in_page": 0,
+            }
+        return {
+            "valid": True,
+            "reason": "verified alternative source",
+            "reason_code": "",
+            "recoverable": False,
+            "failure_stage": "",
+            "failure_kind": "",
+            "http_status": 0,
+            "retry_same_source": False,
+            "images_in_page": 1,
+        }
+
+    def fake_evidence_score(_subject, **kwargs):
+        if kwargs["image_in_source"]:
+            return {
+                "score": 9,
+                "local_score": 9,
+                "verdict": "deterministic_match",
+                "gate": "relevance",
+                "matched": [],
+                "penalties": [],
+                "needs_vision": False,
+                "recoverable": False,
+            }
+        return {
+            "score": 0,
+            "local_score": 0,
+            "verdict": "unresolved_source",
+            "gate": "provenance",
+            "matched": [],
+            "penalties": [],
+            "needs_vision": False,
+            "recoverable": kwargs["source_verification_recoverable"],
+        }
+
+    monkeypatch.setattr(source_verify, "validate_discovered_candidate", fake_validate)
+    monkeypatch.setattr(
+        source_resolver,
+        "resolve_candidate_source",
+        lambda item, *_args, **_kwargs: dict(item),
+    )
+    monkeypatch.setattr(evidence, "evidence_score", fake_evidence_score)
+    monkeypatch.setattr(visual_hash, "image_hashes", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        evidence,
+        "dedupe_by_phash",
+        lambda approved, rejected, **_kwargs: (approved, rejected),
+    )
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [])
+
+    batch = {
+        "schema_version": 1,
+        "batch_id": "two-consecutive-v2-selections",
+        "posts": [{
+            "post_id": post_id,
+            "subject": "Game",
+            "query": "Game",
+            "needed": 1,
+            "limit": 3,
+            "replacement_reserve": 0,
+            "engine": "auto",
+        }],
+    }
+    candidate_batches = [
+        [candidate("missing-first", missing_url, missing_page), candidate("timeout-first", timeout_url, timeout_page)],
+        [
+            candidate("missing-second", missing_url, missing_page),
+            candidate("alternative-second", alternative_url, alternative_page),
+            candidate("timeout-second", timeout_url, timeout_page),
+        ],
+    ]
+
+    def controlled_search(queries, *, accept, **_kwargs):
+        rows = candidate_batches.pop(0)
+        accept(rows, queries[0])
+        return [{
+            "query": queries[0],
+            "candidates": rows,
+            "completion_reason": "TARGET_REACHED",
+            "engine_reports": {"controlled": {"failure_kind": "ok"}},
+        }]
+
+    monkeypatch.setattr(search, "search_web_images_batch", controlled_search)
+
+    first = cli._resolve_media_batch(object(), Config(), tmp_path, batch, full=True, allow_reuse=False)
+    assert first["posts"][0]["audit_candidates"]
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=post_id,
+        run_id="first-v2-run",
+        candidate={
+            **candidate("missing-first", missing_url, missing_page),
+            "retry_same_source": False,
+            "failure_kind": "http_404",
+            "http_status": 404,
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="source_page_unavailable",
+    )
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=post_id,
+        run_id="first-v2-run",
+        candidate={
+            **candidate("timeout-first", timeout_url, timeout_page),
+            "retry_same_source": True,
+            "failure_kind": "timeout",
+        },
+        role="inline",
+        disposition="defer_retry",
+        reason_code="source_page_unavailable",
+    )
+
+    history = _media_rejection_history(tmp_path, post_id)
+    second = cli._resolve_media_batch(
+        object(), Config(), tmp_path, batch, full=True, allow_reuse=False,
+        excluded_urls={post_id: history["urls"]},
+        excluded_source_page_urls={post_id: history["source_page_urls"]},
+        excluded_fingerprints={post_id: history["fingerprints"]},
+        excluded_url_hashes={post_id: history["url_hashes"]},
+        excluded_source_page_url_hashes={post_id: history["source_page_url_hashes"]},
+    )
+
+    assert calls.count(missing_url) == 1
+    assert calls.count(timeout_url) == 2
+    assert calls.count(alternative_url) == 1
+    assert second["posts"][0]["reuse"] == []
+    assert any(
+        row.get("direct_image_url") == alternative_url
+        for row in second["posts"][0]["audit_candidates"]
+    )
 
 
 def test_derived_previous_rejection_is_not_root_evidence(tmp_path):

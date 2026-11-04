@@ -1517,7 +1517,10 @@ def _resolve_media_batch(
     full: bool = False,
     allow_reuse: bool = True,
     excluded_urls: dict[int, set[str]] | None = None,
+    excluded_source_page_urls: dict[int, set[str]] | None = None,
     excluded_fingerprints: dict[int, set[str]] | None = None,
+    excluded_url_hashes: dict[int, set[str]] | None = None,
+    excluded_source_page_url_hashes: dict[int, set[str]] | None = None,
     attempt_id: str = "",
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
@@ -1551,7 +1554,10 @@ def _resolve_media_batch(
             root, int(item["post_id"]), operation="media_resolve_batch"
         )
     excluded_urls = excluded_urls or {}
+    excluded_source_page_urls = excluded_source_page_urls or {}
     excluded_fingerprints = excluded_fingerprints or {}
+    excluded_url_hashes = excluded_url_hashes or {}
+    excluded_source_page_url_hashes = excluded_source_page_url_hashes or {}
     reuse_by_post: dict[int, list[dict]] = {}
     needed_web_by_post: dict[int, int] = {}
     candidate_capacity_by_post: dict[int, int] = {}
@@ -1560,12 +1566,18 @@ def _resolve_media_batch(
         post_id = int(item["post_id"])
         reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"])) if allow_reuse else []
         blocked_urls = excluded_urls.get(post_id, set())
+        blocked_source_page_urls = excluded_source_page_urls.get(post_id, set())
         blocked_fingerprints = excluded_fingerprints.get(post_id, set())
+        blocked_url_hashes = excluded_url_hashes.get(post_id, set())
+        blocked_source_page_url_hashes = excluded_source_page_url_hashes.get(post_id, set())
         existing_urls = set(item.get("existing_media_urls") or [])
         existing_fingerprints = set((item.get("existing_media_phashes") or {}).values())
         reuse = [
             asset for asset in reuse
             if str(asset.get("url") or asset.get("media_url") or "") not in blocked_urls
+            and str(asset.get("source") or asset.get("source_page_url") or "") not in blocked_source_page_urls
+            and hashlib.sha256(str(asset.get("url") or asset.get("media_url") or "").encode("utf-8")).hexdigest() not in blocked_url_hashes
+            and hashlib.sha256(str(asset.get("source") or asset.get("source_page_url") or "").encode("utf-8")).hexdigest() not in blocked_source_page_url_hashes
             and str(asset.get("url") or asset.get("media_url") or "") not in existing_urls
             and not blocked_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
             and not existing_fingerprints.intersection({str(asset.get("phash") or ""), str(asset.get("sha256") or "")})
@@ -1596,7 +1608,10 @@ def _resolve_media_batch(
             existing_media_urls=item.get("existing_media_urls") or [],
             existing_media_phashes=item.get("existing_media_phashes") or {},
             excluded_urls=blocked_urls,
+            excluded_source_page_urls=blocked_source_page_urls,
             excluded_fingerprints=blocked_fingerprints,
+            excluded_url_hashes=blocked_url_hashes,
+            excluded_source_page_url_hashes=blocked_source_page_url_hashes,
             emit_terminal=False,
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
@@ -1637,10 +1652,16 @@ def _resolve_media_batch(
             return 0
         post_id = int(spec["post_id"])
         blocked_urls = excluded_urls.get(post_id, set())
+        blocked_source_page_urls = excluded_source_page_urls.get(post_id, set())
         blocked_fingerprints = excluded_fingerprints.get(post_id, set())
+        blocked_url_hashes = excluded_url_hashes.get(post_id, set())
+        blocked_source_page_url_hashes = excluded_source_page_url_hashes.get(post_id, set())
         novos = [
             candidate for candidate in novos
             if str(candidate.get("direct_image_url") or "") not in blocked_urls
+            and str(candidate.get("source_page_url") or candidate.get("source") or "") not in blocked_source_page_urls
+            and hashlib.sha256(str(candidate.get("direct_image_url") or "").encode("utf-8")).hexdigest() not in blocked_url_hashes
+            and hashlib.sha256(str(candidate.get("source_page_url") or candidate.get("source") or "").encode("utf-8")).hexdigest() not in blocked_source_page_url_hashes
             and not blocked_fingerprints.intersection({
                 str(candidate.get("phash") or ""),
                 str(candidate.get("sha256") or ""),
@@ -1659,7 +1680,10 @@ def _resolve_media_batch(
             existing_media_urls=spec.get("existing_media_urls") or [],
             existing_media_phashes=spec.get("existing_media_phashes") or {},
             excluded_urls=blocked_urls,
+            excluded_source_page_urls=blocked_source_page_urls,
             excluded_fingerprints=blocked_fingerprints,
+            excluded_url_hashes=blocked_url_hashes,
+            excluded_source_page_url_hashes=blocked_source_page_url_hashes,
             emit_terminal=False,
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
@@ -1715,7 +1739,10 @@ def _resolve_media_batch(
             existing_media_urls=item.get("existing_media_urls") or [],
             existing_media_phashes=item.get("existing_media_phashes") or {},
             excluded_urls=excluded_urls.get(post_id, set()),
+            excluded_source_page_urls=excluded_source_page_urls.get(post_id, set()),
             excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
+            excluded_url_hashes=excluded_url_hashes.get(post_id, set()),
+            excluded_source_page_url_hashes=excluded_source_page_url_hashes.get(post_id, set()),
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
             role=str(item.get("role") or ""),
@@ -2511,7 +2538,10 @@ def _enriquecer_candidatos(
     existing_media_urls: list[str] | tuple[str, ...] | None = None,
     existing_media_phashes: dict[str, str] | None = None,
     excluded_urls: set[str] | None = None,
+    excluded_source_page_urls: set[str] | None = None,
     excluded_fingerprints: set[str] | None = None,
+    excluded_url_hashes: set[str] | None = None,
+    excluded_source_page_url_hashes: set[str] | None = None,
     emit_terminal: bool = True,
     url_policy: str = "audit",
     attempt_id: str = "",
@@ -2699,17 +2729,31 @@ def _enriquecer_candidatos(
             )
         )
 
+    def _blocked_by_history(cand: dict) -> bool:
+        direct_image_url = str(cand.get("direct_image_url") or "").strip()
+        source_page_url = str(
+            cand.get("source_page_url") or cand.get("source") or ""
+        ).strip()
+        return bool(
+            direct_image_url in (excluded_urls or set())
+            or source_page_url in (excluded_source_page_urls or set())
+            or hashlib.sha256(direct_image_url.encode("utf-8")).hexdigest() in (excluded_url_hashes or set())
+            or hashlib.sha256(source_page_url.encode("utf-8")).hexdigest() in (excluded_source_page_url_hashes or set())
+        )
+
     def _classificar(cand: dict) -> None:
         """Evidência + proveniência + pHash de UM candidato (fase por candidato)."""
         cand["subject"] = subject
-        blocked_urls = excluded_urls or set()
         blocked_fingerprints = excluded_fingerprints or set()
         candidate_fingerprints = {
             str(cand.get("phash") or ""),
             str(cand.get("sha256") or ""),
             str(cand.get("visual_group_id") or ""),
         }
-        if str(cand.get("direct_image_url") or "") in blocked_urls or blocked_fingerprints.intersection(candidate_fingerprints):
+        if (
+            _blocked_by_history(cand)
+            or blocked_fingerprints.intersection(candidate_fingerprints)
+        ):
             cand["rejected_reason"] = "previously_rejected_candidate"
             cand["evidence"] = {"verdict": "previously_rejected_candidate", "gate": "history", "score": 0}
             cand["evidence_score"] = 0
@@ -2874,6 +2918,9 @@ def _enriquecer_candidatos(
 
     for cand in pendentes:
         chave_original: str | None = None
+        if _blocked_by_history(cand):
+            _classificar(cand)
+            continue
         sem_origem = not str(cand.get("source_page_url") or "").strip()
         source_before_resolution = str(cand.get("source_page_url") or "").strip()
         needs_alternative_source = sem_origem

@@ -199,6 +199,11 @@ def _canonical_embedded_media_url(value: str) -> str:
     ))
 
 
+def _url_sha256(value: Any) -> str:
+    text = str(value or "").strip()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+
+
 def _coverage_query_key(value: Any) -> str:
     """Normalize query identity only for harmless whitespace/case differences."""
     return " ".join(str(value or "").split()).casefold()
@@ -509,6 +514,7 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
 
     reasons: set[str] = set()
     urls: set[str] = set()
+    source_page_urls: set[str] = set()
     fingerprints: set[str] = set()
     queries: set[str] = set()
     revalidation_urls: set[str] = set()
@@ -639,10 +645,7 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 and not evidence.get("vision_decision")
             )
             if needs_revalidation:
-                for key in (
-                    "url", "media_url", "direct_image_url", "source_image_url",
-                    "source_page_url",
-                ):
+                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
                     value = str(row.get(key) or "").strip()
                     if value:
                         revalidation_urls.add(_canonical_embedded_media_url(value))
@@ -703,13 +706,13 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
                 and historical_policy != VISION_POLICY_VERSION
             )
             if not stale_semantic_rejection:
-                for key in (
-                    "url", "media_url", "direct_image_url", "source_image_url",
-                    "source_page_url",
-                ):
+                for key in ("url", "media_url", "direct_image_url", "source_image_url"):
                     value = str(row.get(key) or "").strip()
                     if value:
                         urls.add(_canonical_embedded_media_url(value))
+                source_page_url = str(row.get("source_page_url") or "").strip()
+                if source_page_url:
+                    source_page_urls.add(_canonical_embedded_media_url(source_page_url))
                 for key in ("sha256", "phash", "visual_group_id"):
                     value = str(row.get(key) or "").strip()
                     if value:
@@ -717,14 +720,52 @@ def _media_rejection_history(root: Path, post_id: int) -> dict[str, Any]:
             query = str(row.get("search_query") or row.get("query") or "").strip()
             if query:
                 queries.add(query.casefold())
+    try:
+        from ..media.registry import load_v2_candidate_rejection_history
+
+        registry_history = load_v2_candidate_rejection_history(root, post_id=int(post_id))
+    except Exception:  # noqa: BLE001 - registry history is fail-soft
+        registry_history = {}
     return {
         "reasons": reasons,
         "urls": urls,
+        "source_page_urls": source_page_urls,
         "fingerprints": fingerprints,
         "queries": queries,
         "revalidation_urls": revalidation_urls,
         "revalidation_fingerprints": revalidation_fingerprints,
+        "url_hashes": set(registry_history.get("url_hashes") or ()),
+        "source_page_url_hashes": set(registry_history.get("source_page_url_hashes") or ()),
     }
+
+
+def _media_candidate_is_historically_blocked(
+    candidate: Mapping[str, Any], history: Mapping[str, Any],
+) -> bool:
+    image_url = str(
+        candidate.get("direct_image_url")
+        or candidate.get("media_url")
+        or candidate.get("url")
+        or ""
+    ).strip()
+    source_page_url = str(
+        candidate.get("source_page_url")
+        or candidate.get("source")
+        or ""
+    ).strip()
+    blocked_urls = set(history.get("urls") or ())
+    blocked_source_pages = set(history.get("source_page_urls") or ())
+    if image_url and (
+        image_url in blocked_urls
+        or _canonical_embedded_media_url(image_url) in blocked_urls
+        or _url_sha256(image_url) in set(history.get("url_hashes") or ())
+    ):
+        return True
+    return bool(source_page_url and (
+        source_page_url in blocked_source_pages
+        or _canonical_embedded_media_url(source_page_url) in blocked_source_pages
+        or _url_sha256(source_page_url) in set(history.get("source_page_url_hashes") or ())
+    ))
 
 
 def _adaptive_query_suffix(history: dict[str, Any], *, role: str) -> tuple[str, str]:
@@ -2578,10 +2619,22 @@ class ProductionMediaResolver:
             }
             blocked_urls = {int(context["post_id"]): set(rejection_history["urls"])}
             blocked_fingerprints = {int(context["post_id"]): set(rejection_history["fingerprints"])}
+            blocked_source_page_urls = {
+                int(context["post_id"]): set(rejection_history.get("source_page_urls") or ())
+            }
+            blocked_url_hashes = {
+                int(context["post_id"]): set(rejection_history.get("url_hashes") or ())
+            }
+            blocked_source_page_url_hashes = {
+                int(context["post_id"]): set(rejection_history.get("source_page_url_hashes") or ())
+            }
             resolved = _resolve_media_batch(
                 self.client, self.config, self.root, batch, full=True, allow_reuse=True,
                 excluded_urls=blocked_urls,
                 excluded_fingerprints=blocked_fingerprints,
+                excluded_source_page_urls=blocked_source_page_urls,
+                excluded_url_hashes=blocked_url_hashes,
+                excluded_source_page_url_hashes=blocked_source_page_url_hashes,
                 attempt_id=str(
                     context.get("v2_run_id")
                     or context.get("run_id")
@@ -2654,10 +2707,7 @@ class ProductionMediaResolver:
                 )
             filtered: list[dict[str, Any]] = []
             for candidate in candidates:
-                candidate_url = _canonical_embedded_media_url(
-                    str(candidate.get("direct_image_url") or candidate.get("media_url") or "")
-                )
-                if candidate_url and candidate_url in rejection_history["urls"]:
+                if _media_candidate_is_historically_blocked(candidate, rejection_history):
                     candidate["rejected_reason"] = "previously_rejected_candidate"
                     continue
                 filtered.append(candidate)
@@ -2976,10 +3026,7 @@ class ProductionMediaResolver:
                 candidate["news_context"] = str(identity.get("news_context") or "")
                 candidate["role"] = "featured"
                 candidate["search_query"] = "article_source featured"
-                candidate_url = _canonical_embedded_media_url(
-                    str(candidate.get("direct_image_url") or "")
-                )
-                if candidate_url and candidate_url in rejection_history["urls"]:
+                if _media_candidate_is_historically_blocked(candidate, rejection_history):
                     continue
                 try:
                     from ..media.library_index import find_by_source_url
@@ -3076,8 +3123,7 @@ class ProductionMediaResolver:
                 for candidate in source_candidates:
                     if inline_remaining() <= 0:
                         break
-                    candidate_url = _canonical_embedded_media_url(str(candidate.get("direct_image_url") or ""))
-                    if candidate_url and candidate_url in rejection_history["urls"]:
+                    if _media_candidate_is_historically_blocked(candidate, rejection_history):
                         candidate["rejected_reason"] = "previously_rejected_candidate"
                         continue
                     source_attempted += 1
