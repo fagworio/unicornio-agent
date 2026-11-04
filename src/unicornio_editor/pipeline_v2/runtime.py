@@ -83,6 +83,60 @@ _TECHNICAL_MEDIA_REJECTION_MARKERS = (
     "resolution", "identity_mismatch", "unrelated",
 )
 
+_MEDIA_RETRYABLE_REASON_CODES = frozenset({
+    "source_page_unavailable", "source_asset_unavailable",
+    "source_scan_incomplete", "source_decode_failed",
+    "candidate_asset_unavailable", "source_verification_inconclusive",
+    "incomplete_provenance", "insufficient_source_context",
+    "unresolved_source", "vision_input_unavailable", "vision_provider_error",
+    "baseline_identity_unavailable", "visual_identity_pending",
+    "transient_provider_failure",
+})
+_MEDIA_DEFINITIVE_REASON_CODES = frozenset({
+    "source_mismatch", "source_bytes_mismatch", "duplicate_existing_frame",
+    "duplicate_frame", "unrelated", "subject_mismatch", "role_unsuitable",
+    "width_below_minimum", "resolution", "identity_mismatch",
+})
+
+
+def _classify_media_result(result: Mapping[str, Any]) -> tuple[str, bool, bool]:
+    """Return a stable reason and disposition signals for one media result.
+
+    Structured reason codes are authoritative. Free-text inspection remains
+    only as a compatibility fallback for legacy executors that do not emit a
+    code; an unknown explicit code is inconclusive and therefore retryable,
+    rather than being mislabeled as a provider outage or a final rejection.
+    """
+    status = str(result.get("status") or "").casefold()
+    detail = str(result.get("detail") or result.get("reason") or "")
+    explicit_reason = str(result.get("reason_code") or "").casefold().strip()
+    accepted = status in {"accepted", "ok"}
+    if accepted:
+        return "candidate_accepted", False, False
+    if explicit_reason:
+        if explicit_reason in _MEDIA_RETRYABLE_REASON_CODES:
+            return explicit_reason, True, False
+        if explicit_reason in _MEDIA_DEFINITIVE_REASON_CODES:
+            return explicit_reason, False, True
+        return "source_verification_inconclusive", True, False
+
+    http_status_match = re.search(r"\bHTTP[\s_-]*(\d{3})\b", detail, re.IGNORECASE)
+    http_status = int(http_status_match.group(1)) if http_status_match else 0
+    retryable_http_status = http_status in {408, 425, 429} or 500 <= http_status <= 599
+    temporary = bool(result.get("recoverable")) or retryable_http_status or any(
+        token in detail.casefold()
+        for token in ("timeout", "tempor", "network", "cdn", "unreachable")
+    )
+    definitive = any(token in detail.casefold() for token in (
+        "duplicate", "duplicat", "unrelated", "sem relação", "width_below_minimum",
+        "resolution", "resolu", "source_bytes_mismatch", "mismatch",
+    ))
+    return (
+        "transient_provider_failure" if temporary or not definitive else "candidate_rejected",
+        temporary,
+        definitive,
+    )
+
 
 def _is_legacy_rights_only_media_decision(value: Mapping[str, Any]) -> bool:
     """Identify historical legal-only rejection without masking technical evidence."""
@@ -2678,26 +2732,8 @@ class ProductionMediaResolver:
                         _attach_candidate_vision_evidence(item, vision_evidence)
                     if result.get("source_comparison_proved") is True:
                         item["source_comparison_proved"] = True
-                    status = str(result.get("status") or "").casefold()
-                    detail = str(result.get("detail") or result.get("reason") or "")
-                    explicit_reason = str(result.get("reason_code") or "").casefold().strip()
-                    http_status_match = re.search(r"\bHTTP[\s_-]*(\d{3})\b", detail, re.IGNORECASE)
-                    http_status = int(http_status_match.group(1)) if http_status_match else 0
-                    retryable_http_status = http_status in {408, 425, 429} or 500 <= http_status <= 599
-                    temporary = bool(result.get("recoverable")) or retryable_http_status or any(
-                        token in detail.casefold()
-                        for token in ("timeout", "tempor", "network", "cdn", "unreachable")
-                    )
-                    definitive = any(token in detail.casefold() for token in (
-                        "duplicate", "duplicat", "unrelated", "sem relação", "width_below_minimum",
-                        "resolution", "resolu", "source_bytes_mismatch", "mismatch",
-                    ))
-                    accepted = status in {"accepted", "ok"}
-                    reason_code = explicit_reason or (
-                        "candidate_accepted" if accepted else
-                        "transient_provider_failure" if temporary or not definitive else
-                        "candidate_rejected"
-                    )
+                    reason_code, temporary, definitive = _classify_media_result(result)
+                    accepted = str(result.get("status") or "").casefold() in {"accepted", "ok"}
                     record_v2_candidate_decision(
                         self.root, post_id=int(context["post_id"]), run_id=run_id,
                         candidate=item, role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),

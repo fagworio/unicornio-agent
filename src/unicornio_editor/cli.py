@@ -2572,6 +2572,7 @@ def _enriquecer_candidatos(
     deferidos: list[dict] = []
     cache_paginas: dict = {}
     cache_html: dict = {}
+    prevalidated_sources: dict[int, dict] = {}
 
     def _memo_key(cand: dict) -> str:
         return "\u0000".join(
@@ -2742,18 +2743,20 @@ def _enriquecer_candidatos(
             _guardar_memo(cand)
             return
         if verify:
-            veredito = validate_discovered_candidate(
-                cand,
-                cache=cache_paginas,
-                cache_html=cache_html,
-                subject=subject,
-                url_policy=url_policy,
-                audit=(
-                    lambda finding: append_telemetry(
-                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
-                    )
-                ) if root is not None else None,
-            )
+            veredito = prevalidated_sources.pop(id(cand), None)
+            if veredito is None:
+                veredito = validate_discovered_candidate(
+                    cand,
+                    cache=cache_paginas,
+                    cache_html=cache_html,
+                    subject=subject,
+                    url_policy=url_policy,
+                    audit=(
+                        lambda finding: append_telemetry(
+                            root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
+                        )
+                    ) if root is not None else None,
+                )
             cand["valid"] = bool(veredito["valid"])
             cand["valid_reason"] = str(veredito.get("reason") or "")
             cand["source_verification_reason_code"] = str(
@@ -2855,7 +2858,10 @@ def _enriquecer_candidatos(
 
     teto_resolver = int(capacity) if capacity and capacity > 0 else 0
     resolver = None
-    if any(not str(c.get("source_page_url") or "").strip() for c in pendentes):
+    if any(
+        not str(c.get("source_page_url") or "").strip() or verify
+        for c in pendentes
+    ):
         try:
             from .media.source_resolver import resolve_candidate_source as resolver  # noqa: PLC0415
         except Exception:  # noqa: BLE001 - resolver é best-effort
@@ -2864,7 +2870,24 @@ def _enriquecer_candidatos(
     for cand in pendentes:
         chave_original: str | None = None
         sem_origem = not str(cand.get("source_page_url") or "").strip()
-        if sem_origem and resolver is not None:
+        source_before_resolution = str(cand.get("source_page_url") or "").strip()
+        needs_alternative_source = sem_origem
+        if source_before_resolution and verify:
+            preflight = validate_discovered_candidate(
+                cand,
+                cache=cache_paginas,
+                cache_html=cache_html,
+                subject=subject,
+                url_policy=url_policy,
+                audit=(
+                    lambda finding: append_telemetry(
+                        root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
+                    )
+                ) if root is not None else None,
+            )
+            prevalidated_sources[id(cand)] = preflight
+            needs_alternative_source = not bool(preflight.get("valid"))
+        if needs_alternative_source and resolver is not None:
             if teto_resolver and _fortes_distintos() >= teto_resolver:
                 # Capacidade JÁ atendida por fortes distintos: não investiga
                 # candidato que não é necessário (economia de rede/latência —
@@ -2908,6 +2931,8 @@ def _enriquecer_candidatos(
                     cand["discovery_image_url"] = cand.get("discovery_image_url") or cand.get("direct_image_url")
                     cand["direct_image_url"] = matched
                     cand["canonical_source_asset"] = True
+            if str(cand.get("source_page_url") or "").strip() != source_before_resolution:
+                prevalidated_sources.pop(id(cand), None)
             # O memo fica sob a chave ORIGINAL (sem origem): é a chave que o
             # próximo enriquecimento do MESMO candidato vai usar.
             _guardar_memo(cand, chave_original)

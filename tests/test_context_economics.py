@@ -523,6 +523,62 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert evidence["reason_code"] == "source_page_unavailable"
         assert evidence["recoverable"] is True
 
+    def test_existing_unverified_source_tries_a_verified_alternative(self):
+        from unicornio_editor import cli
+
+        candidate = self._candidate("https://a/1.jpg")
+        candidate["source_page_url"] = "https://pagina/inicial"
+        resolver_calls = []
+
+        def fake_validate(cand, **kwargs):
+            if cand["source_page_url"].endswith("/inicial"):
+                return {
+                    "valid": False,
+                    "reason": "source_mismatch: page does not list the image",
+                    "reason_code": "source_mismatch",
+                    "recoverable": False,
+                    "images_in_page": 1,
+                }
+            return self._verified_source_candidate(cand, **kwargs)
+
+        def fake_resolver(cand, subject, verifier=None):
+            resolver_calls.append(cand["source_page_url"])
+            alternative = {**cand, "source_page_url": "https://pagina/alternativa"}
+            assert verifier is not None
+            assert verifier(alternative)["valid"] is True
+            return alternative
+
+        with mock.patch(
+            "unicornio_editor.media.source_resolver.resolve_candidate_source",
+            side_effect=fake_resolver,
+        ), mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            side_effect=fake_validate,
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda approved, rejected, **kwargs: (approved, rejected),
+        ), mock.patch(
+            "unicornio_editor.media.evidence.evidence_score",
+            return_value={
+                "subject": "Redfall",
+                "matched": ["subject"],
+                "score": 9,
+                "local_score": 9,
+                "gate": "relevance",
+                "penalties": [],
+                "needs_vision": False,
+                "verdict": "deterministic_match",
+            },
+        ):
+            approved, rejected, deferred = cli._enriquecer_candidatos(
+                [candidate], subject="Redfall", termo="Redfall jogo"
+            )
+
+        assert resolver_calls == ["https://pagina/inicial"]
+        assert not rejected
+        assert not deferred
+        assert approved[0]["source_page_url"] == "https://pagina/alternativa"
+
     def test_memo_never_overwrites_discovery_identity(self):
         from unicornio_editor import cli
 

@@ -116,6 +116,35 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(out["source_resolution"], "verified_page")
         self.assertEqual(len(chamadas), 2)  # tentou as duas, na ordem
 
+    def test_verifier_substitui_origem_existente_incompativel(self):
+        """Uma página inicial sem a imagem não bloqueia páginas alternativas."""
+        chamadas: list[str] = []
+
+        def verifier(cand):
+            page = cand["source_page_url"]
+            chamadas.append(page)
+            return {"valid": page.endswith("/fonte-valida/")}
+
+        out = resolve_candidate_source(
+            {
+                **self._cand(),
+                "source_page_url": "https://aggregator.test/fonte-inicial/",
+            },
+            "metroid prime 4",
+            busca=lambda _query: [
+                {"source_page_url": "https://aggregator.test/fonte-inicial/"},
+                {"source_page_url": "https://publisher.test/fonte-valida/"},
+            ],
+            verifier=verifier,
+        )
+
+        self.assertEqual(out["source_page_url"], "https://publisher.test/fonte-valida/")
+        self.assertEqual(out["source_resolution"], "verified_page")
+        self.assertEqual(chamadas[:2], [
+            "https://aggregator.test/fonte-inicial/",
+            "https://publisher.test/fonte-valida/",
+        ])
+
 
 class FluxoPontaAPontaTests(unittest.TestCase):
     """Cadeia completa: descoberta -> origem -> contexto -> score -> veredito."""

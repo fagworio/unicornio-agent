@@ -240,12 +240,39 @@ def resolve_candidate_source(
       excelente; o que não vale é a página SER a imagem.
     """
     resultado = dict(candidate)
-    if str(candidate.get("source_page_url") or "").strip():
+    existing_page = str(candidate.get("source_page_url") or "").strip()
+    if existing_page and verifier is None:
         resultado["source_resolution"] = "already_present"
         return resultado
 
-    buscar = busca or _buscador_padrao
+    # A discovery engine can provide a page that is syntactically valid but
+    # does not actually contain the candidate image.  When the deterministic
+    # verifier is available, validate that page first and only then keep it as
+    # the final provenance.  A failed proof is not a terminal rejection: the
+    # resolver is allowed to investigate other pages returned by the bounded
+    # queries below.
     paginas_candidatas: list[str] = []
+    paginas_verificadas: set[str] = set()
+    if existing_page:
+        if verifier is not None:
+            paginas_verificadas.add(existing_page)
+            try:
+                veredito = verifier({**candidate, "source_page_url": existing_page})
+            except Exception:  # noqa: BLE001 - verification is best-effort here
+                veredito = {}
+            if veredito.get("valid"):
+                resultado["candidate_pages"] = [existing_page]
+                for key in (
+                    "matched_image_url", "verification_level", "verification_reason",
+                ):
+                    if veredito.get(key):
+                        resultado[key] = veredito[key]
+                resultado["source_resolution"] = "already_present_verified"
+                resultado["source_resolution_query"] = ""
+                return resultado
+        paginas_candidatas.append(existing_page)
+
+    buscar = busca or _buscador_padrao
     query_origem = ""
     for query in _queries(candidate, subject, extra):
         try:
@@ -272,6 +299,8 @@ def resolve_candidate_source(
     # Com verifier: escolhe a primeira página que REALMENTE contém a imagem.
     if verifier is not None:
         for pagina in paginas_candidatas:
+            if pagina in paginas_verificadas:
+                continue
             try:
                 veredito = verifier({**candidate, "source_page_url": pagina})
             except Exception:  # noqa: BLE001 - verificação é best-effort aqui
@@ -286,6 +315,11 @@ def resolve_candidate_source(
                 return resultado
         resultado["source_resolution"] = "unresolved"
         resultado["source_resolution_query"] = query_origem
+        # Keep an already supplied page attached to the candidate so the
+        # caller can record the failed proof and classify it as recoverable.
+        # Candidates without an initial page still remain genuinely unresolved.
+        if not existing_page:
+            resultado["source_page_url"] = ""
         return resultado
 
     resultado["source_page_url"] = paginas_candidatas[0]

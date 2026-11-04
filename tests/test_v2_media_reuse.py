@@ -2162,6 +2162,16 @@ def test_media_resolver_continues_queries_after_final_rejections(monkeypatch, tm
     assert result.search.exhausted is False
 
 
+def test_unknown_explicit_media_reason_is_recorded_as_inconclusive():
+    from unicornio_editor.pipeline_v2.runtime import _classify_media_result
+
+    assert _classify_media_result({
+        "status": "error",
+        "reason_code": "provider_payload_unclassified",
+        "detail": "provider returned an inconclusive response",
+    }) == ("source_verification_inconclusive", True, False)
+
+
 @pytest.mark.parametrize("replacement_succeeds", [True, False])
 def test_media_resolver_uses_same_query_replacement_after_final_rejection(
     monkeypatch, tmp_path, replacement_succeeds,
