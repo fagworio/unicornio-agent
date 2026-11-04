@@ -90,6 +90,7 @@ def verification_result(ok: bool, reason: str) -> dict[str, Any]:
         "recoverable": reason_code in SOURCE_VERIFICATION_RETRYABLE_CODES,
         "failure_stage": failure_stage,
         "failure_kind": failure_kind,
+        "retry_same_source": False,
         # This helper is used after the downloaded candidate was compared to
         # assets read from the source page.  A mere EXACT_URL/SLUG_MATCH from
         # the HTML preflight never reaches this path and is not proof of bytes.
@@ -138,6 +139,7 @@ def discover_article_source_candidates(
                 "retryable": True,
                 "failure_kind": fetch_diagnostics.get("failure_kind", "unavailable"),
                 "http_status": int(fetch_diagnostics.get("http_status") or 0),
+                "retry_same_source": bool(fetch_diagnostics.get("retry_same_source", False)),
             })
         return []
     html = payload.decode("utf-8", "ignore")
@@ -352,17 +354,26 @@ def _fetch(
     url_policy: str = "audit",
     diagnostics: dict[str, Any] | None = None,
 ) -> bytes | None:
-    def mark(kind: str, *, http_status: int = 0, recoverable: bool = True) -> None:
+    def mark(
+        kind: str,
+        *,
+        http_status: int = 0,
+        recoverable: bool = True,
+        retry_same_source: bool | None = None,
+    ) -> None:
         if diagnostics is None:
             return
+        if retry_same_source is None:
+            retry_same_source = recoverable
         diagnostics.update({
             "failure_kind": kind,
             "http_status": int(http_status or 0),
             "recoverable": bool(recoverable),
+            "retry_same_source": bool(retry_same_source),
         })
 
     if budget[0] <= 0:
-        mark("byte_budget_exhausted", recoverable=True)
+        mark("byte_budget_exhausted", recoverable=True, retry_same_source=False)
         return None
     host = (urlparse(url).hostname or "").casefold()
     if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
@@ -384,7 +395,7 @@ def _fetch(
             data = response.read(min(max_bytes, budget[0]) + 1)
             if len(data) > max_bytes:
                 data = None
-                mark("size_limit", recoverable=False)
+                mark("size_limit", recoverable=False, retry_same_source=False)
             else:
                 budget[0] -= len(data)
             if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
@@ -397,6 +408,7 @@ def _fetch(
             f"http_{status}" if status < 500 else "http_5xx",
             http_status=status,
             recoverable=status in {408, 425, 429} or status >= 500,
+            retry_same_source=status in {408, 425, 429} or status >= 500,
         )
         if host in {"commons.wikimedia.org", "www.commons.wikimedia.org"} and exc.code == 429:
             retry = exc.headers.get("Retry-After", "60") if exc.headers else "60"
@@ -410,13 +422,16 @@ def _fetch(
         return None
     except URLError as exc:
         reason = str(getattr(exc, "reason", "") or exc).casefold()
-        mark("timeout" if "timed out" in reason or "timeout" in reason else "network_error")
+        mark(
+            "timeout" if "timed out" in reason or "timeout" in reason else "network_error",
+            retry_same_source=True,
+        )
         return None
     except InvalidURL:
-        mark("invalid_url", recoverable=False)
+        mark("invalid_url", recoverable=False, retry_same_source=False)
         return None
     except (OSError, ValueError):
-        mark("io_error")
+        mark("io_error", retry_same_source=False)
         return None
 
 
@@ -550,6 +565,10 @@ def _validate_discovered_candidate(
         "reason": "",
         "reason_code": "",
         "recoverable": False,
+        "retry_same_source": False,
+        "failure_stage": "",
+        "failure_kind": "",
+        "http_status": 0,
         "source_comparison_proved": False,
         "images_in_page": 0,
         "verification_status": "unverified",
@@ -566,6 +585,8 @@ def _validate_discovered_candidate(
         )
         resultado["reason_code"] = "source_page_unavailable"
         resultado["recoverable"] = True
+        resultado["failure_stage"] = "source_page_validation"
+        resultado["failure_kind"] = "invalid_url"
         resultado["reason"] = _coded_reason(
             "source_page_unavailable", "source_page_url ausente ou invalida"
         )
@@ -581,6 +602,8 @@ def _validate_discovered_candidate(
         )
         resultado["reason_code"] = "source_asset_unavailable"
         resultado["recoverable"] = True
+        resultado["failure_stage"] = "candidate_url_validation"
+        resultado["failure_kind"] = "invalid_url"
         resultado["reason"] = _coded_reason(
             "source_asset_unavailable", "direct_image_url ausente ou invalida"
         )
@@ -614,10 +637,12 @@ def _validate_discovered_candidate(
             resultado["failure_stage"] = "source_page_fetch"
             resultado["failure_kind"] = page_fetch_diagnostics.get("failure_kind", "")
             resultado["http_status"] = int(page_fetch_diagnostics.get("http_status") or 0)
+            resultado["recoverable"] = bool(page_fetch_diagnostics.get("recoverable", True))
+            resultado["retry_same_source"] = bool(page_fetch_diagnostics.get("retry_same_source", False))
     listadas = cache[page_url]
     if listadas is None:
         resultado["reason_code"] = "source_page_unavailable"
-        resultado["recoverable"] = True
+        resultado["recoverable"] = bool(resultado.get("recoverable"))
         resultado["reason"] = _coded_reason(
             "source_page_unavailable",
             "pagina de origem inacessivel; nao e possivel confirmar a imagem",
@@ -716,7 +741,8 @@ def _validate_discovered_candidate(
         if candidate_bytes is None:
             resultado.update({
                 "reason_code": "candidate_asset_unavailable",
-                "recoverable": True,
+                "recoverable": bool(candidate_fetch_diagnostics.get("recoverable", True)),
+                "retry_same_source": bool(candidate_fetch_diagnostics.get("retry_same_source", False)),
                 "reason": _coded_reason(
                     "candidate_asset_unavailable",
                     "bytes da candidata indisponíveis para comparação com a origem",
@@ -747,6 +773,7 @@ def _validate_discovered_candidate(
                 if source_fetch_diagnostics and "failure_kind" not in resultado:
                     resultado["failure_kind"] = source_fetch_diagnostics.get("failure_kind", "unavailable")
                     resultado["http_status"] = int(source_fetch_diagnostics.get("http_status") or 0)
+                    resultado["retry_same_source"] = bool(source_fetch_diagnostics.get("retry_same_source", False))
                 resultado["verification_stage"] = "source_asset_fetch"
                 continue
             resultado["verification_stage"] = "visual_comparison"
@@ -800,6 +827,8 @@ def _validate_discovered_candidate(
         resultado["verification_stage"] = "visual_comparison"
     resultado["reason_code"] = code
     resultado["recoverable"] = code in SOURCE_VERIFICATION_RETRYABLE_CODES
+    if code in {"source_mismatch", "source_bytes_mismatch", "source_decode_failed"}:
+        resultado["retry_same_source"] = False
     resultado["reason"] = _coded_reason(code, detail)
     return resultado
 

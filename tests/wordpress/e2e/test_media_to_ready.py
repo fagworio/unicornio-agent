@@ -26,7 +26,7 @@ from unicornio_editor.pipeline_v2.model import (
     Phase,
     WorkState,
 )
-from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2
+from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, run_v2
 from unicornio_editor.workflow import (
     _execute_media_plan,
     compose_final_content,
@@ -193,6 +193,167 @@ def _snapshot(post: dict[str, Any]) -> dict[str, Any]:
         "ready_state": str(meta.get("_hermes_state") or ""),
         "work_state_sha256": hashlib.sha256(str(meta.get("_hermes_work_state") or "").encode()).hexdigest(),
     }
+
+
+def _automatic_pipeline_editorial() -> dict[str, Any]:
+    title = "Hollow Knight Silksong: o mundo de Pharloom em imagens"
+    paragraphs = [
+        "Hollow Knight Silksong leva a exploração para Pharloom, um reino de criaturas, caminhos verticais e combates mais ágeis.",
+        "A continuação mantém a leitura cuidadosa dos cenários e apresenta ferramentas que mudam a forma de enfrentar cada área.",
+        "As imagens da fonte mostram ambientes distintos e registram momentos diferentes da exploração.",
+        "Esse contraste ajuda a entender a variedade visual sem confundir arte promocional com captura de gameplay.",
+        "A página de origem identifica tecnicamente cada arquivo e permite comparar os bytes baixados com os recursos listados.",
+        "Com a evidência técnica preservada, o artigo mantém a ligação direta para a fonte consultada.",
+    ]
+    return {
+        "site_relevance": {
+            "decision": "process", "confidence": 0.99,
+            "reason": "controlled E2E source identifies the cited game",
+            "matched_topics": ["games"],
+        },
+        "cleaned_html": "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs),
+        "seo": {
+            "title": title,
+            "meta_description": "Imagens de Hollow Knight Silksong apresentam Pharloom, seus caminhos verticais e diferentes momentos de exploração durante a aventura.",
+            "focus_keyword": "Hollow Knight Silksong",
+        },
+        "media_plan": [],
+        "needs_trailer": False,
+        "trailer_url": None,
+        "game_name": "Hollow Knight Silksong",
+        "trailer_unavailable": True,
+        "trailer_search_evidence": {
+            "query": "Hollow Knight Silksong trailer official",
+            "provider": "controlled-e2e-fixture",
+            "searched_at": "2026-11-04T00:00:00+00:00",
+            "result": "official_not_found",
+        },
+    }
+
+
+def _prepare_automatic_pipeline_case(
+    case, scenario: str, source_url: str, editorial: dict[str, Any]
+) -> int:
+    from unicornio_editor.pipeline_v2.model import BlockerCode, LifecycleState, MediaProgress, Phase, WorkState
+
+    post_id = case.post_id(scenario)
+    state = WorkState(
+        state=LifecycleState.PENDING,
+        phase=Phase.MEDIA,
+        blocker=BlockerCode.INLINE_MISSING,
+        relevance_approved=True,
+        media=MediaProgress(required=0),
+    )
+    case.client.update_post(
+        post_id,
+        {
+            "title": editorial["seo"]["title"],
+            "meta": {
+                "original_link": source_url,
+                "_hermes_work_state": json.dumps(state.to_dict(), separators=(",", ":")),
+            },
+        },
+    )
+    draft_dir = case.root / "backups" / str(post_id)
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "editorial.draft.json").write_text(
+        json.dumps(editorial, ensure_ascii=False), encoding="utf-8"
+    )
+    return post_id
+
+
+def _automatic_pipeline_config(case, source: ControlledSource, post_id: int) -> Config:
+    return Config(
+        content_source="wordpress",
+        wordpress_url=case.url,
+        wordpress_api_base="/wp-json/wp/v2",
+        app_user=case.user,
+        app_password=case.password,
+        dry_run=False,
+        http_timeout=10,
+        remote_url_policy="off",
+        internal_links_enabled=False,
+        vision_enabled=True,
+        vision_api_key="e2e-local-only",
+        vision_base_url=f"{source.base_url}/v1",
+        vision_model="controlled-e2e-pixel-provider",
+        vision_mode="all",
+        visual_comparison_max_calls=12,
+        visual_comparison_min_confidence=0.85,
+        max_source_retries=0,
+        v2_admission_allowlist=(post_id,),
+    )
+
+
+def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch):
+    monkeypatch.setattr(
+        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        lambda *args, **kwargs: (None, "official_not_found"),
+    )
+    case = wordpress_e2e_case
+    with ControlledSource() as source:
+        source_url = f"{source.base_url}/article"
+        editorial = _automatic_pipeline_editorial()
+        post_id = _prepare_automatic_pipeline_case(case, "media_pipeline_ready", source_url, editorial)
+        before = _snapshot(case.client.get_post(post_id))
+        result = run_v2(
+            case.client,
+            _automatic_pipeline_config(case, source, post_id),
+            case.root,
+            post_id=post_id,
+            limit=1,
+        )
+
+        assert result["details"], result
+        assert result["details"][0]["outcome"] == "ready", result
+        after_post = case.client.get_post(post_id)
+        after = _snapshot(after_post)
+        assert after["ready_state"] == "ready"
+        assert after["status"] == "pending"
+        assert after["featured_media"] > 0
+        assert after["content_sha256"] != before["content_sha256"]
+        assert "wp-content/uploads" in str((after_post.get("content") or {}).get("raw") or "")
+
+
+def test_automatic_media_pipeline_retries_without_partial_apply(wordpress_e2e_case, monkeypatch):
+    import unicornio_editor.media.search as search
+
+    case = wordpress_e2e_case
+    with ControlledSource() as source:
+        source.unavailable_images.update(source.images)
+        source_url = f"{source.base_url}/article"
+        editorial = _automatic_pipeline_editorial()
+        post_id = _prepare_automatic_pipeline_case(case, "media_pipeline_retry", source_url, editorial)
+        before = _snapshot(case.client.get_post(post_id))
+
+        def controlled_empty_search(queries, **_kwargs):
+            return [
+                {
+                    "query": query,
+                    "completion_reason": "SEARCH_INCOMPLETE",
+                    "candidates": [],
+                    "engine_reports": {"controlled": {"failure_kind": "no_results_legitimate"}},
+                }
+                for query in queries
+            ]
+
+        monkeypatch.setattr(search, "search_web_images_batch", controlled_empty_search)
+        result = run_v2(
+            case.client,
+            _automatic_pipeline_config(case, source, post_id),
+            case.root,
+            post_id=post_id,
+            limit=1,
+        )
+
+        assert result["details"], result
+        assert result["details"][0]["outcome"] == "retry", result
+        after_post = case.client.get_post(post_id)
+        after = _snapshot(after_post)
+        assert after["ready_state"] != "ready"
+        assert after["status"] == "pending"
+        assert after["featured_media"] == before["featured_media"] == 0
+        assert after["content_sha256"] == before["content_sha256"]
 
 
 def test_controlled_source_acquisition_composes_checklists_and_commits_ready_media(wordpress_e2e_case):
@@ -824,7 +985,7 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
             ).fetchall()
         decision_map = {str(row[0]): (str(row[1]), str(row[2])) for row in decisions}
         assert decision_map["first-transient-failure"] == (
-            "defer_retry", "transient_provider_failure",
+            "defer_retry", "candidate_asset_unavailable",
         )
         assert decision_map["replacement-one"] == ("accepted", "candidate_accepted")
         assert decision_map["replacement-two"] == ("accepted", "candidate_accepted")

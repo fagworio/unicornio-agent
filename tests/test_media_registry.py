@@ -281,6 +281,41 @@ def test_registry_preserves_visual_identity_pending_retry_reason(tmp_path):
     assert reference["recoverable"] is True
 
 
+def test_registry_persists_bounded_source_failure_diagnostics(tmp_path):
+    record_v2_candidate_decision(
+        tmp_path,
+        post_id=15,
+        run_id="run-source-http-404",
+        candidate={
+            "candidate_id": "candidate-source-http-404",
+            "subject": "Game",
+            "source_page_url": "https://source.example/article",
+            "direct_image_url": "https://cdn.example/missing.webp",
+            "failure_stage": "source_page_fetch",
+            "failure_kind": "http_404",
+            "http_status": 404,
+            "recoverable": False,
+            "retry_same_source": False,
+            "evidence": {"verdict": "unresolved_source", "score": 0},
+        },
+        role="inline",
+        disposition="reject_final",
+        reason_code="source_page_unavailable",
+    )
+
+    with connect(tmp_path) as db:
+        row = db.execute(
+            "SELECT evidence_reference FROM media_decisions WHERE run_id=?",
+            ("run-source-http-404",),
+        ).fetchone()
+    reference = json.loads(row[0])
+    assert reference["failure_stage"] == "source_page_fetch"
+    assert reference["failure_kind"] == "http_404"
+    assert reference["http_status"] == 404
+    assert reference["failure_recoverable"] is False
+    assert reference["retry_same_source"] is False
+
+
 def test_registry_migrates_true_v1_usage_table_and_consolidates_duplicates(tmp_path):
     path = registry_path(tmp_path)
     path.parent.mkdir(parents=True)

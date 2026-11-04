@@ -675,7 +675,12 @@ def record_v2_candidate_decision(
         "vision_policy_version": str(evidence.get("vision_policy_version") or ""),
         "failure_stage": str(candidate.get("failure_stage") or "")[:48],
         "failure_kind": str(candidate.get("failure_kind") or "")[:48],
+        "http_status": (
+            int(candidate.get("http_status") or 0)
+            if str(candidate.get("http_status") or "").isdigit() else 0
+        ),
         "failure_recoverable": candidate.get("recoverable") is True,
+        "retry_same_source": candidate.get("retry_same_source") is True,
         "decision_causes": decision_causes,
     }, sort_keys=True)
     safe_reason_code = str(reason_code or "").casefold().strip()

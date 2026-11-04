@@ -2594,6 +2594,7 @@ def _enriquecer_candidatos(
         "valid", "valid_reason", "images_in_page", "evidence", "evidence_score",
         "needs_vision", "source_context_used", "official_source",
         "source_verification_reason_code", "source_verification_recoverable",
+        "failure_stage", "failure_kind", "http_status", "retry_same_source",
         "verification_stage", "verification_elapsed_ms",
         "verification_stage_durations_ms",
         "source_comparison_proved",
@@ -2765,6 +2766,10 @@ def _enriquecer_candidatos(
             cand["source_verification_recoverable"] = bool(
                 veredito.get("recoverable")
             )
+            cand["failure_stage"] = str(veredito.get("failure_stage") or "")[:48]
+            cand["failure_kind"] = str(veredito.get("failure_kind") or "")[:48]
+            cand["http_status"] = int(veredito.get("http_status") or 0)
+            cand["retry_same_source"] = bool(veredito.get("retry_same_source"))
             cand["verification_stage"] = str(
                 veredito.get("verification_stage") or ""
             )

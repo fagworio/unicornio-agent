@@ -523,6 +523,38 @@ class EnrichmentMemoTests(unittest.TestCase):
         assert evidence["reason_code"] == "source_page_unavailable"
         assert evidence["recoverable"] is True
 
+    def test_source_diagnostics_are_copied_to_enriched_candidate(self):
+        from unicornio_editor import cli
+
+        candidate = self._candidate("https://a/not-found.jpg")
+        with mock.patch(
+            "unicornio_editor.media.source_verify.validate_discovered_candidate",
+            return_value={
+                "valid": False,
+                "reason": "source_page_unavailable: not found",
+                "reason_code": "source_page_unavailable",
+                "recoverable": False,
+                "failure_stage": "source_page_fetch",
+                "failure_kind": "http_404",
+                "http_status": 404,
+                "retry_same_source": False,
+                "images_in_page": 0,
+            },
+        ), mock.patch(
+            "unicornio_editor.media.evidence.dedupe_by_phash",
+            side_effect=lambda approved, rejected, **kwargs: (approved, rejected),
+        ):
+            _approved, rejected, deferred = cli._enriquecer_candidatos(
+                [candidate], subject="Redfall", termo="redfall"
+            )
+
+        assert not rejected
+        assert len(deferred) == 1
+        assert deferred[0]["failure_stage"] == "source_page_fetch"
+        assert deferred[0]["failure_kind"] == "http_404"
+        assert deferred[0]["http_status"] == 404
+        assert deferred[0]["retry_same_source"] is False
+
     def test_existing_unverified_source_tries_a_verified_alternative(self):
         from unicornio_editor import cli
 

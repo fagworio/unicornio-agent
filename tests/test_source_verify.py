@@ -93,6 +93,7 @@ class SourceVerifyTests(unittest.TestCase):
         self.assertEqual(diagnostics["failure_kind"], "http_404")
         self.assertEqual(diagnostics["http_status"], 404)
         self.assertFalse(diagnostics["recoverable"])
+        self.assertFalse(diagnostics["retry_same_source"])
 
     def test_verification_result_preserves_safe_failure_stage(self):
         from unicornio_editor.media.source_verify import verification_result

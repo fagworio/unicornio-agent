@@ -3495,6 +3495,7 @@ def test_execute_media_plan_preserves_download_failure_classification(tmp_path):
     assert results[0]["failure_stage"] == "download"
     assert results[0]["failure_kind"] == "http_404"
     assert results[0]["recoverable"] is True
+    assert results[0]["retry_same_source"] is False
 
 
 def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp_path):

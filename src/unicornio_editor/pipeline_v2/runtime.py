@@ -2741,7 +2741,10 @@ class ProductionMediaResolver:
                         item["source_comparison_proved"] = True
                     reason_code, temporary, definitive = _classify_media_result(result)
                     accepted = str(result.get("status") or "").casefold() in {"accepted", "ok"}
-                    for key in ("failure_stage", "failure_kind", "recoverable"):
+                    for key in (
+                        "failure_stage", "failure_kind", "http_status",
+                        "recoverable", "retry_same_source",
+                    ):
                         if key in result:
                             item[key] = result[key]
                     record_v2_candidate_decision(

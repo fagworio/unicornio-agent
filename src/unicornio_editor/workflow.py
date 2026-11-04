@@ -127,6 +127,7 @@ def _structured_media_failure(
     stage: str,
     reason_code: str,
     recoverable: bool,
+    retry_same_source: bool | None = None,
 ) -> dict[str, Any]:
     """Return bounded failure metadata without copying provider/URL details."""
     text = str(exc or "").casefold()
@@ -144,12 +145,17 @@ def _structured_media_failure(
         failure_kind = "network_error"
     else:
         failure_kind = "exception"
+    if retry_same_source is None:
+        retry_same_source = failure_kind in {
+            "timeout", "network_error", "http_408", "http_425", "http_429", "http_5xx",
+        }
     return {
         "status": "error",
         "reason_code": reason_code,
         "failure_stage": stage,
         "failure_kind": failure_kind,
         "recoverable": bool(recoverable),
+        "retry_same_source": bool(retry_same_source),
         "detail": f"{stage} failed ({failure_kind})",
     }
 
@@ -2604,6 +2610,7 @@ def _execute_media_plan(
                         "recoverable": verification["recoverable"],
                         "failure_stage": verification["failure_stage"],
                         "failure_kind": verification["failure_kind"],
+                        "retry_same_source": verification["retry_same_source"],
                         "source_comparison_proved": verification[
                             "source_comparison_proved"
                         ],
