@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import sys
+from time import monotonic
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,7 +279,7 @@ def _registry_has_round_evidence(
                 },
                 "media_operations": {
                     "post_id", "run_id", "cycle_id", "cycle_round",
-                    "authorization_id", "started_at",
+                    "authorization_id", "started_at", "operation_status",
                 },
             }
             if set(required_columns) - tables:
@@ -328,6 +329,7 @@ def _registry_has_round_evidence(
         "accepted_not_applied": [],
         "applied_readback_required": [],
         "historical_operation": [],
+        "historical_started_operation": [],
         "current_round_operation": [],
         "evidence_temporally_unavailable": [],
     }
@@ -448,6 +450,7 @@ def _registry_has_round_evidence(
                 add_once("historical_operation", post_id)
     for row in operations:
         post_id = int(row.get("post_id") or 0)
+        operation_status = str(row.get("operation_status") or row.get("outcome") or "").casefold()
         started = _parse_registry_timestamp(row.get("started_at"))
         identity_matches = bool(
             has_expected_identity
@@ -472,9 +475,20 @@ def _registry_has_round_evidence(
             add_once("evidence_temporally_unavailable", post_id)
         elif started < parsed_authorized:
             add_once("historical_operation", post_id)
+            if operation_status == "started":
+                # A prior operation that never reached a terminal state is
+                # not harmless historical metadata.  It may represent an
+                # upload/write whose journal was replaced or belongs to a
+                # different run, so it blocks no-write proof and replay.
+                add_once("historical_started_operation", post_id)
         else:
             add_once("evidence_temporally_unavailable", post_id)
-    proof = not current_rows and not missing_or_invalid and not classification["evidence_temporally_unavailable"]
+    proof = bool(
+        not current_rows
+        and not missing_or_invalid
+        and not classification["evidence_temporally_unavailable"]
+        and not classification["historical_started_operation"]
+    )
     return {
         "media_registry_checked": True,
         "media_registry_rows": len(runs) + len(decisions) + len(usages) + len(operations),
@@ -1741,6 +1755,7 @@ def run_v2_cycle(
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
                 authorization_id=authorization_id,
+                return_candidate_snapshot=True,
             )
             if preview.get("selection_mismatch"):
                 budget_violation = _selection_budget_violation(
@@ -1840,6 +1855,7 @@ def run_v2_cycle(
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
                 authorization_id=None,
+                return_candidate_snapshot=True,
             )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
             store.record_round_preview(
@@ -1930,11 +1946,23 @@ def run_v2_cycle(
             }
             lock_reselection_count = 0
             while selected_ids:
+                if request.deadline is not None and monotonic() >= request.deadline:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        budget_violation="duration_limit",
+                    )
                 handles, locked_post_id, lock_error = _reserve_post_lock_batch(
                     root, selected_ids, lock_ttl=lock_ttl
                 )
                 if locked_post_id is None:
                     reserved_post_locks = handles
+                    if request.deadline is not None and monotonic() >= request.deadline:
+                        _release_post_lock_batch(reserved_post_locks)
+                        reserved_post_locks = {}
+                        return CycleRoundResult(
+                            preview_selected_ids=tuple(selected_ids),
+                            budget_violation="duration_limit",
+                        )
                     break
                 if authorized_pending:
                     return CycleRoundResult(
@@ -1960,6 +1988,11 @@ def run_v2_cycle(
                 excluded_for_lock_retry.add(locked_post_id)
                 round_excluded_post_ids = tuple(sorted(excluded_for_lock_retry))
                 lock_reselection_count += 1
+                if request.deadline is not None and monotonic() >= request.deadline:
+                    return CycleRoundResult(
+                        preview_selected_ids=tuple(selected_ids),
+                        budget_violation="duration_limit",
+                    )
                 if lock_reselection_count > max(1, int(cycle_config.max_unique_posts)):
                     return CycleRoundResult(
                         preview_selected_ids=tuple(selected_ids),
@@ -1983,6 +2016,8 @@ def run_v2_cycle(
                     cycle_id=state.cycle_id,
                     cycle_round=request.round_number,
                     authorization_id=authorization_id,
+                    candidate_snapshot=preview.get("_candidate_snapshot"),
+                    return_candidate_snapshot=True,
                 )
                 if preview.get("selection_mismatch"):
                     return CycleRoundResult(selection_mismatch=True)
@@ -2024,6 +2059,11 @@ def run_v2_cycle(
 
         if not selected_ids:
             return CycleRoundResult()
+        if request.deadline is not None and monotonic() >= request.deadline:
+            return CycleRoundResult(
+                preview_selected_ids=tuple(selected_ids),
+                budget_violation="duration_limit",
+            )
         if not authorization_id:
             return CycleRoundResult(
                 preview_selected_ids=tuple(selected_ids),

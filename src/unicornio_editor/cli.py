@@ -65,6 +65,21 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
 
 
+def _v2_cycle_exit_code(result: Any) -> int:
+    """Map a structured V2 cycle outcome to Hermes' operational exit codes."""
+    if isinstance(result, dict):
+        stop_reason = result.get("stop_reason")
+        status = result.get("status")
+    else:
+        stop_reason = getattr(result, "stop_reason", None)
+        status = getattr(result, "status", None)
+    if stop_reason == "skipped_locked" or status == "skipped":
+        return 75
+    if stop_reason in {"recovery_uncertain", "executor_error", "selection_mismatch"} or status == "blocked":
+        return 2
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="unicornio-editor",
@@ -133,6 +148,16 @@ def build_parser() -> argparse.ArgumentParser:
     v2_cycle_parser.add_argument("--max-stagnant-rounds", type=int, default=None)
     v2_cycle_parser.add_argument("--max-drain-rounds", type=int, default=None)
     v2_cycle_parser.add_argument("--max-duration-seconds", type=float, default=None)
+
+    v2_expire_pre_parser = subparsers.add_parser(
+        "v2-cycle-expire-preauthorization",
+        help="fecha administrativamente uma pré-autorização V2 expirada, preservando histórico",
+    )
+    v2_expire_pre_parser.add_argument("--root", type=Path, default=Path("."))
+    v2_expire_pre_parser.add_argument("--cycle-id", required=True)
+    v2_expire_pre_parser.add_argument("--pending-round", type=int, required=True)
+    v2_expire_pre_parser.add_argument("--round-intent-id", required=True)
+    v2_expire_pre_parser.add_argument("--apply", action="store_true")
 
     v2_abandon_parser = subparsers.add_parser(
         "v2-cycle-abandon",
@@ -3247,6 +3272,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.get("status") in {
                 "reconciliation_available", "reconciled", "already_reconciled", "already_released", "no_lock_record"
             } else 2
+        if args.command == "v2-cycle-expire-preauthorization":
+            from .pipeline_v2.cycle_admin import expire_pre_authorization
+
+            result = expire_pre_authorization(
+                args.root,
+                cycle_id=args.cycle_id,
+                pending_round=int(args.pending_round),
+                round_intent_id=args.round_intent_id,
+                apply=bool(args.apply),
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+            return 0 if result.get("status") in {"preview", "applied", "already_applied"} else 2
         _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):
@@ -4944,6 +4981,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result.setdefault("session", session_budget.status(args.root, config))
         _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+        if args.command == "v2-cycle":
+            return _v2_cycle_exit_code(result)
         if args.command == "publish-ready" and (errors or retryable):
             # Technical/uncertain per-post failures ask the publisher wrapper
             # for bounded backoff; quality blocks and clean skips are normal.

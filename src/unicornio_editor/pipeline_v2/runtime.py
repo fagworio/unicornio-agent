@@ -4370,6 +4370,8 @@ def run_v2(
     cycle_round: int | None = None,
     authorization_id: str | None = None,
     reserved_post_locks: Mapping[int, Any] | None = None,
+    candidate_snapshot: list[tuple[int, dict[str, Any]]] | None = None,
+    return_candidate_snapshot: bool = False,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -4388,7 +4390,11 @@ def run_v2(
         }
     try:
         reader = ProductionCandidateReader(client, root)
-        snapshot = reader.snapshot(page_size=max(10, limit))
+        snapshot = (
+            candidate_snapshot
+            if candidate_snapshot is not None
+            else reader.snapshot(page_size=max(10, limit))
+        )
         try:
             epoch_protection = load_epoch_protection(root)
         except EpochProtectionError as exc:
@@ -4617,7 +4623,7 @@ def run_v2(
                 else "cooldown_active"
             )
         if selection_mismatch:
-            return {
+            result = {
                 "selected": len(selected),
                 "completed": 0,
                 "failed": 0,
@@ -4629,8 +4635,11 @@ def run_v2(
                 "queue": queue,
                 "details": [],
             }
+            if return_candidate_snapshot:
+                result["_candidate_snapshot"] = snapshot
+            return result
         if preview:
-            return {
+            result = {
                 "selected": len(selected),
                 "completed": 0,
                 "failed": 0,
@@ -4649,6 +4658,9 @@ def run_v2(
                     for selected_id, context in selected
                 ],
             }
+            if return_candidate_snapshot:
+                result["_candidate_snapshot"] = snapshot
+            return result
         # V2 and legacy workflow actions share per-post locks. Acquire the
         # entire selected batch before journal recovery or any other mutation;
         # if one post is already owned elsewhere, release this batch and let

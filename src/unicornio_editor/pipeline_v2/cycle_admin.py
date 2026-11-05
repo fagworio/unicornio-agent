@@ -29,6 +29,8 @@ from .transaction_admin import (
 
 TRANSITION_VERSION = 1
 TRANSITION_NAME = "v2-cycle-abandon-transition.json"
+PREAUTH_EXPIRY_TRANSITION_VERSION = 1
+PREAUTH_EXPIRY_TRANSITION_NAME = "v2-preauthorization-expiry-transition.json"
 
 
 class CycleAbandonError(RuntimeError):
@@ -59,6 +61,10 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _transition_path(root: Path) -> Path:
     return Path(root) / "work" / "v2-cycle" / TRANSITION_NAME
+
+
+def _preauthorization_expiry_transition_path(root: Path) -> Path:
+    return Path(root) / "work" / "v2-cycle" / PREAUTH_EXPIRY_TRANSITION_NAME
 
 
 def _validate_expected(
@@ -145,6 +151,162 @@ def _write_transition(root: Path, value: dict[str, Any]) -> None:
     path = _transition_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, _json(value))
+
+
+def _write_preauthorization_expiry_transition(root: Path, value: dict[str, Any]) -> None:
+    path = _preauthorization_expiry_transition_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, _json(value))
+
+
+def _copy_optional_verified(source: Path, destination: Path) -> str | None:
+    if not source.exists():
+        return None
+    if source.is_symlink() or not source.is_file():
+        raise CycleAbandonError(f"unsafe evidence path: {source}")
+    return _copy_verified(source, destination)
+
+
+def expire_pre_authorization(
+    root: Path,
+    *,
+    cycle_id: str,
+    pending_round: int,
+    round_intent_id: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Expire an un-authorized round without resetting elapsed/history.
+
+    This is an administrative, local-only transition. It requires the
+    checkpoint's elapsed budget to be exhausted and the pre-authorization
+    evidence to prove that no Writer authorization or effect exists. The old
+    checkpoint/journal/Registry bytes are archived before the pending intent
+    is closed.
+    """
+    root = Path(root)
+    store = CycleStateStore(root)
+    lock = RunSessionLock(root / "work" / "v2-run.lock")
+    if not lock.acquire():
+        return {"status": "blocked", "reason": "global_lock_unavailable", "wordpress_writes": 0}
+    try:
+        transition_path = _preauthorization_expiry_transition_path(root)
+        existing = _read_json(transition_path) if transition_path.is_file() else None
+        if existing:
+            if existing.get("version") != PREAUTH_EXPIRY_TRANSITION_VERSION:
+                raise CycleAbandonError("unsupported pre-authorization expiry transition version")
+            if (
+                existing.get("cycle_id") != cycle_id
+                or int(existing.get("pending_round", -1)) != int(pending_round)
+                or existing.get("round_intent_id") != str(round_intent_id)
+            ):
+                raise CycleAbandonError("unfinished expiry transition belongs to another intent")
+            if existing.get("phase") == "completed":
+                return {
+                    "status": "already_applied",
+                    "transition_version": PREAUTH_EXPIRY_TRANSITION_VERSION,
+                    "wordpress_writes": 0,
+                    "elapsed_seconds": existing.get("elapsed_seconds"),
+                    "archive_dir": existing.get("archive_dir"),
+                }
+
+        state = store.load()
+        if state is None:
+            raise CycleAbandonError("active checkpoint is absent")
+        if state.cycle_id != cycle_id or state.status != "running":
+            raise CycleAbandonError("active checkpoint identity/status diverged")
+        pending = state.pending_round
+        if not isinstance(pending, dict) or pending.get("preview_selected_ids") is not None:
+            raise CycleAbandonError("active checkpoint is not an un-authorized pre-authorization")
+        if int(pending.get("round_number", -1)) != int(pending_round):
+            raise CycleAbandonError("pending round does not match")
+        actual_intent = str(pending.get("round_intent_id") or pending.get("authorization_id") or "")
+        if actual_intent != str(round_intent_id):
+            raise CycleAbandonError("round intent identity does not match")
+        max_duration = float(state.config.get("max_duration_seconds", 3600.0))
+        if state.elapsed_seconds < max_duration:
+            raise CycleAbandonError("pre-authorization deadline has not expired")
+        try:
+            evidence = store.validate_pre_authorization(state)
+        except RuntimeError as exc:
+            raise CycleAbandonError(f"pre-authorization evidence is not safe: {exc}") from exc
+
+        checkpoint = root / "work" / "v2-cycle" / "state.json"
+        journal = root / "work" / "v2-cycle" / "journal.jsonl"
+        registry = root / "work" / "media_registry.sqlite"
+        old_state_hash = _sha256(checkpoint)
+        old_journal_hash = _sha256(journal)
+        registry_hash = _sha256(registry) if registry.is_file() else None
+        preview = {
+            "status": "preview",
+            "transition_version": PREAUTH_EXPIRY_TRANSITION_VERSION,
+            "cycle_id": cycle_id,
+            "pending_round": int(pending_round),
+            "round_intent_id": str(round_intent_id),
+            "elapsed_seconds": state.elapsed_seconds,
+            "max_duration_seconds": max_duration,
+            "old_state_sha256": old_state_hash,
+            "old_journal_sha256": old_journal_hash,
+            "registry_sha256": registry_hash,
+            "evidence_status": evidence["status"],
+            "wordpress_writes": 0,
+        }
+        if not apply:
+            return preview
+
+        archive = root / "work" / "v2-cycle" / "archives" / (
+            f"preauthorization-expired-{cycle_id}-{int(pending_round)}"
+        )
+        archive.mkdir(parents=True, exist_ok=True)
+        archived_state_hash = _copy_verified(checkpoint, archive / "state.json")
+        archived_journal_hash = _copy_verified(journal, archive / "journal.jsonl")
+        archived_registry_hash = _copy_optional_verified(registry, archive / "media_registry.sqlite")
+        transition = existing or {
+            "version": PREAUTH_EXPIRY_TRANSITION_VERSION,
+            "phase": "prepared",
+            "cycle_id": cycle_id,
+            "pending_round": int(pending_round),
+            "round_intent_id": str(round_intent_id),
+            "elapsed_seconds": state.elapsed_seconds,
+            "archive_dir": str(archive),
+            "old_state_sha256": archived_state_hash,
+            "old_journal_sha256": archived_journal_hash,
+            "registry_sha256": archived_registry_hash,
+            "evidence_status": evidence["status"],
+            "created_at": time.time(),
+        }
+        _write_preauthorization_expiry_transition(root, transition)
+        if transition.get("phase") == "prepared":
+            state.pending_round = None
+            state.stop_reason = "pre_authorization_expired"
+            store.save(
+                state,
+                event="round_pre_authorization_expired",
+                transition_version=PREAUTH_EXPIRY_TRANSITION_VERSION,
+                round_number=int(pending_round),
+                round_intent_id=str(round_intent_id),
+                elapsed_seconds=state.elapsed_seconds,
+                archive_dir=str(archive),
+                wordpress_writes=0,
+            )
+            transition = dict(transition)
+            transition.update({
+                "phase": "completed",
+                "new_state_sha256": _sha256(checkpoint),
+                "completed_at": time.time(),
+            })
+            _write_preauthorization_expiry_transition(root, transition)
+        return {
+            "status": "applied",
+            "transition_version": PREAUTH_EXPIRY_TRANSITION_VERSION,
+            "cycle_id": cycle_id,
+            "pending_round": int(pending_round),
+            "round_intent_id": str(round_intent_id),
+            "elapsed_seconds": state.elapsed_seconds,
+            "archive_dir": str(archive),
+            "wordpress_writes": 0,
+        }
+    finally:
+        lock.release()
 
 
 def _apply_from_transition(root: Path, transition: dict[str, Any]) -> dict[str, Any]:

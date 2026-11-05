@@ -51,6 +51,7 @@ class CycleRoundRequest:
     seen_post_ids: tuple[int, ...]
     excluded_post_ids: frozenset[int]
     attempts_by_post: Mapping[int, int]
+    deadline: float | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,10 @@ def run_cycle(
             seen_post_ids=tuple(sorted(seen)),
             excluded_post_ids=excluded,
             attempts_by_post=dict(attempts),
+            deadline=(
+                session_started_at
+                + max(0.0, config.max_duration_seconds - elapsed_before)
+            ),
         )
         try:
             result = _normalize_round_result(run_round(request))
