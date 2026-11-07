@@ -322,6 +322,41 @@ class CompactOutputTests(unittest.TestCase):
         }
         self.assertEqual(_monitor_line(report), _monitor_line(report))
 
+    def test_monitor_liveness_heartbeat_is_bounded_to_work_and_interval(self):
+        report = {
+            "eligible_rework_ids": [],
+            "unprocessed_ids": [],
+            "v2_effective": {
+                "selected_ids": [42],
+                "lock_busy": 0,
+                "checkpoint_recovery_pending": 0,
+                "selector_error": 0,
+            },
+        }
+        with mock.patch.dict(os.environ, {"HERMES_EDITORIAL_HEARTBEAT_SECONDS": "7200"}, clear=False):
+            first = _monitor_line(report, include_liveness=True, now=7_200.0)
+            same_bucket = _monitor_line(report, include_liveness=True, now=7_201.0)
+            next_bucket = _monitor_line(report, include_liveness=True, now=14_400.0)
+        self.assertEqual(first, same_bucket)
+        self.assertNotEqual(first, next_bucket)
+        self.assertIn("liveness=1", first)
+        self.assertIn("liveness=2", next_bucket)
+
+    def test_monitor_liveness_does_not_wake_without_effective_work(self):
+        report = {
+            "eligible_rework_ids": [],
+            "unprocessed_ids": [],
+            "v2_effective": {
+                "selected_ids": [],
+                "lock_busy": 0,
+                "checkpoint_recovery_pending": 0,
+                "selector_error": 0,
+            },
+        }
+        with mock.patch.dict(os.environ, {"HERMES_EDITORIAL_HEARTBEAT_SECONDS": "7200"}, clear=False):
+            line = _monitor_line(report, include_liveness=True, now=7_200.0)
+        self.assertNotIn("liveness=", line)
+
     def test_monitor_line_wakes_for_running_v2_checkpoint(self):
         report = {
             "eligible_rework_ids": [],

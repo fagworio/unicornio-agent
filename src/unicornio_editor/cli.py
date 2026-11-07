@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -2484,7 +2485,13 @@ def _v2_checkpoint_monitor_projection(root: Path) -> dict[str, Any] | None:
     return base
 
 
-def _monitor_line(report: dict, root: Path | None = None) -> str:
+def _monitor_line(
+    report: dict,
+    root: Path | None = None,
+    *,
+    include_liveness: bool = False,
+    now: float | None = None,
+) -> str:
     """Linha ESTAVEL do monitor (hasheada pelo cron).
 
     So muda quando ha trabalho elegivel real: pending nao processado (id),
@@ -2546,7 +2553,43 @@ def _monitor_line(report: dict, root: Path | None = None) -> str:
         recovery_marker = _v2_recovery_monitor_marker(root)
         if recovery_marker:
             parts.append(recovery_marker)
+    if include_liveness and _monitor_has_work(report):
+        heartbeat_seconds = _monitor_heartbeat_seconds()
+        if heartbeat_seconds > 0:
+            parts.append(
+                f"liveness={int((time.time() if now is None else now) // heartbeat_seconds)}"
+            )
     return " ".join(parts) or "0"
+
+
+def _monitor_has_work(report: dict) -> bool:
+    """Return whether a stalled Editorial invocation should be retried.
+
+    The queue signature is intentionally stable between Hermes polls.  A
+    bounded liveness wake is still needed when the previous invocation left
+    the same pending selection behind, otherwise a transient lock/provider
+    failure can turn into an infinite ``0 READY`` backlog.
+    """
+    if report.get("eligible_rework_ids") or report.get("unprocessed_ids"):
+        return True
+    effective = report.get("v2_effective")
+    if isinstance(effective, dict):
+        if effective.get("selected_ids"):
+            return True
+        if effective.get("lock_busy") or effective.get("checkpoint_recovery_pending"):
+            return True
+        if effective.get("selector_error"):
+            return True
+        return False
+    return bool(report.get("v2_eligible_ids"))
+
+
+def _monitor_heartbeat_seconds() -> int:
+    """Read the bounded liveness interval; zero disables the heartbeat."""
+    try:
+        return max(0, int(os.environ.get("HERMES_EDITORIAL_HEARTBEAT_SECONDS", "7200")))
+    except (TypeError, ValueError):
+        return 7200
 
 
 
@@ -3821,7 +3864,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
-                print(_monitor_line(report, args.root))
+                print(_monitor_line(report, args.root, include_liveness=True))
                 return 0
             result = _compact_queue(report) if args.compact else report
         elif args.command == "cards":

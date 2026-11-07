@@ -73,6 +73,13 @@ estado atual. A entrada de novos posts pode mudar a ordenação da fila, mas nã
 substitui os IDs autorizados pelo preview; se algum ID esperado deixar de ser
 elegível, o write-mode bloqueia sem executar stages.
 
+O monitor possui um heartbeat limitado por `HERMES_EDITORIAL_HEARTBEAT_SECONDS`
+(padrão: 7200 segundos). Ele só aparece quando existe trabalho V2 elegível ou
+retomável e permite uma nova tentativa caso a mesma seleção tenha ficado presa
+após timeout, lock ou falha de provider. Não use o heartbeat para contornar
+quarentena, `recovery_uncertain` ou um checkpoint divergente; nesses casos a
+execução deve permanecer bloqueada e ser auditada.
+
 ## Orquestração e auditoria V2
 
 - Preserve `_hermes_work_state`, checkpoints, journals, manifests, tentativas,

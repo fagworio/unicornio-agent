@@ -5,12 +5,13 @@
 # saida exata; enquanto ela nao muda, o agente LLM NAO e acordado (idle custa
 # zero tokens).
 #
-# O monitor devolve exclusivamente a assinatura estavel da fila. O Hermes
-# acorda o agente quando essa assinatura muda: post novo, post processado ou
-# cooldown de rework expirado. Nunca inclua hora/tick aqui: isso acordaria o
-# LLM a cada polling mesmo sem progresso e transforma backlog parado em custo
-# recorrente. Quando nao ha trabalho, a saida e "0"; erro de API vira "ERROR";
-# ambos sao estaveis e nao geram spam.
+# O monitor devolve a assinatura estavel da fila. O Hermes acorda o agente
+# quando essa assinatura muda: post novo, post processado ou cooldown de
+# rework expirado. O CLI tambem inclui um heartbeat em intervalos largos
+# somente quando existe trabalho V2 elegivel/retomavel. Isso recupera uma
+# selecao que ficou igual apos timeout, lock ou falha de provider sem acordar
+# o LLM a cada polling. Quando nao ha trabalho, a saida e "0"; erro de API
+# vira "ERROR"; ambos sao estaveis e nao geram spam.
 #
 # FREIO DE ORCAMENTO SEM MUDAR O HASH: quando o guard bloqueia (custo/contexto),
 # a saida NAO pode virar uma mensagem nova — a transicao de assinatura normal
