@@ -3240,6 +3240,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_parser().print_help()
         return 0
     try:
+        # The capability diagnostic is read-only and must see the same project
+        # environment as the operational commands, but it deliberately does
+        # not instantiate Config or WordPressClient.
+        if args.command == "v2-hermes-media-capabilities":
+            _carregar_env_do_projeto()
         if args.command == "maintenance-report":
             data = json.loads(args.report_file.read_text(encoding="utf-8"))
             posts = data.get("posts", []) if isinstance(data, dict) else data

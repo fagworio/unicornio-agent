@@ -5,7 +5,11 @@ from unittest import mock
 
 from unicornio_editor.ai_provider import AIProviderError
 from unicornio_editor.cli import main
-from unicornio_editor.media.hermes_discovery import capability_report, discover_candidates
+from unicornio_editor.media.hermes_discovery import (
+    _usage_has_evidence,
+    capability_report,
+    discover_candidates,
+)
 
 
 def _response(candidates):
@@ -72,9 +76,42 @@ def test_capability_report_is_unverified_without_live_probe():
     assert result["writes"] == {"wordpress": 0, "filesystem": 0, "media_registry": 0}
 
 
+def test_tool_evidence_requires_the_named_tool():
+    assert not _usage_has_evidence({"tool_calls": {"vision_analyze": 1}}, "web_search")
+    assert not _usage_has_evidence({"tool_calls": 3, "tool_name": "vision_analyze"}, "web_search")
+    assert _usage_has_evidence({"tool_calls": [{"name": "web_search"}]}, "web_search")
+    assert _usage_has_evidence({"web_extract": {"count": 1}}, "web_extract")
+
+
+def test_capability_probe_separates_search_extract_and_source_preflight():
+    payload = _response([{
+        "candidate_id": "h-1",
+        "source_page_url": "https://example.test/article",
+        "direct_image_url": "https://cdn.example.test/key-art.jpg",
+    }])
+    with mock.patch(
+        "unicornio_editor.media.hermes_discovery._version",
+        return_value={"available": True, "status": "SUPPORTED"},
+    ), mock.patch(
+        "unicornio_editor.media.hermes_discovery.call_hermes_oneshot",
+        return_value=(payload, {"tool_calls": [{"name": "web_search"}]}),
+    ), mock.patch(
+        "unicornio_editor.media.hermes_discovery._verify_candidate_read_only",
+        return_value=(True, "source_verified"),
+    ):
+        result = capability_report(
+            command="hermes", probe=True, queries=(("game", "query"),)
+        )
+
+    assert result["tools"]["web_search"]["real_tool_evidence"] is True
+    assert result["tools"]["web_extract"]["real_tool_evidence"] is False
+    assert result["tools"]["web_extract"]["status"] == "DEGRADED"
+    assert result["candidate_metrics"]["source_page_preflight_verified"] == 1
+
+
 def test_capability_cli_does_not_load_wordpress_configuration():
     output = io.StringIO()
-    with redirect_stdout(output):
+    with mock.patch("unicornio_editor.cli._carregar_env_do_projeto") as load_env, redirect_stdout(output):
         exit_code = main([
             "v2-hermes-media-capabilities",
             "--command", "/path/that/does/not/exist",
@@ -85,3 +122,4 @@ def test_capability_cli_does_not_load_wordpress_configuration():
     assert result["status"] == "UNAVAILABLE"
     assert result["read_only"] is True
     assert result["hermes"]["available"] is False
+    load_env.assert_called_once()

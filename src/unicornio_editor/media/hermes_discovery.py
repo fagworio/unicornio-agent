@@ -239,23 +239,58 @@ def _version(command: str, *, timeout: float = 5.0) -> dict[str, Any]:
     return report
 
 
-def _usage_has_evidence(usage: Any, *names: str) -> bool:
-    """Find tool-call counters/records, never trust model text as evidence."""
+def _tool_name(value: Any) -> str:
+    return str(value or "").strip().casefold().replace("-", "_")
 
-    wanted = {name.casefold() for name in names}
+
+def _positive_tool_record(value: Any) -> bool:
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, (list, tuple)):
+        return bool(value)
+    if isinstance(value, dict):
+        counters = [
+            item for key, item in value.items()
+            if _tool_name(key) in {"count", "calls", "call_count", "invocations"}
+        ]
+        if counters:
+            return any(isinstance(item, (int, float)) and item > 0 for item in counters)
+        return bool(value)
+    return False
+
+
+def _usage_has_evidence(usage: Any, name: str) -> bool:
+    """Find a *named* tool call; generic tool counters are insufficient."""
+
+    wanted = _tool_name(name)
     if isinstance(usage, dict):
         for key, value in usage.items():
-            key_text = str(key).casefold()
-            if key_text in wanted or any(name in key_text for name in wanted):
-                if isinstance(value, (int, float)) and value > 0:
+            key_text = _tool_name(key)
+            if key_text == wanted or key_text in {f"{wanted}_calls", f"{wanted}_count"}:
+                if _positive_tool_record(value):
                     return True
-                if isinstance(value, (list, tuple, dict)) and len(value) > 0:
+            if key_text in {"name", "tool", "tool_name", "function", "function_name"}:
+                if _tool_name(value) == wanted:
                     return True
-            if _usage_has_evidence(value, *names):
+            if _usage_has_evidence(value, name):
                 return True
     elif isinstance(usage, (list, tuple)):
-        return any(_usage_has_evidence(item, *names) for item in usage)
+        return any(_usage_has_evidence(item, name) for item in usage)
+    elif isinstance(usage, str):
+        return _tool_name(usage) == wanted
     return False
+
+
+def _verify_candidate_read_only(candidate: dict[str, Any], *, subject: str) -> tuple[bool, str]:
+    """Run the existing source-page preflight without promoting the candidate."""
+
+    try:
+        from .source_verify import validate_discovered_candidate
+
+        result = validate_discovered_candidate(candidate, subject=subject, url_policy="audit")
+        return bool(result.get("valid")), str(result.get("reason_code") or "unverified")
+    except Exception as exc:  # noqa: BLE001 - diagnostics stay fail-safe
+        return False, type(exc).__name__
 
 
 def _provider_config() -> dict[str, Any]:
@@ -285,7 +320,8 @@ def _probe_web(
                 query=query, subject=query, content_type="diagnostic",
                 visual_role="inline", editorial_context="", original_url="",
                 official_domains=(),
-            ),
+            )
+            + "\nCapability probe requirement: call web_search for this query, then call web_extract on at least one returned page before returning the JSON.",
             command=command, model=model, toolsets="web", timeout=timeout,
         )
         parsed = _parse_json_object(response)
@@ -294,18 +330,31 @@ def _probe_web(
             item for index, item in enumerate(candidates, start=1)
             if _normalize_candidate(item, index=index, query=query) is not None
         ]
-        evidence = _usage_has_evidence(usage, "web_search", "web_extract", "tool_calls", "tools")
+        search_evidence = _usage_has_evidence(usage, "web_search")
+        extract_evidence = _usage_has_evidence(usage, "web_extract")
+        verified = 0
+        verification_failures: list[str] = []
+        for candidate in valid[:5]:
+            is_verified, reason = _verify_candidate_read_only(candidate, subject=query)
+            if is_verified:
+                verified += 1
+            elif reason:
+                verification_failures.append(reason)
         return {
-            "status": "SUPPORTED" if evidence and valid else ("DEGRADED" if evidence else "UNVERIFIED"),
-            "real_tool_evidence": evidence,
+            "status": "SUPPORTED" if search_evidence else "UNVERIFIED",
+            "real_tool_evidence": search_evidence,
+            "web_search_evidence": search_evidence,
+            "web_extract_evidence": extract_evidence,
             "candidates": len(valid),
             "source_pages": sum(bool(item.get("source_page_url")) for item in valid),
             "direct_images": sum(bool(item.get("direct_image_url")) for item in valid),
+            "verified_candidates": verified,
+            "verification_failures": verification_failures[:10],
         }
     except AIProviderError as exc:
-        return {"status": FAILURE_SEARCH_TIMEOUT if getattr(exc, "failure_class", "") == "timeout" else "UNAVAILABLE", "error": type(exc).__name__}
+        return {"status": FAILURE_SEARCH_TIMEOUT if getattr(exc, "failure_class", "") == "timeout" else "UNAVAILABLE", "error": type(exc).__name__, "web_search_evidence": False, "web_extract_evidence": False}
     except (TypeError, ValueError, json.JSONDecodeError):
-        return {"status": "DEGRADED", "real_tool_evidence": False, "error": FAILURE_INVALID_RESPONSE}
+        return {"status": "DEGRADED", "real_tool_evidence": False, "web_search_evidence": False, "web_extract_evidence": False, "error": FAILURE_INVALID_RESPONSE}
 
 
 def capability_report(
@@ -335,15 +384,23 @@ def capability_report(
             report["kind"] = kind
             report["query"] = query
             query_reports.append(report)
-        web_reports = [item for item in query_reports if item.get("real_tool_evidence")]
+        web_reports = [item for item in query_reports if item.get("web_search_evidence")]
+        extract_reports = [item for item in query_reports if item.get("web_extract_evidence")]
         tools["web_search"] = {
-            "status": "SUPPORTED" if any(item.get("candidates", 0) for item in web_reports) else ("DEGRADED" if web_reports else "UNAVAILABLE"),
+            "status": "SUPPORTED" if web_reports else "UNAVAILABLE",
             "real_tool_evidence": bool(web_reports),
             "queries": len(query_reports),
         }
         tools["web_extract"] = {
-            "status": "SUPPORTED" if any(item.get("source_pages", 0) for item in web_reports) else ("DEGRADED" if web_reports else "UNAVAILABLE"),
-            "real_tool_evidence": bool(web_reports),
+            "status": "SUPPORTED" if extract_reports else ("DEGRADED" if web_reports else "UNAVAILABLE"),
+            "real_tool_evidence": bool(extract_reports),
+        }
+        candidate_metrics = {
+            "structured_candidates": sum(int(item.get("candidates") or 0) for item in query_reports),
+            "candidates_with_source_and_image_urls": sum(int(item.get("candidates") or 0) for item in query_reports),
+            "source_page_urls": sum(int(item.get("source_pages") or 0) for item in query_reports),
+            "direct_image_urls": sum(int(item.get("direct_images") or 0) for item in query_reports),
+            "source_page_preflight_verified": sum(int(item.get("verified_candidates") or 0) for item in query_reports),
         }
         toolsets["web"] = dict(tools["web_search"])
         # Hermes installations expose web search through the web toolset; the
@@ -363,7 +420,7 @@ def capability_report(
                     "Use vision_analyze on this image URL and return only {}: " + vision_url,
                     command=command, model=model, toolsets="vision", timeout=timeout,
                 )
-                evidence = _usage_has_evidence(usage, "vision_analyze", "vision", "tool_calls", "tools")
+                evidence = _usage_has_evidence(usage, "vision_analyze")
                 tools["vision_analyze"] = {
                     "status": "SUPPORTED" if evidence else "UNVERIFIED",
                     "real_tool_evidence": evidence,
@@ -391,6 +448,13 @@ def capability_report(
         "provider_config": _provider_config(),
         "toolsets": toolsets,
         "tools": tools,
+        "candidate_metrics": candidate_metrics if probe and executable.get("available") else {
+            "structured_candidates": 0,
+            "candidates_with_source_and_image_urls": 0,
+            "source_page_urls": 0,
+            "direct_image_urls": 0,
+            "source_page_preflight_verified": 0,
+        },
         "queries": query_reports,
         "probe_requested": bool(probe),
         "vision_url_probed": bool(vision_url and _valid_http_url(vision_url)),

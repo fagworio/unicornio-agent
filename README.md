@@ -236,6 +236,8 @@ unicornio-editor media-search-listicle "Blue Box temporada 2" "Psyren anime" --l
 # Diagnóstico Hermes Discovery (somente leitura; sem --probe não há chamadas externas)
 unicornio-editor v2-hermes-media-capabilities
 unicornio-editor v2-hermes-media-capabilities --probe --vision-url https://exemplo.test/imagem.jpg
+# O probe carrega o .env do projeto sem instanciar Config/WordPressClient.
+# O JSON separa evidência nominada de cada ferramenta e o preflight de origem.
 
 # Microbatch editorial: o apply continua isolado por post
 unicornio-editor apply-batch editorial-batch.json --compact
