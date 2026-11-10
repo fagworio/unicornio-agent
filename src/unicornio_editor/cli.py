@@ -164,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     v2_cycle_parser.add_argument("--ready-target", type=int, default=None)
     v2_cycle_parser.add_argument("--new-batch-size", type=int, default=None)
     v2_cycle_parser.add_argument("--max-unique-posts", type=int, default=None)
+    v2_cycle_parser.add_argument("--max-lock-reselections", type=int, default=None)
     v2_cycle_parser.add_argument("--max-total-attempts", type=int, default=None)
     v2_cycle_parser.add_argument("--max-attempts-per-post", type=int, default=None)
     v2_cycle_parser.add_argument("--max-stagnant-rounds", type=int, default=None)
@@ -234,6 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="lista isolamentos V2, evidências atuais, idade, causas recorrentes e próxima ação (read-only)",
     )
     v2_investigation_queue_parser.add_argument("--root", type=Path, default=Path("."))
+
+    v2_operational_report_parser = subparsers.add_parser(
+        "v2-operational-report",
+        help="gera diagnóstico read-only de locks, operações abertas, quarentena e seleção",
+    )
+    v2_operational_report_parser.add_argument("--root", type=Path, default=Path("."))
 
     v2_lock_reconcile_parser = subparsers.add_parser(
         "v2-lock-reconcile",
@@ -3382,6 +3389,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .pipeline_v2.cycle_investigation import build_investigation_queue
 
             result = build_investigation_queue(args.root, client)
+        elif args.command == "v2-operational-report":
+            from .pipeline_v2.cycle_investigation import build_operational_admission_report
+
+            result = build_operational_admission_report(args.root, client)
         elif args.command == "v2-release-isolated":
             from .pipeline_v2.cycle_investigation import release_isolated_post
 
@@ -3485,6 +3496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ready_target=int(getattr(config, "v2_cycle_ready_target", 5)),
                 new_batch_size=int(getattr(config, "v2_cycle_new_batch_size", 5)),
                 max_unique_posts=int(getattr(config, "v2_cycle_max_unique_posts", 25)),
+                max_lock_reselections=int(getattr(config, "v2_cycle_max_lock_reselections", 100)),
                 max_total_attempts=int(getattr(config, "v2_cycle_max_total_attempts", 50)),
                 max_attempts_per_post_per_cycle=int(
                     getattr(config, "v2_cycle_max_attempts_per_post", 2)
@@ -3499,6 +3511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "ready_target": args.ready_target,
                 "new_batch_size": args.new_batch_size,
                 "max_unique_posts": args.max_unique_posts,
+                "max_lock_reselections": args.max_lock_reselections,
                 "max_total_attempts": args.max_total_attempts,
                 "max_attempts_per_post_per_cycle": args.max_attempts_per_post,
                 "max_stagnant_rounds": args.max_stagnant_rounds,

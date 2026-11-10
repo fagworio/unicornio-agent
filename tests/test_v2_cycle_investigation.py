@@ -10,6 +10,7 @@ from unicornio_editor.pipeline_v2.cycle_investigation import (
     _probe_lock,
     audit_pending_round_readonly,
     build_investigation_queue,
+    build_operational_admission_report,
     release_isolated_post,
 )
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
@@ -282,6 +283,70 @@ def test_pending_round_audit_cli_is_exposed_as_read_only_preflight(tmp_path, mon
     assert output["read_only"] is True
     assert output["wordpress_writes"] == 0
     assert output["replay"] is False
+
+
+def test_operational_admission_report_is_read_only_and_separates_incident_scopes(tmp_path):
+    lock_root = tmp_path / "work" / "locks"
+    lock_root.mkdir(parents=True)
+    for post_id in range(186, 216):
+        (lock_root / f"{post_id}.lock").write_text(
+            json.dumps({"created_at": 1, "released": False}), encoding="utf-8"
+        )
+    with connect(tmp_path) as db:
+        for post_id in range(12):
+            db.execute(
+                """INSERT INTO media_operations(
+                    post_id, run_id, cycle_id, cycle_round, authorization_id,
+                    phase, operation_status, started_at, write_started,
+                    readback_confirmed, outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, 'started', ?, 0, 0, 'started')""",
+                (
+                    3000 + post_id,
+                    f"run-{post_id}",
+                    "incident-cycle",
+                    1,
+                    f"auth-{post_id}",
+                    "media",
+                    "2026-11-01T00:00:00+00:00",
+                ),
+            )
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "v2-quarantine.json").write_text(
+        json.dumps({
+            "version": 1,
+            "posts": [{"post_id": 999, "reason_code": "uncertain_transaction", "reason": "preserve"}],
+            "release_history": [],
+        }),
+        encoding="utf-8",
+    )
+    before = {
+        "locks": sorted(path.name for path in lock_root.iterdir()),
+        "quarantine": (tmp_path / "config" / "v2-quarantine.json").read_bytes(),
+    }
+
+    report = build_operational_admission_report(tmp_path, now=1_800_000_000.0)
+
+    assert report["read_only"] is True
+    assert report["wordpress_writes"] == report["registry_writes"] == 0
+    assert report["replay"] is False
+    assert report["locks"]["blocked_count"] == 30
+    assert report["media_operations"]["started_count"] == 12
+    assert report["quarantine"]["count"] == 1
+    assert report["selection"] == {
+        "candidates_examined": 0,
+        "locked_candidates": 0,
+        "selected_candidates": 0,
+        "processed_candidates": 0,
+    }
+    assert {row["reason"] for row in report["locks"]["posts"]} == {"owner_token_missing"}
+    assert all(row["effect_status"] == "effect_uncertain" for row in report["media_operations"]["posts"])
+    assert not any(
+        "token" in key.casefold()
+        for row in report["locks"]["posts"]
+        for key in row
+    )
+    assert before["locks"] == sorted(path.name for path in lock_root.iterdir())
+    assert before["quarantine"] == (tmp_path / "config" / "v2-quarantine.json").read_bytes()
 
 
 def test_pending_round_audit_classifies_pre_authorization_interruption_read_only(tmp_path):

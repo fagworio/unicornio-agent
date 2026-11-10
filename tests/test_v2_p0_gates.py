@@ -83,6 +83,72 @@ def test_lock_reselection_reuses_candidate_snapshot_without_wordpress_query(tmp_
     assert client.list_calls == calls_after_first_preview
 
 
+def test_lock_scan_budget_is_separate_from_unique_post_budget_and_reports_counts(
+    tmp_path, monkeypatch
+):
+    locked = set(range(1, 27))
+    snapshot = [
+        (post_id, {"post": {}, "v2_state": WorkState(state=LifecycleState.PENDING, phase=Phase.RELEVANCE)})
+        for post_id in range(1, 27)
+    ] + [
+        (100, {"post": {}, "v2_state": WorkState(state=LifecycleState.PENDING, phase=Phase.RELEVANCE)})
+    ]
+    calls = []
+
+    def fake_run_v2(_client, _config, _root, **kwargs):
+        excluded = {int(value) for value in kwargs.get("excluded_post_ids", ())}
+        selected = next(post_id for post_id, _context in snapshot if post_id not in excluded)
+        calls.append((bool(kwargs.get("preview")), selected))
+        if kwargs.get("preview"):
+            return {"queue": {"selected_ids": [selected]}, "_candidate_snapshot": snapshot}
+        return {
+            "details": [{
+                "post_id": selected,
+                "initial_state": "pending",
+                "outcome": "ready",
+                "readback": True,
+                "state": {"state": "ready", "phase": "validate"},
+                "progress": True,
+            }]
+        }
+
+    def fake_reserve(_root, selected_ids, *, lock_ttl):
+        post_id = int(selected_ids[0])
+        return ({}, post_id, "legacy lock") if post_id in locked else ({}, None, "")
+
+    monkeypatch.setattr(cycle_runtime, "run_v2", fake_run_v2)
+    monkeypatch.setattr(cycle_runtime, "_reserve_post_lock_batch", fake_reserve)
+
+    report = cycle_runtime.run_v2_cycle(
+        object(), SimpleNamespace(lock_ttl=60), tmp_path,
+        cycle_config=CycleConfig(
+            ready_target=1,
+            new_batch_size=1,
+            max_unique_posts=25,
+            max_lock_reselections=30,
+            max_total_attempts=1,
+            max_attempts_per_post_per_cycle=1,
+            max_stagnant_rounds=2,
+            max_drain_rounds=2,
+            max_duration_seconds=60,
+        ),
+    )
+
+    assert report.stop_reason == "ready_target"
+    assert report.ready_post_ids == [100]
+    assert report.candidates_examined == 27
+    assert report.locked_candidates == 26
+    assert report.selected_candidates == 1
+    assert report.processed_candidates == 1
+    assert report.round_reports[0]["selection_stats"] == {
+        "candidates_examined": 27,
+        "locked_candidates": 26,
+        "selected_candidates": 1,
+        "processed_candidates": 1,
+    }
+    assert len(calls) == 28
+
+
 def test_thirty_legacy_locks_are_not_modified_or_auto_reconciled(tmp_path):
     lock_root = tmp_path / "work" / "locks"
     lock_root.mkdir(parents=True)

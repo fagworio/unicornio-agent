@@ -1317,6 +1317,7 @@ def _cycle_config_from_config(config) -> CycleConfig:
         ready_target=int(getattr(config, "v2_cycle_ready_target", 5)),
         new_batch_size=int(getattr(config, "v2_cycle_new_batch_size", 5)),
         max_unique_posts=int(getattr(config, "v2_cycle_max_unique_posts", 25)),
+        max_lock_reselections=int(getattr(config, "v2_cycle_max_lock_reselections", 100)),
         max_total_attempts=int(getattr(config, "v2_cycle_max_total_attempts", 50)),
         max_attempts_per_post_per_cycle=int(
             getattr(config, "v2_cycle_max_attempts_per_post", 2)
@@ -1939,6 +1940,8 @@ def run_v2_cycle(
 
         reserved_post_locks: dict[int, Any] = {}
         round_excluded_post_ids = executor_excluded_ids
+        lock_examined_ids: set[int] = set()
+        locked_candidate_ids: list[int] = []
         if selected_ids:
             lock_ttl = int(getattr(config, "lock_ttl", 900))
             excluded_for_lock_retry = {
@@ -1946,6 +1949,7 @@ def run_v2_cycle(
             }
             lock_reselection_count = 0
             while selected_ids:
+                lock_examined_ids.update(int(value) for value in selected_ids)
                 if request.deadline is not None and monotonic() >= request.deadline:
                     return CycleRoundResult(
                         preview_selected_ids=tuple(selected_ids),
@@ -1964,10 +1968,19 @@ def run_v2_cycle(
                             budget_violation="duration_limit",
                         )
                     break
+                if int(locked_post_id) not in locked_candidate_ids:
+                    locked_candidate_ids.append(int(locked_post_id))
                 if authorized_pending:
                     return CycleRoundResult(
                         preview_selected_ids=tuple(pending_ids or selected_ids),
                         locked=True,
+                        selection_stats={
+                            "candidates_examined": len(lock_examined_ids),
+                            "locked_candidates": len(locked_candidate_ids),
+                            "locked_candidate_ids": list(locked_candidate_ids),
+                            "selected_candidates": 0,
+                            "processed_candidates": 0,
+                        },
                         reconciliation_blocking_info={
                             "reason": "post_lock_busy",
                             "locked_post_id": locked_post_id,
@@ -1979,10 +1992,24 @@ def run_v2_cycle(
                     return CycleRoundResult(
                         preview_selected_ids=tuple(selected_ids),
                         locked=True,
+                        selection_stats={
+                            "candidates_examined": len(lock_examined_ids),
+                            "locked_candidates": len(locked_candidate_ids),
+                            "locked_candidate_ids": list(locked_candidate_ids),
+                            "selected_candidates": 0,
+                            "processed_candidates": 0,
+                        },
                         reconciliation_blocking_info={
                             "reason": "post_lock_reselection_exhausted",
                             "locked_post_id": locked_post_id,
                             "lock_error": lock_error,
+                            "selection_stats": {
+                                "candidates_examined": len(lock_examined_ids),
+                                "locked_candidates": len(locked_candidate_ids),
+                                "locked_candidate_ids": list(locked_candidate_ids),
+                                "selected_candidates": 0,
+                                "processed_candidates": 0,
+                            },
                         },
                     )
                 excluded_for_lock_retry.add(locked_post_id)
@@ -1993,14 +2020,29 @@ def run_v2_cycle(
                         preview_selected_ids=tuple(selected_ids),
                         budget_violation="duration_limit",
                     )
-                if lock_reselection_count > max(1, int(cycle_config.max_unique_posts)):
+                if lock_reselection_count > int(cycle_config.max_lock_reselections):
                     return CycleRoundResult(
                         preview_selected_ids=tuple(selected_ids),
                         locked=True,
+                        selection_stats={
+                            "candidates_examined": len(lock_examined_ids),
+                            "locked_candidates": len(locked_candidate_ids),
+                            "locked_candidate_ids": list(locked_candidate_ids),
+                            "selected_candidates": 0,
+                            "processed_candidates": 0,
+                        },
                         reconciliation_blocking_info={
-                            "reason": "post_lock_reselection_exhausted",
+                            "reason": "post_lock_scan_exhausted",
                             "locked_post_id": locked_post_id,
                             "lock_error": lock_error,
+                            "lock_scan_limit": int(cycle_config.max_lock_reselections),
+                            "selection_stats": {
+                                "candidates_examined": len(lock_examined_ids),
+                                "locked_candidates": len(locked_candidate_ids),
+                                "locked_candidate_ids": list(locked_candidate_ids),
+                                "selected_candidates": 0,
+                                "processed_candidates": 0,
+                            },
                         },
                     )
                 preview = run_v2(
@@ -2101,6 +2143,13 @@ def run_v2_cycle(
                     "write_replayed": False,
                     "journal_conflicts": list(result.get("journal_conflicts") or []),
                 },
+                selection_stats={
+                    "candidates_examined": len(lock_examined_ids),
+                    "locked_candidates": len(locked_candidate_ids),
+                    "locked_candidate_ids": list(locked_candidate_ids),
+                    "selected_candidates": len(selected_ids),
+                    "processed_candidates": 0,
+                },
             )
             return auto_isolate_blocked_round(
                 blocked, selected_ids, authorization_id
@@ -2141,6 +2190,13 @@ def run_v2_cycle(
                 if authorized_pending
                 else ()
             ),
+            selection_stats={
+                "candidates_examined": len(lock_examined_ids),
+                "locked_candidates": len(locked_candidate_ids),
+                "locked_candidate_ids": list(locked_candidate_ids),
+                "selected_candidates": len(selected_ids),
+                "processed_candidates": len(executed_ids),
+            },
         )
 
     try:

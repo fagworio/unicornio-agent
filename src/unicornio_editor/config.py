@@ -123,6 +123,7 @@ class Config:
     v2_cycle_ready_target: int = 5
     v2_cycle_new_batch_size: int = 5
     v2_cycle_max_unique_posts: int = 25
+    v2_cycle_max_lock_reselections: int = 100
     v2_cycle_max_total_attempts: int = 50
     v2_cycle_max_attempts_per_post: int = 2
     v2_cycle_max_stagnant_rounds: int = 3
@@ -415,6 +416,7 @@ def load_config() -> Config:
         v2_cycle_ready_target=_int("EDITOR_V2_CYCLE_READY_TARGET", 5, 1, 1000),
         v2_cycle_new_batch_size=_int("EDITOR_V2_CYCLE_NEW_BATCH_SIZE", 5, 1, 100),
         v2_cycle_max_unique_posts=_int("EDITOR_V2_CYCLE_MAX_UNIQUE_POSTS", 25, 1, 10000),
+        v2_cycle_max_lock_reselections=_int("EDITOR_V2_CYCLE_MAX_LOCK_RESELECTIONS", 100, 1, 100000),
         v2_cycle_max_total_attempts=_int("EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS", 50, 1, 100000),
         v2_cycle_max_attempts_per_post=_int("EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST", 2, 1, 100),
         v2_cycle_max_stagnant_rounds=_int("EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS", 3, 1, 100),

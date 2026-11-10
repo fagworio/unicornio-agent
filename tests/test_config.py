@@ -62,6 +62,7 @@ class ConfigTests(unittest.TestCase):
                 "EDITOR_V2_CYCLE_READY_TARGET": "3",
                 "EDITOR_V2_CYCLE_NEW_BATCH_SIZE": "4",
                 "EDITOR_V2_CYCLE_MAX_UNIQUE_POSTS": "12",
+                "EDITOR_V2_CYCLE_MAX_LOCK_RESELECTIONS": "31",
                 "EDITOR_V2_CYCLE_MAX_TOTAL_ATTEMPTS": "24",
                 "EDITOR_V2_CYCLE_MAX_ATTEMPTS_PER_POST": "3",
                 "EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS": "4",
@@ -74,6 +75,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.v2_cycle_ready_target, 3)
         self.assertEqual(config.v2_cycle_new_batch_size, 4)
         self.assertEqual(config.v2_cycle_max_unique_posts, 12)
+        self.assertEqual(config.v2_cycle_max_lock_reselections, 31)
         self.assertEqual(config.v2_cycle_max_total_attempts, 24)
         self.assertEqual(config.v2_cycle_max_attempts_per_post, 3)
         self.assertEqual(config.v2_cycle_max_stagnant_rounds, 4)

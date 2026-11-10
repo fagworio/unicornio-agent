@@ -16,6 +16,10 @@ class CycleConfig:
     ready_target: int = 5
     new_batch_size: int = 5
     max_unique_posts: int = 25
+    # Lock probes are queue scanning work, not editorial attempts.  Keep a
+    # separate finite budget so a run can pass legacy locks without admitting
+    # more new posts than ``max_unique_posts`` allows.
+    max_lock_reselections: int = 100
     max_total_attempts: int = 50
     max_attempts_per_post_per_cycle: int = 2
     max_stagnant_rounds: int = 3
@@ -29,6 +33,8 @@ class CycleConfig:
             raise ValueError("new_batch_size must be positive")
         if self.max_unique_posts < 1:
             raise ValueError("max_unique_posts must be positive")
+        if self.max_lock_reselections < 1:
+            raise ValueError("max_lock_reselections must be positive")
         if self.max_total_attempts < 1:
             raise ValueError("max_total_attempts must be positive")
         if self.max_attempts_per_post_per_cycle < 1:
@@ -76,6 +82,7 @@ class CycleRoundResult:
     historical_reconciliation_info: Mapping[str, Any] | None = None
     cycle_transitioned: bool = False
     cycle_transition_info: Mapping[str, Any] | None = None
+    selection_stats: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -100,6 +107,10 @@ class CycleReport:
     round_reports: list[dict[str, Any]] = field(default_factory=list)
     cycle_id: str | None = None
     resumed: bool = False
+    candidates_examined: int = 0
+    locked_candidates: int = 0
+    selected_candidates: int = 0
+    processed_candidates: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -125,6 +136,13 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
             "locked_post_id": value.get("locked_post_id"),
             "lock_error": value.get("lock_error"),
         }
+    selection_stats = value.get("selection_stats")
+    if not isinstance(selection_stats, Mapping):
+        selection_stats = (
+            lock_info.get("selection_stats")
+            if isinstance(lock_info, Mapping)
+            else queue.get("selection_stats") if isinstance(queue, Mapping) else None
+        )
     return CycleRoundResult(
         preview_selected_ids=tuple(int(item) for item in preview_ids or ()),
         executed_ids=tuple(int(item) for item in executed_ids or ()),
@@ -170,6 +188,7 @@ def _normalize_round_result(value: CycleRoundResult | Mapping[str, Any]) -> Cycl
             if isinstance(value.get("cycle_transition_info"), Mapping)
             else None
         ),
+        selection_stats=(dict(selection_stats) if isinstance(selection_stats, Mapping) else None),
     )
 
 
@@ -304,6 +323,27 @@ def run_cycle(
             })
             break
 
+        raw_stats = result.selection_stats or {}
+        round_selection_stats = {
+            "candidates_examined": int(
+                raw_stats.get("candidates_examined", len(result.preview_selected_ids))
+            ),
+            "locked_candidates": int(raw_stats.get("locked_candidates", 0)),
+            "selected_candidates": int(
+                raw_stats.get("selected_candidates", len(result.preview_selected_ids))
+            ),
+            "processed_candidates": int(
+                raw_stats.get("processed_candidates", len(result.executed_ids))
+            ),
+        }
+        for field in (
+            "candidates_examined",
+            "locked_candidates",
+            "selected_candidates",
+            "processed_candidates",
+        ):
+            setattr(report, field, getattr(report, field) + round_selection_stats[field])
+
         if result.cycle_transitioned:
             transition = dict(result.cycle_transition_info or {})
             report.stop_reason = "recovery_transition_applied"
@@ -328,6 +368,7 @@ def run_cycle(
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": [],
                 "reason": lock_info.get("reason") or "v2_run_lock_busy",
+                **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
                 **lock_info,
             })
             break
@@ -339,6 +380,7 @@ def run_cycle(
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": [],
+                **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
                 **invalidation,
             }
             report.round_reports.append(invalidation_report)
@@ -356,6 +398,7 @@ def run_cycle(
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": list(result.executed_ids),
+                **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
                 "post_results": [dict(detail) for detail in result.details],
                 **blocking,
             }
@@ -408,6 +451,7 @@ def run_cycle(
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": list(result.executed_ids),
+                **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
                 "post_results": [dict(detail) for detail in result.details],
                 **reconciliation,
             }
@@ -426,6 +470,7 @@ def run_cycle(
                 "phase": phase,
                 "preview_selected_ids": list(result.preview_selected_ids),
                 "executed_ids": list(result.executed_ids),
+                **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
                 "post_results": [dict(detail) for detail in result.details],
                 **reconciliation,
             }
@@ -526,6 +571,7 @@ def run_cycle(
             "drain_rounds": drain_rounds,
             "preview_selected_ids": list(result.preview_selected_ids),
             "executed_ids": list(result.executed_ids),
+            **({"selection_stats": round_selection_stats} if result.selection_stats is not None else {}),
             "ready_post_ids": round_ready,
             "progress": round_progress,
             "post_results": [

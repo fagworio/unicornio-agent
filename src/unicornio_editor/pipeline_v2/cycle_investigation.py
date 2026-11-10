@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import time
@@ -814,6 +815,198 @@ def build_investigation_queue(
         },
         "alerts": alerts,
         "posts": rows,
+    }
+
+
+def build_operational_admission_report(
+    root: str | Path,
+    client=None,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Return a sanitized, read-only admission report for operators.
+
+    This report deliberately reads locks, quarantine, cycle checkpoints and
+    Registry evidence without changing any of them.  It exposes identities as
+    correlation fields and booleans, never lock tokens, credentials or URLs.
+    """
+    root = Path(root)
+    instant = float(now if now is not None else time.time())
+    infrastructure_failures: list[dict[str, Any]] = []
+    individual_failures: list[dict[str, Any]] = []
+
+    locks: list[dict[str, Any]] = []
+    lock_root = root / "work" / "locks"
+    if lock_root.is_symlink():
+        infrastructure_failures.append({"component": "locks", "reason": "lock_directory_is_symlink"})
+    elif lock_root.is_dir():
+        for path in sorted(lock_root.glob("*.lock")):
+            match = re.fullmatch(r"(\d+)\.lock", path.name)
+            if not match:
+                continue
+            post_id = int(match.group(1))
+            record = _json(path)
+            owner_status, owner_reason = classify_lock_owner_record(record)
+            probe_status = _probe_lock(path)
+            row = {
+                "post_id": post_id,
+                "probe_status": probe_status,
+                "owner_classification": owner_status,
+                "reason": owner_reason or probe_status,
+                "owner_identity_available": bool(
+                    isinstance(record, Mapping) and str(record.get("process_start") or "")
+                ),
+                "released": bool(isinstance(record, Mapping) and record.get("released")),
+            }
+            if probe_status not in {"missing", "unlocked"} or owner_status not in {"released", "unlocked"}:
+                locks.append(row)
+                individual_failures.append({"kind": "lock", **row})
+    elif lock_root.exists():
+        infrastructure_failures.append({"component": "locks", "reason": "lock_directory_unavailable"})
+
+    operations: list[dict[str, Any]] = []
+    registry_path = root / "work" / "media_registry.sqlite"
+    if not registry_path.is_file():
+        infrastructure_failures.append({"component": "media_registry", "reason": "registry_unavailable"})
+    else:
+        try:
+            with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as db:
+                tables = {
+                    str(row[0])
+                    for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "media_operations" not in tables:
+                    raise RuntimeError("media_operations_table_missing")
+                columns = {
+                    str(row[1])
+                    for row in db.execute("PRAGMA table_info(media_operations)").fetchall()
+                }
+                required = {"post_id", "run_id", "operation_status", "started_at"}
+                if required - columns:
+                    raise RuntimeError("media_operations_schema_incomplete")
+                selected = [
+                    name for name in (
+                        "post_id", "run_id", "cycle_id", "cycle_round",
+                        "authorization_id", "phase", "operation_status",
+                        "started_at", "completed_at", "write_started",
+                        "readback_confirmed", "outcome",
+                    ) if name in columns
+                ]
+                rows = db.execute(
+                    "SELECT " + ", ".join(selected)
+                    + " FROM media_operations WHERE operation_status = 'started'"
+                    + " ORDER BY started_at, post_id"
+                ).fetchall()
+                for raw in rows:
+                    data = dict(zip(selected, raw))
+                    started_at = _created_at_epoch(data.get("started_at"))
+                    write_started = bool(data.get("write_started"))
+                    readback_confirmed = bool(data.get("readback_confirmed"))
+                    status = "effect_uncertain"
+                    if readback_confirmed:
+                        status = "effect_confirmed"
+                    elif (
+                        not write_started
+                        and str(data.get("outcome") or "") in {"no_effect", "not_executed"}
+                    ):
+                        status = "no_effect_proven"
+                    row = {
+                        "post_id": int(data.get("post_id") or 0),
+                        "run_id": str(data.get("run_id") or ""),
+                        "cycle_id": str(data.get("cycle_id") or ""),
+                        "cycle_round": data.get("cycle_round"),
+                        "authorization_id": str(data.get("authorization_id") or ""),
+                        "identity_available": all(
+                            str(data.get(name) or "")
+                            for name in ("run_id", "cycle_id", "authorization_id")
+                        ),
+                        "phase": str(data.get("phase") or ""),
+                        "operation_status": str(data.get("operation_status") or ""),
+                        "started_at": str(data.get("started_at") or ""),
+                        "age_seconds": max(0, int(instant - started_at)) if started_at is not None else None,
+                        "write_started": write_started,
+                        "readback_confirmed": readback_confirmed,
+                        "effect_status": status,
+                        "next_action": "isolate_post_and_reconcile_before_replay",
+                    }
+                    operations.append(row)
+                    individual_failures.append({"kind": "media_operation", **row})
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            infrastructure_failures.append({
+                "component": "media_registry",
+                "reason": "registry_unavailable",
+                "error_class": type(exc).__name__,
+            })
+
+    try:
+        cycle_state = CycleStateStore(root).load()
+        round_reports = cycle_state.round_reports if cycle_state else []
+        selection = {
+            "candidates_examined": sum(
+                int((row.get("selection_stats") or {}).get("candidates_examined", 0))
+                for row in round_reports if isinstance(row, Mapping)
+            ),
+            "locked_candidates": sum(
+                int((row.get("selection_stats") or {}).get("locked_candidates", 0))
+                for row in round_reports if isinstance(row, Mapping)
+            ),
+            "selected_candidates": sum(
+                int((row.get("selection_stats") or {}).get("selected_candidates", 0))
+                for row in round_reports if isinstance(row, Mapping)
+            ),
+            "processed_candidates": sum(
+                int((row.get("selection_stats") or {}).get("processed_candidates", 0))
+                for row in round_reports if isinstance(row, Mapping)
+            ),
+        }
+        checkpoint = {
+            "status": cycle_state.status if cycle_state else "missing",
+            "cycle_id": cycle_state.cycle_id if cycle_state else None,
+            "phase": cycle_state.phase if cycle_state else None,
+            "pending_round": bool(cycle_state and cycle_state.pending_round),
+        }
+    except Exception as exc:  # read-only diagnostics must identify infra failure
+        selection = {
+            "candidates_examined": 0,
+            "locked_candidates": 0,
+            "selected_candidates": 0,
+            "processed_candidates": 0,
+        }
+        checkpoint = {"status": "unavailable"}
+        infrastructure_failures.append({
+            "component": "cycle_checkpoint",
+            "reason": "checkpoint_unavailable",
+            "error_class": type(exc).__name__,
+        })
+
+    quarantine = build_investigation_queue(root, client, now=instant)
+    quarantined_posts = quarantine.get("posts", []) if quarantine.get("status") == "ok" else []
+    if quarantine.get("status") != "ok":
+        infrastructure_failures.append({
+            "component": "quarantine",
+            "reason": str(quarantine.get("reason") or "quarantine_unavailable"),
+        })
+
+    return {
+        "status": "ok" if not infrastructure_failures else "degraded",
+        "read_only": True,
+        "generated_at": datetime.fromtimestamp(instant, timezone.utc).isoformat(),
+        "git_sha": _git_head(root),
+        "checkpoint": checkpoint,
+        "selection": selection,
+        "locks": {"blocked_count": len(locks), "posts": locks},
+        "media_operations": {"started_count": len(operations), "posts": operations},
+        "quarantine": {
+            "count": len(quarantined_posts),
+            "posts": quarantined_posts,
+        },
+        "infrastructure_failures": infrastructure_failures,
+        "individual_failures": individual_failures,
+        "wordpress_writes": 0,
+        "registry_writes": 0,
+        "replay": False,
     }
 
 

@@ -4539,6 +4539,7 @@ def run_v2(
             blockers[blocker] = blockers.get(blocker, 0) + 1
         queue = {
             "scanned": len(snapshot),
+            "candidates_examined": len(candidates),
             "pending_total": len(snapshot),
             "epoch_protected_ids": sorted(protected_epoch_ids),
             "epoch_protected_count": len(protected_epoch_ids),
@@ -4572,6 +4573,8 @@ def run_v2(
             "eligible_ids": sorted(eligible_ids),
             "cooldown_ids": [post_id for post_id, _context in cooldown],
             "selected_ids": [post_id for post_id, _context in selected],
+            "selected_candidates": len(selected),
+            "processed_candidates": 0,
             "selection_revalidated": expected_ids is not None and not selection_mismatch,
             "selection_drift": selection_drift,
             "by_blocker": blockers,
