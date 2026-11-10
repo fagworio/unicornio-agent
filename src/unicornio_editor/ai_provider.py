@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +20,18 @@ from typing import Any
 class AIProviderError(RuntimeError):
     """Raised when an AI backend cannot produce a trustworthy response."""
 
-    def __init__(self, message: str, *, failure_class: str = "provider_error", retryable: bool = True) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_class: str = "provider_error",
+        retryable: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.failure_class = failure_class
         self.retryable = bool(retryable)
+        self.metadata = dict(metadata or {})
 
 
 def hermes_command_available(command: str = "hermes") -> bool:
@@ -76,30 +85,60 @@ def call_hermes_oneshot(
     if str(toolsets or "").strip():
         argv[1:1] = ["-t", str(toolsets).strip()]
     usage_path: Path | None = None
+    invocation_started = time.monotonic()
+    invocation: dict[str, Any] = {
+        "configured_timeout_seconds": timeout_seconds,
+        "process_spawn_elapsed_ms": None,
+        "provider_call_elapsed_ms": None,
+        "process_returncode": None,
+    }
     try:
         with tempfile.NamedTemporaryFile(prefix="unicornio-hermes-usage-", suffix=".json", delete=False) as handle:
             usage_path = Path(handle.name)
         argv.extend(["--usage-file", str(usage_path)])
         try:
-            completed = subprocess.run(
+            spawn_started = time.monotonic()
+            process = subprocess.Popen(
                 argv,
                 cwd=str(cwd) if cwd is not None else None,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_seconds,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise AIProviderError(
-                "Hermes excedeu o timeout da chamada editorial",
-                failure_class="timeout",
-                retryable=True,
-            ) from exc
+            invocation["process_spawn_elapsed_ms"] = round(
+                (time.monotonic() - spawn_started) * 1000, 1
+            )
+            call_started = time.monotonic()
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                stdout, stderr = process.communicate()
+                invocation.update({
+                    "provider_call_elapsed_ms": round((time.monotonic() - call_started) * 1000, 1),
+                    "process_returncode": process.returncode,
+                    "total_elapsed_ms": round((time.monotonic() - invocation_started) * 1000, 1),
+                })
+                raise AIProviderError(
+                    "Hermes excedeu o timeout da chamada editorial",
+                    failure_class="timeout",
+                    retryable=True,
+                    metadata=invocation,
+                ) from exc
+            invocation.update({
+                "provider_call_elapsed_ms": round((time.monotonic() - call_started) * 1000, 1),
+                "process_returncode": process.returncode,
+                "total_elapsed_ms": round((time.monotonic() - invocation_started) * 1000, 1),
+            })
+            completed = subprocess.CompletedProcess(
+                argv, process.returncode, stdout=stdout, stderr=stderr,
+            )
         except OSError as exc:
             raise AIProviderError(
                 f"falha ao iniciar Hermes: {exc}",
                 failure_class="transport_error",
                 retryable=True,
+                metadata={**invocation, "total_elapsed_ms": round((time.monotonic() - invocation_started) * 1000, 1)},
             ) from exc
         output = (completed.stdout or "").strip()
         if completed.returncode != 0:
@@ -108,12 +147,14 @@ def call_hermes_oneshot(
                 f"Hermes terminou com código {completed.returncode}: {detail[:500]}",
                 failure_class="provider_error",
                 retryable=True,
+                metadata=invocation,
             )
         if not output:
             raise AIProviderError(
                 "Hermes não retornou texto",
                 failure_class="invalid_response",
                 retryable=True,
+                metadata=invocation,
             )
         usage: dict[str, Any] = {}
         if usage_path and usage_path.is_file():
@@ -123,6 +164,7 @@ def call_hermes_oneshot(
                     usage = parsed
             except (OSError, ValueError):
                 usage = {}
+        usage["_unicornio_invocation"] = invocation
         return output, usage
     finally:
         if usage_path is not None:

@@ -236,8 +236,11 @@ unicornio-editor media-search-listicle "Blue Box temporada 2" "Psyren anime" --l
 # Diagnóstico Hermes Discovery (somente leitura; sem --probe não há chamadas externas)
 unicornio-editor v2-hermes-media-capabilities
 unicornio-editor v2-hermes-media-capabilities --probe --vision-url https://exemplo.test/imagem.jpg
+unicornio-editor v2-hermes-media-capabilities --probe --query "Resident Evil official game images"
 # O probe carrega o .env do projeto sem instanciar Config/WordPressClient.
-# O JSON separa evidência nominada de cada ferramenta e o preflight de origem.
+# O JSON separa evidência nominada de cada ferramenta, timing e preflight de origem.
+# No Hermes v0.21.5, --usage-file não contém nomes de ferramentas: a prova real
+# cruza o session_id com o transcript Hermes em state.db, somente para leitura.
 
 # Microbatch editorial: o apply continua isolado por post
 unicornio-editor apply-batch editorial-batch.json --compact

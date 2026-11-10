@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -35,6 +36,12 @@ _CONTROLLED_QUERIES = (
     ("anime", "Cowboy Bebop official anime images"),
 )
 _TOOL_NAMES = ("web_search", "web_extract", "vision_analyze")
+_USAGE_FILE_FIELDS = (
+    "estimated_cost_usd", "cost_status", "cost_source", "input_tokens",
+    "output_tokens", "cache_read_tokens", "cache_write_tokens",
+    "reasoning_tokens", "total_tokens", "api_calls", "model", "provider",
+    "session_id", "completed", "partial", "interrupted", "turn_exit_reason",
+)
 
 
 def _valid_http_url(value: Any) -> bool:
@@ -219,8 +226,13 @@ def discover_candidates(
 
 
 def _version(command: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    started = time.monotonic()
     executable = shutil.which(str(command or "").strip())
-    report: dict[str, Any] = {"configured": bool(str(command or "").strip()), "available": bool(executable)}
+    report: dict[str, Any] = {
+        "configured": bool(str(command or "").strip()),
+        "available": bool(executable),
+        "duration_ms": 0,
+    }
     if not executable:
         report["status"] = "UNAVAILABLE"
         return report
@@ -236,6 +248,7 @@ def _version(command: str, *, timeout: float = 5.0) -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         report["status"] = "DEGRADED"
         report["error"] = type(exc).__name__
+    report["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
     return report
 
 
@@ -243,42 +256,110 @@ def _tool_name(value: Any) -> str:
     return str(value or "").strip().casefold().replace("-", "_")
 
 
-def _positive_tool_record(value: Any) -> bool:
-    if isinstance(value, (int, float)):
-        return value > 0
-    if isinstance(value, (list, tuple)):
-        return bool(value)
-    if isinstance(value, dict):
-        counters = [
-            item for key, item in value.items()
-            if _tool_name(key) in {"count", "calls", "call_count", "invocations"}
-        ]
-        if counters:
-            return any(isinstance(item, (int, float)) and item > 0 for item in counters)
-        return bool(value)
-    return False
+def _record_tool_name(record: dict[str, Any]) -> str:
+    direct = record.get("tool_name") or record.get("name")
+    if direct:
+        return _tool_name(direct)
+    function = record.get("function")
+    if isinstance(function, dict):
+        return _tool_name(function.get("name"))
+    return ""
+
+
+def _record_executed(record: dict[str, Any]) -> bool:
+    """Accept only an execution marker, not a name found in arbitrary metadata."""
+
+    if record.get("executed") is True or record.get("result_present") is True:
+        return True
+    return _tool_name(record.get("status")) in {
+        "completed", "succeeded", "success", "ok", "result_present",
+    }
 
 
 def _usage_has_evidence(usage: Any, name: str) -> bool:
-    """Find a *named* tool call; generic tool counters are insufficient."""
+    """Find a named executed invocation in a structured usage/event payload.
+
+    Hermes v0.21.5's official ``--usage-file`` has no tool names.  This helper
+    therefore accepts only an explicit invocation list supplied by a trusted
+    transcript adapter or a test fixture: descriptions, arbitrary nested text,
+    zero counters, and assistant requests without an execution marker do not
+    count as evidence.
+    """
 
     wanted = _tool_name(name)
-    if isinstance(usage, dict):
-        for key, value in usage.items():
-            key_text = _tool_name(key)
-            if key_text == wanted or key_text in {f"{wanted}_calls", f"{wanted}_count"}:
-                if _positive_tool_record(value):
-                    return True
-            if key_text in {"name", "tool", "tool_name", "function", "function_name"}:
-                if _tool_name(value) == wanted:
-                    return True
-            if _usage_has_evidence(value, name):
-                return True
-    elif isinstance(usage, (list, tuple)):
-        return any(_usage_has_evidence(item, name) for item in usage)
-    elif isinstance(usage, str):
-        return _tool_name(usage) == wanted
+    if not isinstance(usage, dict):
+        return False
+    records = usage.get("executed_tool_calls")
+    if not isinstance(records, list):
+        return False
+    for record in records:
+        if not isinstance(record, dict) or _record_tool_name(record) != wanted:
+            continue
+        count = record.get("count", 1)
+        if isinstance(count, (int, float)) and count <= 0:
+            continue
+        if _record_executed(record):
+            return True
     return False
+
+
+def _hermes_state_path() -> Path:
+    explicit = os.environ.get("HERMES_STATE_DB", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    home = os.environ.get("HERMES_HOME", "").strip()
+    return (Path(home).expanduser() if home else Path.home() / ".hermes") / "state.db"
+
+
+def _state_tool_evidence(session_id: str, names: tuple[str, ...]) -> dict[str, Any]:
+    """Read Hermes' persisted transcript in read-only mode for executed tools."""
+
+    result: dict[str, Any] = {
+        "source": "hermes_state_db",
+        "available": False,
+        "executed_tool_calls": [],
+    }
+    if not session_id:
+        result["reason"] = "missing_session_id"
+        return result
+    database = _hermes_state_path()
+    if not database.is_file():
+        result["reason"] = "state_db_unavailable"
+        return result
+    wanted = {_tool_name(name) for name in names}
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT role, tool_name, tool_calls FROM messages WHERE session_id=?",
+                (session_id,),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        result["reason"] = type(exc).__name__
+        return result
+    result["available"] = True
+    events: list[dict[str, Any]] = []
+    for role, tool_name, raw_tool_calls in rows:
+        if str(role or "") == "tool" and _tool_name(tool_name) in wanted:
+            events.append({
+                "tool_name": _tool_name(tool_name),
+                "executed": True,
+                "result_present": True,
+                "status": "result_present",
+            })
+        # Assistant tool_calls are intentionally not counted: they prove only
+        # that a request was emitted, not that the tool actually ran.
+        _ = raw_tool_calls
+    result["executed_tool_calls"] = events
+    return result
+
+
+def _tool_evidence(usage: dict[str, Any], name: str) -> tuple[bool, str]:
+    if _usage_has_evidence(usage, name):
+        return True, "usage_event_payload"
+    state = _state_tool_evidence(str(usage.get("session_id") or ""), (name,))
+    if _usage_has_evidence(state, name):
+        return True, str(state.get("source") or "hermes_state_db")
+    return False, str(state.get("reason") or "not_observed")
 
 
 def _verify_candidate_read_only(candidate: dict[str, Any], *, subject: str) -> tuple[bool, str]:
@@ -314,6 +395,7 @@ def _provider_config() -> dict[str, Any]:
 def _probe_web(
     *, command: str, model: str, timeout: float, query: str,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     try:
         response, usage = call_hermes_oneshot(
             _prompt_for_discovery(
@@ -330,8 +412,8 @@ def _probe_web(
             item for index, item in enumerate(candidates, start=1)
             if _normalize_candidate(item, index=index, query=query) is not None
         ]
-        search_evidence = _usage_has_evidence(usage, "web_search")
-        extract_evidence = _usage_has_evidence(usage, "web_extract")
+        search_evidence, search_source = _tool_evidence(usage, "web_search")
+        extract_evidence, extract_source = _tool_evidence(usage, "web_extract")
         verified = 0
         verification_failures: list[str] = []
         for candidate in valid[:5]:
@@ -345,16 +427,53 @@ def _probe_web(
             "real_tool_evidence": search_evidence,
             "web_search_evidence": search_evidence,
             "web_extract_evidence": extract_evidence,
+            "evidence_source": {
+                "web_search": search_source,
+                "web_extract": extract_source,
+            },
             "candidates": len(valid),
             "source_pages": sum(bool(item.get("source_page_url")) for item in valid),
             "direct_images": sum(bool(item.get("direct_image_url")) for item in valid),
             "verified_candidates": verified,
             "verification_failures": verification_failures[:10],
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "invocation": usage.get("_unicornio_invocation", {
+                "configured_timeout_seconds": timeout,
+                "process_spawn_elapsed_ms": None,
+                "provider_call_elapsed_ms": None,
+                "process_returncode": None,
+            }),
         }
     except AIProviderError as exc:
-        return {"status": FAILURE_SEARCH_TIMEOUT if getattr(exc, "failure_class", "") == "timeout" else "UNAVAILABLE", "error": type(exc).__name__, "web_search_evidence": False, "web_extract_evidence": False}
+        failure_class = str(getattr(exc, "failure_class", "provider_error") or "provider_error")
+        failure_kind = FAILURE_SEARCH_TIMEOUT if failure_class == "timeout" else FAILURE_SEARCH_UNAVAILABLE
+        return {
+            "status": "UNVERIFIED" if failure_class == "timeout" else "UNAVAILABLE",
+            "failure_kind": failure_kind,
+            "error": type(exc).__name__,
+            "web_search_evidence": False,
+            "web_extract_evidence": False,
+            "evidence_source": {"web_search": "not_observed", "web_extract": "not_observed"},
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "invocation": getattr(exc, "metadata", {}) or {
+                "configured_timeout_seconds": timeout,
+                "process_spawn_elapsed_ms": None,
+                "provider_call_elapsed_ms": None,
+                "process_returncode": None,
+            },
+        }
     except (TypeError, ValueError, json.JSONDecodeError):
-        return {"status": "DEGRADED", "real_tool_evidence": False, "web_search_evidence": False, "web_extract_evidence": False, "error": FAILURE_INVALID_RESPONSE}
+        return {
+            "status": "UNVERIFIED",
+            "failure_kind": FAILURE_INVALID_RESPONSE,
+            "real_tool_evidence": False,
+            "web_search_evidence": False,
+            "web_extract_evidence": False,
+            "evidence_source": {"web_search": "not_observed", "web_extract": "not_observed"},
+            "error": FAILURE_INVALID_RESPONSE,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "invocation": {"configured_timeout_seconds": timeout},
+        }
 
 
 def capability_report(
@@ -364,7 +483,7 @@ def capability_report(
     timeout: float = 90.0,
     probe: bool = False,
     vision_url: str = "",
-    queries: tuple[tuple[str, str], ...] = _CONTROLLED_QUERIES,
+    queries: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     """Build a read-only report; live web calls happen only with ``probe=True``."""
 
@@ -379,20 +498,23 @@ def capability_report(
     }
     query_reports: list[dict[str, Any]] = []
     if probe and executable.get("available"):
-        for kind, query in queries:
+        for kind, query in (queries if queries is not None else _CONTROLLED_QUERIES):
             report = _probe_web(command=command, model=model, timeout=timeout, query=query)
             report["kind"] = kind
             report["query"] = query
             query_reports.append(report)
         web_reports = [item for item in query_reports if item.get("web_search_evidence")]
         extract_reports = [item for item in query_reports if item.get("web_extract_evidence")]
+        inconclusive_reports = [item for item in query_reports if item.get("status") == "UNVERIFIED"]
         tools["web_search"] = {
-            "status": "SUPPORTED" if web_reports else "UNAVAILABLE",
+            "status": "SUPPORTED" if web_reports else ("UNVERIFIED" if inconclusive_reports else "UNAVAILABLE"),
             "real_tool_evidence": bool(web_reports),
             "queries": len(query_reports),
         }
         tools["web_extract"] = {
-            "status": "SUPPORTED" if extract_reports else ("DEGRADED" if web_reports else "UNAVAILABLE"),
+            "status": "SUPPORTED" if extract_reports else (
+                "UNVERIFIED" if inconclusive_reports else ("DEGRADED" if web_reports else "UNAVAILABLE")
+            ),
             "real_tool_evidence": bool(extract_reports),
         }
         candidate_metrics = {
@@ -420,14 +542,22 @@ def capability_report(
                     "Use vision_analyze on this image URL and return only {}: " + vision_url,
                     command=command, model=model, toolsets="vision", timeout=timeout,
                 )
-                evidence = _usage_has_evidence(usage, "vision_analyze")
+                evidence, evidence_source = _tool_evidence(usage, "vision_analyze")
                 tools["vision_analyze"] = {
                     "status": "SUPPORTED" if evidence else "UNVERIFIED",
                     "real_tool_evidence": evidence,
+                    "evidence_source": evidence_source,
+                    "invocation": usage.get("_unicornio_invocation", {"configured_timeout_seconds": timeout}),
                 }
                 toolsets["vision"] = dict(tools["vision_analyze"])
-            except AIProviderError:
-                tools["vision_analyze"] = {"status": "UNAVAILABLE", "real_tool_evidence": False}
+            except AIProviderError as exc:
+                failure_class = str(getattr(exc, "failure_class", "provider_error") or "provider_error")
+                tools["vision_analyze"] = {
+                    "status": "UNVERIFIED" if failure_class == "timeout" else "UNAVAILABLE",
+                    "real_tool_evidence": False,
+                    "failure_kind": FAILURE_SEARCH_TIMEOUT if failure_class == "timeout" else FAILURE_SEARCH_UNAVAILABLE,
+                    "invocation": getattr(exc, "metadata", {}) or {"configured_timeout_seconds": timeout},
+                }
                 toolsets["vision"] = dict(tools["vision_analyze"])
 
     if not executable.get("available"):
@@ -438,6 +568,8 @@ def capability_report(
         overall = "SUPPORTED"
     elif tools["web_search"]["status"] in {"SUPPORTED", "DEGRADED"}:
         overall = "DEGRADED"
+    elif tools["web_search"]["status"] == "UNVERIFIED" or tools["vision_analyze"]["status"] == "UNVERIFIED":
+        overall = "UNVERIFIED"
     else:
         overall = "UNAVAILABLE"
     return {
@@ -446,6 +578,12 @@ def capability_report(
         "read_only": True,
         "hermes": executable,
         "provider_config": _provider_config(),
+        "usage_file_contract": {
+            "format": "hermes_oneshot_usage_v0.21.5",
+            "fields": list(_USAGE_FILE_FIELDS),
+            "tool_names_included": False,
+            "tool_evidence_source": "hermes_state_db.messages.role_tool_name",
+        },
         "toolsets": toolsets,
         "tools": tools,
         "candidate_metrics": candidate_metrics if probe and executable.get("available") else {
@@ -458,7 +596,14 @@ def capability_report(
         "queries": query_reports,
         "probe_requested": bool(probe),
         "vision_url_probed": bool(vision_url and _valid_http_url(vision_url)),
-        "writes": {"wordpress": 0, "filesystem": 0, "media_registry": 0},
+        "writes": {
+            "wordpress": 0,
+            "media_registry": 0,
+            "filesystem": {
+                "persistent": 0,
+                "temporary_usage_file": "created_and_removed_by_call_hermes_oneshot",
+            },
+        },
     }
 
 

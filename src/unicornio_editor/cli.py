@@ -122,6 +122,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--vision-url", default="",
         help="URL HTTP(S) de imagem para uma prova explícita do vision_analyze",
     )
+    hermes_capabilities_parser.add_argument(
+        "--query", default=None,
+        help="executa uma única consulta controlada em vez das três consultas padrão",
+    )
     hermes_capabilities_parser.add_argument("--command", dest="hermes_command", default=None, help="executável Hermes")
     hermes_capabilities_parser.add_argument("--model", default=None, help="modelo Hermes, sem credenciais")
     hermes_capabilities_parser.add_argument("--timeout", type=float, default=None)
@@ -3357,6 +3361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=float(args.timeout if args.timeout is not None else os.environ.get("HERMES_TIMEOUT", 90.0)),
                 probe=bool(args.probe),
                 vision_url=args.vision_url,
+                queries=(("custom", args.query),) if args.query else None,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
             return 0 if result.get("status") in {"SUPPORTED", "DEGRADED", "UNVERIFIED"} else 2
