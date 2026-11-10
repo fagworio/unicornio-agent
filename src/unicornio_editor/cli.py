@@ -110,6 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     v2_shadow_parser.add_argument("--root", type=Path, default=Path("."))
     v2_shadow_parser.add_argument("--output-dir", type=Path, default=None)
 
+    hermes_capabilities_parser = subparsers.add_parser(
+        "v2-hermes-media-capabilities",
+        help="diagnostica Hermes e suas ferramentas de mídia em modo somente leitura",
+    )
+    hermes_capabilities_parser.add_argument(
+        "--probe", action="store_true",
+        help="executa consultas web controladas; sem esta opção, capacidades ficam UNVERIFIED",
+    )
+    hermes_capabilities_parser.add_argument(
+        "--vision-url", default="",
+        help="URL HTTP(S) de imagem para uma prova explícita do vision_analyze",
+    )
+    hermes_capabilities_parser.add_argument("--command", dest="hermes_command", default=None, help="executável Hermes")
+    hermes_capabilities_parser.add_argument("--model", default=None, help="modelo Hermes, sem credenciais")
+    hermes_capabilities_parser.add_argument("--timeout", type=float, default=None)
+
     v2_write_parser = subparsers.add_parser(
         "v2-write", help="aplica um editorial pela fronteira V2, sem publicar"
     )
@@ -3327,6 +3343,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
             return 0 if result.get("status") in {"preview", "applied", "already_applied"} else 2
+        if args.command == "v2-hermes-media-capabilities":
+            from .media.hermes_discovery import capability_report
+
+            result = capability_report(
+                command=args.hermes_command or os.environ.get("HERMES_COMMAND", "hermes"),
+                model=args.model if args.model is not None else os.environ.get("HERMES_MODEL", ""),
+                timeout=float(args.timeout if args.timeout is not None else os.environ.get("HERMES_TIMEOUT", 90.0)),
+                probe=bool(args.probe),
+                vision_url=args.vision_url,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+            return 0 if result.get("status") in {"SUPPORTED", "DEGRADED", "UNVERIFIED"} else 2
         _carregar_env_do_projeto()
         config = load_config()
         if args.command == "apply" and getattr(args, "dry_run", False):

@@ -233,6 +233,9 @@ unicornio-editor telemetry --batch-id batch-local-01 --root .
 unicornio-editor media-search-web "redfall xbox series" --size xga --ratio w --limit 5
 # Para listas: uma chamada compacta, com uma busca exata por obra em paralelo.
 unicornio-editor media-search-listicle "Blue Box temporada 2" "Psyren anime" --limit 3
+# Diagnóstico Hermes Discovery (somente leitura; sem --probe não há chamadas externas)
+unicornio-editor v2-hermes-media-capabilities
+unicornio-editor v2-hermes-media-capabilities --probe --vision-url https://exemplo.test/imagem.jpg
 
 # Microbatch editorial: o apply continua isolado por post
 unicornio-editor apply-batch editorial-batch.json --compact
