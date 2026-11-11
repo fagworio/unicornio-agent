@@ -437,6 +437,67 @@ def _post(context: dict[str, Any]) -> dict[str, Any]:
     return post
 
 
+def _text_for_editorial_identity(editorial: dict[str, Any], post: dict[str, Any]) -> str:
+    """Return the trusted text used to match a carried game identity."""
+    title = wordpress_text(post.get("title"), field="title")
+    post_content = wordpress_text(post.get("content"), field="content")
+    seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+    return " ".join(
+        str(value or "")
+        for value in (
+            title,
+            post_content,
+            editorial.get("title"),
+            editorial.get("cleaned_html"),
+            seo.get("title"),
+            seo.get("focus_keyword"),
+        )
+    ).casefold()
+
+
+def _merge_retry_editorial(
+    previous: dict[str, Any],
+    fresh: dict[str, Any],
+    post: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge a fresh response without turning explicit nulls into omissions.
+
+    Older retry code used a non-null-only update. That made an explicit
+    ``game_name: null`` indistinguishable from an omitted field and revived a
+    stale game identity. The provider response is authoritative for fields it
+    actually returned; legacy fields remain available only when omitted.
+    """
+    previous_clean = dict(previous)
+    previous_clean.pop("decision", None)
+    previous_clean.pop("localization", None)
+    merged = dict(previous_clean)
+    for key, value in fresh.items():
+        if key == "game_name" or value is not None:
+            merged[key] = value
+    if isinstance(previous_clean.get("seo"), dict) and isinstance(fresh.get("seo"), dict):
+        merged["seo"] = {**previous_clean["seo"], **fresh["seo"]}
+
+    if "game_name" in fresh and fresh.get("game_name") is None:
+        old_game_name = str(previous_clean.get("game_name") or "").strip()
+        text = _text_for_editorial_identity(fresh, post)
+        if old_game_name and old_game_name.casefold() in text:
+            merged["game_name"] = old_game_name
+        else:
+            merged["game_name"] = None
+            requires_game_name = bool(
+                fresh.get("needs_trailer") is True
+                or previous_clean.get("needs_trailer") is True
+            )
+            if requires_game_name:
+                raise StageError(
+                    BlockerCode.MANIFEST_INVALID,
+                    Phase.EDITORIAL,
+                    "game_name_missing_for_game_article: explicit null is not "
+                    "safe while the editorial requires a game identity",
+                )
+    return merged
+
+
 def _json_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -664,13 +725,11 @@ class ProductionEditorialStage:
                         "localizacao_pt_br_incompleta: " + ", ".join(missing),
                     )
             if state.phase is Phase.EDITORIAL and isinstance(previous_editorial, dict):
-                previous_clean = dict(previous_editorial)
-                previous_clean.pop("decision", None)
-                previous_clean.pop("localization", None)
-                merged = dict(previous_clean)
-                merged.update({key: value for key, value in raw_editorial.items() if value is not None})
-                if isinstance(previous_clean.get("seo"), dict) and isinstance(raw_editorial.get("seo"), dict):
-                    merged["seo"] = {**previous_clean["seo"], **raw_editorial["seo"]}
+                merged = _merge_retry_editorial(
+                    previous_editorial,
+                    raw_editorial,
+                    _post(context),
+                )
                 if must_localize:
                     for field in ("title", "cleaned_html", "seo"):
                         if raw_editorial.get(field) is None:
@@ -1359,7 +1418,14 @@ class ProductionValidateStage:
                     )
                 elif not source_policy:
                     policy_valid = candidate_media.required == effective_required
-                if current_body != source_body or not policy_valid:
+                candidate_run_id = str(candidate.get("_v2_run_id") or "")
+                current_run_id = str(context.get("v2_run_id") or "")
+                editorial_is_stale = bool(
+                    context.get("candidate_must_be_fresh")
+                    and current_run_id
+                    and candidate_run_id != current_run_id
+                )
+                if current_body != source_body or not policy_valid or editorial_is_stale:
                     candidate_media = replace(
                         candidate_media,
                         required=effective_required,
@@ -1373,12 +1439,16 @@ class ProductionValidateStage:
                         candidate_media,
                         persist=True,
                     )
-            checklist_editorial = dict(candidate["editorial"])
-            checklist_editorial.pop("decision", None)
+            candidate_editorial = dict(candidate["editorial"])
             # Localization is preparation context, not part of the strict
             # model/editorial schema. Older drafts may still contain it.
-            checklist_editorial.pop("localization", None)
-            candidate["editorial"] = dict(checklist_editorial)
+            candidate_editorial.pop("localization", None)
+            candidate["editorial"] = candidate_editorial
+            # The operational decision is retained in the persisted candidate
+            # for recovery/audit, but the strict checklist receives only the
+            # schema-shaped editorial document.
+            checklist_editorial = dict(candidate_editorial)
+            checklist_editorial.pop("decision", None)
             candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
             checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
             candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]
@@ -1439,11 +1509,22 @@ class ProductionValidateStage:
                 candidate["media"] = candidate_media
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             failures = _checklist_failures(checklist)
+            relevance = candidate_editorial.get("site_relevance")
+            relevance_decision = (
+                relevance.get("decision")
+                if isinstance(relevance, dict)
+                else ""
+            )
             result = {
                 "passed": bool(checklist.get("all_passed")), "failures": failures,
                 "checklist": checklist, "_v2_run_id": str(context.get("v2_run_id") or ""),
                 "candidate_run_id": str(candidate.get("_v2_run_id") or ""),
                 "candidate_hash": hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest(),
+                "editorial_decision": {
+                    "decision": str(candidate_editorial.get("decision") or relevance_decision or ""),
+                    "confidence": (relevance or {}).get("confidence") if isinstance(relevance, dict) else None,
+                    "run_id": str(candidate.get("_v2_run_id") or ""),
+                },
             }
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", result)
             return result

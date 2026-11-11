@@ -15,6 +15,7 @@ from unicornio_editor.pipeline_v2.production_stages import (
     ProductionValidateStage,
     _checklist_failures,
     _ensure_prepared_media_structure,
+    _merge_retry_editorial,
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
 )
@@ -1383,6 +1384,101 @@ def test_validate_recomposes_candidate_when_resumed_body_changed(tmp_path, monke
     assert observed["media"]["inline"]["required"] == 3
     assert observed["media"]["layout_policy"]["target_ideal"] == 4
     assert observed["media"]["layout_policy"]["target_effective"] == 3
+
+
+def test_validate_recomposes_stale_candidate_to_keep_fresh_editorial_decision(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(10)
+    title = "Atualização semanal de videogame"
+    source = {
+        "title": title,
+        "cleaned_html": body,
+        "seo": {
+            "title": title,
+            "meta_description": "Descrição editorial suficientemente longa para validar este candidato fresco.",
+            "focus_keyword": "videogame",
+        },
+        "site_relevance": {
+            "decision": "process",
+            "confidence": 0.99,
+            "reason": "assunto compatível",
+            "matched_topics": ["games"],
+        },
+        "decision": "process",
+    }
+    observed = {}
+
+    def checklist(**kwargs):
+        observed["editorial"] = kwargs["editorial"]
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        checklist,
+    )
+    candidate = {
+        "_v2_run_id": "old-run",
+        "content": body,
+        "editorial": {
+            **source,
+            "site_relevance": {
+                **source["site_relevance"],
+                "decision": "skip",
+                "confidence": 0.99,
+            },
+            "decision": "skip",
+        },
+        "media": MediaProgress(required=3).to_dict(),
+        "featured_media": None,
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {
+            "post_id": 115783,
+            "title": title,
+            "original_link": None,
+            "post": {"id": 115783, "status": "pending", "title": {"raw": title}, "meta": {}},
+            "editorial": source,
+            "candidate_must_be_fresh": True,
+            "v2_run_id": "fresh-run",
+        },
+        candidate,
+    )
+
+    persisted = json.loads(
+        (tmp_path / "backups/115783/editorial.candidate.json").read_text(encoding="utf-8")
+    )
+    assert observed["editorial"]["site_relevance"]["decision"] == "process"
+    assert "decision" not in observed["editorial"]
+    assert persisted["editorial"]["decision"] == "process"
+    assert persisted["_v2_run_id"] == "fresh-run"
+    assert result["editorial_decision"] == {
+        "decision": "process",
+        "confidence": 0.99,
+        "run_id": "fresh-run",
+    }
+
+
+def test_retry_editorial_preserves_explicit_game_name_null_and_blocks_required_identity():
+    previous = {"game_name": "Jogo antigo", "needs_trailer": False}
+    fresh = {"game_name": None, "needs_trailer": False}
+    non_game_post = {
+        "title": {"raw": "Atualização sobre a comunidade"},
+        "content": {"raw": "<p>Notícia geral sem referência a jogo.</p>"},
+    }
+    assert _merge_retry_editorial(previous, fresh, non_game_post)["game_name"] is None
+
+    matching = _merge_retry_editorial(
+        previous,
+        {"game_name": None, "needs_trailer": False},
+        {"title": {"raw": "Jogo antigo recebe atualização"}, "content": {"raw": "<p>Jogo antigo confirmado.</p>"}},
+    )
+    assert matching["game_name"] == "Jogo antigo"
+
+    with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+        _merge_retry_editorial(
+            previous,
+            {"game_name": None, "needs_trailer": True},
+            non_game_post,
+        )
 
 
 def test_listicle_media_preparation_does_not_restructure_item_coverage():
