@@ -27,6 +27,7 @@ from ..language import editorial_language_report
 from ..html_cleaner import normalize_h1_headings
 from ..list_quality import detect_list_format
 from ..media.evidence import post_subjects
+from ..media.relevance import normalize
 from ..media.inserter import (
     MediaInsertionError,
     append_featured_credit,
@@ -437,28 +438,50 @@ def _post(context: dict[str, Any]) -> dict[str, Any]:
     return post
 
 
-def _text_for_editorial_identity(editorial: dict[str, Any], post: dict[str, Any]) -> str:
-    """Return the trusted text used to match a carried game identity."""
-    title = wordpress_text(post.get("title"), field="title")
-    post_content = wordpress_text(post.get("content"), field="content")
+_GAME_CONTEXT_TERMS = frozenset({
+    "jogo", "jogos", "game", "games", "videogame", "videogames",
+    "gameplay", "console", "consoles", "playstation", "xbox", "nintendo",
+    "steam", "pc", "dlc", "rpg",
+})
+
+
+def _editorial_identity_context(
+    editorial: dict[str, Any],
+    post: dict[str, Any],
+) -> tuple[set[str], bool]:
+    """Return exact editorial subjects and whether the article is game-contextual."""
+    post_title = wordpress_text(post.get("title"), field="title")
     seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
-    return " ".join(
-        str(value or "")
-        for value in (
-            title,
-            post_content,
-            editorial.get("title"),
-            editorial.get("cleaned_html"),
-            seo.get("title"),
-            seo.get("focus_keyword"),
-        )
-    ).casefold()
+    title = post_title or str(editorial.get("title") or seo.get("title") or "")
+    content = wordpress_text(post.get("content"), field="content") or str(
+        editorial.get("cleaned_html") or ""
+    )
+    focus = str(seo.get("focus_keyword") or "")
+    rows = post_subjects(
+        title=title,
+        content_html=content,
+        focus_keyword=focus,
+        game_name=None,
+        categories=post.get("categories") or (),
+    )
+    subjects = {
+        normalize(str(row.get("subject") or "")).strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("subject") or "").strip()
+    }
+    # Use the headline/SEO focus for type detection. A body mention such as
+    # "o jogo" is not enough to classify a news article as a game article.
+    context_text = normalize(" ".join((title, focus, str(seo.get("title") or ""))))
+    context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
+    return subjects, bool(context_tokens & _GAME_CONTEXT_TERMS)
 
 
 def _merge_retry_editorial(
     previous: dict[str, Any],
     fresh: dict[str, Any],
     post: dict[str, Any],
+    *,
+    normalizations: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Merge a fresh response without turning explicit nulls into omissions.
 
@@ -479,14 +502,17 @@ def _merge_retry_editorial(
 
     if "game_name" in fresh and fresh.get("game_name") is None:
         old_game_name = str(previous_clean.get("game_name") or "").strip()
-        text = _text_for_editorial_identity(fresh, post)
-        if old_game_name and old_game_name.casefold() in text:
+        subjects, game_context = _editorial_identity_context(fresh, post)
+        old_identity = normalize(old_game_name).strip()
+        current_identity_matches = bool(old_identity and old_identity in subjects)
+        if current_identity_matches:
             merged["game_name"] = old_game_name
         else:
             merged["game_name"] = None
             requires_game_name = bool(
                 fresh.get("needs_trailer") is True
-                or previous_clean.get("needs_trailer") is True
+                or "needs_trailer_without_url_cleared" in normalizations
+                or game_context
             )
             if requires_game_name:
                 raise StageError(
@@ -706,6 +732,11 @@ class ProductionEditorialStage:
                 })
                 raise StageError(blocker, phase, reason)
             raw_editorial = dict(item["editorial"])
+            normalizations = tuple(
+                str(value)
+                for value in (item.get("normalizations") or ())
+                if str(value).strip()
+            )
             if must_localize:
                 missing = []
                 if not str(raw_editorial.get("title") or "").strip():
@@ -729,6 +760,7 @@ class ProductionEditorialStage:
                     previous_editorial,
                     raw_editorial,
                     _post(context),
+                    normalizations=normalizations,
                 )
                 if must_localize:
                     for field in ("title", "cleaned_html", "seo"):
@@ -736,6 +768,16 @@ class ProductionEditorialStage:
                             merged.pop(field, None)
                 editorial = resolve_editorial_defaults(merged, _post(context))
             else:
+                # Apply the same identity gate on a first attempt. Without a
+                # previous draft, a game article with ``game_name: null``
+                # would otherwise bypass the retry merge entirely.
+                if raw_editorial.get("game_name") is None:
+                    _merge_retry_editorial(
+                        {},
+                        raw_editorial,
+                        _post(context),
+                        normalizations=normalizations,
+                    )
                 editorial = resolve_editorial_defaults(raw_editorial, _post(context))
             repaired = _repair_focus_keyword_draft(editorial, _post(context))
             if repaired is not None:
@@ -1377,9 +1419,25 @@ class ProductionValidateStage:
             post_id = int(context["post_id"])
             candidate_media = MediaProgress.from_dict(candidate.get("media"))
             source_editorial = None
-            if "candidate_must_be_fresh" in context:
+            has_candidate_lineage = "candidate_must_be_fresh" in context
+            requires_fresh_editorial = bool(context.get("candidate_must_be_fresh"))
+            current_run_id = str(context.get("v2_run_id") or "")
+            source_run_id = str(context.get("editorial_source_run_id") or "")
+            if requires_fresh_editorial and current_run_id and source_run_id and source_run_id != current_run_id:
+                raise StageError(
+                    BlockerCode.MANIFEST_INVALID,
+                    Phase.VALIDATE,
+                    "editorial_source_lineage_mismatch: fresh validation source "
+                    "does not belong to the current v2_run_id",
+                )
+            if requires_fresh_editorial:
                 source_editorial = context.get("editorial") or context.get("draft")
-            if "candidate_must_be_fresh" in context and not isinstance(source_editorial, dict):
+            elif has_candidate_lineage and isinstance(candidate.get("editorial"), dict):
+                # A VALIDATE retry is allowed to reuse its candidate, but its
+                # own editorial is the source of truth. Never replace it with
+                # a newer-looking draft from a different attempt.
+                source_editorial = candidate.get("editorial")
+            if requires_fresh_editorial and not isinstance(source_editorial, dict):
                 draft_path = self.root / "backups" / str(post_id) / "editorial.draft.json"
                 source_editorial = _json_object(draft_path) if draft_path.is_file() else None
             if isinstance(source_editorial, dict):
@@ -1419,7 +1477,6 @@ class ProductionValidateStage:
                 elif not source_policy:
                     policy_valid = candidate_media.required == effective_required
                 candidate_run_id = str(candidate.get("_v2_run_id") or "")
-                current_run_id = str(context.get("v2_run_id") or "")
                 editorial_is_stale = bool(
                     context.get("candidate_must_be_fresh")
                     and current_run_id

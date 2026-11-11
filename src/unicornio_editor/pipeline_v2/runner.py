@@ -106,6 +106,13 @@ class PipelineRunner:
         if run_editorial:
             try:
                 editorial = call_stage("editorial", self.stages["editorial"], context, previous)
+                # The editorial stage is the authority for this invocation.
+                # Keep the same object in the context consumed by COMPOSE and
+                # VALIDATE; otherwise VALIDATE may silently fall back to the
+                # draft loaded before the provider generated a fresh result.
+                context["editorial"] = editorial
+                context["draft"] = editorial
+                context["editorial_source_run_id"] = str(context.get("v2_run_id") or "")
             except StageError as exc:
                 editorial = {}
                 outcome = classify_stage_error(previous, exc, **self._policy())

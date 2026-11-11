@@ -108,6 +108,35 @@ def test_runner_processes_one_post_and_persists_ready():
     assert set(context["_v2_stage_durations_ms"]) == {"editorial", "media", "compose", "validate"}
 
 
+def test_runner_propagates_fresh_editorial_to_compose_and_validate():
+    store = MemoryStore(WorkState(phase=Phase.EDITORIAL))
+    old = {"decision": "skip", "site_relevance": {"decision": "skip"}}
+    fresh = {"decision": "process", "site_relevance": {"decision": "process"}}
+    observed = {}
+    context = {"editorial": old, "draft": old, "v2_run_id": "run-fresh"}
+
+    def validate(current_context, _candidate):
+        observed["editorial"] = current_context["editorial"]
+        observed["source_run_id"] = current_context["editorial_source_run_id"]
+        return {"passed": True, "failures": []}
+
+    stages = {
+        "editorial": lambda _context, _state: fresh,
+        "media": lambda *_args: MediaProgress(),
+        "compose": lambda current_context, editorial, _media: {
+            "editorial": editorial,
+            "content": "<p>novo</p>",
+        },
+        "validate": validate,
+    }
+    result = PipelineRunner(store, stages).run_one(115784, context)
+
+    assert result.type is OutcomeType.READY
+    assert observed == {"editorial": fresh, "source_run_id": "run-fresh"}
+    assert context["editorial"] is fresh
+    assert context["draft"] is fresh
+
+
 def test_runner_persists_retry_without_running_later_stages_for_skip():
     store = MemoryStore()
     stages = {

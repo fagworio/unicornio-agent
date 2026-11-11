@@ -1466,10 +1466,17 @@ def test_retry_editorial_preserves_explicit_game_name_null_and_blocks_required_i
     }
     assert _merge_retry_editorial(previous, fresh, non_game_post)["game_name"] is None
 
+    stale_requirement = _merge_retry_editorial(
+        {"game_name": "Jogo antigo", "needs_trailer": True},
+        {"game_name": None, "needs_trailer": False},
+        non_game_post,
+    )
+    assert stale_requirement["game_name"] is None
+
     matching = _merge_retry_editorial(
         previous,
         {"game_name": None, "needs_trailer": False},
-        {"title": {"raw": "Jogo antigo recebe atualização"}, "content": {"raw": "<p>Jogo antigo confirmado.</p>"}},
+        {"title": {"raw": "Jogo Antigo recebe atualização"}, "content": {"raw": "<p>Jogo Antigo confirmado.</p>"}},
     )
     assert matching["game_name"] == "Jogo antigo"
 
@@ -1478,6 +1485,80 @@ def test_retry_editorial_preserves_explicit_game_name_null_and_blocks_required_i
             previous,
             {"game_name": None, "needs_trailer": True},
             non_game_post,
+        )
+
+    with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+        _merge_retry_editorial(
+            {"game_name": "Mario", "needs_trailer": False},
+            {"game_name": None, "needs_trailer": False},
+            {
+                "title": {"raw": "Zelda Tears of the Kingdom recebe novidades no jogo"},
+                "content": {"raw": "<p>O jogo recebe uma atualização.</p>"},
+            },
+        )
+    with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+        _merge_retry_editorial(
+            {},
+            {"game_name": None, "needs_trailer": False},
+            {
+                "title": {"raw": "Zelda Tears of the Kingdom recebe novidades no jogo"},
+                "content": {"raw": "<p>O jogo recebe uma atualização.</p>"},
+            },
+        )
+
+
+def test_validate_resume_uses_candidate_editorial_instead_of_old_draft(tmp_path, monkeypatch):
+    body = _long_single_sentence_body(10)
+    observed = {}
+
+    def checklist(**kwargs):
+        observed["body"] = kwargs["editorial"]["cleaned_html"]
+        return {"all_passed": True, "items": []}
+
+    monkeypatch.setattr(
+        "unicornio_editor.pipeline_v2.production_stages.run_pre_publish_checklist",
+        checklist,
+    )
+    backup = tmp_path / "backups" / "115785"
+    backup.mkdir(parents=True)
+    (backup / "editorial.draft.json").write_text(
+        json.dumps({"cleaned_html": "<p>draft antigo.</p>", "seo": {}}),
+        encoding="utf-8",
+    )
+    candidate = {
+        "_v2_run_id": "resume-run",
+        "content": body,
+        "editorial": {
+            "cleaned_html": body,
+            "seo": {"title": "Videogame", "focus_keyword": "videogame"},
+            "site_relevance": {"decision": "process", "confidence": 0.99, "reason": "ok", "matched_topics": ["games"]},
+            "decision": "process",
+        },
+        "media": MediaProgress(required=3).to_dict(),
+        "featured_media": None,
+    }
+    result = ProductionValidateStage(object(), Config(), tmp_path)(
+        {
+            "post_id": 115785,
+            "v2_run_id": "resume-run",
+            "candidate_must_be_fresh": False,
+            "post": {"id": 115785, "status": "pending", "title": {"raw": "Videogame"}, "meta": {}},
+        },
+        candidate,
+    )
+    assert result["passed"] is True
+    assert observed["body"] == body
+
+    with pytest.raises(StageError, match="editorial_source_lineage_mismatch"):
+        ProductionValidateStage(object(), Config(), tmp_path)(
+            {
+                "post_id": 115785,
+                "v2_run_id": "current-run",
+                "editorial_source_run_id": "old-run",
+                "candidate_must_be_fresh": True,
+                "post": {"id": 115785, "status": "pending", "title": {"raw": "Videogame"}, "meta": {}},
+            },
+            candidate,
         )
 
 
