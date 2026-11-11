@@ -313,6 +313,17 @@ class CycleStateStore:
                             reconciled_ids is None or list(reconciled_ids) == selected
                         ):
                             open_items.pop(key, None)
+            elif event_type == "transaction_uncertain_isolated":
+                auth_id = str(event.get("authorization_id") or "")
+                key = (event_round, auth_id)
+                if (
+                    key in open_items
+                    and event.get("selected_ids") == open_items[key]
+                    and event.get("write_replayed") is False
+                    and str(event.get("isolation_id") or "").strip()
+                    and str(event.get("operator_authorization") or "").strip()
+                ):
+                    open_items.pop(key, None)
         return open_items
 
     @staticmethod

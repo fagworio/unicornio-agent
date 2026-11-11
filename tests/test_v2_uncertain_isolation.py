@@ -1181,7 +1181,9 @@ def test_multi_post_isolation_closes_round_with_exact_accounting(tmp_path):
         operator_authorization="operator-round-close-v1",
     )
     assert result["status"] == "applied"
-    state = CycleStateStore(tmp_path).load()
+    store = CycleStateStore(tmp_path)
+    state = store.load()
+    assert state is not None
     assert state.pending_round is None
     assert state.rounds == 1
     assert state.attempts_by_post == {115524: 1}
@@ -1189,6 +1191,7 @@ def test_multi_post_isolation_closes_round_with_exact_accounting(tmp_path):
     assert state.attempts_total == 1
     assert state.round_reports[-1]["event"] == "transaction_uncertain_isolated"
     assert state.round_reports[-1]["next_round_number"] == 2
+    store.validate_no_unresolved_authorizations(state)
     quarantine = json.loads((tmp_path / "config/v2-quarantine.json").read_text())
     assert {row["post_id"] for row in quarantine["posts"]} == {115282, 115331, 115215, 115512}
     archive = Path(result["archive_dir"])
@@ -1196,6 +1199,10 @@ def test_multi_post_isolation_closes_round_with_exact_accounting(tmp_path):
         assert (archive / f"journal-{post_id}.json").is_file()
         assert json.loads((tmp_path / "work/v2-journal" / f"{post_id}.json").read_text())["status"] in {"committing", "committed", "failed_pre_writer"}
     assert not any(row.get("post_id") == 115524 for row in quarantine["posts"])
+    store.start_round(state, round_number=2, request={"max_new_posts": 1})
+    assert state.pending_round is not None
+    assert state.pending_round["round_number"] == 2
+    assert store.validate_pre_authorization(state)["status"] == "preauthorization_safe_to_resume"
 
 
 def test_multi_post_isolation_is_idempotent_after_apply(tmp_path):
