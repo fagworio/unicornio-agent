@@ -139,10 +139,26 @@ class PipelineRunner:
                 and stored_editorial_hash == editorial_fingerprint(candidate_editorial)
             )
             candidate_legacy_process = not stored_editorial_hash and candidate_decision == "process"
-            candidate_decision_coherent = not (
+            nested_relevance = (
+                candidate_editorial.get("site_relevance")
+                if isinstance(candidate_editorial, dict)
+                else None
+            )
+            nested_decision = (
+                nested_relevance.get("decision")
+                if isinstance(nested_relevance, dict)
+                else None
+            )
+            top_level_decision = (
+                candidate_editorial.get("decision")
+                if isinstance(candidate_editorial, dict)
+                else None
+            )
+            candidate_decision_coherent = bool(
                 isinstance(candidate_editorial, dict)
-                and candidate_editorial.get("decision")
-                and candidate_editorial.get("decision") != candidate_decision
+                and nested_decision in {"process", "skip"}
+                and candidate_decision == nested_decision
+                and (top_level_decision in {None, "", nested_decision})
             )
             candidate_is_verifiable = bool(
                 candidate_run_id

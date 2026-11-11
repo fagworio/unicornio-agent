@@ -27,6 +27,7 @@ from unicornio_editor.pipeline_v2.model import (
     WorkState,
 )
 from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, run_v2
+from unicornio_editor.pipeline_v2.production import editorial_fingerprint
 from unicornio_editor.workflow import (
     _execute_media_plan,
     compose_final_content,
@@ -632,6 +633,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "editorial": editorial_with_media,
             "media": media_progress.to_dict(),
         }
+        candidate["editorial_hash"] = editorial_fingerprint(candidate["editorial"])
         candidate_path = root / "backups" / str(post_id) / "editorial.candidate.json"
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_path.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
@@ -641,7 +643,11 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
                 "_v2_run_id": run_id,
                 "candidate_run_id": run_id,
                 "candidate_hash": candidate_hash,
+                "editorial_hash": candidate["editorial_hash"]
+                if candidate.get("editorial_hash")
+                else editorial_fingerprint(candidate["editorial"]),
                 "passed": True,
+                "failures": [],
                 "checklist": checklist,
             }, ensure_ascii=False),
             encoding="utf-8",
@@ -1058,6 +1064,7 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
             "editorial": editorial_with_media,
             "media": media.to_dict(),
         }
+        candidate["editorial_hash"] = editorial_fingerprint(candidate["editorial"])
         candidate_path = case.root / "backups" / str(post_id) / "editorial.candidate.json"
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_path.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
@@ -1067,7 +1074,11 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
                 "_v2_run_id": run_id,
                 "candidate_run_id": run_id,
                 "candidate_hash": candidate_hash,
+                "editorial_hash": candidate["editorial_hash"]
+                if candidate.get("editorial_hash")
+                else editorial_fingerprint(candidate["editorial"]),
                 "passed": True,
+                "failures": [],
                 "checklist": checklist,
             }, ensure_ascii=False),
             encoding="utf-8",

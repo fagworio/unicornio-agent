@@ -1103,6 +1103,8 @@ def test_layout_capacity_caps_candidate_and_preserves_excess_working_media(tmp_p
         "candidate_run_id": run_id,
         "candidate_hash": candidate_hash,
         "editorial_hash": candidate["editorial_hash"],
+        "passed": True,
+        "failures": [],
     }), encoding="utf-8")
 
     class Client:
@@ -2052,7 +2054,8 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     )
 
 
-def test_writer_refuses_ready_when_editorial_changes_after_validation(tmp_path):
+@pytest.mark.parametrize("tampered_field", ["editorial", "seo", "title", "validation"])
+def test_writer_refuses_ready_when_validated_candidate_payload_changes(tmp_path, tampered_field):
     class Client:
         def __init__(self):
             self.post = {
@@ -2089,33 +2092,43 @@ def test_writer_refuses_ready_when_editorial_changes_after_validation(tmp_path):
         "editorial": editorial,
         "editorial_hash": editorial_fingerprint(editorial),
         "seo": dict(editorial["seo"]),
+        "title": "Título",
         "featured_media": None,
     }
     backup = tmp_path / "backups" / "115788"
     backup.mkdir(parents=True)
-    candidate["editorial"]["seo"]["focus_keyword"] = "alterado depois da validação"
-    candidate["seo"]["focus_keyword"] = "alterado depois da validação"
+    original_editorial_hash = candidate["editorial_hash"]
+    original_validation_hash = editorial_fingerprint(editorial)
+    if tampered_field == "editorial":
+        candidate["editorial"]["seo"]["focus_keyword"] = "alterado depois da validação"
+    elif tampered_field == "seo":
+        candidate["seo"]["focus_keyword"] = "alterado depois da validação"
+    elif tampered_field == "title":
+        candidate["title"] = "Título alterado depois da validação"
     (backup / "editorial.candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
     (backup / "editorial.validation.json").write_text(json.dumps({
         "_v2_run_id": "writer-run",
         "candidate_run_id": "candidate-run",
         "candidate_hash": hashlib.sha256(candidate["content"].encode()).hexdigest(),
-        "editorial_hash": editorial_fingerprint({**editorial, "seo": {**editorial["seo"], "focus_keyword": "original"}}),
+        "editorial_hash": original_validation_hash,
+        "passed": tampered_field != "validation",
+        "failures": [] if tampered_field != "validation" else [{"gate": "seo"}],
     }), encoding="utf-8")
 
     client = Client()
-    result = WordPressWriterV2(client, tmp_path).commit(
-        115788,
-        {"post_id": 115788, "v2_run_id": "writer-run", "candidate_must_be_fresh": False},
-        WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True),
-        Outcome.ready(),
-    )
+    with pytest.raises(RuntimeError, match="editorial integrity"):
+        WordPressWriterV2(client, tmp_path).commit(
+            115788,
+            {"post_id": 115788, "v2_run_id": "writer-run", "candidate_must_be_fresh": False},
+            WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True),
+            Outcome.ready(),
+        )
 
-    assert result["ready_hash"] == ""
+    assert candidate["editorial_hash"] == original_editorial_hash
+    assert client.updates == []
     assert client.post["content"]["raw"] == "conteúdo anterior"
     assert "_hermes_ready_manifest" not in client.post["meta"]
-    journal = json.loads((tmp_path / "work/v2-journal/115788.json").read_text(encoding="utf-8"))
-    assert journal["editorial_integrity_fresh"] is False
+    assert not (tmp_path / "work/v2-journal/115788.json").exists()
 
 
 def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diverges(tmp_path):

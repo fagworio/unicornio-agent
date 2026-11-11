@@ -22,6 +22,7 @@ def test_validation_requires_matching_run_and_candidate_content(mismatch):
     validation = {
         "_v2_run_id": "validation-run", "candidate_run_id": "candidate-run",
         "candidate_hash": hashlib.sha256(candidate["content"].encode()).hexdigest(),
+        "passed": True, "failures": [],
     }
     if mismatch == "run":
         validation["_v2_run_id"] = "old-run"

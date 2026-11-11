@@ -38,6 +38,26 @@ def editorial_fingerprint(editorial: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(editorial).encode("utf-8")).hexdigest()
 
 
+def candidate_payload_matches_editorial(candidate: dict[str, Any]) -> bool:
+    """Ensure derived fields used by the Writer still belong to the proof."""
+    editorial = candidate.get("editorial")
+    if not isinstance(editorial, dict):
+        return False
+    editorial_seo = editorial.get("seo")
+    editorial_seo = editorial_seo if isinstance(editorial_seo, dict) else {}
+    candidate_seo = candidate.get("seo")
+    if not isinstance(candidate_seo, dict) or candidate_seo != editorial_seo:
+        return False
+    candidate_title = str(candidate.get("title") or "").strip()
+    if candidate_title:
+        expected_title = str(
+            editorial.get("title") or editorial_seo.get("title") or ""
+        ).strip()
+        if candidate_title != expected_title:
+            return False
+    return True
+
+
 def _project_recovered_editorial(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Project a legacy recovery artifact onto the strict editorial schema.
 
@@ -319,7 +339,13 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
     }
 
 
-def validation_matches_candidate(validation: dict, candidate: dict, run_id: str) -> bool:
+def validation_matches_candidate(
+    validation: dict,
+    candidate: dict,
+    run_id: str,
+    *,
+    require_passed: bool = False,
+) -> bool:
     """A historical checklist is not evidence of a new interrupted run."""
     candidate_run_id = str(candidate.get("_v2_run_id") or "").strip()
     base_match = bool(
@@ -331,6 +357,10 @@ def validation_matches_candidate(validation: dict, candidate: dict, run_id: str)
         == hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest()
     )
     if not base_match:
+        return False
+    if require_passed and (
+        validation.get("passed") is not True or validation.get("failures")
+    ):
         return False
     validation_editorial_hash = str(validation.get("editorial_hash") or "").strip()
     candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip()
