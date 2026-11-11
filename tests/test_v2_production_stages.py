@@ -19,7 +19,7 @@ from unicornio_editor.pipeline_v2.production_stages import (
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
 )
-from unicornio_editor.pipeline_v2.production import ProductionContextLoader, recover_editorial, editorial_has_substantive_text
+from unicornio_editor.pipeline_v2.production import ProductionContextLoader, editorial_fingerprint, recover_editorial, editorial_has_substantive_text
 from unicornio_editor.pipeline_v2.runtime import (
     ProductionMediaResolver,
     WordPressWriterV2,
@@ -1102,6 +1102,7 @@ def test_layout_capacity_caps_candidate_and_preserves_excess_working_media(tmp_p
         "_v2_run_id": run_id,
         "candidate_run_id": run_id,
         "candidate_hash": candidate_hash,
+        "editorial_hash": candidate["editorial_hash"],
     }), encoding="utf-8")
 
     class Client:
@@ -1519,7 +1520,12 @@ def test_editorial_identity_gate_respects_skip_platforms_and_primary_subjects():
     )
     assert skip["game_name"] is None
 
-    for title in ("Steam muda política de reembolso", "Nintendo anuncia novo console"):
+    for title in (
+        "Steam muda política de reembolso",
+        "Nintendo anuncia novo console",
+        "Nintendo Switch 2 recebe atualização de hardware",
+        "Steam Deck ganha novo recurso",
+    ):
         platform = _merge_retry_editorial(
             {},
             {
@@ -1560,6 +1566,19 @@ def test_editorial_identity_gate_respects_skip_platforms_and_primary_subjects():
                     "raw": "<h2>Mario</h2><p>Primeiro.</p><h2>Zelda</h2><p>Segundo.</p>",
                 },
             },
+        )
+
+    with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+        _merge_retry_editorial(
+            {"game_name": "Mario"},
+            {
+                "title": "Zelda Tears of the Kingdom recebe atualização",
+                "cleaned_html": "<p>Zelda Tears of the Kingdom foi atualizado.</p>",
+                "game_name": None,
+                "needs_trailer": False,
+                "site_relevance": {"decision": "process", "matched_topics": ["games"]},
+            },
+            {"title": {"raw": "Mario recebe atualização"}, "content": {"raw": "<p>Mario.</p>"}},
         )
 
 
@@ -2033,6 +2052,72 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     )
 
 
+def test_writer_refuses_ready_when_editorial_changes_after_validation(tmp_path):
+    class Client:
+        def __init__(self):
+            self.post = {
+                "id": 115788,
+                "status": "pending",
+                "content": {"raw": "conteúdo anterior"},
+                "featured_media": 0,
+                "meta": {},
+            }
+            self.updates = []
+
+        def get_post(self, _post_id):
+            return self.post
+
+        def update_post(self, _post_id, update):
+            self.updates.append(update)
+            self.post.update({key: value for key, value in update.items() if key != "meta"})
+            self.post.setdefault("meta", {}).update(update.get("meta") or {})
+
+    editorial = {
+        "decision": "process",
+        "site_relevance": {
+            "decision": "process",
+            "confidence": 0.99,
+            "reason": "fonte atual",
+            "matched_topics": ["games"],
+        },
+        "cleaned_html": "<p>conteúdo novo</p>",
+        "seo": {"title": "Título", "meta_description": "Descrição", "focus_keyword": "original"},
+    }
+    candidate = {
+        "_v2_run_id": "candidate-run",
+        "content": "<p>conteúdo novo</p>",
+        "editorial": editorial,
+        "editorial_hash": editorial_fingerprint(editorial),
+        "seo": dict(editorial["seo"]),
+        "featured_media": None,
+    }
+    backup = tmp_path / "backups" / "115788"
+    backup.mkdir(parents=True)
+    candidate["editorial"]["seo"]["focus_keyword"] = "alterado depois da validação"
+    candidate["seo"]["focus_keyword"] = "alterado depois da validação"
+    (backup / "editorial.candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+    (backup / "editorial.validation.json").write_text(json.dumps({
+        "_v2_run_id": "writer-run",
+        "candidate_run_id": "candidate-run",
+        "candidate_hash": hashlib.sha256(candidate["content"].encode()).hexdigest(),
+        "editorial_hash": editorial_fingerprint({**editorial, "seo": {**editorial["seo"], "focus_keyword": "original"}}),
+    }), encoding="utf-8")
+
+    client = Client()
+    result = WordPressWriterV2(client, tmp_path).commit(
+        115788,
+        {"post_id": 115788, "v2_run_id": "writer-run", "candidate_must_be_fresh": False},
+        WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True),
+        Outcome.ready(),
+    )
+
+    assert result["ready_hash"] == ""
+    assert client.post["content"]["raw"] == "conteúdo anterior"
+    assert "_hermes_ready_manifest" not in client.post["meta"]
+    journal = json.loads((tmp_path / "work/v2-journal/115788.json").read_text(encoding="utf-8"))
+    assert journal["editorial_integrity_fresh"] is False
+
+
 def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diverges(tmp_path):
     inline_url = "https://example.test/inline.webp"
 
@@ -2457,7 +2542,8 @@ def test_v2_media_to_ready_uses_existing_inline_and_simulated_featured(tmp_path,
     outcome = PipelineRunner(store, stages, config=config).run_one(
         post_id,
         {
-            "post_id": post_id, "title": editorial["title"],
+                "post_id": post_id, "title": editorial["title"],
+                "v2_run_id": "run-ready-115286",
             "post": client.post, "editorial": editorial, "root": tmp_path,
         },
     )
@@ -2475,7 +2561,12 @@ def test_v2_media_to_ready_uses_existing_inline_and_simulated_featured(tmp_path,
 
     write = WordPressWriterV2(client, tmp_path).commit(
         post_id,
-        {"post_id": post_id, "post": client.post},
+        {
+            "post_id": post_id,
+            "post": client.post,
+            "v2_run_id": "run-ready-115286",
+            "candidate_must_be_fresh": True,
+        },
         store.state,
         Outcome.ready(),
     )
@@ -2851,6 +2942,10 @@ def test_validate_repairs_focus_keyword_even_with_media_failure(tmp_path, monkey
     assert seen_keywords == ["termo antigo", "vazamentos de GTA 6"]
     assert result["passed"] is True
     assert '"focus_keyword": "vazamentos de GTA 6"' in (draft_dir / "editorial.draft.json").read_text(encoding="utf-8")
+    persisted_candidate = json.loads((draft_dir / "editorial.candidate.json").read_text(encoding="utf-8"))
+    persisted_validation = json.loads((draft_dir / "editorial.validation.json").read_text(encoding="utf-8"))
+    assert persisted_candidate["editorial_hash"] == editorial_fingerprint(persisted_candidate["editorial"])
+    assert persisted_validation["editorial_hash"] == persisted_candidate["editorial_hash"]
 
 
 def test_validate_does_not_repair_focus_keyword_when_token_order_is_wrong(tmp_path, monkeypatch):

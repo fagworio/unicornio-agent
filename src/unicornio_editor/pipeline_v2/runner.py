@@ -23,7 +23,7 @@ from .model import (
     WorkState,
     media_search_is_incomplete,
 )
-from .production import _has_relevance_contract
+from .production import _has_relevance_contract, editorial_fingerprint
 
 
 class PipelineRunner:
@@ -128,12 +128,30 @@ class PipelineRunner:
                 if isinstance(persisted_candidate, dict)
                 else ""
             )
+            stored_editorial_hash = (
+                str(persisted_candidate.get("editorial_hash") or "").strip()
+                if isinstance(persisted_candidate, dict)
+                else ""
+            )
+            candidate_hash_matches = bool(
+                stored_editorial_hash
+                and isinstance(candidate_editorial, dict)
+                and stored_editorial_hash == editorial_fingerprint(candidate_editorial)
+            )
+            candidate_legacy_process = not stored_editorial_hash and candidate_decision == "process"
+            candidate_decision_coherent = not (
+                isinstance(candidate_editorial, dict)
+                and candidate_editorial.get("decision")
+                and candidate_editorial.get("decision") != candidate_decision
+            )
             candidate_is_verifiable = bool(
                 candidate_run_id
                 and isinstance(candidate_editorial, dict)
                 and _has_relevance_contract(candidate_editorial)
                 and candidate_decision in {"process", "skip"}
                 and (candidate_decision == "skip" or candidate_content)
+                and candidate_decision_coherent
+                and (candidate_hash_matches or candidate_legacy_process)
             )
             if candidate_is_verifiable:
                 editorial = candidate_editorial

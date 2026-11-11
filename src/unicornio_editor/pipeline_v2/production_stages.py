@@ -50,7 +50,7 @@ from ..workflow import (
     resolve_editorial_defaults,
     validate_media_plan,)
 from .errors import StageError
-from .production import editorial_has_substantive_text
+from .production import editorial_fingerprint, editorial_has_substantive_text
 from .media_accounting import reconcile_working_visual_media
 from .model import BlockerCode, FeaturedProgress, FeaturedStatus, InlineMedia, MediaProgress, MediaSearchProgress, Phase
 from .model import WorkState
@@ -60,7 +60,6 @@ from .media_layout import (
     validate_normal_article_layout_policy,
 )
 from ..observability import _redact_text, record_unexpected_error
-from ..state import canonical_json
 
 
 def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> Path:
@@ -70,11 +69,6 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
-
-
-def _editorial_hash(editorial: dict[str, Any]) -> str:
-    """Fingerprint the exact editorial document carried by a candidate."""
-    return hashlib.sha256(canonical_json(editorial).encode("utf-8")).hexdigest()
 
 
 def _prepare_editorial_media_structure(
@@ -460,10 +454,10 @@ def _editorial_identity_context(
     """Return exact editorial subjects and whether the article is game-contextual."""
     post_title = wordpress_text(post.get("title"), field="title")
     seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
-    title = post_title or str(editorial.get("title") or seo.get("title") or "")
-    content = wordpress_text(post.get("content"), field="content") or str(
-        editorial.get("cleaned_html") or ""
-    )
+    fresh_title = str(editorial.get("title") or seo.get("title") or "").strip()
+    title = fresh_title or post_title
+    fresh_content = str(editorial.get("cleaned_html") or "").strip()
+    content = fresh_content or wordpress_text(post.get("content"), field="content")
     focus = str(seo.get("focus_keyword") or "")
     rows = post_subjects(
         title=title,
@@ -493,7 +487,11 @@ def _editorial_identity_context(
         if str(topic).strip()
     }
     game_topic = bool(matched_topics & {"game", "games", "gaming", "video games", "videogame"})
-    platform_subject = len(all_subjects) == 1 and all_subjects[0] in _PLATFORM_OR_HARDWARE_SUBJECTS
+    platform_subject = len(all_subjects) == 1 and any(
+        all_subjects[0] == platform
+        or all_subjects[0].startswith(platform + " ")
+        for platform in _PLATFORM_OR_HARDWARE_SUBJECTS
+    )
     return subjects, bool(not platform_subject and (game_topic or context_tokens & _GAME_CONTEXT_TERMS))
 
 
@@ -1403,7 +1401,7 @@ class ProductionComposeStage:
                 layout_policy=source_layout_policy,
                 closing_featured_repeat=closing_repeat_record,
             )
-            candidate = {"content": content, "editorial": candidate_editorial, "editorial_hash": _editorial_hash(candidate_editorial), "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            candidate = {"content": content, "editorial": candidate_editorial, "editorial_hash": editorial_fingerprint(candidate_editorial), "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
             if persist:
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
@@ -1465,7 +1463,7 @@ class ProductionValidateStage:
                 if (
                     stored_editorial_hash
                     and isinstance(candidate_editorial, dict)
-                    and stored_editorial_hash != _editorial_hash(candidate_editorial)
+                    and stored_editorial_hash != editorial_fingerprint(candidate_editorial)
                 ):
                     raise StageError(
                         BlockerCode.MANIFEST_INVALID,
@@ -1552,7 +1550,7 @@ class ProductionValidateStage:
             candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
             checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
             candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]
-            candidate["editorial_hash"] = _editorial_hash(candidate_editorial)
+            candidate["editorial_hash"] = editorial_fingerprint(candidate_editorial)
             _persist_draft_repairs(self.root, int(context["post_id"]), normalize_dashes=True)
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             post_for_checklist = dict(post)
@@ -1609,6 +1607,11 @@ class ProductionValidateStage:
                 }
                 candidate["media"] = candidate_media
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
+            # Focus-keyword repair and media enrichment may change the
+            # editorial after the first checklist invocation. Persist the
+            # final fingerprint only after every allowed repair is complete.
+            candidate["editorial_hash"] = editorial_fingerprint(candidate_editorial)
+            _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             failures = _checklist_failures(checklist)
             relevance = candidate_editorial.get("site_relevance")
             relevance_decision = (

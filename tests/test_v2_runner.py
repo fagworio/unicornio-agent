@@ -176,6 +176,46 @@ def test_validate_resume_uses_verifiable_candidate_before_old_draft_decision():
     assert observed == {"decision": "process", "candidate": candidate}
 
 
+def test_validate_candidate_hash_tampering_blocks_before_skip_classification():
+    from unicornio_editor.pipeline_v2.production import editorial_fingerprint
+
+    store = MemoryStore(WorkState(phase=Phase.VALIDATE))
+    original_editorial = {
+        "decision": "process",
+        "site_relevance": {
+            "decision": "process",
+            "confidence": 0.99,
+            "reason": "fonte atual",
+            "matched_topics": ["games"],
+        },
+    }
+    candidate = {
+        "_v2_run_id": "candidate-run",
+        "content": "<p>conteúdo novo</p>",
+        "editorial": {**original_editorial, "decision": "skip"},
+        "editorial_hash": editorial_fingerprint(original_editorial),
+    }
+    calls = []
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not rerun")),
+        "media": lambda *_: (_ for _ in ()).throw(AssertionError("media must not run")),
+        "compose": lambda *_: (_ for _ in ()).throw(AssertionError("compose must not run")),
+        "validate": lambda *_: calls.append("validate"),
+    }
+    result = PipelineRunner(store, stages).run_one(
+        115787,
+        {
+            "candidate": candidate,
+            "editorial": {"decision": "skip", "site_relevance": {"decision": "skip"}},
+            "draft": {"decision": "skip", "site_relevance": {"decision": "skip"}},
+        },
+    )
+
+    assert result.type is OutcomeType.RETRY
+    assert result.blocker is BlockerCode.MANIFEST_INVALID
+    assert calls == []
+
+
 def test_runner_persists_retry_without_running_later_stages_for_skip():
     store = MemoryStore()
     stages = {

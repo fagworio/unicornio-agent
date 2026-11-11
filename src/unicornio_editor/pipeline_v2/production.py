@@ -27,9 +27,15 @@ from .scheduler import _cooldown_expired
 from .state_store import StateStore
 from ..content_quality import word_count
 from ..editorial_schema import _LEGACY_MEDIA_RIGHTS_FIELDS, _MEDIA, _TOP_LEVEL
+from ..state import canonical_json
 
 
 _MIN_RECOVERABLE_EDITORIAL_WORDS = 20
+
+
+def editorial_fingerprint(editorial: dict[str, Any]) -> str:
+    """Fingerprint the exact editorial document carried by a candidate."""
+    return hashlib.sha256(canonical_json(editorial).encode("utf-8")).hexdigest()
 
 
 def _project_recovered_editorial(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -316,7 +322,7 @@ def recover_editorial(post: dict[str, Any], directory: Path) -> tuple[dict[str, 
 def validation_matches_candidate(validation: dict, candidate: dict, run_id: str) -> bool:
     """A historical checklist is not evidence of a new interrupted run."""
     candidate_run_id = str(candidate.get("_v2_run_id") or "").strip()
-    return bool(
+    base_match = bool(
         run_id
         and candidate_run_id
         and validation.get("_v2_run_id") == run_id
@@ -324,6 +330,20 @@ def validation_matches_candidate(validation: dict, candidate: dict, run_id: str)
         and validation.get("candidate_hash")
         == hashlib.sha256(str(candidate.get("content") or "").encode()).hexdigest()
     )
+    if not base_match:
+        return False
+    validation_editorial_hash = str(validation.get("editorial_hash") or "").strip()
+    candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip()
+    if validation_editorial_hash or candidate_editorial_hash:
+        editorial = candidate.get("editorial")
+        return bool(
+            isinstance(editorial, dict)
+            and validation_editorial_hash
+            and candidate_editorial_hash
+            and validation_editorial_hash == candidate_editorial_hash
+            and candidate_editorial_hash == editorial_fingerprint(editorial)
+        )
+    return True
 
 
 class _WordPressStateBackend:

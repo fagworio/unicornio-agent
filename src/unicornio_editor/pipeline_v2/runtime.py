@@ -41,7 +41,7 @@ from .model import (
 from .media_accounting import account_visual_media, reconcile_working_visual_media
 from .epoch_protection import EpochProtectionError, load_epoch_protection
 from .quarantine import load_quarantine
-from .production import ProductionCandidateReader, validation_matches_candidate
+from .production import ProductionCandidateReader, editorial_fingerprint, validation_matches_candidate
 from .production_stages import ProductionComposeStage, ProductionEditorialStage, ProductionMediaStage, ProductionValidateStage
 from .runner import PipelineRunner
 from .scheduler import _cooldown_expired, select
@@ -3711,6 +3711,35 @@ class WordPressWriterV2:
         validation_fresh = isinstance(validation, dict) and validation_matches_candidate(
             validation, candidate, expected_run_id,
         )
+        candidate_editorial = candidate.get("editorial") if isinstance(candidate, dict) else None
+        candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip() if isinstance(candidate, dict) else ""
+        validation_editorial_hash = str(validation.get("editorial_hash") or "").strip() if isinstance(validation, dict) else ""
+        editorial_integrity_required = bool(
+            (expected_run_id and candidate_run_id)
+            or candidate_editorial_hash
+            or validation_editorial_hash
+        )
+        editorial_integrity_fresh = bool(
+            isinstance(candidate_editorial, dict)
+            and candidate_editorial_hash
+            and validation_editorial_hash
+            and candidate_editorial_hash == validation_editorial_hash
+            and candidate_editorial_hash == editorial_fingerprint(candidate_editorial)
+        )
+        editorial_integrity_blocked = False
+        if (
+            outcome.type.value == "ready"
+            and content
+            and editorial_integrity_required
+            and not (validation_fresh and editorial_integrity_fresh)
+        ):
+            # Do not let a candidate with a fresh HTML hash but stale/missing
+            # editorial proof reach the READY write path.
+            candidate = {}
+            content = ""
+            seo = {}
+            ready_hash = ""
+            editorial_integrity_blocked = True
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
         meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
@@ -3747,7 +3776,11 @@ class WordPressWriterV2:
             )
             if str(item.media_url or "").strip()
         ]
-        proposed_media = getattr(proposed_state, "media", None)
+        proposed_media = (
+            None
+            if editorial_integrity_blocked
+            else getattr(proposed_state, "media", None)
+        )
         layout_target_reduced = False
         candidate_media = (
             MediaProgress.from_dict(candidate.get("media"))
@@ -3947,6 +3980,8 @@ class WordPressWriterV2:
             "cycle_round": context.get("v2_cycle_round"),
             **({"authorization_id": authorization_id} if authorization_id else {}),
             "validation_fresh": validation_fresh,
+            "editorial_integrity_fresh": editorial_integrity_fresh,
+            "editorial_integrity_blocked": editorial_integrity_blocked,
             "state": proposed_state.to_dict(), "ready_hash": ready_hash,
             "candidate_hash": hashlib.sha256(content.encode()).hexdigest(),
             "candidate_fresh": candidate_fresh,
@@ -4246,7 +4281,7 @@ class WordPressWriterV2:
             if readback.get("status") != "awaiting_human":
                 raise RuntimeError("Awaiting Human status read-back mismatch")
         media_readback = False
-        if apply_inline or outcome.type.value == "ready":
+        if (apply_inline or outcome.type.value == "ready") and not editorial_integrity_blocked:
             try:
                 assert_media_readback(readback)
             except Exception as exc:
@@ -4299,16 +4334,16 @@ class WordPressWriterV2:
                     run_id=str(context.get("v2_run_id") or context.get("run_id") or ""),
                     file="pipeline_v2/runtime.py", field="media_apply_readback",
                 )
-        if outcome.type.value == "ready":
+        if outcome.type.value == "ready" and not editorial_integrity_blocked:
             if (readback.get("content") or {}).get("raw") != content:
                 raise RuntimeError("candidate content read-back mismatch")
             if readback_meta.get("_hermes_ready_hash") != ready_hash:
                 raise RuntimeError("ready hash read-back mismatch")
-        if outcome.type.value == "ready" and candidate_title:
+        if outcome.type.value == "ready" and not editorial_integrity_blocked and candidate_title:
             readback_title = str((readback.get("title") or {}).get("raw") or "").strip()
             if readback_title != candidate_title:
                 raise RuntimeError("candidate title read-back mismatch")
-        if outcome.type.value == "ready" and not media_readback:
+        if outcome.type.value == "ready" and not editorial_integrity_blocked and not media_readback:
             raise RuntimeError("media read-back mismatch: featured or inline media diverged")
         if media_readback:
             media_state = "applied_readback_confirmed"
