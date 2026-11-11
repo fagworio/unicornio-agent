@@ -60,6 +60,7 @@ from .media_layout import (
     validate_normal_article_layout_policy,
 )
 from ..observability import _redact_text, record_unexpected_error
+from ..state import canonical_json
 
 
 def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> Path:
@@ -69,6 +70,11 @@ def _write_json(root: Path, post_id: int, name: str, value: dict[str, Any]) -> P
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(target)
     return target
+
+
+def _editorial_hash(editorial: dict[str, Any]) -> str:
+    """Fingerprint the exact editorial document carried by a candidate."""
+    return hashlib.sha256(canonical_json(editorial).encode("utf-8")).hexdigest()
 
 
 def _prepare_editorial_media_structure(
@@ -440,8 +446,10 @@ def _post(context: dict[str, Any]) -> dict[str, Any]:
 
 _GAME_CONTEXT_TERMS = frozenset({
     "jogo", "jogos", "game", "games", "videogame", "videogames",
-    "gameplay", "console", "consoles", "playstation", "xbox", "nintendo",
-    "steam", "pc", "dlc", "rpg",
+    "gameplay", "dlc", "rpg",
+})
+_PLATFORM_OR_HARDWARE_SUBJECTS = frozenset({
+    "steam", "nintendo", "playstation", "xbox", "pc", "console", "consoles",
 })
 
 
@@ -464,16 +472,29 @@ def _editorial_identity_context(
         game_name=None,
         categories=post.get("categories") or (),
     )
-    subjects = {
+    all_subjects = [
         normalize(str(row.get("subject") or "")).strip()
         for row in rows
         if isinstance(row, dict) and str(row.get("subject") or "").strip()
-    }
+    ]
+    # A name that occurs only as one item in a listicle is not the article's
+    # singular identity. Do not inherit it as the game's identity.
+    subjects = {
+        all_subjects[0]
+    } if len(all_subjects) == 1 else set()
     # Use the headline/SEO focus for type detection. A body mention such as
     # "o jogo" is not enough to classify a news article as a game article.
     context_text = normalize(" ".join((title, focus, str(seo.get("title") or ""))))
     context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
-    return subjects, bool(context_tokens & _GAME_CONTEXT_TERMS)
+    relevance = editorial.get("site_relevance")
+    matched_topics = {
+        normalize(str(topic)).strip()
+        for topic in (relevance.get("matched_topics") if isinstance(relevance, dict) else ())
+        if str(topic).strip()
+    }
+    game_topic = bool(matched_topics & {"game", "games", "gaming", "video games", "videogame"})
+    platform_subject = len(all_subjects) == 1 and all_subjects[0] in _PLATFORM_OR_HARDWARE_SUBJECTS
+    return subjects, bool(not platform_subject and (game_topic or context_tokens & _GAME_CONTEXT_TERMS))
 
 
 def _merge_retry_editorial(
@@ -501,6 +522,14 @@ def _merge_retry_editorial(
         merged["seo"] = {**previous_clean["seo"], **fresh["seo"]}
 
     if "game_name" in fresh and fresh.get("game_name") is None:
+        relevance = fresh.get("site_relevance")
+        decision = (
+            relevance.get("decision")
+            if isinstance(relevance, dict)
+            else fresh.get("decision")
+        )
+        if decision and decision != "process":
+            return merged
         old_game_name = str(previous_clean.get("game_name") or "").strip()
         subjects, game_context = _editorial_identity_context(fresh, post)
         old_identity = normalize(old_game_name).strip()
@@ -1374,7 +1403,7 @@ class ProductionComposeStage:
                 layout_policy=source_layout_policy,
                 closing_featured_repeat=closing_repeat_record,
             )
-            candidate = {"content": content, "editorial": candidate_editorial, "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            candidate = {"content": content, "editorial": candidate_editorial, "editorial_hash": _editorial_hash(candidate_editorial), "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
             if persist:
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate
@@ -1430,6 +1459,20 @@ class ProductionValidateStage:
                     "editorial_source_lineage_mismatch: fresh validation source "
                     "does not belong to the current v2_run_id",
                 )
+            if has_candidate_lineage and not requires_fresh_editorial:
+                stored_editorial_hash = str(candidate.get("editorial_hash") or "").strip()
+                candidate_editorial = candidate.get("editorial")
+                if (
+                    stored_editorial_hash
+                    and isinstance(candidate_editorial, dict)
+                    and stored_editorial_hash != _editorial_hash(candidate_editorial)
+                ):
+                    raise StageError(
+                        BlockerCode.MANIFEST_INVALID,
+                        Phase.VALIDATE,
+                        "candidate_editorial_integrity_mismatch: persisted hash "
+                        "does not match the candidate editorial",
+                    )
             if requires_fresh_editorial:
                 source_editorial = context.get("editorial") or context.get("draft")
             elif has_candidate_lineage and isinstance(candidate.get("editorial"), dict):
@@ -1509,6 +1552,7 @@ class ProductionValidateStage:
             candidate["content"] = normalize_editorial_dashes(candidate.get("content", ""))
             checklist_editorial["cleaned_html"] = normalize_editorial_dashes(checklist_editorial.get("cleaned_html", ""))
             candidate["editorial"]["cleaned_html"] = checklist_editorial["cleaned_html"]
+            candidate["editorial_hash"] = _editorial_hash(candidate_editorial)
             _persist_draft_repairs(self.root, int(context["post_id"]), normalize_dashes=True)
             _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             post_for_checklist = dict(post)
@@ -1582,6 +1626,7 @@ class ProductionValidateStage:
                     "confidence": (relevance or {}).get("confidence") if isinstance(relevance, dict) else None,
                     "run_id": str(candidate.get("_v2_run_id") or ""),
                 },
+                "editorial_hash": str(candidate.get("editorial_hash") or ""),
             }
             _write_json(self.root, int(context["post_id"]), "editorial.validation.json", result)
             return result

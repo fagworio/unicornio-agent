@@ -23,6 +23,7 @@ from .model import (
     WorkState,
     media_search_is_incomplete,
 )
+from .production import _has_relevance_contract
 
 
 class PipelineRunner:
@@ -102,6 +103,48 @@ class PipelineRunner:
                 durations[name] = round((monotonic() - started_at) * 1000, 1)
 
         editorial = context.get("editorial") or context.get("draft")
+        if previous.phase is Phase.VALIDATE:
+            # A VALIDATE retry owns a persisted candidate. Its editorial
+            # decision must be selected before any skip/process branch; the
+            # draft in the context may belong to an older attempt.
+            persisted_candidate = context.get("candidate")
+            candidate_editorial = (
+                persisted_candidate.get("editorial")
+                if isinstance(persisted_candidate, dict)
+                else None
+            )
+            candidate_run_id = (
+                str(persisted_candidate.get("_v2_run_id") or "").strip()
+                if isinstance(persisted_candidate, dict)
+                else ""
+            )
+            candidate_decision = (
+                editorial_decision(candidate_editorial)
+                if isinstance(candidate_editorial, dict)
+                else None
+            )
+            candidate_content = (
+                str(persisted_candidate.get("content") or "").strip()
+                if isinstance(persisted_candidate, dict)
+                else ""
+            )
+            candidate_is_verifiable = bool(
+                candidate_run_id
+                and isinstance(candidate_editorial, dict)
+                and _has_relevance_contract(candidate_editorial)
+                and candidate_decision in {"process", "skip"}
+                and (candidate_decision == "skip" or candidate_content)
+            )
+            if candidate_is_verifiable:
+                editorial = candidate_editorial
+                context["editorial"] = editorial
+                context["draft"] = editorial
+                context["editorial_source_run_id"] = candidate_run_id
+            elif persisted_candidate is not None:
+                # Do not fall back to an unrelated draft and classify it as
+                # SKIPPED. Let the normal missing-editorial guard produce a
+                # retryable manifest failure for an unverifiable candidate.
+                editorial = {}
         run_editorial = previous.phase in {Phase.RELEVANCE, Phase.EDITORIAL}
         if run_editorial:
             try:

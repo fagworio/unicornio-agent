@@ -1507,6 +1507,62 @@ def test_retry_editorial_preserves_explicit_game_name_null_and_blocks_required_i
         )
 
 
+def test_editorial_identity_gate_respects_skip_platforms_and_primary_subjects():
+    skip = _merge_retry_editorial(
+        {},
+        {
+            "game_name": None,
+            "needs_trailer": False,
+            "site_relevance": {"decision": "skip", "matched_topics": ["games"]},
+        },
+        {"title": {"raw": "Jogo fora da pauta editorial"}, "content": {"raw": "<p>Resumo.</p>"}},
+    )
+    assert skip["game_name"] is None
+
+    for title in ("Steam muda política de reembolso", "Nintendo anuncia novo console"):
+        platform = _merge_retry_editorial(
+            {},
+            {
+                "game_name": None,
+                "needs_trailer": False,
+                "site_relevance": {"decision": "process", "matched_topics": ["games"]},
+            },
+            {"title": {"raw": title}, "content": {"raw": "<p>Notícia da indústria.</p>"}},
+        )
+        assert platform["game_name"] is None
+
+    for title in (
+        "Elden Ring ganha data de lançamento",
+        "Hollow Knight Silksong recebe atualização",
+    ):
+        with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+            _merge_retry_editorial(
+                {},
+                {
+                    "game_name": None,
+                    "needs_trailer": False,
+                    "site_relevance": {"decision": "process", "matched_topics": ["games"]},
+                },
+                {"title": {"raw": title}, "content": {"raw": "<p>Notícia confirmada.</p>"}},
+            )
+
+    with pytest.raises(StageError, match="game_name_missing_for_game_article"):
+        _merge_retry_editorial(
+            {"game_name": "Mario"},
+            {
+                "game_name": None,
+                "needs_trailer": False,
+                "site_relevance": {"decision": "process", "matched_topics": ["games"]},
+            },
+            {
+                "title": {"raw": "3 jogos para acompanhar"},
+                "content": {
+                    "raw": "<h2>Mario</h2><p>Primeiro.</p><h2>Zelda</h2><p>Segundo.</p>",
+                },
+            },
+        )
+
+
 def test_validate_resume_uses_candidate_editorial_instead_of_old_draft(tmp_path, monkeypatch):
     body = _long_single_sentence_body(10)
     observed = {}
@@ -1559,6 +1615,17 @@ def test_validate_resume_uses_candidate_editorial_instead_of_old_draft(tmp_path,
                 "post": {"id": 115785, "status": "pending", "title": {"raw": "Videogame"}, "meta": {}},
             },
             candidate,
+        )
+
+    with pytest.raises(StageError, match="candidate_editorial_integrity_mismatch"):
+        ProductionValidateStage(object(), Config(), tmp_path)(
+            {
+                "post_id": 115785,
+                "v2_run_id": "resume-run",
+                "candidate_must_be_fresh": False,
+                "post": {"id": 115785, "status": "pending", "title": {"raw": "Videogame"}, "meta": {}},
+            },
+            {**candidate, "editorial_hash": "0" * 64},
         )
 
 

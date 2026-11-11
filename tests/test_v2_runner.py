@@ -137,6 +137,45 @@ def test_runner_propagates_fresh_editorial_to_compose_and_validate():
     assert context["draft"] is fresh
 
 
+def test_validate_resume_uses_verifiable_candidate_before_old_draft_decision():
+    store = MemoryStore(WorkState(phase=Phase.VALIDATE))
+    observed = {}
+    candidate = {
+        "_v2_run_id": "candidate-run",
+        "content": "<p>conteúdo novo</p>",
+        "editorial": {
+            "decision": "process",
+            "site_relevance": {
+                "decision": "process",
+                "confidence": 0.99,
+                "reason": "fonte atual",
+                "matched_topics": ["games"],
+            },
+        },
+    }
+    context = {
+        "editorial": {"decision": "skip", "site_relevance": {"decision": "skip"}},
+        "draft": {"decision": "skip", "site_relevance": {"decision": "skip"}},
+        "candidate": candidate,
+    }
+
+    def validate(current_context, current_candidate):
+        observed["decision"] = current_context["editorial"]["decision"]
+        observed["candidate"] = current_candidate
+        return {"passed": True, "failures": []}
+
+    stages = {
+        "editorial": lambda *_: (_ for _ in ()).throw(AssertionError("editorial must not rerun")),
+        "media": lambda *_: (_ for _ in ()).throw(AssertionError("media must not rerun")),
+        "compose": lambda *_: (_ for _ in ()).throw(AssertionError("compose must not rerun")),
+        "validate": validate,
+    }
+    result = PipelineRunner(store, stages).run_one(115786, context)
+
+    assert result.type is OutcomeType.READY
+    assert observed == {"decision": "process", "candidate": candidate}
+
+
 def test_runner_persists_retry_without_running_later_stages_for_skip():
     store = MemoryStore()
     stages = {
