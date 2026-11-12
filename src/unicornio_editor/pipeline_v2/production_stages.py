@@ -1401,7 +1401,24 @@ class ProductionComposeStage:
                 layout_policy=source_layout_policy,
                 closing_featured_repeat=closing_repeat_record,
             )
-            candidate = {"content": content, "editorial": candidate_editorial, "editorial_hash": editorial_fingerprint(candidate_editorial), "seo": candidate_editorial.get("seo") or {}, "title": str(candidate_editorial.get("title") or "").strip() or None, "featured_media": media.featured.media_id, "media": candidate_media.to_dict(), "media_placements": placement_audit, "trailer": trailer, "trailer_status": trailer_status, "_v2_run_id": str(context.get("v2_run_id") or "")}
+            editorial_seo = candidate_editorial.get("seo")
+            editorial_title = candidate_editorial.get("title")
+            if not editorial_title and isinstance(editorial_seo, dict):
+                editorial_title = editorial_seo.get("title")
+            candidate_title = str(editorial_title or "").strip() or None
+            candidate = {
+                "content": content,
+                "editorial": candidate_editorial,
+                "editorial_hash": editorial_fingerprint(candidate_editorial),
+                "seo": candidate_editorial.get("seo") or {},
+                "title": candidate_title,
+                "featured_media": media.featured.media_id,
+                "media": candidate_media.to_dict(),
+                "media_placements": placement_audit,
+                "trailer": trailer,
+                "trailer_status": trailer_status,
+                "_v2_run_id": str(context.get("v2_run_id") or ""),
+            }
             if persist:
                 _write_json(self.root, int(context["post_id"]), "editorial.candidate.json", candidate)
             return candidate

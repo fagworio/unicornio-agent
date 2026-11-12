@@ -1,0 +1,25 @@
+[Unit]
+Description=Unicornio-Agent Editorial V2 cycle
+Documentation=https://github.com/fagworio/unicornio-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/www/wwwroot/hermes/unicornio-agent
+Environment=UNICORNIO_EDITORIAL_ROOT=/www/wwwroot/hermes/unicornio-agent
+Environment=HOME=/root
+Environment=HERMES_HOME=/root/.hermes
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/bash /www/wwwroot/hermes/unicornio-agent/hermes/supervisor/run-v2-cycle.sh
+TimeoutStartSec=0
+TimeoutStopSec=0
+KillMode=control-group
+KillSignal=SIGTERM
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unicornio-editorial-v2
