@@ -19,7 +19,7 @@ from unicornio_editor.pipeline_v2.production_stages import (
     _prepare_editorial_media_structure,
     _repair_focus_keyword_draft,
 )
-from unicornio_editor.pipeline_v2.production import ProductionContextLoader, editorial_fingerprint, recover_editorial, editorial_has_substantive_text
+from unicornio_editor.pipeline_v2.production import ProductionContextLoader, candidate_payload_matches_editorial, editorial_fingerprint, recover_editorial, editorial_has_substantive_text
 from unicornio_editor.pipeline_v2.runtime import (
     ProductionMediaResolver,
     WordPressWriterV2,
@@ -800,6 +800,40 @@ def test_editorial_stage_prepares_body_before_media_and_places_final_image_befor
     end_marker_position = candidate["content"].index("ENCERRAMENTO EDITORIAL ÚNICO.")
     cta_position = candidate["content"].index("Confira mais novidades")
     assert end_marker_position < final_image_position < cta_position
+
+
+def test_compose_candidate_derives_title_from_seo_when_editorial_title_is_absent(tmp_path):
+    title = "Hollow Knight Silksong: o mundo de Pharloom em imagens"
+    seo = {
+        "title": title,
+        "meta_description": "Imagens de Hollow Knight Silksong apresentam Pharloom, seus caminhos verticais e diferentes momentos da exploração durante a aventura.",
+        "focus_keyword": "Hollow Knight Silksong",
+    }
+    editorial = {
+        "site_relevance": {"decision": "process", "confidence": 0.99},
+        "cleaned_html": _substantive_body(6),
+        "seo": seo,
+        "media_plan": [],
+        "needs_trailer": False,
+        "trailer_unavailable": True,
+        "trailer_search_evidence": {
+            "query": "Hollow Knight Silksong trailer",
+            "provider": "controlled-e2e-fixture",
+            "searched_at": "2026-11-04T00:00:00+00:00",
+            "result": "official_not_found",
+        },
+    }
+
+    candidate = ProductionComposeStage(Config(), tmp_path).compose_candidate(
+        {"post_id": 99201, "title": title, "original_link": "https://source.example/article", "v2_run_id": "run-99201"},
+        editorial,
+        MediaProgress(required=0),
+        persist=False,
+    )
+
+    assert candidate["title"] == title
+    assert candidate["editorial_hash"] == editorial_fingerprint(candidate["editorial"])
+    assert candidate_payload_matches_editorial(candidate)
 
 
 def test_capacity_limited_normal_article_gets_audited_layout_reduction(tmp_path, monkeypatch):
