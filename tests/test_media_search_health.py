@@ -213,6 +213,7 @@ class BreakerNaoPuneMotivoPermanenteTests(unittest.TestCase):
         self.assertEqual(resultado, [])
         self.assertEqual(set(relatorios), {"bing", "yandex", "google"})
         self.assertEqual(relatorios["google"]["failure_kind"], "js_required")
+        self.assertTrue(all(float(report["elapsed_ms"]) >= 0 for report in relatorios.values()))
         # O motivo permanente não virou cooldown...
         self.assertTrue(search.engine_disponivel("google_images"))
         self.assertEqual(search.engines_status()["google_images"]["failures"], 0)

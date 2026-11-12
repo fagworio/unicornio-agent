@@ -1558,6 +1558,7 @@ def run_v2_cycle(
                 "duplicate_selection",
                 "attempt_budget_violation",
                 "unique_post_budget_violation",
+                "duration_limit",
                 "recovery_uncertain",
                 "skipped_locked",
             }:
@@ -1756,8 +1757,13 @@ def run_v2_cycle(
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
                 authorization_id=authorization_id,
+                deadline=request.deadline,
                 return_candidate_snapshot=True,
             )
+            if preview.get("budget_violation"):
+                return CycleRoundResult(
+                    budget_violation=str(preview["budget_violation"]),
+                )
             if preview.get("selection_mismatch"):
                 budget_violation = _selection_budget_violation(
                     pending_ids,
@@ -1856,8 +1862,13 @@ def run_v2_cycle(
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
                 authorization_id=None,
+                deadline=request.deadline,
                 return_candidate_snapshot=True,
             )
+            if preview.get("budget_violation"):
+                return CycleRoundResult(
+                    budget_violation=str(preview["budget_violation"]),
+                )
             selected_ids = [int(value) for value in preview.get("queue", {}).get("selected_ids", ())]
             store.record_round_preview(
                 state,
@@ -2058,9 +2069,14 @@ def run_v2_cycle(
                     cycle_id=state.cycle_id,
                     cycle_round=request.round_number,
                     authorization_id=authorization_id,
+                    deadline=request.deadline,
                     candidate_snapshot=preview.get("_candidate_snapshot"),
                     return_candidate_snapshot=True,
                 )
+                if preview.get("budget_violation"):
+                    return CycleRoundResult(
+                        budget_violation=str(preview["budget_violation"]),
+                    )
                 if preview.get("selection_mismatch"):
                     return CycleRoundResult(selection_mismatch=True)
                 selected_ids = [
@@ -2130,6 +2146,7 @@ def run_v2_cycle(
                 cycle_id=state.cycle_id,
                 cycle_round=request.round_number,
                 authorization_id=authorization_id,
+                deadline=request.deadline,
                 reserved_post_locks=reserved_post_locks,
             )
         finally:

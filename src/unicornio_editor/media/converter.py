@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 FEATURED_WIDTH = 1280
 FEATURED_HEIGHT = 720
@@ -63,6 +64,72 @@ def image_is_mostly_flat(path, *, sample_px=12000, edge_threshold=18.0) -> bool:
 
 class MediaConversionError(RuntimeError):
     """Raised when an image cannot be verified or converted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "media_conversion_error",
+        failure_kind: str = "conversion_error",
+        recoverable: bool = False,
+        stage: str = "conversion",
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code)
+        self.failure_kind = str(failure_kind)
+        self.recoverable = bool(recoverable)
+        self.stage = str(stage)
+        self.diagnostics = dict(diagnostics or {})
+        self.diagnostics.setdefault("stage", self.stage)
+        self.diagnostics.setdefault("reason_code", self.reason_code)
+        self.diagnostics.setdefault("failure_kind", self.failure_kind)
+        self.diagnostics.setdefault("recoverable", self.recoverable)
+
+
+def _conversion_diagnostics(image: Image.Image | None, *, stage: str) -> dict[str, Any]:
+    if image is None:
+        return {"stage": stage}
+    return {
+        "stage": stage,
+        "format": str(image.format or "").upper(),
+        "mode": str(image.mode or ""),
+        "width": int(image.width),
+        "height": int(image.height),
+    }
+
+
+def _wrapped_conversion_error(
+    exc: Exception,
+    *,
+    role: str,
+    stage: str,
+    image: Image.Image | None = None,
+) -> MediaConversionError:
+    if isinstance(exc, UnidentifiedImageError):
+        reason_code, failure_kind, recoverable = "invalid_image_format", "decode_error", False
+    elif isinstance(exc, MemoryError):
+        reason_code, failure_kind, recoverable = "conversion_memory_error", "resource_error", True
+    elif isinstance(exc, OSError) and stage == "write":
+        reason_code, failure_kind, recoverable = "conversion_write_failed", "disk_error", True
+    elif isinstance(exc, (OSError, ValueError)):
+        reason_code, failure_kind, recoverable = "image_decode_failed", "decode_error", False
+    else:
+        reason_code, failure_kind, recoverable = "conversion_unexpected_error", "unexpected_error", False
+    diagnostics = _conversion_diagnostics(image, stage=stage)
+    diagnostics.update({
+        "role": role,
+        "exception_type": type(exc).__name__,
+        "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else "",
+    })
+    return MediaConversionError(
+        f"{role} image conversion failed at {stage} ({failure_kind})",
+        reason_code=reason_code,
+        failure_kind=failure_kind,
+        recoverable=recoverable,
+        stage=stage,
+        diagnostics=diagnostics,
+    )
 
 
 def _open_authoritative(source: Path) -> Image.Image:
@@ -153,12 +220,18 @@ def _reject_if_empty_alpha(image: Image.Image) -> None:
     total_pixels = sum(histogram)
     if opaque_pixels == 0:
         raise MediaConversionError(
-            "imagem totalmente transparente (sem pixels opacos); troque por uma imagem com fundo"
+            "imagem totalmente transparente (sem pixels opacos); troque por uma imagem com fundo",
+            reason_code="transparent_image_empty",
+            failure_kind="invalid_media",
+            stage="transparency",
         )
     if opaque_pixels < _MIN_OPAQUE_FRACTION * total_pixels:
         raise MediaConversionError(
             "imagem quase totalmente transparente "
-            f"({opaque_pixels / total_pixels:.2%} de pixels opacos); troque por uma imagem com fundo"
+            f"({opaque_pixels / total_pixels:.2%} de pixels opacos); troque por uma imagem com fundo",
+            reason_code="transparent_image_sparse",
+            failure_kind="invalid_media",
+            stage="transparency",
         )
 
 
@@ -186,30 +259,48 @@ def _cap_inline_width(image: Image.Image) -> Image.Image:
 def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
     source = Path(source)
     destination = destination or source.with_suffix(".webp")
+    stage = "decode"
+    image: Image.Image | None = None
     try:
         image = _open_authoritative(source)
         with image:
+            stage = "dimensions"
             if image.width < 64 or image.height < 64:
-                raise MediaConversionError("image resolution is below 64x64")
+                raise MediaConversionError(
+                    "image resolution is below 64x64",
+                    reason_code="resolution_below_minimum",
+                    failure_kind="invalid_media",
+                    stage=stage,
+                    diagnostics=_conversion_diagnostics(image, stage=stage),
+                )
             if image.width < MIN_INLINE_WIDTH:
                 raise MediaConversionError(
                     f"inline image source is {image.width}px wide (minimum {MIN_INLINE_WIDTH}px); "
-                    "pick a larger source — content images are never upscaled"
+                    "pick a larger source — content images are never upscaled",
+                    reason_code="width_below_minimum",
+                    failure_kind="invalid_media",
+                    stage=stage,
+                    diagnostics=_conversion_diagnostics(image, stage=stage),
                 )
+            stage = "transparency"
             if image.mode not in {"RGB", "RGBA"}:
                 image = image.convert("RGBA")
             # Politica de transparencia: imagem vazia e rejeitada; o resto e
             # achatado sobre branco — o WebP publicado nunca tem canal alpha.
             image = _flatten_if_transparent(image)
+            stage = "resize"
             image = _cap_inline_width(image)
             destination.parent.mkdir(parents=True, exist_ok=True)
+            stage = "write"
             image.save(destination, format="WEBP", quality=85, method=6)
     except MediaConversionError:
         destination.unlink(missing_ok=True)
         raise
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise MediaConversionError("image conversion failed") from exc
+        raise _wrapped_conversion_error(
+            exc, role="inline", stage=stage, image=image
+        ) from exc
     return destination
 
 
@@ -228,17 +319,31 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
     """
     source = Path(source)
     destination = destination or source.with_name(source.stem + "_featured.webp")
+    stage = "decode"
+    image: Image.Image | None = None
     try:
         image = _open_authoritative(source)
         with image:
+            stage = "dimensions"
             if image.width < 64 or image.height < 64:
-                raise MediaConversionError("image resolution is below 64x64")
+                raise MediaConversionError(
+                    "image resolution is below 64x64",
+                    reason_code="resolution_below_minimum",
+                    failure_kind="invalid_media",
+                    stage=stage,
+                    diagnostics=_conversion_diagnostics(image, stage=stage),
+                )
             if image.width < image.height:
                 raise MediaConversionError(
                     f"featured source is portrait ({image.width}x{image.height} after EXIF transpose); "
-                    "a 1280x720 featured image requires a landscape source — pick landscape key art"
+                    "a 1280x720 featured image requires a landscape source — pick landscape key art",
+                    reason_code="featured_portrait_source",
+                    failure_kind="invalid_media",
+                    stage=stage,
+                    diagnostics=_conversion_diagnostics(image, stage=stage),
                 )
             work = image.convert("RGBA") if image.mode not in {"RGB", "RGBA"} else image
+            stage = "transparency"
             # Politica de transparencia: imagem vazia e rejeitada; o resto e
             # achatado sobre branco — o destaque publicado nunca tem alpha.
             work = _flatten_if_transparent(work)
@@ -255,11 +360,14 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
                 work = work.crop((0, top, width, top + new_height))
             work = work.resize((FEATURED_WIDTH, FEATURED_HEIGHT), Image.Resampling.LANCZOS)
             destination.parent.mkdir(parents=True, exist_ok=True)
+            stage = "write"
             work.save(destination, format="WEBP", quality=85, method=6)
     except MediaConversionError:
         destination.unlink(missing_ok=True)
         raise
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise MediaConversionError("featured image conversion failed") from exc
+        raise _wrapped_conversion_error(
+            exc, role="featured", stage=stage, image=image
+        ) from exc
     return destination

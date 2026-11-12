@@ -216,20 +216,27 @@ class EditorialProviderTests(unittest.TestCase):
                 },
             ],
         }
-        call_hermes.return_value = ("```json\n" + json.dumps(response) + "\n```", {"input_tokens": 11, "output_tokens": 7})
+        call_hermes.return_value = (
+            "```json\n" + json.dumps(response) + "\n```",
+            {"input_tokens": 11, "output_tokens": 7, "model": "gpt-6-luna-900k"},
+        )
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             result = self._run(
-                Path(directory),
+                root,
                 api_key="",
                 provider="auto",
                 hermes_command="hermes",
                 hermes_model="configured-by-hermes",
             )
-        self.assertEqual(result["provider_requests"], 1)
-        call_hermes.assert_called_once()
-        prompt = call_hermes.call_args.args[0]
-        self.assertIn('"batch_id": "editorial-test"', prompt)
-        self.assertIn('"additionalProperties":false', prompt)
+            self.assertEqual(result["provider_requests"], 1)
+            call_hermes.assert_called_once()
+            prompt = call_hermes.call_args.args[0]
+            self.assertIn('"batch_id": "editorial-test"', prompt)
+            self.assertIn('"additionalProperties":false', prompt)
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"model": "gpt-6-luna-900k"', telemetry)
+            self.assertIn('"model_identity_source": "provider_usage"', telemetry)
 
     @mock.patch("unicornio_editor.editorial_provider.hermes_command_available", return_value=False)
     def test_auto_provider_falls_back_to_legacy_key(self, _available):

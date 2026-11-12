@@ -228,6 +228,32 @@ class MediaPipelineTests(unittest.TestCase):
             with self.assertRaises(MediaConversionError):
                 convert_to_webp(source)
 
+    def test_conversion_error_keeps_structured_invalid_media_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "invalid.png"
+            source.write_bytes(b"not-an-image")
+            with self.assertRaises(MediaConversionError) as raised:
+                convert_to_webp(source)
+            error = raised.exception
+            self.assertEqual(error.reason_code, "invalid_image_format")
+            self.assertEqual(error.failure_kind, "decode_error")
+            self.assertFalse(error.recoverable)
+            self.assertEqual(error.diagnostics["stage"], "decode")
+            self.assertEqual(error.diagnostics["exception_type"], "UnidentifiedImageError")
+
+    def test_conversion_error_classifies_destination_write_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (800, 600), "blue").save(source)
+            with mock.patch.object(Image.Image, "save", side_effect=OSError("disk full")):
+                with self.assertRaises(MediaConversionError) as raised:
+                    convert_to_webp(source, Path(directory) / "nested" / "out.webp")
+            error = raised.exception
+            self.assertEqual(error.reason_code, "conversion_write_failed")
+            self.assertEqual(error.failure_kind, "disk_error")
+            self.assertTrue(error.recoverable)
+            self.assertEqual(error.diagnostics["stage"], "write")
+
     def test_caps_inline_width_at_maximum(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"

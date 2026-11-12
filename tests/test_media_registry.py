@@ -556,12 +556,36 @@ def test_v2_observation_separates_state_readback_from_media_application(tmp_path
     accepted = load_v2_media(tmp_path, post_id=10)
     assert {row["status"] for row in accepted} == {"accepted"}
 
-    record_v2_observation(tmp_path, post_id=10, run_id="run-1", state=state, phase="validate", outcome="ready", applied=True)
+    record_v2_observation(
+        tmp_path,
+        post_id=10,
+        run_id="run-1",
+        state=state,
+        phase="validate",
+        outcome="ready",
+        operation_status="completed",
+        applied=True,
+        readback_confirmed=True,
+    )
+    record_v2_observation(
+        tmp_path,
+        post_id=10,
+        run_id="run-1",
+        state=state,
+        phase="media",
+        outcome="started",
+        operation_status="started",
+        applied=False,
+    )
     record_v2_observation(tmp_path, post_id=10, run_id="run-2", state=state, phase="media", outcome="started", applied=False)
     with connect(tmp_path) as db:
         assert db.execute("SELECT status FROM media_usage WHERE post_id=10 AND role='inline'").fetchone()[0] == "applied"
         metrics = json.loads(db.execute("SELECT planned_deficits FROM media_runs WHERE run_id='run-1'").fetchone()[0])
         assert metrics["final"]["phase"] == "validate"
+        operation_status = db.execute(
+            "SELECT operation_status FROM media_operations WHERE run_id='run-1'"
+        ).fetchone()[0]
+        assert operation_status == "completed"
     reused = load_v2_media(tmp_path, post_id=10)
     assert {row["role"] for row in reused} == {"inline", "featured"}
     assert all(row["status"] == "applied" for row in reused)

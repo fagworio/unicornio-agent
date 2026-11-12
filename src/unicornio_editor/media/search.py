@@ -1249,6 +1249,13 @@ def search_web_images(
     acumulado: list[dict[str, Any]] = []
     vistos: set[str] = set()
     for name in order:
+        engine_started = time.monotonic()
+
+        def publish_report() -> None:
+            relatorio["elapsed_ms"] = round((time.monotonic() - engine_started) * 1000, 1)
+            if reports is not None:
+                reports[name] = dict(relatorio)
+
         breaker_name = provider_key(name)
         relatorio: dict[str, Any] = {}
         if deadline is not None:
@@ -1259,8 +1266,7 @@ def search_web_images(
                     "candidates": 0, "failure_kind": "budget_exhausted",
                     "parser_version": PARSER_VERSION,
                 }
-                if reports is not None:
-                    reports[name] = dict(relatorio)
+                publish_report()
                 break
         # Circuit breaker: engine em cooldown é simplesmente pulada — o
         # pipeline segue com as outras fontes (sem trocar User-Agent).
@@ -1277,8 +1283,7 @@ def search_web_images(
                 except (TypeError, ValueError, OverflowError):
                     remaining = 0
                 relatorio["cooldown_remaining_seconds"] = max(0, min(86400, int(remaining)))
-            if reports is not None:
-                reports[name] = dict(relatorio)
+            publish_report()
             continue
         try:
             effective_timeout = float(timeout)
@@ -1328,8 +1333,7 @@ def search_web_images(
                         relatorio["recovery_probe_remaining_seconds"] = max(
                             0, min(900, int(remaining))
                         )
-                    if reports is not None:
-                        reports[name] = dict(relatorio)
+                    publish_report()
                     continue
             lote = _fns[name](query, **kwargs)
         except Exception:  # noqa: BLE001 - rotate on any failure
@@ -1363,8 +1367,7 @@ def search_web_images(
                             time.sleep(pausa)
                     except Exception:  # noqa: BLE001 - sleep interrompido não quebra
                         pass
-            if reports is not None:
-                reports[name] = dict(relatorio)
+            publish_report()
             continue
         engine_ok(breaker_name)
         novos: list[dict[str, Any]] = []
@@ -1390,8 +1393,7 @@ def search_web_images(
             "candidates_with_page_reference",
             sum(bool(candidate.get("source_page_url")) for candidate in lote if isinstance(candidate, dict)),
         )
-        if reports is not None:
-            reports[name] = dict(relatorio)
+        publish_report()
         # Capacidade que encerra a busca: se o chamador fornece `accept`, o
         # critério é o número de candidatos ACEITOS (origem verificada +
         # subject + frame distinto) — nunca "usable" estrutural. Sem isso o

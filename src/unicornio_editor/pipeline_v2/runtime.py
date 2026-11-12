@@ -2782,6 +2782,7 @@ class ProductionMediaResolver:
                 self.root,
                 preflight=checked,
                 post_id=int(context["post_id"]),
+                run_id=str(context.get("v2_run_id") or ""),
                 post_title=title,
                 previous_inline_phashes=tuple(
                     item.phash for item in current_inline if item.phash
@@ -4424,6 +4425,7 @@ def run_v2(
     cycle_id: str | None = None,
     cycle_round: int | None = None,
     authorization_id: str | None = None,
+    deadline: float | None = None,
     reserved_post_locks: Mapping[int, Any] | None = None,
     candidate_snapshot: list[tuple[int, dict[str, Any]]] | None = None,
     return_candidate_snapshot: bool = False,
@@ -4432,6 +4434,15 @@ def run_v2(
         raise ValueError("limit must be positive")
     if max_new_posts is not None and max_new_posts < 0:
         raise ValueError("max_new_posts must not be negative")
+    if deadline is not None and monotonic() >= float(deadline):
+        return {
+            "selected": 0,
+            "completed": 0,
+            "failed": 0,
+            "details": [],
+            "queue": {"selected_ids": [], "candidates_examined": 0},
+            "budget_violation": "duration_limit",
+        }
     lock = None if lock_held else RunSessionLock(Path(root) / "work" / "v2-run.lock")
     if lock is not None and not lock.acquire():
         for handle in reversed(list((reserved_post_locks or {}).values())):
@@ -4843,7 +4854,11 @@ def run_v2(
         failed = 0
         from ..workflow import _guard_post_client
 
+        budget_violation = None
         for post_id, context in selected:
+            if deadline is not None and monotonic() >= float(deadline):
+                budget_violation = "duration_limit"
+                break
             post_client = _guard_post_client(client, post_lock_handles[int(post_id)], root=root, post_id=int(post_id))
             stages = {
                 "editorial": ProductionEditorialStage(post_client, config, root),
@@ -5180,6 +5195,7 @@ def run_v2(
             "completed": completed,
             "failed": failed,
             "locked": False,
+            **({"budget_violation": budget_violation} if budget_violation else {}),
             "queue": queue,
             "funnel": funnel,
             "details": details,

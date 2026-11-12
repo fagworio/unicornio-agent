@@ -421,8 +421,19 @@ def record_v2_observation(
                     cycle_id=CASE WHEN excluded.cycle_id <> '' THEN excluded.cycle_id ELSE media_operations.cycle_id END,
                     cycle_round=COALESCE(excluded.cycle_round, media_operations.cycle_round),
                     authorization_id=CASE WHEN excluded.authorization_id <> '' THEN excluded.authorization_id ELSE media_operations.authorization_id END,
-                    phase=CASE WHEN excluded.phase <> '' THEN excluded.phase ELSE media_operations.phase END,
-                    operation_status=excluded.operation_status,
+                    phase=CASE
+                        WHEN media_operations.operation_status IN ('completed', 'failed')
+                             AND excluded.operation_status NOT IN ('completed', 'failed')
+                        THEN media_operations.phase
+                        WHEN excluded.phase <> '' THEN excluded.phase
+                        ELSE media_operations.phase
+                    END,
+                    operation_status=CASE
+                        WHEN media_operations.operation_status IN ('completed', 'failed')
+                             AND excluded.operation_status NOT IN ('completed', 'failed')
+                        THEN media_operations.operation_status
+                        ELSE excluded.operation_status
+                    END,
                     completed_at=COALESCE(excluded.completed_at, media_operations.completed_at),
                     write_started=MAX(media_operations.write_started, excluded.write_started),
                     readback_confirmed=MAX(media_operations.readback_confirmed, excluded.readback_confirmed),
@@ -460,11 +471,36 @@ def record_v2_observation(
             (run_id, post_id, planned_deficits, queries_attempted, acquisition_outcome, checkpoint_reference, completion_reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
-                planned_deficits=excluded.planned_deficits,
-                queries_attempted=excluded.queries_attempted,
-                acquisition_outcome=excluded.acquisition_outcome,
-                checkpoint_reference=excluded.checkpoint_reference,
-                completion_reason=excluded.completion_reason""",
+                planned_deficits=CASE
+                    WHEN media_runs.acquisition_outcome IN ('ready', 'completed', 'readback_confirmed')
+                         AND excluded.acquisition_outcome NOT IN ('ready', 'completed', 'readback_confirmed')
+                    THEN media_runs.planned_deficits
+                    ELSE excluded.planned_deficits
+                END,
+                queries_attempted=CASE
+                    WHEN media_runs.acquisition_outcome IN ('ready', 'completed', 'readback_confirmed')
+                         AND excluded.acquisition_outcome NOT IN ('ready', 'completed', 'readback_confirmed')
+                    THEN media_runs.queries_attempted
+                    ELSE excluded.queries_attempted
+                END,
+                acquisition_outcome=CASE
+                    WHEN media_runs.acquisition_outcome IN ('ready', 'completed', 'readback_confirmed')
+                         AND excluded.acquisition_outcome NOT IN ('ready', 'completed', 'readback_confirmed')
+                    THEN media_runs.acquisition_outcome
+                    ELSE excluded.acquisition_outcome
+                END,
+                checkpoint_reference=CASE
+                    WHEN media_runs.acquisition_outcome IN ('ready', 'completed', 'readback_confirmed')
+                         AND excluded.acquisition_outcome NOT IN ('ready', 'completed', 'readback_confirmed')
+                    THEN media_runs.checkpoint_reference
+                    ELSE excluded.checkpoint_reference
+                END,
+                completion_reason=CASE
+                    WHEN media_runs.acquisition_outcome IN ('ready', 'completed', 'readback_confirmed')
+                         AND excluded.acquisition_outcome NOT IN ('ready', 'completed', 'readback_confirmed')
+                    THEN media_runs.completion_reason
+                    ELSE excluded.completion_reason
+                END""",
             (run_id, int(post_id), json.dumps(planned, sort_keys=True), queries_attempted, outcome,
              checkpoint_reference, "readback_confirmed" if applied else phase, observed_at),
         )

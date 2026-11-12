@@ -228,6 +228,22 @@ def _parse_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _verified_model_identity(usage: Any) -> str:
+    """Return only a model name explicitly reported by the provider."""
+    if not isinstance(usage, dict):
+        return ""
+    for key in ("model", "model_name", "model_id", "actual_model"):
+        value = usage.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:160]
+    for key in ("response", "metadata", "provider"):
+        nested = usage.get(key)
+        found = _verified_model_identity(nested)
+        if found:
+            return found
+    return ""
+
+
 def _normalize_output(
     payload: dict[str, Any],
     *,
@@ -579,6 +595,10 @@ def generate_editorial_batch(
         custo = usage_cost_usd(
             entrada, saida, price_in_per_1m=preco_in, price_out_per_1m=preco_out
         )
+        configured_model = (
+            hermes_model if selected_provider == "hermes" else model
+        )
+        verified_model = _verified_model_identity(usage)
         evento: dict[str, Any] = {
             "batch_id": batch_id,
             "batch_size": len(posts),
@@ -586,10 +606,13 @@ def generate_editorial_batch(
             "input_tokens": entrada,
             "output_tokens": saida,
             "cached_tokens": int(detalhes.get("cached_tokens") or 0),
-            "model": hermes_model if selected_provider == "hermes" and hermes_model else model,
             "provider": "hermes" if selected_provider == "hermes" else base_url[:120],
             "backend": selected_provider,
+            "model_configured": str(configured_model or "")[:160],
+            "model_identity_source": "provider_usage" if verified_model else "unverified",
         }
+        if verified_model:
+            evento["model"] = verified_model
         # Custo da chamada DIRETA: o gate (`cost_guard`) prefere este numero ao
         # preco do ambiente, porque registra o preco vigente na hora da chamada.
         if custo is not None:

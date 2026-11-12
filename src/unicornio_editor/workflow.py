@@ -130,6 +130,14 @@ def _structured_media_failure(
     retry_same_source: bool | None = None,
 ) -> dict[str, Any]:
     """Return bounded failure metadata without copying provider/URL details."""
+    conversion_reason = str(getattr(exc, "reason_code", "") or "")
+    conversion_kind = str(getattr(exc, "failure_kind", "") or "")
+    conversion_stage = str(getattr(exc, "stage", "") or "")
+    conversion_recoverable = getattr(exc, "recoverable", None)
+    if stage == "conversion" and conversion_reason:
+        reason_code = conversion_reason
+    if stage == "conversion" and conversion_stage:
+        stage = conversion_stage
     text = str(exc or "").casefold()
     http_match = re.search(r"\bHTTP[\s_-]*(\d{3})\b", text, re.IGNORECASE)
     if http_match:
@@ -143,10 +151,12 @@ def _structured_media_failure(
         failure_kind = "decode_error"
     elif "network" in text or "unreachable" in text or "connection" in text:
         failure_kind = "network_error"
+    elif conversion_kind:
+        failure_kind = conversion_kind
     else:
         failure_kind = "exception"
     if retry_same_source is None:
-        retry_same_source = failure_kind in {
+        retry_same_source = conversion_recoverable is True or failure_kind in {
             "timeout", "network_error", "http_408", "http_425", "http_429", "http_5xx",
         }
     return {
@@ -154,9 +164,16 @@ def _structured_media_failure(
         "reason_code": reason_code,
         "failure_stage": stage,
         "failure_kind": failure_kind,
-        "recoverable": bool(recoverable),
+        "recoverable": bool(
+            conversion_recoverable if conversion_recoverable is not None else recoverable
+        ),
         "retry_same_source": bool(retry_same_source),
         "detail": f"{stage} failed ({failure_kind})",
+        **(
+            {"diagnostics": dict(getattr(exc, "diagnostics"))}
+            if isinstance(getattr(exc, "diagnostics", None), dict)
+            else {}
+        ),
     }
 
 
@@ -2292,6 +2309,7 @@ def _execute_media_plan(
     *,
     preflight: dict[str, Any] | None = None,
     post_id: int | None = None,
+    run_id: str = "",
     post_title: str = "",
     previous_inline_phashes: list[str] | tuple[str, ...] = (),
     previous_inline_visual_assets: list[dict[str, Any]] | None = None,
@@ -2643,6 +2661,7 @@ def _execute_media_plan(
                             "recoverable": False,
                         }
                 transparency = "flattened" if image_has_transparency(source) else "none"
+                conversion_started = time.monotonic()
                 try:
                     if is_featured:
                         webp = prepare_featured_webp(source, tmp / f"featured_{position}.webp")
@@ -2650,6 +2669,20 @@ def _execute_media_plan(
                         webp = convert_to_webp(source, tmp / f"inline_{position}.webp")
                 except MediaConversionError as exc:
                     _funnel("conversion", "error", item, position, type(exc).__name__)
+                    diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+                    diagnostics.update({
+                        "post_id": int(post_id) if post_id is not None else None,
+                        "run_id": str(run_id or ""),
+                        "candidate_id": str(item.get("candidate_id") or ""),
+                        "role": "featured" if is_featured else "inline",
+                        "transparency_detected": transparency != "none",
+                        "elapsed_ms": round((time.monotonic() - conversion_started) * 1000, 1),
+                    })
+                    append_telemetry(
+                        root,
+                        "media_conversion_failure",
+                        **diagnostics,
+                    )
                     return position, _structured_media_failure(
                         exc,
                         stage="conversion",

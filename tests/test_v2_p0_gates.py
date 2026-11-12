@@ -210,8 +210,25 @@ def test_deadline_expiring_during_lock_reselection_does_not_authorize_or_query_a
 
     assert report.stop_reason == "duration_limit", report
     assert len(calls) == 1
-    pending = CycleStateStore(tmp_path).load().pending_round
-    assert pending is None or not pending["preview_selected_ids"]
+    state = CycleStateStore(tmp_path).load()
+    assert state.status == "running"
+    assert state.pending_round is not None
+    assert state.pending_round["preview_selected_ids"] is None
+
+
+def test_expired_post_deadline_stops_before_queue_read_or_external_work(tmp_path):
+    client = _Client([_post(501)])
+    result = run_v2(
+        client,
+        _config(tmp_path),
+        tmp_path,
+        preview=True,
+        deadline=time.monotonic() - 1,
+    )
+
+    assert result["budget_violation"] == "duration_limit"
+    assert result["details"] == []
+    assert client.list_calls == 0
 
 
 def test_expired_pre_authorization_transition_preserves_elapsed_and_archives_identity(tmp_path):
