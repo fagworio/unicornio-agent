@@ -48,13 +48,14 @@ def candidate_payload_matches_editorial(candidate: dict[str, Any]) -> bool:
     candidate_seo = candidate.get("seo")
     if not isinstance(candidate_seo, dict) or candidate_seo != editorial_seo:
         return False
-    candidate_title = str(candidate.get("title") or "").strip()
-    if candidate_title:
-        expected_title = str(
-            editorial.get("title") or editorial_seo.get("title") or ""
-        ).strip()
-        if candidate_title != expected_title:
-            return False
+    raw_candidate_title = candidate.get("title")
+    expected_title_value = editorial.get("title") or editorial_seo.get("title")
+    if not isinstance(raw_candidate_title, str) or not isinstance(expected_title_value, str):
+        return False
+    candidate_title = raw_candidate_title.strip()
+    expected_title = expected_title_value.strip()
+    if not candidate_title or not expected_title or candidate_title != expected_title:
+        return False
     return True
 
 
@@ -358,10 +359,14 @@ def validation_matches_candidate(
     )
     if not base_match:
         return False
-    if require_passed and (
-        validation.get("passed") is not True or validation.get("failures")
-    ):
-        return False
+    if require_passed:
+        failures = validation.get("failures")
+        if (
+            validation.get("passed") is not True
+            or not isinstance(failures, list)
+            or failures
+        ):
+            return False
     validation_editorial_hash = str(validation.get("editorial_hash") or "").strip()
     candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip()
     if validation_editorial_hash or candidate_editorial_hash:

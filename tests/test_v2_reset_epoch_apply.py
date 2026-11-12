@@ -55,6 +55,8 @@ def test_apply_archives_active_backups_and_readback(tmp_path):
     assert (tmp_path / "backups").exists() and not (tmp_path / "backups" / "12" / "editorial.draft.json").exists()
     assert list((tmp_path / "work" / "v2-epochs" / "archives").rglob("active-root-backups/12/editorial.draft.json"))
     assert client.posts[12]["status"] == "pending"
+    assert client.posts[12]["content"]["raw"] == "content-12"
+    assert client.posts[12]["featured_media"] == 0
     assert json.loads(client.posts[12]["meta"]["_hermes_work_state"])["retry"]["attempts"] == 0
     assert not (tmp_path / "work" / "v2-maintenance.lock").exists()
 

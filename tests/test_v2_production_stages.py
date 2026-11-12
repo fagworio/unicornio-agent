@@ -77,6 +77,25 @@ def _substantive_body(paragraphs=6):
     return "".join(f"<p>{sentence}</p>" for _ in range(paragraphs))
 
 
+def _persist_ready_candidate(backup, candidate, *, run_id="writer-run"):
+    candidate["_v2_run_id"] = run_id
+    candidate["editorial_hash"] = editorial_fingerprint(candidate["editorial"])
+    (backup / "editorial.candidate.json").write_text(
+        json.dumps(candidate), encoding="utf-8"
+    )
+    validation = {
+        "_v2_run_id": run_id,
+        "candidate_run_id": run_id,
+        "candidate_hash": hashlib.sha256(candidate["content"].encode("utf-8")).hexdigest(),
+        "editorial_hash": candidate["editorial_hash"],
+        "passed": True,
+        "failures": [],
+    }
+    (backup / "editorial.validation.json").write_text(
+        json.dumps(validation), encoding="utf-8"
+    )
+
+
 def test_writer_commit_emits_write_intent_and_readback_contract(tmp_path):
     post_id = 99181
     state = WorkState(
@@ -2025,15 +2044,23 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
     client = Client()
     backup = tmp_path / "backups" / "13"
     backup.mkdir(parents=True)
-    (backup / "editorial.candidate.json").write_text(
-        json.dumps({
-            "content": f'<p>texto</p><img src="{inline_url}" />',
-                        "editorial": {"cleaned_html": "<p>texto</p>", "seo": {"title": "Título", "meta_description": "Descrição editorial com contexto e informações essenciais para o leitor entender a notícia e acompanhar os principais pontos desta publicação.", "focus_keyword": "título"}},
-                        "seo": {"title": "Título", "meta_description": "Descrição editorial com contexto e informações essenciais para o leitor entender a notícia e acompanhar os principais pontos desta publicação.", "focus_keyword": "título"},
-            "featured_media": None,
-        }),
-        encoding="utf-8",
-    )
+    seo = {
+        "title": "Título",
+        "meta_description": "Descrição editorial com contexto e informações essenciais para o leitor entender a notícia e acompanhar os principais pontos desta publicação.",
+        "focus_keyword": "título",
+    }
+    editorial = {
+        "title": "Título",
+        "cleaned_html": "<p>texto</p>",
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
+        "title": "Título",
+        "content": f'<p>texto</p><img src="{inline_url}" />',
+        "editorial": editorial,
+        "seo": dict(seo),
+        "featured_media": None,
+    })
     media = MediaProgress(
         required=1,
         inline=(InlineMedia(13, inline_url, 0, "Imagem", "Crédito da imagem: Fonte"),),
@@ -2044,7 +2071,12 @@ def test_writer_requires_inline_media_in_wordpress_readback(tmp_path):
         relevance_approved=True,
         media=media,
     )
-    result = WordPressWriterV2(client, tmp_path).commit(13, {"post_id": 13}, state, Outcome.ready())
+    result = WordPressWriterV2(client, tmp_path).commit(
+        13,
+        {"post_id": 13, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+        state,
+        Outcome.ready(),
+    )
     assert result["readback"] is True
     assert client.post["meta"]["_hermes_human_reopened_from"] == "awaiting_human"
     assert all(
@@ -2154,16 +2186,23 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
 
     backup = tmp_path / "backups" / "130"
     backup.mkdir(parents=True)
-    (backup / "editorial.candidate.json").write_text(json.dumps({
+    seo = {
+        "title": "Título SEO",
+        "meta_description": "Descrição editorial com contexto suficiente para validar o fluxo seguro de publicação e confirmar os dados principais. Extra.",
+        "focus_keyword": "título",
+    }
+    editorial = {
+        "title": "Título",
+        "cleaned_html": "<p>texto</p>",
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
         "content": f'<p>texto</p><img src="{inline_url}" />',
         "featured_media": 99,
         "title": "Título",
-        "seo": {
-            "title": "Título SEO",
-            "meta_description": "Descrição editorial com contexto suficiente para validar o fluxo seguro de publicação e confirmar os dados principais. Extra.",
-            "focus_keyword": "título",
-        },
-    }), encoding="utf-8")
+        "seo": dict(seo),
+        "editorial": editorial,
+    })
     state = WorkState(
         state=LifecycleState.READY,
         phase=Phase.VALIDATE,
@@ -2186,7 +2225,12 @@ def test_writer_keeps_ready_markers_unwritten_when_featured_media_readback_diver
     )
 
     with pytest.raises(RuntimeError, match="featured media read-back mismatch"):
-        WordPressWriterV2(Client(), tmp_path).commit(130, {"post_id": 130}, state, Outcome.ready())
+        WordPressWriterV2(Client(), tmp_path).commit(
+            130,
+            {"post_id": 130, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+            state,
+            Outcome.ready(),
+        )
 
     journal = json.loads((tmp_path / "work/v2-journal/130.json").read_text())
     assert journal["status"] == "media_readback_failed"
@@ -2233,21 +2277,25 @@ def test_writer_rejects_unexpected_inline_media_when_v2_contract_is_empty(tmp_pa
     media = MediaProgress(required=2, inline=(), featured=featured)
     backup = tmp_path / "backups" / "131"
     backup.mkdir(parents=True)
-    (backup / "editorial.candidate.json").write_text(json.dumps({
-        "content": '<p>Texto editorial.</p><img src="https://example.test/unexpected.webp" />',
-        "editorial": {"cleaned_html": "<p>Texto editorial.</p>", "seo": {
-            "title": "Título editorial",
-            "meta_description": "Descrição editorial com contexto para validar o candidato, confirmar os dados principais e assegurar a persistência segura do estado READY durante o readback.",
-            "focus_keyword": "título",
-        }},
-        "seo": {
-            "title": "Título editorial",
-            "meta_description": "Descrição editorial com contexto para validar o candidato, confirmar os dados principais e assegurar a persistência segura do estado READY durante o readback.",
-            "focus_keyword": "título",
-        },
+    content = '<p>Texto editorial.</p><img src="https://example.test/unexpected.webp" />'
+    seo = {
+        "title": "Título editorial",
+        "meta_description": "Descrição editorial com contexto para validar o candidato, confirmar os dados principais e assegurar a persistência segura do estado READY durante o readback.",
+        "focus_keyword": "título",
+    }
+    editorial = {
+        "title": "Título editorial",
+        "cleaned_html": "<p>Texto editorial.</p>",
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
+        "title": "Título editorial",
+        "content": content,
+        "editorial": editorial,
+        "seo": dict(seo),
         "featured_media": 99,
         "media": media.to_dict(),
-    }), encoding="utf-8")
+    })
     state = WorkState(
         state=LifecycleState.READY,
         phase=Phase.VALIDATE,
@@ -2257,7 +2305,12 @@ def test_writer_rejects_unexpected_inline_media_when_v2_contract_is_empty(tmp_pa
 
     client = Client()
     with pytest.raises(RuntimeError, match="unexpected inline media"):
-        WordPressWriterV2(client, tmp_path).commit(131, {"post_id": 131}, state, Outcome.ready())
+        WordPressWriterV2(client, tmp_path).commit(
+            131,
+            {"post_id": 131, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+            state,
+            Outcome.ready(),
+        )
     assert client.updates == []
     assert client.post["content"] == {"raw": "<p>antigo</p>"}
     assert client.post["featured_media"] == 0
@@ -2312,22 +2365,24 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
     content = "<p>Texto editorial.</p>" + "".join(
         f'<img src="{item.media_url}" />' for item in accepted
     )
-    (backup / "editorial.candidate.json").write_text(json.dumps({
+    seo = {
+        "title": "Título",
+        "meta_description": "Descrição editorial com contexto suficiente para validar a aprovação do candidato e confirmar todos os dados relevantes da publicação.",
+        "focus_keyword": "título",
+    }
+    editorial = {
+        "title": "Título",
+        "cleaned_html": content,
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
+        "title": "Título",
         "content": content,
-        "editorial": {
-            "cleaned_html": content,
-            "seo": {
-                "title": "Título", "meta_description": "Descrição editorial com contexto suficiente para validar a aprovação do candidato e confirmar todos os dados relevantes da publicação.",
-                "focus_keyword": "título",
-            },
-        },
-        "seo": {
-            "title": "Título", "meta_description": "Descrição editorial com contexto suficiente para validar a aprovação do candidato e confirmar todos os dados relevantes da publicação.",
-            "focus_keyword": "título",
-        },
+        "editorial": editorial,
+        "seo": dict(seo),
         "featured_media": featured.media_id,
         "media": candidate_media.to_dict(),
-    }), encoding="utf-8")
+    })
     proposed = WorkState(
         state=LifecycleState.READY,
         phase=Phase.VALIDATE,
@@ -2336,7 +2391,10 @@ def test_writer_persists_only_readback_confirmed_candidate_media_in_ready_state(
     )
 
     result = WordPressWriterV2(client, tmp_path).commit(
-        132, {"post_id": 132}, proposed, Outcome.ready()
+        132,
+        {"post_id": 132, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+        proposed,
+        Outcome.ready(),
     )
 
     persisted = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
@@ -2651,17 +2709,31 @@ def test_writer_allows_only_listicle_final_repeat_of_featured(tmp_path):
     )
     backup = tmp_path / "backups" / "133"
     backup.mkdir(parents=True)
-    candidate = {
-        "title": "Top 2 jogos", "content": content,
-        "editorial": {"cleaned_html": content, "seo": {}},
-        "seo": {"title": "Top 2 jogos", "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.", "focus_keyword": "jogos"},
-        "featured_media": featured.media_id, "media": media.to_dict(),
+    seo = {
+        "title": "Top 2 jogos",
+        "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.",
+        "focus_keyword": "jogos",
     }
-    (backup / "editorial.candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+    editorial = {
+        "title": "Top 2 jogos",
+        "cleaned_html": content,
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
+        "title": "Top 2 jogos",
+        "content": content,
+        "editorial": editorial,
+        "seo": dict(seo),
+        "featured_media": featured.media_id,
+        "media": media.to_dict(),
+    })
     proposed = WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True, media=media)
 
     result = WordPressWriterV2(Client(), tmp_path).commit(
-        133, {"post_id": 133}, proposed, Outcome.ready(),
+        133,
+        {"post_id": 133, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+        proposed,
+        Outcome.ready(),
     )
 
     assert result["media_readback"] is True
@@ -2690,15 +2762,33 @@ def test_writer_rejects_listicle_duplicate_not_at_final_position(tmp_path):
     )
     backup = tmp_path / "backups" / "134"
     backup.mkdir(parents=True)
-    (backup / "editorial.candidate.json").write_text(json.dumps({
-        "title": "Top 2 jogos", "content": content, "editorial": {"cleaned_html": content, "seo": {}},
-        "seo": {"title": "Top 2 jogos", "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.", "focus_keyword": "jogos"},
-        "featured_media": featured.media_id, "media": media.to_dict(),
-    }), encoding="utf-8")
+    seo = {
+        "title": "Top 2 jogos",
+        "meta_description": "Lista editorial com os quatro jogos distintos apresentados e análise suficiente para o leitor compreender cada recomendação.",
+        "focus_keyword": "jogos",
+    }
+    editorial = {
+        "title": "Top 2 jogos",
+        "cleaned_html": content,
+        "seo": seo,
+    }
+    _persist_ready_candidate(backup, {
+        "title": "Top 2 jogos",
+        "content": content,
+        "editorial": editorial,
+        "seo": dict(seo),
+        "featured_media": featured.media_id,
+        "media": media.to_dict(),
+    })
     proposed = WorkState(state=LifecycleState.READY, phase=Phase.VALIDATE, relevance_approved=True, media=media)
 
     with pytest.raises(RuntimeError, match="ineligible visual media"):
-        WordPressWriterV2(Client(), tmp_path).commit(134, {"post_id": 134}, proposed, Outcome.ready())
+        WordPressWriterV2(Client(), tmp_path).commit(
+            134,
+            {"post_id": 134, "v2_run_id": "writer-run", "candidate_must_be_fresh": True},
+            proposed,
+            Outcome.ready(),
+        )
 
 
 def test_readback_identity_uses_img_elements_not_plain_text_urls():

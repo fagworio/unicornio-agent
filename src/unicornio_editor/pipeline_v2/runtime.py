@@ -3693,40 +3693,46 @@ class WordPressWriterV2:
     def commit(self, post_id: int, context: dict[str, Any], proposed_state, outcome):
         load_epoch_protection(self.root).assert_writable(post_id, effect="writer_commit")
         journal_dir = self.root / "work" / "v2-journal"
-        journal_dir.mkdir(parents=True, exist_ok=True)
         candidate_path = self.root / "backups" / str(post_id) / "editorial.candidate.json"
-        candidate = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+        try:
+            candidate = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.is_file() else {}
+        except (OSError, ValueError) as exc:
+            if outcome.type.value == "ready":
+                raise RuntimeError("editorial integrity validation failed before READY") from exc
+            raise
+        if not isinstance(candidate, dict):
+            candidate = {}
         expected_run_id = str(context.get("v2_run_id") or "").strip()
         requires_fresh_candidate = bool(context.get("candidate_must_be_fresh"))
-        candidate_run_id = str(candidate.get("_v2_run_id") or "").strip() if isinstance(candidate, dict) else ""
+        candidate_run_value = candidate.get("_v2_run_id")
+        candidate_run_id = candidate_run_value.strip() if isinstance(candidate_run_value, str) else ""
         candidate_fresh = not requires_fresh_candidate or (
             bool(expected_run_id) and candidate_run_id == expected_run_id
         )
         if not candidate_fresh:
             # A failed COMPOSE must never fall through to a candidate from a
-            # previous attempt. Keep the lifecycle/state write available, but
-            # make all derived editorial writes unavailable for this commit.
+            # previous attempt. Keep non-READY lifecycle writes available, but
+            # never allow that artifact to authorize READY.
             candidate = {}
-        content = str(candidate.get("content") or "")
+        content_value = candidate.get("content")
+        content = content_value if isinstance(content_value, str) else ""
         validation_path = candidate_path.with_name("editorial.validation.json")
         try:
             validation = json.loads(validation_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             validation = {}
-        validation_fresh = isinstance(validation, dict) and validation_matches_candidate(
+        if not isinstance(validation, dict):
+            validation = {}
+        is_ready = outcome.type.value == "ready"
+        validation_fresh = validation_matches_candidate(
             validation,
             candidate,
             expected_run_id,
-            require_passed=outcome.type.value == "ready",
+            require_passed=is_ready,
         )
-        candidate_editorial = candidate.get("editorial") if isinstance(candidate, dict) else None
-        candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip() if isinstance(candidate, dict) else ""
-        validation_editorial_hash = str(validation.get("editorial_hash") or "").strip() if isinstance(validation, dict) else ""
-        editorial_integrity_required = bool(
-            (expected_run_id and candidate_run_id)
-            or candidate_editorial_hash
-            or validation_editorial_hash
-        )
+        candidate_editorial = candidate.get("editorial")
+        candidate_editorial_hash = str(candidate.get("editorial_hash") or "").strip()
+        validation_editorial_hash = str(validation.get("editorial_hash") or "").strip()
         editorial_integrity_fresh = bool(
             isinstance(candidate_editorial, dict)
             and candidate_editorial_hash
@@ -3735,16 +3741,29 @@ class WordPressWriterV2:
             and candidate_editorial_hash == editorial_fingerprint(candidate_editorial)
             and candidate_payload_matches_editorial(candidate)
         )
-        if (
-            outcome.type.value == "ready"
-            and content
-            and editorial_integrity_required
-            and not (validation_fresh and editorial_integrity_fresh)
-        ):
-            # Fail closed before preparing any WordPress payload. A blocked
-            # READY candidate must not leave lifecycle metadata claiming that
-            # content was committed.
-            raise RuntimeError("editorial integrity validation failed before READY")
+        if is_ready:
+            failures = validation.get("failures")
+            try:
+                build_meta(candidate.get("seo"))
+                seo_fields_valid = True
+            except Exception:
+                seo_fields_valid = False
+            if (
+                not content.strip()
+                or not expected_run_id
+                or not candidate_run_id
+                or not candidate_fresh
+                or validation.get("_v2_run_id") != expected_run_id
+                or validation.get("candidate_run_id") != candidate_run_id
+                or validation.get("passed") is not True
+                or not isinstance(failures, list)
+                or failures
+                or not validation_fresh
+                or not editorial_integrity_fresh
+                or not seo_fields_valid
+            ):
+                raise RuntimeError("editorial integrity validation failed before READY")
+        journal_dir.mkdir(parents=True, exist_ok=True)
         seo = candidate.get("seo") or {}
         post = context.get("post") or self.client.get_post(post_id)
         meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}

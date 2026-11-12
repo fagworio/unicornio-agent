@@ -55,6 +55,125 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _tree_fingerprint(path: Path) -> str:
+    path = Path(path)
+    if not path.exists():
+        return "missing"
+    if path.is_file():
+        return _file_sha(path)
+    files = {
+        str(child.relative_to(path)): _file_sha(child)
+        for child in sorted(path.rglob("*"))
+        if child.is_file()
+    }
+    return _sha(_json(files).encode("utf-8"))
+
+
+def _registry_snapshot(path: Path) -> tuple[str, set[int]]:
+    path = Path(path)
+    if not path.is_file():
+        raise ResetEpochError("Media Registry is missing; external effects cannot be classified")
+    source = target = None
+    try:
+        source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        source.execute("PRAGMA query_only=ON")
+        target = sqlite3.connect(":memory:")
+        source.backup(target)
+        check = target.execute("PRAGMA quick_check").fetchone()
+        if not check or check[0] != "ok":
+            raise ResetEpochError("Media Registry quick_check failed")
+        exists = target.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_operations'"
+        ).fetchone()
+        if not exists:
+            raise ResetEpochError("Media Registry lacks media_operations; external effects are unclassified")
+        columns = {row[1] for row in target.execute("PRAGMA table_info(media_operations)")}
+        required = {"post_id", "operation_status", "completed_at", "readback_confirmed"}
+        if not required <= columns:
+            raise ResetEpochError("Media Registry operation schema is incomplete")
+        rows = target.execute(
+            """SELECT DISTINCT post_id FROM media_operations
+            WHERE lower(trim(coalesce(operation_status, ''))) != 'completed'
+               OR completed_at IS NULL OR trim(completed_at) = ''
+               OR coalesce(readback_confirmed, 0) != 1"""
+        ).fetchall()
+        protected_ids: set[int] = set()
+
+        def add_post_ids(rows, table: str) -> None:
+            for row in rows:
+                try:
+                    post_id = int(row[0])
+                except (TypeError, ValueError) as exc:
+                    raise ResetEpochError(f"Media Registry contains an invalid post ID in {table}") from exc
+                if post_id <= 0:
+                    raise ResetEpochError(f"Media Registry contains an invalid post ID in {table}")
+                protected_ids.add(post_id)
+
+        add_post_ids(rows, "media_operations")
+        for table, required_columns in (
+            ("media_runs", {"post_id", "acquisition_outcome"}),
+            ("media_usage", {"post_id", "status", "applied_at", "readback_confirmed_at"}),
+        ):
+            exists = target.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if not exists:
+                raise ResetEpochError(f"Media Registry lacks {table}; external effects are unclassified")
+            columns = {row[1] for row in target.execute(f"PRAGMA table_info({table})")}
+            if not required_columns <= columns:
+                raise ResetEpochError(f"Media Registry {table} schema is incomplete")
+        started_or_unknown_runs = target.execute(
+            """SELECT DISTINCT post_id FROM media_runs
+            WHERE lower(trim(coalesce(acquisition_outcome, '')))
+                  NOT IN ('retry', 'human_required', 'ready')"""
+        ).fetchall()
+        add_post_ids(started_or_unknown_runs, "media_runs")
+        unresolved_usage = target.execute(
+            """SELECT DISTINCT post_id FROM media_usage
+            WHERE lower(trim(coalesce(status, ''))) NOT IN ('accepted', 'applied', 'rejected')
+               OR lower(trim(coalesce(status, ''))) = 'accepted'
+               OR (lower(trim(coalesce(status, ''))) = 'applied'
+                   AND (applied_at IS NULL OR trim(applied_at) = ''
+                        OR readback_confirmed_at IS NULL OR trim(readback_confirmed_at) = ''))"""
+        ).fetchall()
+        add_post_ids(unresolved_usage, "media_usage")
+        foreign_key_errors = target.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise ResetEpochError("Media Registry foreign_key_check failed")
+        schema = target.execute(
+            """SELECT type, name, tbl_name, coalesce(sql, '') FROM sqlite_master
+            WHERE type IN ('table', 'index', 'view', 'trigger') ORDER BY type, name"""
+        ).fetchall()
+        tables = [row[0] for row in target.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()]
+        table_rows: dict[str, list[str]] = {}
+        for table in tables:
+            quoted = '"' + table.replace('"', '""') + '"'
+            rows = target.execute(f"SELECT * FROM {quoted}").fetchall()
+            encoded_rows = []
+            for row in rows:
+                values = [({"__blob__": value.hex()} if isinstance(value, bytes) else value) for value in row]
+                encoded_rows.append(_json(values))
+            table_rows[table] = sorted(encoded_rows)
+        logical_snapshot = {
+            "schema": schema,
+            "user_version": target.execute("PRAGMA user_version").fetchone()[0],
+            "application_id": target.execute("PRAGMA application_id").fetchone()[0],
+            "tables": table_rows,
+        }
+        return _sha(_json(logical_snapshot).encode("utf-8")), protected_ids
+    except ResetEpochError:
+        raise
+    except sqlite3.Error as exc:
+        raise ResetEpochError(f"Media Registry read failed: {type(exc).__name__}") from exc
+    finally:
+        if source is not None:
+            source.close()
+        if target is not None:
+            target.close()
+
+
 def _read_json(path: Path, default: Any = None) -> Any:
     if not path.is_file():
         return default
@@ -81,7 +200,22 @@ def _quarantine(root: Path) -> tuple[dict[int, dict[str, Any]], str]:
     payload = _read_json(path)
     if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("posts"), list):
         raise ResetEpochError("invalid or missing V2 quarantine policy")
-    rows = {int(row["post_id"]): row for row in payload["posts"] if isinstance(row, dict) and str(row.get("post_id", "")).isdigit()}
+    rows: dict[int, dict[str, Any]] = {}
+    for index, row in enumerate(payload["posts"]):
+        if not isinstance(row, dict):
+            raise ResetEpochError(f"invalid quarantine post entry at index {index}")
+        raw_post_id = row.get("post_id")
+        if isinstance(raw_post_id, bool):
+            raise ResetEpochError(f"invalid quarantine post ID at index {index}")
+        if isinstance(raw_post_id, int):
+            post_id = raw_post_id
+        elif isinstance(raw_post_id, str) and raw_post_id.isdigit():
+            post_id = int(raw_post_id)
+        else:
+            raise ResetEpochError(f"invalid quarantine post ID at index {index}")
+        if post_id <= 0 or post_id in rows:
+            raise ResetEpochError(f"invalid or duplicate quarantine post ID at index {index}")
+        rows[post_id] = row
     return rows, _file_sha(path)
 
 
@@ -127,27 +261,103 @@ def _initial_state() -> WorkState:
     )
 
 
-def _protected_ids(root: Path) -> set[int]:
+def _registry_incomplete_ids(root: Path) -> set[int]:
+    path = Path(root) / "work" / "media_registry.sqlite"
+    if not path.is_file():
+        return set()
+    return _registry_snapshot(path)[1]
+
+
+def _collect_post_marker_ids(directory: Path, suffix: str, description: str, result: set[int]) -> None:
+    directory = Path(directory)
+    if directory.is_symlink():
+        raise ResetEpochError(f"{description} marker directory is a symlink")
+    if not directory.exists():
+        return
+    if not directory.is_dir():
+        raise ResetEpochError(f"{description} marker path is not a directory")
+    seen: set[int] = set()
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file():
+            raise ResetEpochError(f"uncategorized {description} marker: {path.name}")
+        if path.suffix != suffix or not path.stem.isdigit() or int(path.stem) <= 0:
+            raise ResetEpochError(f"uncategorized {description} marker: {path.name}")
+        post_id = int(path.stem)
+        if post_id in seen:
+            raise ResetEpochError(f"duplicate {description} marker for post {post_id}")
+        seen.add(post_id)
+        result.add(post_id)
+
+
+def _protected_ids(root: Path, *, registry_ids: set[int] | None = None) -> set[int]:
+    root = Path(root)
     result = {PROTECTED_POST_ID}
     cycle = _cycle_snapshot(root)
-    result.update(cycle.get("unresolved_ids") or [])
+    for post_id in cycle.get("unresolved_ids") or []:
+        if type(post_id) is not int or post_id <= 0:
+            raise ResetEpochError("cycle contains an invalid unresolved post ID")
+        result.add(post_id)
+    selected = cycle.get("selected_ids") or []
+    if cycle.get("authorization_id") or selected:
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or any(type(post_id) is not int or post_id <= 0 for post_id in selected)
+            or len(selected) != len(set(selected))
+        ):
+            raise ResetEpochError("pending round authorization has invalid selected IDs")
+        result.update(selected)
+    for relative in (
+        "work/v2-journal",
+        "work/v2-epochs/active",
+        "work/v2-publication-uncertain",
+        "work/v2-uncertain",
+    ):
+        _collect_post_marker_ids(root / relative, ".json", relative, result)
+    _collect_post_marker_ids(root / "work" / "locks", ".lock", "post lock", result)
+    if registry_ids is None:
+        registry_ids = _registry_incomplete_ids(root)
+    result.update(registry_ids)
     return result
+
+
+def _wordpress_state_diverges(post: dict[str, Any], state: WorkState | None) -> bool:
+    raw_meta = post.get("meta")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    legacy = str(meta.get("_hermes_state") or "").strip()
+    if state is None:
+        return bool(legacy)
+    if not legacy:
+        return True
+    expected = {
+        LifecycleState.PENDING: {"new", "pending"},
+        LifecycleState.READY: {"ready"},
+        LifecycleState.HUMAN_REQUIRED: {"awaiting_human"},
+        LifecycleState.SKIPPED: {"skipped"},
+        LifecycleState.PUBLISHED: {"published"},
+    }
+    return legacy not in expected.get(state.state, set())
 
 
 def _classify(root: Path, post: dict[str, Any], quarantine: dict[int, dict[str, Any]], protected: set[int]) -> dict[str, Any]:
     pid = int(post["id"])
     status = str(post.get("status") or "")
+    raw_meta = post.get("meta")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    legacy_state = str(meta.get("_hermes_state") or "").strip()
     state, state_error = _state_from_post(post)
-    if status == "publish" or (state and state.state is LifecycleState.PUBLISHED):
+    if status == "publish" or legacy_state == "published" or (state and state.state is LifecycleState.PUBLISHED):
         return {"post_id": pid, "classification": "preserve_published", "reason": "published"}
     if pid in quarantine:
         return {"post_id": pid, "classification": "protected_quarantine", "reason": quarantine[pid].get("reason_code", "quarantine")}
     if pid in protected:
         return {"post_id": pid, "classification": "protected_transaction", "reason": "uncertain_external_effect"}
-    if status not in {"pending", "awaiting_human"}:
-        return {"post_id": pid, "classification": "exclude_status", "reason": f"wordpress_status:{status}"}
     if state_error:
         return {"post_id": pid, "classification": "exception", "reason": state_error}
+    if _wordpress_state_diverges(post, state):
+        return {"post_id": pid, "classification": "protected_transaction", "reason": "wordpress_state_divergence"}
+    if status not in {"pending", "awaiting_human"}:
+        return {"post_id": pid, "classification": "exclude_status", "reason": f"wordpress_status:{status}"}
     if state and state.state is LifecycleState.HUMAN_REQUIRED and status != "awaiting_human":
         return {"post_id": pid, "classification": "exception", "reason": "human_required_status_mismatch"}
     return {"post_id": pid, "classification": "reset", "reason": "safe_unpublished_editorial_state", "previous_state": state.to_dict() if state else None}
@@ -213,31 +423,125 @@ def _registry_projection(source: Path, target: Path, epoch_id: str) -> dict[str,
 
 
 def _active_processes() -> list[str]:
-    found = []
-    for entry in Path("/proc").glob("[0-9]*"):
+    proc_root = Path("/proc")
+    ignored_pids: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in ignored_pids:
+        ignored_pids.add(pid)
         try:
-            cmd = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+            stat_fields = (proc_root / str(pid) / "stat").read_text().split()
+            pid = int(stat_fields[3])
+        except (OSError, IndexError, ValueError):
+            break
+    commands = {
+        "v2-cycle", "v2-run", "v2-reset-epoch", "v2-release-isolated",
+        "v2-reconcile", "v2-audit-pending-round", "v2-investigation-queue",
+        "publish-ready",
+    }
+    script_names = {
+        "run-v2-cycle.sh", "start-v2-cycle.sh", "unicorniohater-publish.sh",
+        "publish-ready.sh", "v2-cycle.sh",
+    }
+    found = []
+    for entry in proc_root.glob("[0-9]*"):
+        try:
+            process_id = int(entry.name)
+        except ValueError:
+            continue
+        if process_id in ignored_pids:
+            continue
+        try:
+            raw_args = (entry / "cmdline").read_bytes().split(b"\x00")
+            args = [value.decode(errors="replace") for value in raw_args if value]
         except OSError:
             continue
-        if any(token in cmd for token in ("v2-cycle", "v2-run", "publish-ready", "unicorniohater-publish.sh")):
-            found.append(cmd)
+        if not args:
+            continue
+        executable = Path(args[0]).name
+        cli_command = (
+            executable == "unicornio-editor"
+            and any(argument in commands for argument in args[1:])
+        ) or (
+            "unicornio_editor.cli" in args
+            and any(argument in commands for argument in args[args.index("unicornio_editor.cli") + 1:])
+        ) or "unicornio_editor.pipeline_v2.writer" in args
+        script_command = any(Path(argument).name in script_names for argument in args)
+        if cli_command or script_command:
+            found.append(f"{process_id}: {' '.join(args)}")
     return found
 
 
 def _copy_tree_verified(source: Path, target: Path) -> dict[str, str]:
+    source = Path(source)
+    target = Path(target)
+    if source.is_symlink():
+        raise ResetEpochError(f"archive source is a symlink: {source}")
     if not source.exists():
+        if target.exists() or target.is_symlink():
+            raise ResetEpochError(f"archive target exists without source evidence: {target}")
         return {}
+    source_hashes = _tree_hashes(source)
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or _tree_hashes(target) != source_hashes:
+            raise ResetEpochError(f"existing archive differs from source evidence: {target}")
+        return source_hashes
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, dirs_exist_ok=True)
-    expected: dict[str, str] = {}
-    for path in sorted(source.rglob("*")):
-        if path.is_file():
-            relative = str(path.relative_to(source))
-            copied = target / relative
-            if not copied.is_file() or _file_sha(path) != _file_sha(copied):
-                raise ResetEpochError(f"archive copy verification failed: {path}")
-            expected[relative] = _file_sha(path)
-    return expected
+    shutil.copytree(source, target)
+    if _tree_hashes(target) != source_hashes:
+        raise ResetEpochError(f"archive copy verification failed: {source}")
+    return source_hashes
+
+
+def _tree_hashes(path: Path) -> dict[str, str]:
+    path = Path(path)
+    if path.is_symlink() or not path.is_dir():
+        raise ResetEpochError(f"archive path is not a regular directory: {path}")
+    return {
+        str(child.relative_to(path)): _file_sha(child)
+        for child in sorted(path.rglob("*"))
+        if child.is_file()
+    }
+
+
+def _archive_tree_preserving(
+    source: Path,
+    target: Path,
+    *,
+    expected_sha256: str | None = None,
+    expected_files: dict[str, str] | None = None,
+) -> None:
+    if expected_sha256 is None and expected_files is None:
+        if target.exists() or target.is_symlink():
+            raise ResetEpochError(f"archive target exists without preview evidence: {target}")
+        if source.is_symlink():
+            raise ResetEpochError(f"active source is a symlink without preview evidence: {source}")
+        if source.exists() and any(child.is_file() for child in source.rglob("*")):
+            raise ResetEpochError(f"active source contains unclassified files: {source}")
+        return
+
+    def verified(path: Path) -> bool:
+        if path.is_symlink() or not path.is_dir():
+            return False
+        if expected_sha256 is not None and _tree_fingerprint(path) != expected_sha256:
+            return False
+        if expected_files is not None and _tree_hashes(path) != expected_files:
+            return False
+        return True
+
+    if target.exists() or target.is_symlink():
+        if not verified(target):
+            raise ResetEpochError(f"existing archive differs from verified evidence: {target}")
+        if source.exists() and any(child.is_file() for child in source.rglob("*")):
+            raise ResetEpochError(f"archive and active source both contain data: {source}")
+        return
+    if not source.exists():
+        return
+    if not verified(source):
+        raise ResetEpochError(f"active source differs from preview evidence: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    if not verified(target):
+        raise ResetEpochError(f"archive move verification failed: {target}")
 
 
 def _archive_active_artifacts(root: Path, archive: Path) -> dict[str, Any]:
@@ -376,49 +680,93 @@ def _human_required_audit(root: Path, posts: list[dict[str, Any]], quarantine: d
     return sorted(audit, key=lambda row: row["post_id"])
 
 
-def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: bool = False, preview_evidence: Path | None = None, operator_authorization: str | None = None, report_dir: Path | None = None) -> dict[str, Any]:
-    if preview == apply:
-        raise ResetEpochError("choose exactly one of --preview or --apply")
-    root = Path(root).resolve()
-    active_protection = load_epoch_protection(root)
-    report_dir = Path(report_dir or (root / "work" / "v2-epochs" / "reports" / uuid.uuid4().hex)).resolve()
-    report_dir.mkdir(parents=True, exist_ok=True)
+def _capture_reset_snapshot(
+    client: Any,
+    root: Path,
+    active_protection: Any,
+    *,
+    operation_id: str | None = None,
+    old_epoch_id: str | None = None,
+    new_epoch_id: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], set[int]]:
+    registry_sha256, registry_incomplete_ids = _registry_snapshot(
+        root / "work" / "media_registry.sqlite"
+    )
     quarantine, quarantine_hash = _quarantine(root)
     posts = _all_posts(client)
-    protected = _protected_ids(root) | set(active_protection.protected_ids)
+    protected = _protected_ids(root, registry_ids=registry_incomplete_ids) | set(
+        active_protection.protected_ids
+    )
     cycle = _cycle_snapshot(root)
     classifications = []
     for post in posts:
         row = _classify(root, post, quarantine, protected)
         row["snapshot"] = _post_fingerprint(post)
         classifications.append(row)
-    human_required_audit = _human_required_audit(root, posts, quarantine, protected, client)
+    human_required_audit = _human_required_audit(
+        root, posts, quarantine, protected, client
+    )
     audit_by_id = {int(row["post_id"]): row for row in human_required_audit}
     for row in classifications:
         audit = audit_by_id.get(int(row["post_id"]))
-        if audit and audit["classification"] in {"SAFE_RESET", "SAFE_RESET_RECONCILED"}:
-            row["classification"] = "reset"
+        if (
+            audit
+            and audit["classification"] in {"SAFE_RESET", "SAFE_RESET_RECONCILED"}
+            and row["classification"] == "reset"
+        ):
             row["reason"] = "safe_human_required_reset"
             row["human_required_audit"] = audit
         elif audit:
             row["human_required_audit"] = audit
-    _write_json(report_dir / "human-required-audit.json", human_required_audit)
+    current_epoch = (
+        _read_json(root / "work" / "v2-epochs" / "active" / "epoch.json", {}) or {}
+    ).get("epoch_id", "legacy-unversioned")
     snapshot = {
         "schema_version": 1,
-        "operation_id": uuid.uuid4().hex,
-        "old_epoch_id": (_read_json(root / "work" / "v2-epochs" / "active" / "epoch.json", {}) or {}).get("epoch_id", "legacy-unversioned"),
-        "new_epoch_id": uuid.uuid4().hex,
+        "operation_id": operation_id or uuid.uuid4().hex,
+        "old_epoch_id": old_epoch_id if old_epoch_id is not None else current_epoch,
+        "new_epoch_id": new_epoch_id or uuid.uuid4().hex,
         "generated_at": _now(),
         "production_sha": os.popen(f"git -C {root} rev-parse HEAD").read().strip(),
         "active_epoch_id": active_protection.epoch_id,
         "active_epoch_policy_fingerprint": active_protection.policy_fingerprint,
         "quarantine_sha256": quarantine_hash,
         "cycle": cycle,
-        "registry_sha256": _file_sha(root / "work" / "media_registry.sqlite"),
+        "cycle_files_sha256": _tree_fingerprint(root / "work" / "v2-cycle"),
+        "journal_sha256": _tree_fingerprint(root / "work" / "v2-journal"),
+        "lock_snapshot_sha256": _tree_fingerprint(root / "work" / "locks"),
+        "protected_ids": sorted(protected),
+        "registry_sha256": registry_sha256,
         "posts": classifications,
-        "counts": {name: sum(1 for row in classifications if row["classification"] == name) for name in sorted({row["classification"] for row in classifications})},
+        "counts": {
+            name: sum(1 for row in classifications if row["classification"] == name)
+            for name in sorted({row["classification"] for row in classifications})
+        },
     }
-    snapshot["snapshot_hash"] = _sha(_json({key: snapshot[key] for key in ("production_sha", "active_epoch_id", "active_epoch_policy_fingerprint", "quarantine_sha256", "cycle", "registry_sha256", "posts", "counts")}).encode())
+    hash_fields = (
+        "production_sha", "active_epoch_id", "active_epoch_policy_fingerprint",
+        "quarantine_sha256", "cycle", "cycle_files_sha256", "journal_sha256",
+        "lock_snapshot_sha256", "protected_ids", "registry_sha256", "posts", "counts",
+    )
+    snapshot["snapshot_hash"] = _sha(
+        _json({key: snapshot[key] for key in hash_fields}).encode()
+    )
+    return snapshot, posts, human_required_audit, protected
+
+
+def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: bool = False, preview_evidence: Path | None = None, operator_authorization: str | None = None, report_dir: Path | None = None) -> dict[str, Any]:
+    if preview == apply:
+        raise ResetEpochError("choose exactly one of --preview or --apply")
+    root = Path(root).resolve()
+    active_protection = load_epoch_protection(root)
+    report_dir = Path(report_dir or (root / "work" / "v2-epochs" / "reports" / uuid.uuid4().hex)).resolve()
+    snapshot, posts, human_required_audit, protected = _capture_reset_snapshot(
+        client, root, active_protection
+    )
+    classifications = snapshot["posts"]
+    report_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(report_dir / "human-required-audit.json", human_required_audit)
+
     evidence = None
     resume_transition = None
     if not preview:
@@ -487,14 +835,87 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
         _write_json(maintenance_path, {"operation_id": snapshot["operation_id"], "phase": "APPLYING", "created_at": _now()})
         if not run_lock.acquire():
             raise ResetEpochError("V2 run lock unavailable")
+        if _active_processes():
+            raise ResetEpochError("active V2/Publisher process prevents reset")
+        if (
+            resume_transition
+            and resume_transition.get("phase") in {"APPLYING", "READBACK_VERIFIED"}
+        ):
+            expected_archive = (
+                root / "work" / "v2-epochs" / "archives"
+                / snapshot["old_epoch_id"] / snapshot["operation_id"]
+            ).resolve()
+            if Path(str(resume_transition.get("archive") or "")).resolve() != expected_archive:
+                raise ResetEpochError("resume archive identity mismatch")
+            if snapshot.get("production_sha") != evidence.get("production_sha"):
+                raise ResetEpochError("production code changed during partial reset")
+            _, current_quarantine_sha = _quarantine(root)
+            if current_quarantine_sha != evidence.get("quarantine_sha256"):
+                raise ResetEpochError("quarantine changed during partial reset")
+            if _tree_fingerprint(root / "work" / "locks") != evidence.get("lock_snapshot_sha256"):
+                raise ResetEpochError("lock snapshot changed during partial reset")
+            current_protection = load_epoch_protection(root)
+            if (
+                current_protection.epoch_id != evidence.get("active_epoch_id")
+                or current_protection.policy_fingerprint != evidence.get("active_epoch_policy_fingerprint")
+            ):
+                raise ResetEpochError("active epoch protection changed during partial reset")
+            live_registry_hash, _ = _registry_snapshot(root / "work" / "media_registry.sqlite")
+            if live_registry_hash != evidence.get("registry_sha256"):
+                raise ResetEpochError("Media Registry changed during partial reset; resume blocked")
+            registry_backup = expected_archive / "media_registry.sqlite.backup"
+            backup_registry_hash, _ = _registry_snapshot(registry_backup)
+            if backup_registry_hash != evidence.get("registry_sha256"):
+                raise ResetEpochError("archived Media Registry backup does not match preview evidence")
+            expected_backup_sha = resume_transition.get("registry_backup_file_sha256")
+            if expected_backup_sha and _file_sha(registry_backup) != expected_backup_sha:
+                raise ResetEpochError("archived Media Registry backup file hash changed")
+            manifest_path = expected_archive / "artifact-manifest.json"
+            manifest = _read_json(manifest_path, {}) or {}
+            if not isinstance(manifest.get("roots"), dict):
+                raise ResetEpochError("archived artifact manifest is missing or invalid")
+            recorded_manifest_path = resume_transition.get("artifact_manifest")
+            if recorded_manifest_path and Path(recorded_manifest_path).resolve() != manifest_path.resolve():
+                raise ResetEpochError("artifact manifest identity mismatch")
+        if not (
+            resume_transition
+            and resume_transition.get("phase") in {"APPLYING", "READBACK_VERIFIED"}
+        ):
+            locked_protection = load_epoch_protection(root)
+            locked_snapshot, locked_posts, locked_audit, locked_protected = _capture_reset_snapshot(
+                client,
+                root,
+                locked_protection,
+                operation_id=snapshot["operation_id"],
+                old_epoch_id=snapshot["old_epoch_id"],
+                new_epoch_id=snapshot["new_epoch_id"],
+            )
+            if locked_snapshot["snapshot_hash"] != evidence["snapshot_hash"]:
+                _write_json(report_dir / "apply-preflight.json", {
+                    "status": "blocked_snapshot_drift",
+                    "expected_snapshot_hash": evidence["snapshot_hash"],
+                    "observed_snapshot_hash": locked_snapshot["snapshot_hash"],
+                })
+                raise ResetEpochError("preview snapshot changed after maintenance locks were acquired")
+            snapshot = locked_snapshot
+            posts = locked_posts
+            classifications = snapshot["posts"]
+            human_required_audit = locked_audit
+            protected = locked_protected
+            active_protection = locked_protection
+            _write_json(report_dir / "human-required-audit.json", human_required_audit)
+            _write_json(report_dir / "preview.json", snapshot)
         transition_root = root / "work" / "v2-epochs" / "transitions"
         transition_root.mkdir(parents=True, exist_ok=True)
         archive = root / "work" / "v2-epochs" / "archives" / snapshot["old_epoch_id"] / snapshot["operation_id"]
         archive.mkdir(parents=True, exist_ok=True)
         transition_path = _reset_transition_path(root, snapshot["operation_id"])
-        transition = resume_transition or {"schema_version": 1, "operation_id": snapshot["operation_id"], "phase": "BACKUP_VERIFIED", "preview_hash": evidence["snapshot_hash"], "authorization": str(operator_authorization), "new_epoch_id": snapshot["new_epoch_id"], "archive": str(archive), "updated_at": _now()}
+        transition = resume_transition or {"schema_version": 1, "operation_id": snapshot["operation_id"], "phase": "BACKUP_PENDING", "preview_hash": evidence["snapshot_hash"], "authorization": str(operator_authorization), "new_epoch_id": snapshot["new_epoch_id"], "archive": str(archive), "updated_at": _now()}
+        mutation_started = True
         _write_json(transition_path, transition)
-        if transition.get("phase") == "BACKUP_VERIFIED":
+        if transition.get("phase") in {"BACKUP_PENDING", "BACKUP_VERIFIED"}:
+            transition.update({"phase": "BACKUP_PENDING", "updated_at": _now()})
+            _write_json(transition_path, transition)
             for source_name in ("v2-cycle", "v2-journal"):
                 source = root / "work" / source_name
                 if source.exists():
@@ -533,6 +954,11 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
             if current_fp != row["snapshot"]:
                 read_state = _state_from_post(current)[0]
                 if current.get("status") == "pending" and read_state == _initial_state():
+                    if (
+                        current_fp.get("content_sha256") != row["snapshot"].get("content_sha256")
+                        or current_fp.get("featured_media") != row["snapshot"].get("featured_media")
+                    ):
+                        raise ResetEpochError(f"post {pid} content or featured media changed during reset resume")
                     _post_reset_journal(post_journal, {"post_id": pid, "phase": "READBACK_VERIFIED", "before": row["snapshot"], "after": current_fp, "resumed": True})
                     if pid not in changed: changed.append(pid)
                     continue
@@ -551,20 +977,43 @@ def reset_epoch(client: Any, config: Any, root: Path, *, preview: bool, apply: b
             client.update_post(pid, {"meta": payload_meta})
             readback = client.get_post(pid)
             read_state = _state_from_post(readback)[0]
-            if readback.get("status") != "pending" or read_state != _initial_state():
-                _post_reset_journal(post_journal, {**before, "phase": "READBACK", "after": _post_fingerprint(readback), "error": "readback_mismatch"})
-                raise ResetEpochError(f"post {pid} reset readback mismatch")
             after = _post_fingerprint(readback)
+            if readback.get("status") != "pending" or read_state != _initial_state():
+                _post_reset_journal(post_journal, {**before, "phase": "READBACK", "after": after, "error": "readback_mismatch"})
+                raise ResetEpochError(f"post {pid} reset readback mismatch")
+            if (
+                after.get("content_sha256") != row["snapshot"].get("content_sha256")
+                or after.get("featured_media") != row["snapshot"].get("featured_media")
+            ):
+                _post_reset_journal(post_journal, {**before, "phase": "READBACK", "after": after, "error": "content_or_featured_media_changed"})
+                raise ResetEpochError(f"post {pid} content or featured media changed during reset")
             _post_reset_journal(post_journal, {"post_id": pid, "phase": "READBACK_VERIFIED", "before": row["snapshot"], "after": after, "updated_at": _now()})
             _write_json(archive / "post-readbacks" / f"{pid}.json", {"post_id": pid, "before": row["snapshot"], "after": after})
             if pid not in changed: changed.append(pid)
         transition.update({"phase": "READBACK_VERIFIED", "reset_post_ids": sorted(changed), "updated_at": _now()}); _write_json(transition_path, transition)
         mutation_started = True
-        for source, name in ((root / "work" / "v2-cycle", "active-v2-cycle"), (root / "work" / "v2-journal", "active-v2-journal"), (root / "backups", "active-root-backups"), (root / "work" / "backups", "active-work-backups")):
-            if source.exists():
-                target = archive / name
-                if target.exists(): shutil.rmtree(target)
-                shutil.move(str(source), str(target))
+        artifact_manifest_path = Path(
+            transition.get("artifact_manifest") or (archive / "artifact-manifest.json")
+        )
+        artifact_manifest = _read_json(artifact_manifest_path, {}) or {}
+        archived_roots = artifact_manifest.get("roots") if isinstance(artifact_manifest, dict) else None
+        if not isinstance(archived_roots, dict):
+            raise ResetEpochError("verified artifact manifest is missing before archive activation")
+        moves = (
+            (root / "work" / "v2-cycle", "active-v2-cycle", evidence.get("cycle_files_sha256"), None),
+            (root / "work" / "v2-journal", "active-v2-journal", evidence.get("journal_sha256"), None),
+            (root / "backups", "active-root-backups", None, archived_roots.get(str(root / "backups"))),
+            (root / "work" / "backups", "active-work-backups", None, archived_roots.get(str(root / "work" / "backups"))),
+        )
+        for source, name, expected_sha256, expected_files in moves:
+            target = archive / name
+            if source.exists() or target.exists():
+                _archive_tree_preserving(
+                    source,
+                    target,
+                    expected_sha256=expected_sha256,
+                    expected_files=expected_files,
+                )
         (root / "work" / "v2-cycle").mkdir(parents=True, exist_ok=True); (root / "work" / "v2-journal").mkdir(parents=True, exist_ok=True); (root / "backups").mkdir(parents=True, exist_ok=True); (root / "work" / "backups").mkdir(parents=True, exist_ok=True)
         projection = root / "work" / "media_registry.epoch-projection.sqlite"
         copied = _registry_projection(root / "work" / "media_registry.sqlite", projection, snapshot["new_epoch_id"])

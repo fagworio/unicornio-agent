@@ -28,12 +28,24 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 
 ## Executor oficial V2 — regra de precedência
 
-O executor editorial operacional é:
+A execução automática agendada pelo Hermes passa pelo supervisor persistente:
 
 ```bash
-set -a; . ./.env; set +a
-PYTHONPATH=.:src .venv/bin/python -m unicornio_editor.cli v2-cycle --root .
+./hermes/supervisor/start-v2-cycle.sh
 ```
+
+Esse wrapper consulta o estado de `unicornio-editorial-v2.service` e, somente
+quando está `inactive`, solicita `systemd start --no-block`; ele retorna sem
+manter o ciclo dentro do timeout do Hermes. A unit executa o `v2-cycle` normal
+por `hermes/supervisor/run-v2-cycle.sh`, carrega o `.env` na fronteira do
+processo e preserva o checkpoint, journals e locks oficiais. Não execute o
+`v2-cycle` diretamente dentro da sessão do cron nem crie outra instância.
+
+Se a unit estiver `active`/`activating`, monitore-a sem iniciar outra. Se
+estiver `failed` ou ausente, pare e reporte o bloqueio; não use `restart`,
+`reset-failed`, `stop` ou recuperação automática após erro de integridade. A
+unit não é habilitada no boot: o cron editorial existente continua sendo o
+único agendador.
 
 O `v2-cycle` executa um preview e um write-mode pinado por rodada, persiste o
 checkpoint em `work/v2-cycle/state.json` e retoma automaticamente uma rodada
