@@ -1,9 +1,11 @@
 import json
 import sqlite3
 import stat
+from pathlib import Path
 
 import pytest
 
+import unicornio_editor.pipeline_v2.cycle_state as cycle_state_module
 from unicornio_editor.pipeline_v2.cycle import CycleConfig, CycleRoundResult, run_cycle
 from unicornio_editor.pipeline_v2.cycle_state import CycleState, CycleStateStore
 
@@ -346,6 +348,109 @@ def test_pre_authorization_blocks_media_registry_effect_after_start(tmp_path):
         db.execute("CREATE TABLE unexpected_media_effect (id INTEGER)")
     with pytest.raises(RuntimeError, match="post or media evidence changed"):
         store.validate_pre_authorization(state)
+
+
+def _create_wal_registry(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT)")
+        db.execute("INSERT INTO evidence(value) VALUES ('stable')")
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for suffix in ("-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def _create_legacy_registry(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT)")
+        db.execute("INSERT INTO evidence(value) VALUES ('stable')")
+        db.commit()
+
+
+def test_pre_authorization_ignores_empty_wal_and_shm_created_by_reader(tmp_path):
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    _create_wal_registry(registry)
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="empty-wal-reader")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+
+    with sqlite3.connect(registry) as db:
+        assert db.execute("SELECT value FROM evidence").fetchone()[0] == "stable"
+
+    assert Path(f"{registry}-wal").exists()
+    assert Path(f"{registry}-wal").stat().st_size == 0
+    evidence = store.validate_pre_authorization(state)
+    assert evidence["status"] == "preauthorization_safe_to_resume"
+    assert evidence["registry_fingerprint"]["status"] == "ok"
+
+
+@pytest.mark.parametrize("mutation", ["insert", "update", "delete", "schema"])
+def test_pre_authorization_blocks_each_real_registry_mutation(tmp_path, mutation):
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    _create_legacy_registry(registry)
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id=f"registry-{mutation}")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+
+    with sqlite3.connect(registry) as db:
+        if mutation == "insert":
+            db.execute("INSERT INTO evidence(value) VALUES ('new')")
+        elif mutation == "update":
+            db.execute("UPDATE evidence SET value='changed' WHERE id=1")
+        elif mutation == "delete":
+            db.execute("DELETE FROM evidence WHERE id=1")
+        else:
+            db.execute("ALTER TABLE evidence ADD COLUMN extra TEXT")
+        db.commit()
+
+    with pytest.raises(RuntimeError, match="post or media evidence changed"):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_blocks_nonempty_wal_without_stable_evidence(tmp_path):
+    registry = tmp_path / "work" / "media_registry.sqlite"
+    _create_wal_registry(registry)
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="nonempty-wal")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    Path(f"{registry}-wal").write_bytes(b"unclassified wal frame")
+
+    with pytest.raises(RuntimeError, match="post or media evidence changed"):
+        store.validate_pre_authorization(state)
+
+
+def test_pre_authorization_blocks_registry_race_during_audit(tmp_path, monkeypatch):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="registry-race")
+    store.start_round(state, round_number=1, request={"batch_size": 1})
+    original = cycle_state_module._capture_registry_fingerprint
+    monkeypatch.setattr(
+        cycle_state_module,
+        "_capture_registry_fingerprint",
+        lambda _path: {
+            "status": "inconclusive",
+            "reason": "registry_changed_during_audit",
+        },
+    )
+    with pytest.raises(RuntimeError, match="post or media evidence changed"):
+        store.validate_pre_authorization(state)
+    monkeypatch.setattr(cycle_state_module, "_capture_registry_fingerprint", original)
+
+
+def test_pre_authorization_audit_is_idempotent_and_preserves_round_identity(tmp_path):
+    store = CycleStateStore(tmp_path)
+    state = store.create({"ready_target": 1}, cycle_id="idempotent-preauth")
+    intent_id = store.start_round(state, round_number=1, request={"batch_size": 1})
+    first = store.validate_pre_authorization(state)
+    second = store.validate_pre_authorization(state)
+    assert first == second
+    assert first["cycle_id"] == "idempotent-preauth"
+    assert first["round_intent_id"] == intent_id
+    assert state.pending_round["authorization_id"] is None
+    assert state.pending_round["preview_selected_ids"] is None
 
 
 def test_pre_authorization_recovery_archives_checkpoint_journal_registry_and_preview(tmp_path):

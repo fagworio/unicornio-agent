@@ -34,6 +34,177 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _sqlite_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _sqlite_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"__bytes__": value.hex()}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _registry_file_state(path: Path) -> dict[str, Any]:
+    path = Path(path)
+    if path.is_symlink():
+        raise RuntimeError(f"media registry path is a symlink: {path.name}")
+    if not path.exists():
+        return {"exists": False}
+    if not path.is_file():
+        raise RuntimeError(f"media registry path is not a regular file: {path.name}")
+    stat_result = path.stat()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        "exists": True,
+        "size": int(stat_result.st_size),
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "inode": int(stat_result.st_ino),
+        "sha256": digest,
+    }
+
+
+def _registry_sidecar_state(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.is_symlink():
+            raise RuntimeError(f"media registry sidecar is a symlink: {sidecar.name}")
+        if not sidecar.exists():
+            result[suffix] = {"exists": False, "size": 0, "sha256": None}
+            continue
+        if not sidecar.is_file():
+            raise RuntimeError(f"media registry sidecar is not a regular file: {sidecar.name}")
+        stat_result = sidecar.stat()
+        size = int(stat_result.st_size)
+        result[suffix] = {
+            "exists": True,
+            "size": size,
+            "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest() if size else None,
+        }
+    return result
+
+
+def _capture_registry_fingerprint(path: Path) -> dict[str, Any]:
+    """Capture logical Registry evidence without turning sidecars into drift.
+
+    An empty WAL/SHM can be created by SQLite readers.  When no WAL frames are
+    present, ``immutable=1`` is safe for this read because there is no sidecar
+    state to ignore; a second physical check still detects a writer racing the
+    audit.  A non-empty WAL is read normally and must remain byte-identical
+    throughout the capture.
+    """
+    path = Path(path)
+    main_state = _registry_file_state(path)
+    sidecars_before = _registry_sidecar_state(path)
+    if not main_state["exists"]:
+        if any(value["exists"] for value in sidecars_before.values()):
+            return {
+                "status": "inconclusive",
+                "reason": "registry_main_missing_with_sidecar",
+                "main": main_state,
+                "wal": sidecars_before["-wal"],
+            }
+        return {
+            "status": "absent",
+            "sha256": None,
+            "main": main_state,
+            "wal": sidecars_before["-wal"],
+        }
+
+    wal_state = sidecars_before["-wal"]
+    wal_nonempty = int(wal_state.get("size") or 0) > 0
+    try:
+        if wal_nonempty:
+            uri = f"file:{quote(str(path.resolve()))}?mode=ro"
+        else:
+            # Do not let a read-only audit create a WAL/SHM sidecar.  This is
+            # conditional: a non-empty WAL is never ignored by this branch.
+            uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=5) as db:
+            db.execute("PRAGMA query_only=ON")
+            schema = [
+                tuple(row)
+                for row in db.execute(
+                    """SELECT type, name, tbl_name, sql
+                       FROM sqlite_master
+                       WHERE name NOT LIKE 'sqlite_%'
+                       ORDER BY type, name, tbl_name"""
+                ).fetchall()
+            ]
+            tables: list[dict[str, Any]] = []
+            for object_type, name, _table_name, _sql in schema:
+                if object_type != "table":
+                    continue
+                identifier = _sqlite_identifier(str(name))
+                columns = [
+                    tuple(row)
+                    for row in db.execute(f"PRAGMA table_info({identifier})").fetchall()
+                ]
+                rows = [
+                    [_sqlite_value(value) for value in row]
+                    for row in db.execute(f"SELECT * FROM {identifier}").fetchall()
+                ]
+                rows.sort(key=lambda value: json.dumps(value, sort_keys=True, default=str))
+                tables.append({"name": str(name), "columns": columns, "rows": rows})
+            payload = {
+                "schema": [list(row) for row in schema],
+                "tables": tables,
+                "user_version": int(db.execute("PRAGMA user_version").fetchone()[0]),
+                "application_id": int(db.execute("PRAGMA application_id").fetchone()[0]),
+            }
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        return {
+            "status": "inconclusive",
+            "reason": "registry_read_failed",
+            "error_type": type(exc).__name__,
+            "main": main_state,
+            "wal": wal_state,
+        }
+
+    main_after = _registry_file_state(path)
+    sidecars_after = _registry_sidecar_state(path)
+    wal_after = sidecars_after["-wal"]
+    if main_after != main_state or wal_after != wal_state:
+        return {
+            "status": "inconclusive",
+            "reason": "registry_changed_during_audit",
+            "main": main_after,
+            "wal": wal_after,
+        }
+    return {
+        "status": "ok",
+        "sha256": hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest(),
+        "main": main_state,
+        "wal": wal_state,
+    }
+
+
+def _registry_fingerprint_matches(
+    baseline: Mapping[str, Any], current: Mapping[str, Any]
+) -> bool:
+    if baseline.get("status") != current.get("status"):
+        return False
+    if baseline.get("status") == "absent":
+        return True
+    if baseline.get("status") != "ok" or current.get("status") != "ok":
+        return False
+    if baseline.get("sha256") != current.get("sha256"):
+        return False
+    if baseline.get("main") != current.get("main"):
+        return False
+    baseline_wal = baseline.get("wal") or {}
+    current_wal = current.get("wal") or {}
+    # Existence of an empty WAL is not evidence of an effect; its content is.
+    return (
+        int(baseline_wal.get("size") or 0) == int(current_wal.get("size") or 0)
+        and baseline_wal.get("sha256") == current_wal.get("sha256")
+    )
+
+
 @dataclass
 class CycleState:
     """Serializable checkpoint for an active or completed cycle."""
@@ -403,6 +574,11 @@ class CycleStateStore:
         # it becomes an authorization only after selected IDs are persisted.
         round_intent_id = str(authorization_id or uuid.uuid4().hex)
         protection = load_epoch_protection(self.root)
+        registry_fingerprint = _capture_registry_fingerprint(
+            self.root / "work" / "media_registry.sqlite"
+        )
+        if registry_fingerprint.get("status") == "inconclusive":
+            raise RuntimeError("media Registry evidence is inconclusive at round start")
         state.pending_round = {
             "round_number": int(round_number),
             "request": dict(request),
@@ -412,6 +588,7 @@ class CycleStateStore:
             "authorization_status": "preview",
             "epoch_id": protection.epoch_id,
             "epoch_policy_fingerprint": protection.policy_fingerprint,
+            "registry_fingerprint": registry_fingerprint,
         }
         self.save(
             state,
@@ -419,6 +596,7 @@ class CycleStateStore:
             round_number=round_number,
             request=dict(request),
             round_intent_id=round_intent_id,
+            registry_fingerprint=registry_fingerprint,
         )
         return round_intent_id
 
@@ -633,17 +811,34 @@ class CycleStateStore:
                 if path.stat().st_mtime > started_epoch:
                     changed_post_journals.append(path.stem)
         registry_path = self.root / "work" / "media_registry.sqlite"
-        changed_registry_files = []
-        for suffix in ("", "-wal"):
-            path = Path(f"{registry_path}{suffix}")
-            if path.is_symlink():
-                raise RuntimeError("media registry symlink makes pre-authorization evidence ambiguous")
-            if path.is_file() and path.stat().st_mtime > started_epoch:
-                changed_registry_files.append(path.name)
-        if changed_post_journals or changed_registry_files:
+        current_registry = _capture_registry_fingerprint(registry_path)
+        baseline_registry = pending.get("registry_fingerprint")
+        if isinstance(baseline_registry, Mapping):
+            registry_changed = not _registry_fingerprint_matches(
+                baseline_registry, current_registry
+            )
+            registry_reason = "logical_or_physical_registry_change"
+        else:
+            # Legacy checkpoints have no trustworthy baseline.  A missing
+            # Registry remains safe, but an existing Registry is resumable
+            # only when its main file predates the intent and no WAL frames
+            # are present. Empty WAL/SHM sidecars alone are reader noise.
+            registry_changed = current_registry.get("status") == "inconclusive"
+            registry_reason = str(
+                current_registry.get("reason") or "registry_evidence_incomplete"
+            )
+            if current_registry.get("status") == "ok":
+                current_main = current_registry.get("main") or {}
+                registry_changed = (
+                    int((current_registry.get("wal") or {}).get("size") or 0) > 0
+                    or int(current_main.get("mtime_ns") or 0)
+                    > int(started_epoch * 1_000_000_000)
+                )
+                registry_reason = "legacy_registry_changed_after_round_start"
+        if changed_post_journals or registry_changed:
             raise RuntimeError(
                 "post or media evidence changed after round_started: "
-                f"journals={changed_post_journals[:20]}, registry={changed_registry_files}"
+                f"journals={changed_post_journals[:20]}, registry={registry_reason}"
             )
         if isinstance(pending, dict):
             pending["round_intent_id"] = intent_id
@@ -656,6 +851,7 @@ class CycleStateStore:
             "round_intent_id": intent_id,
             "selected_ids": None,
             "wordpress_writes": 0,
+            "registry_fingerprint": current_registry,
         }
 
     def validate_round_authorization(self, state: CycleState) -> str:
@@ -875,6 +1071,7 @@ class CycleStateStore:
                 registry_copy = temporary / "media_registry.sqlite"
                 source_uri = f"file:{quote(str(registry_source.resolve()))}?mode=ro"
                 with sqlite3.connect(source_uri, uri=True, timeout=5) as source_db:
+                    source_db.execute("PRAGMA query_only=ON")
                     with sqlite3.connect(registry_copy) as destination_db:
                         source_db.backup(destination_db)
                 os.chmod(registry_copy, 0o600)
@@ -893,6 +1090,7 @@ class CycleStateStore:
                 "authorization_id": None,
                 "selected_ids": None,
                 "preview": {"status": "not_run_yet"},
+                "registry_fingerprint": evidence.get("registry_fingerprint"),
                 "files": {
                     "state.json": checkpoint_hash,
                     "journal.jsonl": journal_hash,
