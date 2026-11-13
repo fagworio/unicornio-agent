@@ -43,6 +43,7 @@ SCENARIOS = (
     "test_controlled_source_acquisition_composes_checklists_and_commits_ready_media",
     "test_automatic_media_pipeline_reaches_ready",
     "test_automatic_media_pipeline_retries_without_partial_apply",
+    "test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop",
     "test_rejected_media_candidate_is_replaced_before_ready_readback",
     "test_visual_identity_retry_persists_and_resumes_after_cooldown",
     "test_started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks",
@@ -61,6 +62,7 @@ SCENARIO_OPERATIONS = {
     "controlled_source_acquisition_composes_checklists_and_commits_ready_media": ["media_to_ready"],
     "automatic_media_pipeline_reaches_ready": ["media_pipeline_ready"],
     "automatic_media_pipeline_retries_without_partial_apply": ["media_pipeline_retry"],
+    "v1_safe_migration_reaches_ready_and_repeated_apply_is_noop": ["v1_restoration"],
     "rejected_media_candidate_is_replaced_before_ready_readback": ["media_candidate_replacement"],
     "visual_identity_retry_persists_and_resumes_after_cooldown": [
         "visual_retry_waiting", "visual_retry_still_waiting", "visual_retry_resumed",
@@ -82,6 +84,7 @@ POST_FIXTURES = {
     "media_ready": ("pending", False),
     "media_pipeline_ready": ("pending", False),
     "media_pipeline_retry": ("pending", False),
+    "v1_restoration": ("pending", False),
     "media_replacement": ("pending", False),
     "visual_retry": ("pending", False),
     "visual_retry_new": ("pending", False),
@@ -268,6 +271,7 @@ def main() -> int:
         "media_acquisition": {
             "source": "controlled local HTTP with technical source-asset matching",
             "visual_provider": "controlled local OpenAI-compatible endpoint",
+            "v1_migration": "explicit safe V2->V1 bridge; no content or attachment migration",
             "trailer_waiver": "synthetic audited official_not_found fixture; no live trailer search",
             "wordpress": "real ephemeral REST API and database",
         },

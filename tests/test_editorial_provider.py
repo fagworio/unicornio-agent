@@ -245,6 +245,16 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertEqual(result["provider_requests"], 1)
         self.assertEqual(len(EditorialHandler.calls), 1)
 
+    @mock.patch("unicornio_editor.editorial_provider.hermes_command_available", return_value=False)
+    def test_explicit_hermes_never_falls_back_to_legacy_key(self, _available):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(EditorialProviderError, "explicitamente selecionado"):
+                self._run(
+                    Path(directory), provider="hermes", api_key="legacy-key",
+                    hermes_command="hermes",
+                )
+        self.assertEqual(len(EditorialHandler.calls), 0)
+
     def test_provider_joins_retry_mode_from_input_after_model_response(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self._run(Path(directory), retry_mode="uncertain_second_pass")

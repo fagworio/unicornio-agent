@@ -102,6 +102,7 @@ from .pipeline_v2.quarantine import (
 )
 from .pipeline_v2.lock import RunSessionLock
 from .pipeline_v2.epoch_protection import EpochProtectionError, load_epoch_protection
+from .eligibility import assert_v1_mutation_allowed, resolve_post_eligibility
 
 META_PUBLISH_OPERATION_ID = "_ai_editor_publish_operation_id"
 
@@ -236,6 +237,10 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
     assert_post_not_quarantined(root, post_id, operation="prepare")
     post = client.get_post(post_id)
     _require_pending(post)
+    try:
+        assert_v1_mutation_allowed(post, root, operation="prepare")
+    except RuntimeError as exc:
+        raise WorkflowError(str(exc)) from exc
     backup = SnapshotStore(root).save(post_id, post)
     raw = _raw_content(post)
     return {
@@ -379,6 +384,22 @@ def _apply_editorial_unlocked(
     started_at = time.monotonic()
     post = client.get_post(post_id)
     _require_pending(post)
+    resolved = resolve_post_eligibility(post, root)
+    if not resolved.is_v2 and resolved.state == STATE_READY:
+        # A pending post can legitimately be READY while Publisher is paused.
+        # Reapplying the same editorial would spend provider budget and could
+        # duplicate uploads; the durable READY marker is already the result.
+        return {
+            "post_id": post_id,
+            "status": "noop",
+            "state": STATE_READY,
+            "wordpress_changed": False,
+            "idempotent": True,
+        }
+    try:
+        eligibility = assert_v1_mutation_allowed(post, root, operation="apply")
+    except RuntimeError as exc:
+        raise WorkflowError(str(exc)) from exc
     state_before = read_state(post)
     partial_path = _partial_manifest_path(root, post_id)
     if state_before.get("state") == STATE_PARTIAL:
@@ -388,7 +409,7 @@ def _apply_editorial_unlocked(
         if partial_path.is_file():
             append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
     prior_media = _partial_media_records(partial_manifest)
-    attempts_before = state_before["attempts"]
+    attempts_before = eligibility.attempts
     append_telemetry(
         root, "apply_started", post_id=post_id,
         attempt=attempts_before + 1, first_pass=attempts_before == 0,
@@ -5153,41 +5174,19 @@ def build_queue_report(
         if not isinstance(post_id, int):
             continue
         backups_dir = root / "backups" / str(post_id)
+        eligibility = resolve_post_eligibility(post, root)
         state_info = read_state(post)
-        state = state_info["state"]
-        v2_state = None
-        raw_v2_state = (post.get("meta") or {}).get("_hermes_work_state")
-        if raw_v2_state:
-            try:
-                from .pipeline_v2.model import WorkState
-
-                decoded_v2 = json.loads(raw_v2_state) if isinstance(raw_v2_state, str) else raw_v2_state
-                if isinstance(decoded_v2, dict) and decoded_v2.get("version") == 2:
-                    v2_state = WorkState.from_dict(decoded_v2)
-                    # V2 is authoritative whenever present. The legacy
-                    # _hermes_state marker is only a compatibility projection.
-                    state = v2_state.state.value
-                    state_info = {
-                        **state_info,
-                        "attempts": v2_state.retry.attempts,
-                        "next_retry_at": v2_state.retry.next_at or "",
-                        "no_progress_attempts": v2_state.retry.no_progress,
-                    }
-            except (TypeError, ValueError, json.JSONDecodeError):
-                v2_state = None
-        latest_file = (backups_dir / "editorial.latest.json").is_file()
-        blocked_file = (backups_dir / "editorial.blocked.json").is_file()
-        uncertain_file = (backups_dir / "uncertain.json").is_file()
-        if state is None:
-            # Legado (sem meta de estado): marcadores de filesystem decidem.
-            if uncertain_file:
-                state = STATE_UNCERTAIN
-            elif blocked_file:
-                state = STATE_BLOCKED
-            elif latest_file:
-                state = STATE_READY  # legado: latest sem bloqueio == pronto
-            else:
-                state = STATE_NEW
+        state = eligibility.state
+        v2_state = eligibility.v2_state
+        if v2_state is not None:
+            # V2 is authoritative whenever present. The legacy _hermes_state
+            # marker is only a compatibility projection.
+            state_info = {
+                **state_info,
+                "attempts": v2_state.retry.attempts,
+                "next_retry_at": v2_state.retry.next_at or "",
+                "no_progress_attempts": v2_state.retry.no_progress,
+            }
         # Elegibilidade usa o estado RESOLVIDO (legado incluido): blocked sem
         # next_retry_at (ou com ele vencido) volta a agenda do monitor.
         effective_state = {**state_info, "state": state}
@@ -5212,11 +5211,11 @@ def build_queue_report(
             if retry_eligible(effective_state):
                 eligible_rework.append(post_id)
         else:  # NEW / PROCESSING / V2 pending / desconhecido
-            if v2_state is None:
+            if not eligibility.is_v2:
                 unprocessed.append(post_id)
-            if v2_state is not None and state == "pending" and cooldown_expired(state_info.get("next_retry_at") or ""):
+            if eligibility.is_v2 and state == "pending" and eligibility.cooldown_expired:
                 v2_eligible.append(post_id)
-            if v2_state is None and _is_recent(post, cutoff):
+            if not eligibility.is_v2 and _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
         rows.append(
@@ -5226,6 +5225,8 @@ def build_queue_report(
                 "date_gmt": post.get("date_gmt"),
                 "word_count": word_count((post.get("content") or {}).get("rendered") or ""),
                 "state": state,
+                "state_source": eligibility.source,
+                "eligibility_reason": eligibility.reason,
                 "attempts": state_info["attempts"],
                 "next_retry_at": state_info["next_retry_at"],
                 "last_error": state_info["last_error"][:160],
@@ -5238,14 +5239,13 @@ def build_queue_report(
                 "awaiting_human": state in {STATE_AWAITING_HUMAN, "human_required"} or post.get("_wp_awaiting_human"),
                 "skipped": state == STATE_SKIPPED,
                 "title": title,
-                "v2": v2_state is not None,
+                "v2": eligibility.is_v2,
                 "phase": v2_state.phase.value if v2_state is not None else None,
                 "blocker": v2_state.blocker.value if v2_state is not None and v2_state.blocker else None,
                 "no_progress": v2_state.retry.no_progress if v2_state is not None else state_info.get("no_progress_attempts", 0),
                 "eligible": (
-                    cooldown_expired(v2_state.retry.next_at if v2_state is not None else state_info.get("next_retry_at") or "")
-                    and state == "pending"
-                    if v2_state is not None else state in (STATE_NEW, STATE_BLOCKED, STATE_PARTIAL)
+                    eligibility.cooldown_expired and state == "pending"
+                    if eligibility.is_v2 else eligibility.eligible_for_v1
                 ),
                 "media": (
                     {
@@ -5394,19 +5394,11 @@ def build_cards(
             post_id = cand.get("id")
             if not isinstance(post_id, int):
                 continue
-            backups_dir = root / "backups" / str(post_id)
             state_info = read_state(cand)
-            state = state_info["state"]
-            if state is None:
-                # Legado: marcadores de filesystem decidem (igual ao queue).
-                if (backups_dir / "uncertain.json").is_file():
-                    state = STATE_UNCERTAIN
-                elif (backups_dir / "editorial.blocked.json").is_file():
-                    state = STATE_BLOCKED
-                elif (backups_dir / "editorial.latest.json").is_file():
-                    state = STATE_READY
-                else:
-                    state = STATE_NEW
+            eligibility = resolve_post_eligibility(cand, root)
+            state = eligibility.state
+            if eligibility.is_v2:
+                continue
             if state in (STATE_BLOCKED, STATE_PARTIAL) and retry_eligible({**state_info, "state": state}):
                 posts.append(cand)
     remaining = per_page - len(posts)
@@ -5433,17 +5425,7 @@ def build_cards(
     # Reserve deterministic capacity for UNCERTAIN second passes so NEW cannot
     # starve them, while keeping the independent quota bounded.
     def _state_for_card(post: dict[str, Any]) -> str | None:
-        state_value = read_state(post)["state"]
-        if state_value is not None:
-            return state_value
-        marker_dir = root / "backups" / str(post.get("id"))
-        if (marker_dir / "uncertain.json").is_file():
-            return STATE_UNCERTAIN
-        if (marker_dir / "editorial.blocked.json").is_file():
-            return STATE_BLOCKED
-        if (marker_dir / "editorial.latest.json").is_file():
-            return STATE_READY
-        return STATE_NEW
+        return resolve_post_eligibility(post, root).state
 
     eligible_uncertain = [
         post for post in ordered
@@ -5479,20 +5461,11 @@ def build_cards(
             continue
         backups_dir = root / "backups" / str(post_id)
         state_info = read_state(post)
-        state = state_info["state"]
-        blocked_file = (backups_dir / "editorial.blocked.json").is_file()
-        uncertain_file = (backups_dir / "uncertain.json").is_file()
-        latest_file = (backups_dir / "editorial.latest.json").is_file()
-        if state is None:
-            # Legado: marcadores de filesystem decidem.
-            if uncertain_file:
-                state = STATE_UNCERTAIN
-            elif blocked_file:
-                state = STATE_BLOCKED
-            elif latest_file:
-                state = STATE_READY
-            else:
-                state = STATE_NEW
+        eligibility = resolve_post_eligibility(post, root)
+        state = eligibility.state
+        # V2 posts are surfaced by the V2 scheduler, never as V1 cards.
+        if eligibility.is_v2:
+            continue
         uncertain_retry_eligible = False
         if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
             uncertain_retry_eligible = (
@@ -5988,33 +5961,12 @@ def _retry_post_unlocked(
     post = client.get_post(post_id)
     if post.get("status") not in ("pending", "awaiting_human"):
         raise WorkflowError(f"post {post_id} nao esta pending/awaiting_human ({post.get('status')})")
+    try:
+        eligibility = assert_v1_mutation_allowed(post, root, operation="retry")
+    except RuntimeError as exc:
+        raise WorkflowError(str(exc)) from exc
     if config.dry_run:
         raise WorkflowError("retry e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
-    existing_v2 = (post.get("meta") or {}).get("_hermes_work_state")
-    reopened = None
-    if existing_v2:
-        try:
-            from .pipeline_v2.model import LifecycleState, RetryInfo, WorkState
-
-            raw_v2 = json.loads(existing_v2) if isinstance(existing_v2, str) else existing_v2
-            previous = WorkState.from_dict(raw_v2)
-            reopened = WorkState(
-                state=LifecycleState.PENDING,
-                phase=previous.phase,
-                blocker=previous.blocker,
-                retry=RetryInfo(attempts=0, no_progress=0, next_at=None),
-                relevance_approved=previous.relevance_approved,
-                media=previous.media,
-            )
-            serialized = json.dumps(reopened.to_dict(), ensure_ascii=False, separators=(",", ":"))
-            client.update_post(post_id, {"meta": {"_hermes_work_state": serialized}})
-            readback = client.get_post(post_id)
-            meta = readback.get("meta") or {}
-            if meta.get("_hermes_work_state") != serialized:
-                raise WorkflowError(f"V2 retry read-back failed for post {post_id}")
-        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            raise WorkflowError(f"estado V2 invalido para retry {post_id}: {exc}") from exc
-
     if post.get("status") == "awaiting_human":
         client.move_to_status(post_id, "pending")
         moved = client.get_post(post_id)
@@ -6035,16 +5987,10 @@ def _retry_post_unlocked(
     final_meta = final.get("meta") if isinstance(final.get("meta"), dict) else {}
     if final_meta.get("_hermes_state") != STATE_BLOCKED or str(final_meta.get("_hermes_attempts") or "") != "0":
         raise WorkflowError(f"retry legacy read-back failed for post {post_id}")
-    if reopened is not None:
-        from .pipeline_v2.model import WorkState
-        raw_final = final_meta.get("_hermes_work_state")
-        raw_final = json.loads(raw_final) if isinstance(raw_final, str) else raw_final
-        if not isinstance(raw_final, dict) or WorkState.from_dict(raw_final) != reopened:
-            raise WorkflowError(f"V2 retry final read-back failed for post {post_id}")
     return {
         "post_id": post_id,
         "status": "retried",
-        "state": reopened.state.value if reopened is not None else STATE_BLOCKED,
+        "state": STATE_BLOCKED,
         "attempts": 0,
         "wordpress_changed": True,
         "readback": True,

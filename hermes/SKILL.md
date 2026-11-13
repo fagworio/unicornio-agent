@@ -26,71 +26,35 @@ algo falhar) e `references/hash-imagens-analise.md` (frames repetidos).
 - Nunca logue credenciais, tokens, cookies ou headers completos.
 - Nunca use posts de produção para validação local.
 
-## Executor oficial V2 — regra de precedência
+## Executor oficial V1 — regra de precedência
 
-A execução automática agendada pelo Hermes passa pelo supervisor persistente:
+O cron editorial restaura o fluxo V1 por comandos explícitos e idempotentes:
 
 ```bash
-./hermes/supervisor/start-v2-cycle.sh
+unicornio-editor cards --compact --root .
+unicornio-editor prepare-batch POST_ID --batch-id BATCH_ID --root .
+unicornio-editor editorial-generate-batch \
+  work/batches/BATCH_ID/editorial.input.json --root .
+unicornio-editor apply-batch work/batches/BATCH_ID/editorial.output.json \
+  --compact --root .
 ```
 
-Esse wrapper consulta o estado de `unicornio-editorial-v2.service` e, somente
-quando está `inactive`, solicita `systemd start --no-block`; ele retorna sem
-manter o ciclo dentro do timeout do Hermes. A unit executa o `v2-cycle` normal
-por `hermes/supervisor/run-v2-cycle.sh`, carrega o `.env` na fronteira do
-processo e preserva o checkpoint, journals e locks oficiais. Não execute o
-`v2-cycle` diretamente dentro da sessão do cron nem crie outra instância.
+`media-resolve-batch` e `vision-batch` só são executados quando o card pedir,
+antes do `apply`. O monitor continua sendo somente leitura (`queue --monitor`)
+e o Publisher permanece separado e pausado. Esta instalação não executa
+`v2-cycle`, `v2-run`, `start-v2-cycle` ou qualquer supervisor V2.
 
-Se a unit estiver `active`/`activating`, monitore-a sem iniciar outra. Se
-estiver `failed` ou ausente, pare e reporte o bloqueio; não use `restart`,
-`reset-failed`, `stop` ou recuperação automática após erro de integridade. A
-unit não é habilitada no boot: o cron editorial existente continua sendo o
-único agendador.
+Antes de cada preparação e aplicação, o código revalida `pending`, quarentena,
+cooldown, tentativas, lock e estado. Um post com `_hermes_work_state` é V2,
+mesmo que `_hermes_state` esteja ausente ou inválido; ele não vira `NEW` e não
+é migrado automaticamente. Estados incertos permanecem bloqueados. Use uma
+migração administrativa explícita somente quando houver evidência segura.
 
-O `v2-cycle` executa um preview e um write-mode pinado por rodada, persiste o
-checkpoint em `work/v2-cycle/state.json` e retoma automaticamente uma rodada
-interrompida. A seleção de cada preview é a única autorização de escopo: não
-adicionar `--post-id`, não ampliar allowlists, não alterar cooldowns e não
-processar IDs fora de `selected_ids`. O `v2-run` continua disponível como
-executor de uma única rodada e coordena EDITORIAL → MEDIA → COMPOSE → VALIDATE
-→ READY/RETRY/HUMAN_REQUIRED.
-
-O ciclo encerra quando alcança `EDITOR_V2_CYCLE_READY_TARGET`, esgota orçamento,
-fica sem trabalho elegível, conclui a fase `DRAINING` de retries após
-estagnação ou encontra divergência crítica. Em `DRAINING`, novas admissões são
-fechadas e somente retries elegíveis podem entrar.
-Falhas de autorização ou executor deixam o checkpoint em estado retomável; não
-use `--fresh` para descartar uma execução interrompida.
-Retries editoriais fora de `seen_post_ids` são novas admissões para o ciclo e
-nunca podem entrar em `DRAINING`. Uma autorização pendente incompatível pode ser
-invalidada somente sob o lock, quando não há journal nem evidência de write no
-readback; o evento `round_authorization_invalidated` preserva a seleção e os
-contadores históricos sem contar uma rodada não executada. Qualquer evidência de
-write exige reconciliação por post. O limite de duração considera apenas tempo
-de execução, não o intervalo de pausa entre invocações do cron.
-Reconciliação só é válida quando `cycle_id` e `cycle_round` do journal
-coincidem exatamente com a autorização pendente; journal histórico de outro
-ciclo não pode ser reutilizado. A invalidação consulta WordPress e
-MediaRegistry somente para leitura e para diante de qualquer evidência parcial.
-Quando um journal válido comprova execução fora do orçamento, registre
-`round_reconciled_out_of_budget`: preserve os resultados individuais, remova a
-pendência e não incremente contadores nem repita writes.
-
-Os comandos do lifecycle legado (`prepare-batch`, `editorial-generate-batch`,
-`media-resolve-batch`, `apply-batch`, `media-search-web` e `apply`) não podem ser
-executados pelo cron, pelo operador ou por uma reinstalação. Qualquer referência
-legada mantida abaixo é somente documentação histórica e não autoriza execução.
-O write-mode revalida cada ID esperado contra admissão, quarentena, cooldown e
-estado atual. A entrada de novos posts pode mudar a ordenação da fila, mas não
-substitui os IDs autorizados pelo preview; se algum ID esperado deixar de ser
-elegível, o write-mode bloqueia sem executar stages.
-
-O monitor possui um heartbeat limitado por `HERMES_EDITORIAL_HEARTBEAT_SECONDS`
-(padrão: 7200 segundos). Ele só aparece quando existe trabalho V2 elegível ou
-retomável e permite uma nova tentativa caso a mesma seleção tenha ficado presa
-após timeout, lock ou falha de provider. Não use o heartbeat para contornar
-quarentena, `recovery_uncertain` ou um checkpoint divergente; nesses casos a
-execução deve permanecer bloqueada e ser auditada.
+O fluxo V1 mantém snapshots, manifests, MediaRegistry e `_hermes_state`. READY
+só é produzido depois do checklist completo, mídia aplicada, featured válida e
+readback. Se Hermes não fornecer evidência estruturada de `vision_analyze`, a
+imagem fica bloqueada; texto do modelo nunca é prova de tool call. Uma segunda
+execução idêntica retorna `noop` e não repete custo, upload ou chamada externa.
 
 ## Orquestração e auditoria V2
 
@@ -120,7 +84,7 @@ execução deve permanecer bloqueada e ser auditada.
 ## Procedimentos legados — somente referência histórica (NÃO EXECUTAR)
 
 > Esta seção não pertence ao lifecycle operacional. Para produção, use somente
-> `v2-run` conforme a seção **Executor oficial V2** acima.
+> os comandos V1 conforme a seção **Executor oficial V1** acima.
 
 Quando houver dois posts novos elegíveis, a antiga estratégia de microbatch era
 
@@ -214,10 +178,11 @@ Não envie para o modelo uma resposta combinada com conteúdo de posts sem
 correlação e a telemetria carrega `batch_id`/`batch_stage` quando a execução é
 batch.
 
-## Fluxo V2 oficial — referência operacional
+## Compatibilidade V2 — não executar no cron V1
 
-A execução real é feita pelo `v2-run` e não pelos procedimentos históricos
-abaixo. Estes invariantes devem ser verificados no resultado do runner:
+Os invariantes V2 abaixo são somente referência de bloqueio e auditoria. O cron
+V1 não executa `v2-run` nem converte um post V2 em NEW; quando encontrar
+`_hermes_work_state`, deixe o post para o executor V2 e reporte o motivo:
 
 1. `v2-run --preview` antes de qualquer write-mode;
    `images{required,valid,missing,irrelevant,non_webp}`, `featured` (ação),

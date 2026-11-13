@@ -774,6 +774,16 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="sem esta flag o comando apenas relata o que faria")
     migrate_parser.add_argument("--limit", type=int, default=0)
 
+    safe_v1_parser = subparsers.add_parser(
+        "v2-migrate-safe-v1",
+        help="migração administrativa e fail-closed de V2 intocado para V1 "
+        "(dry-run por padrão; nunca altera conteúdo ou anexos)",
+    )
+    safe_v1_parser.add_argument("--root", type=Path, default=Path("."))
+    safe_v1_parser.add_argument("--post-id", action="append", type=int, default=[])
+    safe_v1_parser.add_argument("--apply", action="store_true", help="confirma a migração de metadados")
+    safe_v1_parser.add_argument("--limit", type=int, default=0)
+
     rebase_cooldowns_parser = subparsers.add_parser(
         "v2-rebase-cooldowns",
         help="rebaseia cooldowns V2 de MEDIA criados por política antiga "
@@ -1194,6 +1204,7 @@ def preflight_apply_candidate(
     config: Any,
     post_id: int,
     editorial: dict[str, Any],
+    root: Path | None = None,
 ) -> tuple[bool, str]:
     """Validate admission before reserving a session-touch slot.
 
@@ -1206,6 +1217,14 @@ def preflight_apply_candidate(
         return True, ""  # lightweight test doubles/legacy clients
     if current_post.get("status") != "pending":
         return False, f"post status is {current_post.get('status')}, expected pending"
+    if root is not None:
+        from .eligibility import resolve_post_eligibility
+
+        eligibility = resolve_post_eligibility(current_post, root)
+        if eligibility.is_v2:
+            return False, f"V2 state requires the V2 executor ({eligibility.reason})"
+        if not eligibility.eligible_for_v1:
+            return False, f"post is not eligible ({eligibility.reason})"
     try:
         validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
     except (ValueError, TypeError, KeyError) as exc:
@@ -1356,7 +1375,7 @@ def _apply_editorial_batch(
                     continue
             try:
                 admissible, preflight_reason = preflight_apply_candidate(
-                    client, config, post_id, item["editorial"]
+                    client, config, post_id, item["editorial"], root
                 )
             except WordPressError as exc:
                 outcomes.append({
@@ -3713,6 +3732,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 apply=bool(getattr(args, "apply", False)),
                 limit=int(getattr(args, "limit", 0) or 0),
             )
+        elif args.command == "v2-migrate-safe-v1":
+            from .pipeline_v2.v1_migration import migrate_safe_v2_to_v1
+
+            result = migrate_safe_v2_to_v1(
+                client,
+                args.root,
+                post_ids=list(getattr(args, "post_id", []) or []),
+                apply=bool(getattr(args, "apply", False)),
+                limit=int(getattr(args, "limit", 0) or 0),
+            )
         elif args.command == "v2-rebase-cooldowns":
             from .pipeline_v2.migration import rebase_media_cooldowns
 
@@ -5013,7 +5042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.root, args.post_id, payload
                 )
             admissible, preflight_reason = preflight_apply_candidate(
-                client, config, args.post_id, payload
+                client, config, args.post_id, payload, args.root
             )
             if not admissible:
                 result = {

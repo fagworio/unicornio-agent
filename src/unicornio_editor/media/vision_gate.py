@@ -46,6 +46,7 @@ from urllib.request import Request, urlopen
 
 from ..ai_provider import AIProviderError, call_hermes_oneshot
 from .downloader import download_image
+from .hermes_discovery import _tool_evidence
 
 
 class VisionGateError(RuntimeError):
@@ -57,6 +58,26 @@ class VisionInputUnavailable(RuntimeError):
 
 
 VISUAL_DECISIONS = ("SAME_IMAGE", "SAME_ART_CROP", "DIFFERENT", "UNCERTAIN", "ERROR")
+
+
+def _require_hermes_tool_evidence(usage: dict[str, Any], *, root: Any, detail: str,
+                                  model: str, base_url: str,
+                                  operation: str = "subject_validation",
+                                  candidate_ids: list[str] | None = None) -> None:
+    """Reject a textual answer when Hermes cannot prove tool execution."""
+
+    evidence, source = _tool_evidence(usage, "vision_analyze")
+    if evidence:
+        return
+    _registrar_chamada(
+        root, detail=detail, model=model or "hermes-configured", base_url=base_url,
+        operation=operation, erro="vision_tool_evidence_unavailable",
+        evidence_source=source, provider="hermes", candidate_ids=candidate_ids,
+    )
+    raise VisionGateError(
+        "Hermes retornou texto sem evidência verificável de vision_analyze; "
+        "a imagem permanece bloqueada"
+    )
 
 
 @dataclass(frozen=True)
@@ -447,6 +468,9 @@ def _call_vision(
                     base_url=base_url, erro=str(exc), provider="hermes",
                 )
                 raise VisionGateError(f"Hermes não conseguiu analisar a imagem: {exc}") from exc
+            _require_hermes_tool_evidence(
+                usage, root=root, detail=detail, model=model, base_url=base_url,
+            )
             _registrar_chamada(
                 root, detail=detail, model=model or "hermes-configured", base_url=base_url,
                 usage=usage, provider="hermes",
@@ -567,6 +591,11 @@ def _call_visual_comparison(
                     candidate_ids=[reference_id, candidate_id],
                 )
                 raise VisionGateError(f"Hermes não conseguiu comparar as imagens: {exc}") from exc
+            _require_hermes_tool_evidence(
+                usage, root=root, detail=detail, model=model, base_url=base_url,
+                operation="visual_comparison",
+                candidate_ids=[reference_id, candidate_id],
+            )
             _registrar_chamada(
                 root, detail=detail, model=model or "hermes-configured", base_url=base_url,
                 operation="visual_comparison", usage=usage, provider="hermes",

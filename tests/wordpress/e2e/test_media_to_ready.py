@@ -30,9 +30,11 @@ from unicornio_editor.pipeline_v2.runtime import WordPressWriterV2, run_v2
 from unicornio_editor.pipeline_v2.production import editorial_fingerprint
 from unicornio_editor.workflow import (
     _execute_media_plan,
+    apply_editorial,
     compose_final_content,
     validate_media_plan,
 )
+from unicornio_editor.pipeline_v2.v1_migration import migrate_safe_v2_to_v1
 
 
 pytestmark = pytest.mark.integration
@@ -355,6 +357,91 @@ def test_automatic_media_pipeline_retries_without_partial_apply(wordpress_e2e_ca
         assert after["status"] == "pending"
         assert after["featured_media"] == before["featured_media"] == 0
         assert after["content_sha256"] == before["content_sha256"]
+
+
+def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2e_case, monkeypatch):
+    """V2 untouched -> explicit V1 bridge -> READY, with no second upload/AI call."""
+
+    monkeypatch.setattr(
+        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        lambda *args, **kwargs: (None, "official_not_found"),
+    )
+    case = wordpress_e2e_case
+    post_id = case.post_id("v1_restoration")
+    with ControlledSource() as source:
+        source_url = f"{source.base_url}/article"
+        editorial = _automatic_pipeline_editorial()
+        candidates = discover_article_source_candidates(
+            source_url,
+            subject="Hollow Knight Silksong",
+            limit=8,
+            stats={},
+            url_policy="off",
+            root=case.root,
+        )
+        by_name = {str(item["direct_image_url"]).rsplit("/", 1)[-1]: item for item in candidates}
+
+        def media_item(name: str, paragraph_index: int, featured: bool, query: str) -> dict[str, Any]:
+            candidate = by_name[name]
+            allowed = {
+                "paragraph_index", "source_page_url", "direct_image_url", "alt_text",
+                "is_featured", "subject", "search_query", "candidate_id",
+            }
+            return {
+                **{key: candidate[key] for key in allowed if key in candidate},
+                "paragraph_index": paragraph_index,
+                "is_featured": featured,
+                "search_query": query,
+            }
+
+        editorial["media_plan"] = [
+            media_item("hollow-knight-silksong-key-art.png", 0, True, "Hollow Knight Silksong key art"),
+            media_item("hollow-knight-silksong-screenshot-one.png", 0, False, "Hollow Knight Silksong gameplay screenshot"),
+            media_item("hollow-knight-silksong-screenshot-two.png", 3, False, "Hollow Knight Silksong gameplay screenshot"),
+        ]
+        case.client.update_post(
+            post_id,
+            {
+                "title": editorial["seo"]["title"],
+                "meta": {"_hermes_work_state": json.dumps(WorkState().to_dict(), separators=(",", ":"))},
+            },
+        )
+        migration = migrate_safe_v2_to_v1(case.client, case.root, post_ids=[post_id], apply=True)
+        assert migration["migrated"] == 1, migration
+
+        config = _automatic_pipeline_config(case, source, post_id)
+        upload_count = 0
+        original_upload = case.client.upload_media
+
+        def counted_upload(*args, **kwargs):
+            nonlocal upload_count
+            upload_count += 1
+            return original_upload(*args, **kwargs)
+
+        monkeypatch.setattr(case.client, "upload_media", counted_upload)
+        first = apply_editorial(case.client, config, case.root, post_id, editorial)
+        first_calls = len(source.operations)
+        first_uploads = upload_count
+        after_first = case.client.get_post(post_id)
+        assert first["status"] == "ready", first
+        assert (after_first.get("meta") or {}).get("_hermes_state") == "ready"
+        assert int(after_first.get("featured_media") or 0) > 0
+        assert "wp-content/uploads" in str((after_first.get("content") or {}).get("raw") or "")
+
+        second = apply_editorial(case.client, config, case.root, post_id, editorial)
+        assert second["status"] == "noop", second
+        assert len(source.operations) == first_calls
+        assert upload_count == first_uploads
+        case.observations.append({
+            "scenario": "v1_restoration",
+            "post_id": post_id,
+            "migration": migration,
+            "first": {"status": first.get("status"), "uploads": first_uploads, "vision_calls": first_calls},
+            "second": {"status": second.get("status"), "uploads": upload_count, "vision_calls": len(source.operations)},
+            "ready": True,
+            "featured_media": int(after_first.get("featured_media") or 0),
+            "html_has_uploaded_media": True,
+        })
 
 
 def test_controlled_source_acquisition_composes_checklists_and_commits_ready_media(wordpress_e2e_case):

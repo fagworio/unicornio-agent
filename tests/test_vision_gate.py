@@ -543,7 +543,11 @@ class VisionGateTests(unittest.TestCase):
                 "editorial_fit": "suitable",
                 "role_fit": "suitable",
             }),
-            {"input_tokens": 10, "output_tokens": 8},
+            {
+                "input_tokens": 10,
+                "output_tokens": 8,
+                "executed_tool_calls": [{"tool_name": "vision_analyze", "executed": True}],
+            },
         )
         ok, reason = self._verify(
             api_key="hermes", base_url="hermes://cli", model="", detail="low"
@@ -554,6 +558,21 @@ class VisionGateTests(unittest.TestCase):
         prompt = call_hermes.call_args.args[0]
         self.assertIn("vision_analyze", prompt)
         self.assertNotIn("data:image/", prompt)
+
+    @mock.patch("unicornio_editor.media.vision_gate.call_hermes_oneshot")
+    def test_hermes_text_without_tool_evidence_remains_blocked(self, call_hermes):
+        call_hermes.return_value = (
+            json.dumps({
+                "status": "MATCH", "confidence": 0.99,
+                "visual_type": "key_art", "relation": "direct",
+                "editorial_fit": "suitable", "role_fit": "suitable",
+            }),
+            {"input_tokens": 10, "output_tokens": 8},
+        )
+        with self.assertRaisesRegex(VisionGateError, "evidência verificável"):
+            self._verify(
+                api_key="hermes", base_url="hermes://cli", model="", detail="low"
+            )
 
     @mock.patch("unicornio_editor.media.vision_gate._call_vision")
     def test_hermes_batch_rejects_expired_total_budget_before_submitting(self, call_vision):

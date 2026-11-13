@@ -536,6 +536,7 @@ class WorkflowTests(unittest.TestCase):
             payload["site_relevance"]["confidence"] = 0.70
             client = FakeClient(self.post())
             first = apply_editorial(client, self.config(False), Path(directory), 42, payload)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
             second = apply_editorial(client, self.config(False), Path(directory), 42, payload)
         self.assertEqual(first["state"], "uncertain")
         self.assertEqual(first["attempts"], 1)
@@ -1441,7 +1442,9 @@ class WorkflowTests(unittest.TestCase):
             root = Path(directory)
             client = FakeClient(self.post())
             first = apply_editorial(client, self.config(False), root, 42, payload)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
             second = apply_editorial(client, self.config(False), root, 42, payload)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
             third = apply_editorial(client, self.config(False), root, 42, payload)
         self.assertEqual(first["state"], "partial")
         self.assertEqual(first["attempts"], 0)
@@ -2129,7 +2132,9 @@ class WorkflowTests(unittest.TestCase):
             root = Path(directory)
             client = FakeClient(self.post())
             first = apply_editorial(client, self.config(False), root, 42, payload)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
             second = apply_editorial(client, self.config(False), root, 42, payload)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
             third = apply_editorial(client, self.config(False), root, 42, payload)
             self.assertEqual(first["state"], "blocked")
             self.assertEqual(first["attempts"], 1)
@@ -2639,17 +2644,13 @@ class WorkflowTests(unittest.TestCase):
 
         client = StatusClient(post)
         with tempfile.TemporaryDirectory() as directory:
-            result = retry_post(client, self.config(False), Path(directory), 42)
+            with self.assertRaisesRegex(WorkflowError, "post V2"):
+                retry_post(client, self.config(False), Path(directory), 42)
 
         saved = WorkState.from_dict(json.loads(client.post["meta"]["_hermes_work_state"]))
-        self.assertTrue(result["readback"])
-        self.assertEqual(client.post["status"], "pending")
-        self.assertIs(saved.state, LifecycleState.PENDING)
-        self.assertIs(saved.phase, Phase.MEDIA)
-        self.assertIs(saved.blocker, BlockerCode.INLINE_MISSING)
-        self.assertEqual(saved.retry.attempts, 0)
-        self.assertEqual(saved.retry.no_progress, 0)
-        self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
+        self.assertEqual(client.post["status"], "awaiting_human")
+        self.assertIs(saved.state, LifecycleState.HUMAN_REQUIRED)
+        self.assertEqual(saved.retry.attempts, 3)
 
     def test_discard_projects_terminal_skipped_into_v2_state(self):
         post = self.post()

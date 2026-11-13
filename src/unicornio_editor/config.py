@@ -310,6 +310,7 @@ def load_config() -> Config:
         raise ConfigError("write mode requires WORDPRESS_APP_USER and WORDPRESS_APP_PASSWORD")
 
     vision_provider = _choice("EDITOR_VISION_PROVIDER", "auto", {"auto", "openai", "hermes"})
+    editorial_provider = _choice("EDITORIAL_PROVIDER", "auto", {"auto", "openai", "hermes"})
     legacy_vision_key = _env("EDITOR_VISION_API_KEY") or _env("OPENAI_API_KEY")
     legacy_vision_base = _validate_url(
         "EDITOR_VISION_BASE_URL", _env("EDITOR_VISION_BASE_URL", "https://api.openai.com/v1")
@@ -383,12 +384,16 @@ def load_config() -> Config:
         vision_max_low=_int("EDITOR_VISION_MAX_LOW", 12, 0, 20),
         visual_comparison_max_calls=_int("EDITOR_VISUAL_COMPARISON_MAX_CALLS", 42, 0, 42),
         visual_comparison_min_confidence=_float("EDITOR_VISUAL_COMPARISON_MIN_CONFIDENCE", 0.85, 0.0, 1.0),
-        editorial_api_key=_env("EDITORIAL_API_KEY") or _env("OPENAI_API_KEY"),
+        # An ambient OpenAI key is intentionally ignored by an explicit
+        # Hermes editorial provider; it must never become a hidden fallback.
+        editorial_api_key=_env("EDITORIAL_API_KEY") or (
+            _env("OPENAI_API_KEY") if editorial_provider != "hermes" else ""
+        ),
         editorial_base_url=_validate_url(
             "EDITORIAL_BASE_URL", _env("EDITORIAL_BASE_URL", "https://api.openai.com/v1")
         ),
         editorial_model=_env("EDITORIAL_MODEL", "gpt-4o-mini"),
-        editorial_provider=_choice("EDITORIAL_PROVIDER", "auto", {"auto", "openai", "hermes"}),
+        editorial_provider=editorial_provider,
         hermes_command=_env("HERMES_COMMAND", "hermes"),
         hermes_model=_env("HERMES_MODEL"),
         hermes_timeout=_float("HERMES_TIMEOUT", 90.0, 1.0, 600.0),

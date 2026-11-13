@@ -246,6 +246,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.editorial_provider, "openai")
         self.assertEqual(config.editorial_api_key, "legacy-key")
 
+    def test_explicit_hermes_ignores_ambient_openai_key_without_fallback(self):
+        values = {
+            "WORDPRESS_URL": "http://wp.test",
+            "EDITORIAL_PROVIDER": "hermes",
+            "EDITOR_VISION_PROVIDER": "hermes",
+            "OPENAI_API_KEY": "sk-must-not-be-used",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            config = load_config()
+        self.assertEqual(config.vision_provider, "hermes")
+        self.assertEqual(config.vision_base_url, "hermes://cli")
+        self.assertEqual(config.editorial_provider, "hermes")
+        self.assertEqual(config.editorial_api_key, "")
+
     def test_auto_vision_uses_explicit_hermes_multimodal_endpoint(self):
         values = {
             "WORDPRESS_URL": "http://wp.test",

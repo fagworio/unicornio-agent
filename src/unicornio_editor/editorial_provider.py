@@ -449,14 +449,14 @@ def generate_editorial_batch(
             retryable=False,
         )
     if selected_provider == "hermes" and not hermes_command_available(hermes_command):
-        if api_key:
-            selected_provider = "openai"
-        else:
-            raise EditorialProviderError(
-                f"Hermes não disponível e EDITORIAL_API_KEY/OPENAI_API_KEY ausente: {hermes_command}",
-                failure_class="configuration_error",
-                retryable=False,
-            )
+        # An explicit Hermes selection is a hard provider boundary.  Falling
+        # back to an OpenAI-compatible endpoint would spend paid budget and
+        # make a V1 Hermes restoration look healthy while using another model.
+        raise EditorialProviderError(
+            f"Hermes não disponível para o provedor explicitamente selecionado: {hermes_command}",
+            failure_class="configuration_error",
+            retryable=False,
+        )
     batch_id, posts = _read_input(input_path)
     request_payload = {
         "model": model,
