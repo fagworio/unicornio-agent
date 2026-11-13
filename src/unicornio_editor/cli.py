@@ -76,6 +76,8 @@ def _v2_cycle_exit_code(result: Any) -> int:
         status = getattr(result, "status", None)
     if stop_reason == "skipped_locked" or status == "skipped":
         return 75
+    if stop_reason == "duration_limit" and status == "running":
+        return 75
     if stop_reason in {"recovery_uncertain", "executor_error", "selection_mismatch"} or status == "blocked":
         return 2
     return 0

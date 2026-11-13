@@ -260,6 +260,8 @@ def test_expired_pre_authorization_transition_preserves_elapsed_and_archives_ide
     assert applied["status"] == "applied"
     current = CycleStateStore(tmp_path).load()
     assert current.pending_round is None
+    assert current.status == "completed"
+    assert current.phase == "COMPLETED"
     assert current.elapsed_seconds == 7874.96
     assert current.stop_reason == "pre_authorization_expired"
     archived = tmp_path / "work" / "v2-cycle" / "archives" / "preauthorization-expired-expired-cycle-1" / "state.json"
@@ -267,6 +269,31 @@ def test_expired_pre_authorization_transition_preserves_elapsed_and_archives_ide
     transition = json.loads((tmp_path / "work" / "v2-cycle" / "v2-preauthorization-expiry-transition.json").read_text())
     assert transition["version"] == 1
     assert transition["phase"] == "completed"
+    repeated = expire_pre_authorization(
+        tmp_path,
+        cycle_id="expired-cycle",
+        pending_round=1,
+        round_intent_id=intent,
+        apply=True,
+    )
+    assert repeated["status"] == "already_applied"
+    transition["phase"] = "prepared"
+    transition.pop("completed_at", None)
+    transition.pop("new_state_sha256", None)
+    (tmp_path / "work" / "v2-cycle" / "v2-preauthorization-expiry-transition.json").write_text(
+        json.dumps(transition), encoding="utf-8"
+    )
+    recovered = expire_pre_authorization(
+        tmp_path,
+        cycle_id="expired-cycle",
+        pending_round=1,
+        round_intent_id=intent,
+        apply=True,
+    )
+    assert recovered["status"] == "already_applied"
+    assert json.loads(
+        (tmp_path / "work" / "v2-cycle" / "v2-preauthorization-expiry-transition.json").read_text()
+    )["phase"] == "completed"
 
 
 def test_old_started_registry_operations_block_replay_independent_of_current_journal(tmp_path):

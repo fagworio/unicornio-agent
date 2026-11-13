@@ -89,6 +89,7 @@ class CycleRoundResult:
 class CycleReport:
     """Auditable aggregate for one cycle execution."""
 
+    status: str = "completed"
     ready_count: int = 0
     ready_post_ids: list[int] = field(default_factory=list)
     unique_posts: int = 0

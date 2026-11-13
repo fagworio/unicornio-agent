@@ -281,6 +281,39 @@ def test_production_cycle_runs_pinned_preview_write_rounds_and_persists(tmp_path
     assert state["rounds"] == 2
 
 
+def test_exhausted_cycle_without_pending_round_closes_terminally(tmp_path, monkeypatch):
+    store = cycle_runtime.CycleStateStore(tmp_path)
+    state = store.create({"max_duration_seconds": 10}, cycle_id="exhausted-no-pending")
+    state.elapsed_seconds = 10
+    store.save(state, event="elapsed_budget_reached")
+    calls = []
+    monkeypatch.setattr(cycle_runtime, "run_v2", lambda *args, **kwargs: calls.append(kwargs))
+
+    report = cycle_runtime.run_v2_cycle(
+        object(),
+        _config(),
+        tmp_path,
+        cycle_config=cycle_runtime.CycleConfig(
+            ready_target=1,
+            new_batch_size=1,
+            max_unique_posts=1,
+            max_total_attempts=1,
+            max_attempts_per_post_per_cycle=1,
+            max_stagnant_rounds=1,
+            max_drain_rounds=1,
+            max_duration_seconds=10,
+        ),
+    )
+
+    assert report.stop_reason == "duration_limit"
+    assert report.status == "completed"
+    assert calls == []
+    persisted = store.load()
+    assert persisted.status == "completed"
+    assert persisted.phase == "COMPLETED"
+    assert persisted.pending_round is None
+
+
 def test_interrupted_pre_authorization_round_resumes_preview_before_write(tmp_path, monkeypatch):
     store = cycle_runtime.CycleStateStore(tmp_path)
     state = store.create({"ready_target": 1}, cycle_id="resume-before-auth")

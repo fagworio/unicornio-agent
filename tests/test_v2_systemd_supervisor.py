@@ -15,9 +15,12 @@ def _fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "import json, os, sys\n"
         "args=sys.argv[1:]\n"
         "with open(os.environ['SYSTEMCTL_LOG'], 'a', encoding='utf-8') as f: f.write(json.dumps(args)+'\\n')\n"
+        "marker=os.environ['SYSTEMCTL_LOG']+'.started'\n"
+        "if args and args[0] == 'start': open(marker, 'w').close()\n"
         "if args and args[0] == 'show':\n"
         "    prop=next((a.split('=',1)[1] for a in args if a.startswith('--property=')), '')\n"
-        "    print(os.environ.get('FAKE_'+prop.upper(), ''))\n"
+        "    prefix='FAKE_POST_' if os.path.exists(marker) else 'FAKE_'\n"
+        "    print(os.environ.get(prefix+prop.upper(), os.environ.get('FAKE_'+prop.upper(), '')))\n"
         "elif args and args[0] == 'start':\n"
         "    sys.exit(0)\n"
         "else:\n"
@@ -36,6 +39,11 @@ def _run_trigger(tmp_path: Path, *, load_state: str, active_state: str):
         "SYSTEMCTL_LOG": str(log),
         "FAKE_LOADSTATE": load_state,
         "FAKE_ACTIVESTATE": active_state,
+        "FAKE_POST_ACTIVESTATE": "activating",
+        "FAKE_POST_MAINPID": "1234",
+        "FAKE_POST_EXECMAINSTARTTIMESTAMP": "Thu 2026-11-13 10:00:00 -03",
+        "FAKE_POST_RESULT": "success",
+        "SUPERVISOR_START_CONFIRM_TIMEOUT_SEC": "1",
     }
     return subprocess.run(
         ["bash", str(SUPERVISOR_DIR / "start-v2-cycle.sh")],
@@ -51,7 +59,8 @@ def test_trigger_starts_one_inactive_service_without_waiting(tmp_path):
     calls = [json.loads(line) for line in log.read_text().splitlines()]
 
     assert result.returncode == 0, result.stderr
-    assert "start_requested" in result.stdout
+    assert "state=started" in result.stdout
+    assert "execution_confirmed=true" in result.stdout
     assert ["start", "--no-block", "unicornio-editorial-v2.service"] in calls
 
 
@@ -71,6 +80,30 @@ def test_trigger_blocks_failed_service_without_automatic_recovery(tmp_path):
     assert result.returncode != 0
     assert "manual_reset_required" in result.stdout
     assert not any(call[0] in {"start", "reset-failed", "restart"} for call in calls)
+
+
+def test_trigger_fails_when_systemd_accepts_start_but_never_confirms_worker(tmp_path):
+    executable, log = _fake_systemctl(tmp_path)
+    env = {
+        **os.environ,
+        "SYSTEMCTL_BIN": str(executable),
+        "SYSTEMCTL_LOG": str(log),
+        "FAKE_LOADSTATE": "loaded",
+        "FAKE_ACTIVESTATE": "inactive",
+        "FAKE_POST_ACTIVESTATE": "inactive",
+        "FAKE_POST_EXECMAINSTARTTIMESTAMP": "",
+        "SUPERVISOR_START_CONFIRM_TIMEOUT_SEC": "0",
+    }
+    result = subprocess.run(
+        ["bash", str(SUPERVISOR_DIR / "start-v2-cycle.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "start_unconfirmed" in result.stderr
 
 
 def test_cycle_runner_sources_env_and_executes_only_normal_v2_cycle(tmp_path):

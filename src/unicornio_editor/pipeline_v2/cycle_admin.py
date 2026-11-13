@@ -212,7 +212,30 @@ def expire_pre_authorization(
         state = store.load()
         if state is None:
             raise CycleAbandonError("active checkpoint is absent")
-        if state.cycle_id != cycle_id or state.status != "running":
+        if state.cycle_id != cycle_id:
+            raise CycleAbandonError("active checkpoint identity/status diverged")
+        if (
+            existing
+            and existing.get("phase") == "prepared"
+            and state.status == "completed"
+            and state.stop_reason == "pre_authorization_expired"
+            and state.pending_round is None
+        ):
+            completed_transition = dict(existing)
+            completed_transition.update({
+                "phase": "completed",
+                "new_state_sha256": _sha256(root / "work" / "v2-cycle" / "state.json"),
+                "completed_at": time.time(),
+            })
+            _write_preauthorization_expiry_transition(root, completed_transition)
+            return {
+                "status": "already_applied",
+                "transition_version": PREAUTH_EXPIRY_TRANSITION_VERSION,
+                "wordpress_writes": 0,
+                "elapsed_seconds": state.elapsed_seconds,
+                "archive_dir": completed_transition.get("archive_dir"),
+            }
+        if state.status != "running":
             raise CycleAbandonError("active checkpoint identity/status diverged")
         pending = state.pending_round
         if not isinstance(pending, dict) or pending.get("preview_selected_ids") is not None:
@@ -278,6 +301,9 @@ def expire_pre_authorization(
         if transition.get("phase") == "prepared":
             state.pending_round = None
             state.stop_reason = "pre_authorization_expired"
+            state.status = "completed"
+            state.phase = "COMPLETED"
+            state.active_started_at = None
             store.save(
                 state,
                 event="round_pre_authorization_expired",

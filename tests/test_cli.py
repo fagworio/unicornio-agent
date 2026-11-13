@@ -22,6 +22,7 @@ from unicornio_editor.cli import (
     _json_default,
     _monitor_line,
     _record_cmd_output,
+    _v2_cycle_exit_code,
     _v2_checkpoint_monitor_projection,
     main,
 )
@@ -60,6 +61,12 @@ class CompactOutputTests(unittest.TestCase):
         )
         self.assertIn('"ready_count": 1', payload)
         self.assertIn('"phase": "COMPLETED"', payload)
+
+    def test_cycle_exit_code_marks_paused_duration_as_retryable(self):
+        self.assertEqual(
+            _v2_cycle_exit_code({"stop_reason": "duration_limit", "status": "running"}),
+            75,
+        )
 
     def test_compact_cards_keeps_only_the_next_action(self):
         result = _compact_cards({"cards": [{

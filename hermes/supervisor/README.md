@@ -1,9 +1,10 @@
 # Supervisor do ciclo editorial V2
 
 O cron Editorial existente continua como agendador. Ele chama
-`start-v2-cycle.sh`, que retorna imediatamente e não executa Writer ou `v2-cycle`
-dentro da sessão Hermes. O serviço singleton systemd roda o ciclo normal com o
-checkpoint, os locks e o `.env` do projeto.
+`start-v2-cycle.sh`, que solicita o serviço singleton e confirma que o worker
+começou (ou que terminou com resultado observável); uma aceitação assíncrona do
+systemd, sozinha, é reportada como `start_unconfirmed`. O serviço roda o ciclo
+normal com o checkpoint, os locks e o `.env` do projeto.
 
 ## Política operacional
 
@@ -18,6 +19,10 @@ checkpoint, os locks e o `.env` do projeto.
 - O trigger não inicia segunda instância quando `active`/`activating`, e bloqueia
   quando a unit está `failed` ou não instalada. Não usar `restart` nem
   `reset-failed` como recuperação automática.
+- Em uma unit `inactive`, o trigger espera confirmação limitada por
+  `SUPERVISOR_START_CONFIRM_TIMEOUT_SEC` (15 segundos por padrão), distinguindo
+  `started`, `completed` e `start_unconfirmed`. Ao terminar, compara os hashes
+  do checkpoint e do journal para indicar se houve avanço persistido.
 - O runner usa somente `v2-cycle --root <projeto>` normal; não usa `--fresh`, IDs
   forçados, Publisher ou fluxos legados.
 

@@ -1551,17 +1551,19 @@ def run_v2_cycle(
             # Unsafe executor/authorization failures remain resumable. Normal
             # budget/drainage stops are completed cycles and start fresh next
             # time, while the pending round is retained for a retry.
-            if stop_reason in {
+            resumable = {
                 "executor_error",
                 "selection_mismatch",
                 "incomplete_round",
                 "duplicate_selection",
                 "attempt_budget_violation",
                 "unique_post_budget_violation",
-                "duration_limit",
                 "recovery_uncertain",
                 "skipped_locked",
-            }:
+            }
+            if stop_reason in resumable or (
+                stop_reason == "duration_limit" and current.pending_round is not None
+            ):
                 current.status = "running"
                 current.active_started_at = None
                 store.save(current, event="cycle_paused", stop_reason=stop_reason)
@@ -2310,6 +2312,7 @@ def run_v2_cycle(
             state=state,
             checkpoint=checkpoint,
         )
+        report.status = state.status
         try:
             from ..observability import append_telemetry
 
@@ -2327,6 +2330,8 @@ def run_v2_cycle(
                     if report.stop_reason == "skipped_locked"
                     else "recovered"
                     if report.stop_reason == "recovery_transition_applied"
+                    else "paused"
+                    if state.status == "running"
                     else "completed"
                 ),
                 cycle_id=state.cycle_id,
