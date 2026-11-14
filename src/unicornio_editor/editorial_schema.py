@@ -33,6 +33,9 @@ _RELEVANCE = {"decision", "confidence", "reason", "matched_topics"}
 _SEO = {"title", "meta_description", "focus_keyword"}
 _MEDIA = {
     "paragraph_index",
+    # Deterministic placement emitted by the media resolver when the final
+    # inline image is safely attached to the end of the editorial body.
+    "placement",
     "source_page_url",
     "direct_image_url",
     "alt_text",
@@ -162,12 +165,18 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
                 # Rastreabilidade opcional (vem do ledger de decisões); o apply
                 # NUNCA confia nela para decidir, só para medir qualidade.
                 "decision_id", "decision",
+                "placement",
                 *_LEGACY_MEDIA_RIGHTS_FIELDS,
             },
         )
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
             raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")
+        placement = media.get("placement")
+        if placement is not None and placement != "after_editorial_body":
+            raise EditorialValidationError(
+                f"media_plan[{index}].placement has unsupported value"
+            )
         _nonempty_string(media["alt_text"], f"media_plan[{index}].alt_text")
         for name in ("source_page_url", "direct_image_url"):
             _http_url(media[name], f"media_plan[{index}].{name}")

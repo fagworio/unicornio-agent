@@ -13,6 +13,8 @@ import pytest
 from PIL import Image, ImageDraw
 
 from unicornio_editor.checklist import run_pre_publish_checklist
+from unicornio_editor.batch import load_editorial_batch, merge_media_manifest_into_editorial, prepare_batch
+from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch
 from unicornio_editor.config import Config
 from unicornio_editor.media.inserter import insert_media
 from unicornio_editor.media.source_verify import discover_article_source_candidates
@@ -360,7 +362,7 @@ def test_automatic_media_pipeline_retries_without_partial_apply(wordpress_e2e_ca
 
 
 def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2e_case, monkeypatch):
-    """V2 untouched -> explicit V1 bridge -> READY, with no second upload/AI call."""
+    """V2 untouched -> V1 bridge -> full batch media chain -> READY/idempotent."""
 
     monkeypatch.setattr(
         "unicornio_editor.workflow.find_cached_game_trailer_with_status",
@@ -371,34 +373,6 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
     with ControlledSource() as source:
         source_url = f"{source.base_url}/article"
         editorial = _automatic_pipeline_editorial()
-        candidates = discover_article_source_candidates(
-            source_url,
-            subject="Hollow Knight Silksong",
-            limit=8,
-            stats={},
-            url_policy="off",
-            root=case.root,
-        )
-        by_name = {str(item["direct_image_url"]).rsplit("/", 1)[-1]: item for item in candidates}
-
-        def media_item(name: str, paragraph_index: int, featured: bool, query: str) -> dict[str, Any]:
-            candidate = by_name[name]
-            allowed = {
-                "paragraph_index", "source_page_url", "direct_image_url", "alt_text",
-                "is_featured", "subject", "search_query", "candidate_id",
-            }
-            return {
-                **{key: candidate[key] for key in allowed if key in candidate},
-                "paragraph_index": paragraph_index,
-                "is_featured": featured,
-                "search_query": query,
-            }
-
-        editorial["media_plan"] = [
-            media_item("hollow-knight-silksong-key-art.png", 0, True, "Hollow Knight Silksong key art"),
-            media_item("hollow-knight-silksong-screenshot-one.png", 0, False, "Hollow Knight Silksong gameplay screenshot"),
-            media_item("hollow-knight-silksong-screenshot-two.png", 3, False, "Hollow Knight Silksong gameplay screenshot"),
-        ]
         case.client.update_post(
             post_id,
             {
@@ -410,6 +384,72 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
         assert migration["migrated"] == 1, migration
 
         config = _automatic_pipeline_config(case, source, post_id)
+        prepared = prepare_batch(
+            case.client, config, case.root, [post_id], batch_id="batch-v1-restoration-e2e"
+        )
+        assert prepared["prepared"] == 1, prepared
+
+        # The discovery provider is controlled, but the real V1 resolver,
+        # provenance gates and manifest writer are exercised below.
+        discovered = discover_article_source_candidates(
+            source_url,
+            subject="Hollow Knight Silksong",
+            limit=8,
+            stats={},
+            url_policy="off",
+            root=case.root,
+        )
+
+        def controlled_search(queries, **kwargs):
+            accept = kwargs.get("accept")
+            rows = []
+            for query in queries:
+                candidates = [dict(candidate) for candidate in discovered]
+                if accept is not None:
+                    accept(candidates, query)
+                rows.append({
+                    "query": query,
+                    "candidates": candidates,
+                    "completion_reason": "EXHAUSTED_VERIFIED",
+                    "engine_reports": {},
+                })
+            return rows
+
+        monkeypatch.setattr(
+            "unicornio_editor.media.search.search_web_images_batch", controlled_search
+        )
+        media_input = {
+            "schema_version": 1,
+            "batch_id": prepared["batch_id"],
+            "posts": [{
+                "post_id": post_id,
+                "subject": "Hollow Knight Silksong",
+                "needed": 3,
+                "query": "Hollow Knight Silksong gameplay",
+                "article_title": editorial["seo"]["title"],
+                "limit": 8,
+                "engine": "duckduckgo",
+                "size": "xga",
+                "ratio": "w",
+            }],
+        }
+        resolved = _resolve_media_batch(case.client, config, case.root, media_input)
+        assert resolved["posts"][0]["candidates"], resolved
+
+        editorial_output = case.root / "work" / "batches" / prepared["batch_id"] / "editorial.output.json"
+        editorial_output.write_text(json.dumps({
+            "schema_version": 1,
+            "batch_id": prepared["batch_id"],
+            "results": [{"post_id": post_id, "status": "ok", "editorial": editorial}],
+        }), encoding="utf-8")
+        batch = load_editorial_batch(editorial_output)
+        batch, assembly = merge_media_manifest_into_editorial(
+            batch,
+            case.root / "work" / "batches" / prepared["batch_id"] / "media.manifest.json",
+        )
+        assert assembly["assembled"] == 1, assembly
+        assert len(batch["items"][0]["editorial"]["media_plan"]) == 3
+
         upload_count = 0
         original_upload = case.client.upload_media
 
@@ -419,7 +459,10 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
             return original_upload(*args, **kwargs)
 
         monkeypatch.setattr(case.client, "upload_media", counted_upload)
-        first = apply_editorial(case.client, config, case.root, post_id, editorial)
+        first_batch = _apply_editorial_batch(
+            case.client, config, case.root, batch, dry_run=False, compact=False
+        )
+        first = first_batch["posts"][0]
         first_calls = len(source.operations)
         first_uploads = upload_count
         after_first = case.client.get_post(post_id)
@@ -428,7 +471,10 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
         assert int(after_first.get("featured_media") or 0) > 0
         assert "wp-content/uploads" in str((after_first.get("content") or {}).get("raw") or "")
 
-        second = apply_editorial(case.client, config, case.root, post_id, editorial)
+        second_batch = _apply_editorial_batch(
+            case.client, config, case.root, batch, dry_run=False, compact=False
+        )
+        second = second_batch["posts"][0]
         assert second["status"] == "noop", second
         assert len(source.operations) == first_calls
         assert upload_count == first_uploads

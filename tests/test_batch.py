@@ -10,6 +10,7 @@ from unittest import mock
 from unicornio_editor.batch import (
     BatchError,
     load_media_resolve_batch,
+    merge_media_manifest_into_editorial,
     prepare_batch,
     validate_batch_id,
 )
@@ -466,6 +467,77 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(result["posts"][0]["status"], "noop")
             self.assertTrue(result["posts"][0]["stale"])
             self.assertEqual(client.posts[1]["meta"]["_hermes_attempts"], "2")
+
+    def test_media_manifest_is_joined_into_empty_editorial_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-media-join"
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Hollow Knight Silksong",
+                    "query": "Hollow Knight Silksong gameplay",
+                    "needed": 3,
+                    "reuse": [],
+                    "candidates": [
+                        {"url": "https://img.test/featured.webp", "source": "https://source.test/article", "verdict": "deterministic_match", "candidate_id": "c1"},
+                        {"url": "https://img.test/inline-one.webp", "source": "https://source.test/article", "verdict": "deterministic_match", "candidate_id": "c2"},
+                        {"url": "https://img.test/inline-two.webp", "source": "https://source.test/article", "verdict": "deterministic_match", "candidate_id": "c3"},
+                    ],
+                }],
+            }), encoding="utf-8")
+            editorial = {
+                "post_id": 1,
+                "status": "ok",
+                "editorial": {
+                    "cleaned_html": "".join(
+                        f"<p>Paragrafo substantivo {index} com bastante texto editorial para validar o espaçamento das imagens.</p>"
+                        for index in range(8)
+                    ),
+                    "media_plan": [],
+                },
+            }
+            merged, report = merge_media_manifest_into_editorial({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "items": [editorial],
+            }, manifest)
+
+            plan = merged["items"][0]["editorial"]["media_plan"]
+            self.assertEqual(len(plan), 3)
+            self.assertTrue(plan[0]["is_featured"])
+            self.assertFalse(plan[1]["is_featured"])
+            self.assertEqual(plan[0]["source_page_url"], "https://source.test/article")
+            self.assertEqual(plan[0]["candidate_id"], "c1")
+            self.assertGreaterEqual(plan[2]["paragraph_index"] - plan[1]["paragraph_index"], 3)
+            self.assertEqual(report["assembled"], 1)
+
+    def test_media_manifest_does_not_promote_ambiguous_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": "batch-ambiguous",
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Silksong",
+                    "query": "Silksong",
+                    "needed": 1,
+                    "candidates": [{"url": "https://img.test/a.webp", "source": "https://source.test/a", "verdict": "ambiguous"}],
+                }],
+            }), encoding="utf-8")
+            merged, report = merge_media_manifest_into_editorial({
+                "schema_version": 1,
+                "batch_id": "batch-ambiguous",
+                "items": [{"post_id": 1, "status": "ok", "editorial": {"media_plan": []}}],
+            }, manifest)
+            self.assertEqual(merged["items"][0]["editorial"]["media_plan"], [])
+            self.assertEqual(report["missing_candidates"], [1])
+            self.assertEqual(report["rejected_candidates"], 1)
 
 
 if __name__ == "__main__":

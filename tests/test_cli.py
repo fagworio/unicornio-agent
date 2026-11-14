@@ -590,7 +590,7 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(projection["draining"], 1)
         self.assertEqual(projection["selector_error"], 0)
 
-    def test_queue_monitor_uses_safe_preview_limit_and_does_not_take_global_lock(self):
+    def test_queue_monitor_uses_v1_eligibility_without_previewing_v2(self):
         from unicornio_editor import cli
         from unicornio_editor.config import Config
 
@@ -601,20 +601,20 @@ class CompactOutputTests(unittest.TestCase):
                     mock.patch.object(cli, "load_config", return_value=config), \
                     mock.patch.object(cli, "WordPressClient"), \
                     mock.patch.object(cli, "build_queue_report", return_value={
-                        "eligible_rework_ids": [], "v2_eligible_ids": [],
-                        "unprocessed_ids": [], "posts": [],
+                        "eligible_rework_ids": [12, 13], "v2_eligible_ids": [13],
+                        "unprocessed_ids": [11],
+                        "posts": [{"id": 12, "v2": False}, {"id": 13, "v2": True}],
                     }), \
-                    mock.patch("unicornio_editor.pipeline_v2.runtime.run_v2", return_value={
-                        "queue": {"selected_ids": [115900]},
-                    }) as run_v2, \
+                    mock.patch("unicornio_editor.pipeline_v2.runtime.run_v2") as run_v2, \
+                    mock.patch("builtins.print") as printer, \
                     mock.patch.object(cli, "_record_cmd_output"):
                 code = cli.main(["queue", "--monitor", "--root", str(root)])
 
         self.assertEqual(code, 0)
-        self.assertEqual(run_v2.call_args.kwargs["limit"], 100)
-        self.assertTrue(run_v2.call_args.kwargs["lock_held"])
+        self.assertFalse(run_v2.called)
+        self.assertTrue(printer.call_args.args[0].startswith("12 11"))
 
-    def test_queue_monitor_reports_epoch_fail_closed_as_selector_error(self):
+    def test_queue_monitor_ignores_v2_checkpoint_failures(self):
         from unicornio_editor import cli
         from unicornio_editor.config import Config
 
@@ -628,16 +628,14 @@ class CompactOutputTests(unittest.TestCase):
                         "eligible_rework_ids": [], "v2_eligible_ids": [],
                         "unprocessed_ids": [], "posts": [],
                     }), \
-                    mock.patch("unicornio_editor.pipeline_v2.runtime.run_v2", return_value={
-                        "blocked": True, "epoch_protection_fail_closed": True,
-                    }) as run_v2, \
+                    mock.patch("unicornio_editor.pipeline_v2.runtime.run_v2") as run_v2, \
                     mock.patch.object(cli, "_record_cmd_output"), \
                     mock.patch("builtins.print") as printer:
                 code = cli.main(["queue", "--monitor", "--root", str(root)])
 
         self.assertEqual(code, 0)
-        self.assertIn("selector=1", printer.call_args.args[0])
-        self.assertEqual(run_v2.call_args.kwargs["limit"], 100)
+        self.assertEqual(printer.call_args.args[0], "0")
+        self.assertFalse(run_v2.called)
 
     def test_compact_checklist_failure_only(self):
         ok = _compact_checklist({"items": [{"name": "a", "status": "pass"}]})

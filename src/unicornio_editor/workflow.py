@@ -580,6 +580,7 @@ def _apply_editorial_unlocked(
         plan = [
             {
                 "paragraph_index": result["paragraph_index"],
+                "placement": result.get("placement"),
                 "media_url": result["media_url"],
                 "alt_text": result["alt_text"],
                 "credit_text": result["credit_text"],
@@ -2967,6 +2968,7 @@ def _execute_media_plan(
                 accepted_result = {
                     "status": "accepted",
                     "paragraph_index": item["paragraph_index"],
+                    "placement": item.get("placement"),
                     "media_id": media_id, "media_url": media_url,
                     "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
                     "subject": item.get("subject"), "item_number": item.get("item_number"),

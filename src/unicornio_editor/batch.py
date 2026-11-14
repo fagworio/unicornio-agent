@@ -19,6 +19,7 @@ from .checklist import required_image_count
 from .content_quality import word_count
 from .language import detect_language, localization_required
 from .media.relevance import extract_entities
+from .media.inserter import plan_normal_media_insertions
 from .state import read_state, uncertain_second_pass_eligible
 from .workflow import (
     _featured_diagnosis,
@@ -37,6 +38,152 @@ _EDITORIAL_FAILURE_CLASSES = frozenset({
 
 class BatchError(ValueError):
     """Raised when a batch envelope cannot be safely created or read."""
+
+
+def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query: str,
+                              post_id: int, index: int, featured: bool) -> dict[str, Any] | None:
+    """Project one verified manifest candidate into the editorial schema.
+
+    ``media-resolve-batch`` deliberately emits a compact candidate projection;
+    this bridge keeps only the provenance needed by ``apply-batch`` and never
+    invents a usable URL when the resolver did not prove one.
+    """
+    direct_url = str(
+        candidate.get("direct_image_url") or candidate.get("url") or ""
+    ).strip()
+    source_url = str(
+        candidate.get("source_page_url") or candidate.get("source") or ""
+    ).strip()
+    verdict = str(
+        candidate.get("evidence_verdict")
+        or candidate.get("verdict")
+        or ((candidate.get("evidence") or {}).get("verdict") if isinstance(candidate.get("evidence"), dict) else "")
+        or ""
+    ).strip()
+    if not direct_url.startswith(("http://", "https://")):
+        return None
+    if not source_url.startswith(("http://", "https://")):
+        return None
+    # Ambiguous candidates require the separate vision stage.  The automatic
+    # bridge may use only a deterministic hard-gate match; it must never turn
+    # an unresolved candidate into an upload decision.
+    if verdict and verdict != "deterministic_match":
+        return None
+    alt_suffix = "imagem principal" if featured else "imagem de apoio"
+    item: dict[str, Any] = {
+        "paragraph_index": 0,
+        "source_page_url": source_url,
+        "direct_image_url": direct_url,
+        "alt_text": f"{subject} - {alt_suffix}"[:240],
+        "is_featured": featured,
+        "subject": subject,
+        "search_query": query,
+        "candidate_id": str(candidate.get("candidate_id") or f"media-{post_id}-{index + 1}"),
+    }
+    for key in ("media_library_id", "evidence_score", "phash"):
+        if candidate.get(key) is not None:
+            item[key] = candidate[key]
+    if verdict:
+        item["evidence_verdict"] = verdict
+    return item
+
+
+def merge_media_manifest_into_editorial(
+    batch: dict[str, Any],
+    manifest_path: Path | str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Attach verified media candidates to an editorial batch deterministically.
+
+    The model output intentionally contains ``media_plan: []``.  This bridge
+    joins by ``post_id`` with the sibling ``media.manifest.json`` produced by
+    ``media-resolve-batch``.  It writes no WordPress state and does not replace
+    an explicitly supplied plan; an empty/invalid manifest stays empty and is
+    reported for the normal media gate to classify.
+    """
+    source = Path(manifest_path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BatchError(f"manifest de midia invalido: {source}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise BatchError("manifest de midia precisa ser um objeto JSON")
+    if str(payload.get("batch_id") or "") != str(batch.get("batch_id") or ""):
+        raise BatchError("media.manifest.json pertence a outro batch")
+    posts = payload.get("posts")
+    if not isinstance(posts, list):
+        raise BatchError("media.manifest.json precisa conter posts[]")
+    by_post = {
+        int(row["post_id"]): row
+        for row in posts
+        if isinstance(row, dict)
+        and isinstance(row.get("post_id"), int)
+    }
+    merged_items: list[dict[str, Any]] = []
+    report: dict[str, Any] = {
+        "manifest": str(source),
+        "posts": 0,
+        "assembled": 0,
+        "unchanged": 0,
+        "missing_candidates": [],
+        "rejected_candidates": 0,
+    }
+    for raw_item in batch.get("items") or []:
+        item = dict(raw_item)
+        editorial = dict(item.get("editorial") or {})
+        existing_plan = editorial.get("media_plan")
+        if existing_plan:
+            report["unchanged"] += 1
+            merged_items.append(item)
+            continue
+        post_id = int(item["post_id"])
+        media_row = by_post.get(post_id) or {}
+        subject = str(media_row.get("subject") or "").strip()
+        query = str(media_row.get("query") or subject).strip()
+        candidates = []
+        # Reuse is already enriched and is preferred over new discovery.
+        candidates.extend(media_row.get("reuse") or [])
+        candidates.extend(media_row.get("candidates") or [])
+        projected: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            direct_url = str(candidate.get("direct_image_url") or candidate.get("url") or "").strip()
+            if not direct_url or direct_url in seen_urls:
+                continue
+            seen_urls.add(direct_url)
+            planned = _media_manifest_candidate(
+                candidate,
+                subject=subject,
+                query=query,
+                post_id=post_id,
+                index=len(projected),
+                featured=not projected,
+            )
+            if planned is None:
+                report["rejected_candidates"] += 1
+                continue
+            projected.append(planned)
+            if len(projected) >= int(media_row.get("needed") or 0):
+                break
+        if projected:
+            inline = [dict(row, is_featured=False) for row in projected[1:]]
+            if inline:
+                html = str(editorial.get("cleaned_html") or "")
+                if not html:
+                    raise BatchError(f"post {post_id} precisa de cleaned_html para montar o media_plan")
+                try:
+                    inline = plan_normal_media_insertions(html, inline)
+                except Exception as exc:
+                    raise BatchError(f"post {post_id} sem slots seguros para media_plan: {exc}") from exc
+            editorial["media_plan"] = [projected[0], *inline]
+            item["editorial"] = editorial
+            report["assembled"] += 1
+        else:
+            report["missing_candidates"].append(post_id)
+        merged_items.append(item)
+    report["posts"] = len(merged_items)
+    return {**batch, "items": merged_items}, report
 
 
 def wordpress_text(value: Any, *, field: str) -> str:

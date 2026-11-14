@@ -24,6 +24,7 @@ from .batch import (
     load_editorial_batch,
     load_media_resolve_batch,
     load_vision_batch,
+    merge_media_manifest_into_editorial,
     prepare_batch,
 )
 from .checklist import required_image_count, required_image_count_for_content, run_pre_publish_checklist
@@ -478,6 +479,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--compact",
         action="store_true",
         help="grava auditorias individuais e imprime apenas o resumo do batch",
+    )
+    apply_batch_parser.add_argument(
+        "--media-manifest",
+        type=Path,
+        default=None,
+        help="manifest produzido por media-resolve-batch; por padrão usa media.manifest.json ao lado do batch",
     )
 
     checklist_parser = subparsers.add_parser(
@@ -3838,115 +3845,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "queue":
             report = build_queue_report(client, args.root)
             if args.monitor:
-                # Reuse the exact read-only admission/cooldown/quarantine
-                # selector used by v2-run. The old monitor only inspected the
-                # broad WordPress queue and could stay awake even when the
-                # executor selected zero posts.
-                checkpoint_projection = _v2_checkpoint_monitor_projection(args.root)
-                if checkpoint_projection is not None:
-                    # A pending authorization is authoritative.  Do not run
-                    # a fresh selector or contend for the executor lock.
-                    report["v2_effective"] = checkpoint_projection
-                else:
-                    try:
-                        from .pipeline_v2.runtime import run_v2
-
-                        preview = run_v2(
-                            client,
-                            config,
-                            args.root,
-                            # WordPress caps per_page at 100.  The reader also
-                            # clamps defensively, but keep the monitor's
-                            # request valid at this boundary too.
-                            limit=100,
-                            preview=True,
-                            lock_held=True,
-                        )
-                        if isinstance(preview, dict):
-                            effective = preview.get("queue")
-                            if (
-                                isinstance(effective, dict)
-                                and not preview.get("epoch_protection_fail_closed")
-                            ):
-                                effective = dict(effective)
-                                effective["not_admitted"] = int(
-                                    effective.get("admission_blocked", 0) or 0
-                                ) + int(effective.get("historical_excluded", 0) or 0)
-                                effective["recovery_blocked"] = int(
-                                    effective.get("candidate_load_errors", 0)
-                                    if isinstance(effective.get("candidate_load_errors"), int)
-                                    else len(effective.get("candidate_load_errors") or [])
-                                ) + int(effective.get("epoch_protected_count", 0) or 0)
-                                effective.setdefault("checkpoint_recovery_pending", 0)
-                                effective.setdefault("writer_uncertain", 0)
-                                effective.setdefault("identity_mismatch", 0)
-                                effective.setdefault("draining", 0)
-                                effective.setdefault("selector_error", 0)
-                                effective.setdefault("lock_busy", 0)
-                                report["v2_effective"] = effective
-                            elif preview.get("epoch_protection_fail_closed"):
-                                report["v2_effective"] = {
-                                    "selected_ids": [],
-                                    "not_admitted": 0,
-                                    "cooldown": 0,
-                                    "quarantined": 0,
-                                    "recovery_blocked": 0,
-                                    "checkpoint_recovery_pending": 0,
-                                    "writer_uncertain": 0,
-                                    "identity_mismatch": 0,
-                                    "draining": 0,
-                                    "selector_error": 1,
-                                    "lock_busy": 0,
-                                    "preview_error": "epoch_protection_fail_closed",
-                                }
-                            elif preview.get("locked"):
-                                report["v2_effective"] = {
-                                    "selected_ids": [],
-                                    "not_admitted": 0,
-                                    "cooldown": 0,
-                                    "quarantined": 0,
-                                    "recovery_blocked": 0,
-                                    "checkpoint_recovery_pending": 0,
-                                    "writer_uncertain": 0,
-                                    "identity_mismatch": 0,
-                                    "draining": 0,
-                                    "selector_error": 0,
-                                    "lock_busy": 1,
-                                    "preview_error": "v2_run_lock_busy",
-                                }
-                            else:
-                                report["v2_effective"] = {
-                                    "selected_ids": [],
-                                    "not_admitted": 0,
-                                    "cooldown": 0,
-                                    "quarantined": 0,
-                                    "recovery_blocked": 0,
-                                    "checkpoint_recovery_pending": 0,
-                                    "writer_uncertain": 0,
-                                    "identity_mismatch": 0,
-                                    "draining": 0,
-                                    "selector_error": 1,
-                                    "lock_busy": 0,
-                                    "preview_error": "selector_invalid_result",
-                                }
-                    except Exception as exc:  # monitor must remain stable on diagnostics failure
-                        report["v2_effective"] = {
-                            "selected_ids": [],
-                            "not_admitted": 0,
-                            "cooldown": 0,
-                            "quarantined": 0,
-                            "recovery_blocked": 0,
-                            "checkpoint_recovery_pending": 0,
-                            "writer_uncertain": 0,
-                            "identity_mismatch": 0,
-                            "draining": 0,
-                            "selector_error": 1,
-                            "lock_busy": 0,
-                            "preview_error": type(exc).__name__,
+                # The V1 cron monitor must not inspect or preview V2.  The
+                # shared queue report already applies status, cooldown and
+                # quarantine rules; retain only rows that the V1 executor can
+                # actually mutate.  In particular, do not call run_v2 or read
+                # a V2 checkpoint here: those are separate scheduler concerns.
+                report = {
+                    **report,
+                    "posts": [row for row in report.get("posts", []) if not row.get("v2")],
+                    "unprocessed_ids": [
+                        int(post_id) for post_id in report.get("unprocessed_ids", [])
+                        if int(post_id) not in {
+                            int(row["id"]) for row in report.get("posts", []) if row.get("v2")
                         }
+                    ],
+                    "eligible_rework_ids": [
+                        int(post_id) for post_id in report.get("eligible_rework_ids", [])
+                        if int(post_id) not in {
+                            int(row["id"]) for row in report.get("posts", []) if row.get("v2")
+                        }
+                    ],
+                    "v2_eligible_ids": [],
+                }
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
-                print(_monitor_line(report, args.root, include_liveness=True))
+                print(_monitor_line(report, None, include_liveness=True))
                 return 0
             result = _compact_queue(report) if args.compact else report
         elif args.command == "cards":
@@ -4065,6 +3988,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
         elif args.command == "apply-batch":
             batch = load_editorial_batch(args.batch_file)
+            media_manifest = getattr(args, "media_manifest", None)
+            if media_manifest is None:
+                candidate_manifest = args.batch_file.with_name("media.manifest.json")
+                media_manifest = candidate_manifest if candidate_manifest.is_file() else None
+            media_assembly = None
+            if media_manifest is not None:
+                batch, media_assembly = merge_media_manifest_into_editorial(
+                    batch, media_manifest
+                )
+                _write_audit(
+                    args.batch_file.with_name("editorial.resolved.json"), batch
+                )
             if args.dry_run:
                 config = replace(config, dry_run=True)
             result = _apply_editorial_batch(
@@ -4075,6 +4010,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dry_run=bool(args.dry_run),
                 compact=bool(args.compact),
             )
+            if media_assembly is not None:
+                result["media_plan_assembly"] = media_assembly
         elif args.command == "checklist":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
