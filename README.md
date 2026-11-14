@@ -86,31 +86,34 @@ Se `decision=skip` ou a confianca ficar abaixo do limite configurado, o comando 
 
 ## Pipeline
 
-O fluxo operacional atual é o `v2-cycle`, que mantém um lock durante a sessão
-e repete rodadas preview→write até READY ou um limite seguro:
+O fluxo operacional atual do Editorial é o executor V1, instalado pelo cron
+Hermes e separado do Publisher. Ele mantém cada post isolado, revalida a
+elegibilidade antes de cada escrita e segue até READY ou um bloqueio seguro:
 
 ```text
 Hermes cron
-  -> unicornio_editor.cli v2-cycle
-  -> checkpoint/journal do ciclo
-  -> a cada rodada: scheduler NEW+RETRY
-       -> preview autorizado
-       -> v2-run write com os mesmos IDs e ordem
-       -> pipeline EDITORIAL -> MEDIA -> COMPOSE -> VALIDATE
-       -> readback/checkpoint/telemetria
-  -> retoma rodada interrompida ou encerra por READY/orçamento/estagnação
-  -> após estagnação, DRAINING fecha NEW e processa somente retries
+  -> queue/cards (somente posts elegíveis para V1)
+  -> prepare-batch
+  -> editorial-generate-batch (Hermes)
+  -> media-resolve-batch
+  -> montagem determinística do media_plan pelo post_id
+  -> apply-batch -> MEDIA -> COMPOSE -> VALIDATE
+  -> readback: READY, PARTIAL, BLOCKED ou AWAITING_HUMAN
   -> publisher separado: somente posts READY
 ```
 
+Posts que possuem `_hermes_work_state` continuam pertencendo ao V2 e não viram
+`NEW` automaticamente. A migração V2→V1 é administrativa, explícita e limitada
+a estados comprovadamente intocados; ela preserva o histórico e não migra
+conteúdo ou anexos. O V2 permanece disponível para auditoria e recuperação,
+mas não é executado pelo cron V1.
+
 Para auditar isolamentos sem replay, revisar evidências e gerar métricas
 agregadas de conversão de mídia, consulte o [procedimento de investigação do
-ciclo V2](docs/v2-cycle-investigation.md). A fila é read-only; liberar um post
-exige preview atualizado, classificação segura e autorização administrativa
-explícita.
+ciclo V2](docs/v2-cycle-investigation.md). A fila é read-only; qualquer
+alteração de estado exige elegibilidade, cooldown, quarentena e readback.
 
-O diagrama abaixo descreve o pipeline histórico de etapas internas; os
-comandos legados não devem ser usados pelo cron.
+O diagrama abaixo detalha as etapas internas do executor V1.
 
 ```text
 Hermes cron (monitor: so acorda quando a assinatura da fila muda)

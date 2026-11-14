@@ -12,6 +12,7 @@ from unicornio_editor.batch import (
     load_media_resolve_batch,
     merge_media_manifest_into_editorial,
     prepare_batch,
+    resolve_batch_editorial_defaults,
     validate_batch_id,
 )
 from unicornio_editor.config import Config
@@ -514,6 +515,32 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(plan[0]["candidate_id"], "c1")
             self.assertGreaterEqual(plan[2]["paragraph_index"] - plan[1]["paragraph_index"], 3)
             self.assertEqual(report["assembled"], 1)
+
+    def test_batch_defaults_restore_original_html_when_model_omits_rewrite(self):
+        post = _post(1, "Videogame sem reescrita")
+        post["content"] = {"raw": "<article><p>Videogame sem reescrita preserva o conteúdo original.</p></article>"}
+        client = BatchClient({1: post})
+        batch = {
+            "schema_version": 1,
+            "batch_id": "batch-defaults",
+            "items": [{
+                "post_id": 1,
+                "status": "ok",
+                "editorial": {
+                    "cleaned_html": None,
+                    "seo": None,
+                    "needs_trailer": None,
+                    "trailer_url": None,
+                },
+            }],
+        }
+
+        resolved = resolve_batch_editorial_defaults(client, batch)
+        editorial = resolved["items"][0]["editorial"]
+        self.assertTrue(editorial["cleaned_html"])
+        self.assertIn("Videogame sem reescrita", editorial["cleaned_html"])
+        self.assertIsInstance(editorial["seo"], dict)
+        self.assertFalse(editorial["needs_trailer"])
 
     def test_media_manifest_does_not_promote_ambiguous_candidate(self):
         with tempfile.TemporaryDirectory() as directory:

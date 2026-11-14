@@ -25,6 +25,7 @@ from .workflow import (
     _featured_diagnosis,
     _images_summary,
     prepare_post,
+    resolve_editorial_defaults,
 )
 
 BATCH_SCHEMA_VERSION = 1
@@ -38,6 +39,27 @@ _EDITORIAL_FAILURE_CLASSES = frozenset({
 
 class BatchError(ValueError):
     """Raised when a batch envelope cannot be safely created or read."""
+
+
+def resolve_batch_editorial_defaults(client: Any, batch: dict[str, Any]) -> dict[str, Any]:
+    """Fill omitted editorial fields from the current WordPress snapshot.
+
+    Hermes may return ``cleaned_html: null`` when no rewrite is needed.  The
+    deterministic media bridge still needs the current HTML to place inline
+    images, so resolve the same V1 defaults used by ``apply`` before joining
+    the media manifest.  This performs read-only WordPress reads only.
+    """
+    items: list[dict[str, Any]] = []
+    for raw_item in batch.get("items") or []:
+        item = dict(raw_item)
+        if str(item.get("status") or "ok") == "ok":
+            post_id = int(item["post_id"])
+            post = client.get_post(post_id)
+            item["editorial"] = resolve_editorial_defaults(
+                dict(item.get("editorial") or {}), post
+            )
+        items.append(item)
+    return {**batch, "items": items}
 
 
 def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query: str,

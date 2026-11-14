@@ -13,7 +13,12 @@ import pytest
 from PIL import Image, ImageDraw
 
 from unicornio_editor.checklist import run_pre_publish_checklist
-from unicornio_editor.batch import load_editorial_batch, merge_media_manifest_into_editorial, prepare_batch
+from unicornio_editor.batch import (
+    load_editorial_batch,
+    merge_media_manifest_into_editorial,
+    prepare_batch,
+    resolve_batch_editorial_defaults,
+)
 from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch
 from unicornio_editor.config import Config
 from unicornio_editor.media.inserter import insert_media
@@ -377,6 +382,7 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
             post_id,
             {
                 "title": editorial["seo"]["title"],
+                "content": {"raw": editorial["cleaned_html"]},
                 "meta": {"_hermes_work_state": json.dumps(WorkState().to_dict(), separators=(",", ":"))},
             },
         )
@@ -437,12 +443,15 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
         assert resolved["posts"][0]["candidates"], resolved
 
         editorial_output = case.root / "work" / "batches" / prepared["batch_id"] / "editorial.output.json"
+        model_editorial = {**editorial, "cleaned_html": None}
         editorial_output.write_text(json.dumps({
             "schema_version": 1,
             "batch_id": prepared["batch_id"],
-            "results": [{"post_id": post_id, "status": "ok", "editorial": editorial}],
+            "results": [{"post_id": post_id, "status": "ok", "editorial": model_editorial}],
         }), encoding="utf-8")
         batch = load_editorial_batch(editorial_output)
+        batch = resolve_batch_editorial_defaults(case.client, batch)
+        assert batch["items"][0]["editorial"]["cleaned_html"]
         batch, assembly = merge_media_manifest_into_editorial(
             batch,
             case.root / "work" / "batches" / prepared["batch_id"] / "media.manifest.json",

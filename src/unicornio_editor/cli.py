@@ -26,6 +26,7 @@ from .batch import (
     load_vision_batch,
     merge_media_manifest_into_editorial,
     prepare_batch,
+    resolve_batch_editorial_defaults,
 )
 from .checklist import required_image_count, required_image_count_for_content, run_pre_publish_checklist
 from .config import ConfigError, _carregar_env_do_projeto, load_config
@@ -3988,6 +3989,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
         elif args.command == "apply-batch":
             batch = load_editorial_batch(args.batch_file)
+            batch = resolve_batch_editorial_defaults(client, batch)
             media_manifest = getattr(args, "media_manifest", None)
             if media_manifest is None:
                 candidate_manifest = args.batch_file.with_name("media.manifest.json")
