@@ -364,7 +364,12 @@ def _validate_prepared_archive(root: Path, transition: Mapping[str, Any]) -> tup
     for name, expected in (manifest.get("archive_file_hashes") or {}).items():
         path = Path(name)
         if not path.is_absolute():
-            path = archive / name
+            # Older manifests written with a relative --root stored paths that
+            # already included the archive prefix. Keep those resumable while
+            # new manifests store archive-relative names.
+            archive_parts = archive.parts
+            if path.parts[:len(archive_parts)] != archive_parts:
+                path = archive / path
         if _file_hash(path) != expected:
             raise CycleRecoveryError(f"archived evidence hash diverged: {path}")
     return (str(transition["old_state_sha256"]), str(transition["old_journal_sha256"]), str(transition["quarantine_before_sha256"]), after_hash, new_state_hash, new_journal_hash)
@@ -607,7 +612,11 @@ def recover_blocked_cycle(
             allow_normalize=not (archive / "archive-manifest.json").exists(),
         )
         _write_once(archive / "quarantine-after.json", _json(after))
-        archive_files = {str(path): _sha256(path) for path in archive.rglob("*") if path.is_file() and path.name != "archive-manifest.json"}
+        archive_files = {
+            path.relative_to(archive).as_posix(): _sha256(path)
+            for path in archive.rglob("*")
+            if path.is_file() and path.name != "archive-manifest.json"
+        }
         manifest = {**transition, "phase": "prepared", "archive_hashes": hashes, "archive_file_hashes": archive_files, "registry_snapshot": registry_info, "reconciliation_evidence": evidence, "quarantine_before": policy, "quarantine_after": after, "old_state_sha256": state_hash, "old_journal_sha256": journal_hash, "quarantine_before_sha256": quarantine_hash, "quarantine_after_hash": _hash_value(after), "new_state_prepared_sha256": _sha256(archive / "new-state.json"), "new_journal_prepared_sha256": _sha256(archive / "new-journal.jsonl")}
         _write_once(archive / "archive-manifest.json", _json(manifest))
         transition = manifest

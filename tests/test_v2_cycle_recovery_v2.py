@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -142,7 +143,7 @@ def _evidence(monkeypatch):
     monkeypatch.setattr(recovery, "_round_post_evidence", fake)
 
 
-def _kwargs(root: Path, **extra):
+def _kwargs(root: Path, **extra: Any) -> dict[str, Any]:
     value = dict(root=root, client=object(), cycle_id=CYCLE, authorization_id=AUTH, pending_round=3,
                  selected_ids=SELECTED, committed_post_ids=[101, 102, 103], uncertain_post_ids=[104],
                  not_executed_post_ids=[105], pre_writer_recoverable_post_ids=[], run_ids=RUNS,
@@ -198,6 +199,55 @@ def test_resume_after_quarantine_write_interruption(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
     resumed = recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
+    assert resumed["status"] == "applied"
+    assert json.loads((root / "work" / "v2-cycle" / "state.json").read_text())["cycle_id"] == "n" * 32
+
+
+def test_recovery_apply_supports_relative_root_archive_paths(tmp_path, monkeypatch):
+    _root(tmp_path / "project")
+    monkeypatch.chdir(tmp_path)
+    root = Path("project")
+    _evidence(monkeypatch)
+
+    preview = recovery.recover_blocked_cycle(**_kwargs(root))
+    result = recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
+
+    assert result["status"] == "applied"
+    assert json.loads((root / "work" / "v2-cycle" / "state.json").read_text())["cycle_id"] == "n" * 32
+    assert Path(result["archive_dir"]).is_dir()
+
+
+def test_resume_prepared_transition_with_legacy_prefixed_archive_paths(tmp_path, monkeypatch):
+    import hashlib
+
+    _root(tmp_path / "project")
+    monkeypatch.chdir(tmp_path)
+    root = Path("project")
+    _evidence(monkeypatch)
+    preview = recovery.recover_blocked_cycle(**_kwargs(root))
+
+    original_validate = recovery._validate_resume_phase
+    monkeypatch.setattr(recovery, "_validate_resume_phase", lambda *_args: (_ for _ in ()).throw(OSError("simulated crash")))
+    with pytest.raises(OSError, match="simulated crash"):
+        recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
+    monkeypatch.setattr(recovery, "_validate_resume_phase", original_validate)
+
+    transition_path = recovery._transition_path(root, preview["isolation_id"])
+    transition = json.loads(transition_path.read_text())
+    archive = Path(transition["archive_dir"])
+    manifest_path = archive / "archive-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["archive_file_hashes"] = {
+        str(archive / name): digest
+        for name, digest in manifest["archive_file_hashes"].items()
+    }
+    manifest_text = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    manifest_path.write_text(manifest_text + chr(10), encoding="utf-8")
+    transition["archive_manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    transition_path.write_text(json.dumps(transition, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + chr(10), encoding="utf-8")
+
+    resumed = recovery.recover_blocked_cycle(**_kwargs(root, preview=preview, apply=True))
+
     assert resumed["status"] == "applied"
     assert json.loads((root / "work" / "v2-cycle" / "state.json").read_text())["cycle_id"] == "n" * 32
 
