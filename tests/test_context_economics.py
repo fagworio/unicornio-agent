@@ -288,7 +288,7 @@ class MediaSelectionTests(unittest.TestCase):
         self.assertNotIn("rejected", resultado)
         serializado = json.dumps(resultado)
         self.assertNotIn("phash", serializado)
-        for campo in ("url", "source", "score", "verdict", "official_source",
+        for campo in ("url", "source_page_url", "score", "verdict", "official_source",
                       "already_in_library", "needs_vision"):
             self.assertIn(campo, resultado["options"][0])
 

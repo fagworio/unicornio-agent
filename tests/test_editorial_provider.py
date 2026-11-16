@@ -11,6 +11,7 @@ from unittest import mock
 from unicornio_editor.editorial_provider import (
     _OUTPUT_SCHEMA,
     _normalize_output,
+    _output_schema_for_policy,
     EditorialProviderError,
     generate_editorial_batch,
 )
@@ -291,6 +292,19 @@ class EditorialProviderTests(unittest.TestCase):
             set(editorial["required"]), set(editorial["properties"]),
             "o editorial precisa declarar `required` completo em strict mode",
         )
+
+    def test_media_schema_tracks_effective_source_policy(self):
+        strict = _output_schema_for_policy("strict")
+        credit_only = _output_schema_for_policy("credit_only")
+        strict_item = strict["properties"]["results"]["items"]["properties"]["editorial"]["properties"]["media_plan"]["items"]
+        credit_item = credit_only["properties"]["results"]["items"]["properties"]["editorial"]["properties"]["media_plan"]["items"]
+        self.assertIn("source_page_url", strict_item["required"])
+        self.assertNotIn("source_page_url", credit_item["properties"])
+        for schema in (strict, credit_only):
+            for path, node in _walk_schema(schema):
+                if node.get("type") == "object":
+                    self.assertIs(node.get("additionalProperties"), False, path)
+                    self.assertEqual(set(node.get("required") or []), set(node.get("properties") or {}), path)
 
     def test_accepts_editorial_serialized_as_json_string(self):
         EditorialHandler.editorial_mode = "string"

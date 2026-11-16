@@ -39,13 +39,15 @@ _FIGCAPTION_RE = re.compile(r"<figcaption\b[^>]*>(.*?)</figcaption>", re.IGNOREC
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'([a-zA-Z-]+)\s*=\s*["\']([^"\']*)["\']')
 
-# Pesos do score (Fase 11) — evidência de origem, nunca texto do agente.
+# Pesos de evidência editorial. Em modo credit-only a URL direta e o crédito
+# substituem a página-fonte, sem declarar licença ou origem verificada.
 PESOS: dict[str, int] = {
     "filename": 5,
     "og_title": 5,
     "page_title": 4,
     "alt_original": 4,
     "figcaption": 3,
+    "credit_text": 3,
     "heading": 3,
     "page_url": 2,
     "query": 1,
@@ -66,7 +68,7 @@ LIMIAR_RECUPERACAO_CONTEXTO = 2
 # `deterministic_match` exige pelo menos um sinal local forte: sem isso uma
 # página sobre Metroid aprovaria o avatar do autor (page_title 4 + url 2 +
 # query 1 = 7) mesmo sem nenhuma evidência sobre a imagem.
-SINAIS_LOCAIS: tuple[str, ...] = ("filename", "alt_original", "figcaption", "heading")
+SINAIS_LOCAIS: tuple[str, ...] = ("filename", "alt_original", "figcaption", "credit_text", "heading")
 LIMIAR_LOCAL = 4
 
 
@@ -479,6 +481,8 @@ def evidence_score(
     source_verification_reason: str = "",
     source_verification_recoverable: bool = False,
     source_comparison_proved: bool = False,
+    allow_credit_only: bool = False,
+    credit_text: str = "",
     duplicate_frame: bool = False,
 ) -> dict[str, Any]:
     """Score determinístico de evidência (Fase 11).
@@ -496,6 +500,7 @@ def evidence_score(
         "page_title": page_title,
         "alt_original": alt_original,
         "figcaption": figcaption,
+        "credit_text": credit_text,
         "heading": heading,
         "page_url": page_url,
         "query": query,
@@ -518,10 +523,40 @@ def evidence_score(
     # proveniência. Era -10 e podia ser "vencido" por muitos +5/+4 — o que
     # permitiria publicar uma imagem bonita de origem desconhecida.
     if not source_page_present:
+        if allow_credit_only and str(credit_text or "").strip():
+            local_score = sum(
+                PESOS[field] for field in SINAIS_LOCAIS if field in evidencias
+            )
+            if not any(_casa(subject, campos.get(field, "")) for field in (
+                "filename", "alt_original", "figcaption", "credit_text"
+            )):
+                return {
+                    **base,
+                    "score": 0,
+                    "gate": "relevance",
+                    "verdict": "reject",
+                    "needs_vision": False,
+                    "source_page_verified": False,
+                    "rights_verified": False,
+                    "reason_code": "credit_only_subject_mismatch",
+                    "reason": "URL/crédito não relacionam a imagem ao assunto",
+                }
+            return {
+                **base,
+                "score": score,
+                "local_score": local_score,
+                "gate": "credit_only_policy",
+                "verdict": "credit_only_accepted",
+                "needs_vision": False,
+                "source_page_verified": False,
+                "rights_verified": False,
+                "reason_code": "site_assumed_responsibility",
+                "reason": "URL direta e crédito aceitos pela política do site; licença não verificada",
+            }
         return {**base, "score": 0, "gate": "provenance",
                 "verdict": "unresolved_source", "penalties": ["missing_source"],
                 "needs_vision": False,
-                "reason": "sem página de origem: proveniência não resolvida"}
+                "reason": "sem página de origem e sem política URL+crédito"}
     if not image_in_source:
         definitive_mismatch = (
             source_verification_reason in {"source_mismatch", "source_bytes_mismatch"}

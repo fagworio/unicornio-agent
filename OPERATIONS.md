@@ -51,8 +51,25 @@ unicornio-editor list-pending
 unicornio-editor prepare ID
 ```
 
+## Política de aquisição de mídia
+
+A configuração efetiva é `MEDIA_SOURCE_POLICY` (`credit_only` por default no
+loader de produção; `strict` preserva a antiga exigência de página-fonte). Em
+`credit_only`, URL direta HTTP(S) + crédito visível são obrigatórios; sem crédito
+o sistema registra `Crédito da imagem: domínio de hospedagem: <host>.` Essa
+etiqueta não identifica autor nem prova origem/licença. Logs, manifesto e
+readback devem manter `source_page_verified=false` e `rights_verified=false`.
+As demais validações (relevância, integridade, WebP/dimensões, duplicidade,
+featured, checklist e readback) permanecem ativas.
+
 ## Teste de mídia licenciada
-A pesquisa usa o plano de providers configurado, mas o upload só ocorre quando a página original declara um Schema.org `ImageObject` com o `contentUrl` exato e a licença compatível. Páginas sem essa evidência são rejeitadas, mesmo que o plano do agente declare CC. Baixe somente para área temporária, converta para WebP e envie pela Media Library local; não use bucket/CDN externo. Confirme no attachment o crédito e os metadados de licença.
+Esta checagem manual é uma validação separada do modo de política `strict`; não
+é requisito para aceitar mídia sob `credit_only`. O upload só ocorre quando a
+página original declara um Schema.org `ImageObject` com o `contentUrl` exato e a
+licença compatível. Páginas sem essa evidência são rejeitadas, mesmo que o plano
+do agente declare CC. Baixe somente para área temporária, converta para WebP e
+envie pela Media Library local; não use bucket/CDN externo. Confirme no
+attachment o crédito e os metadados de licença.
 
 ```bash
 unicornio-editor upload-image "URL_DA_IMAGEM" \

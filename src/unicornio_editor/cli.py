@@ -1234,7 +1234,11 @@ def preflight_apply_candidate(
         if not eligibility.eligible_for_v1:
             return False, f"post is not eligible ({eligibility.reason})"
     try:
-        validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
+        validate_editorial(
+            editorial,
+            min_confidence=config.min_relevance_confidence,
+            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+        )
     except (ValueError, TypeError, KeyError) as exc:
         return False, f"editorial invalido: {exc}"
     relevance = editorial.get("site_relevance") or {}
@@ -1640,6 +1644,7 @@ def _resolve_media_batch(
     excluded_fingerprints = excluded_fingerprints or {}
     excluded_url_hashes = excluded_url_hashes or {}
     excluded_source_page_url_hashes = excluded_source_page_url_hashes or {}
+    media_source_policy = str(getattr(config, "media_source_policy", "strict"))
     reuse_by_post: dict[int, list[dict]] = {}
     needed_web_by_post: dict[int, int] = {}
     candidate_capacity_by_post: dict[int, int] = {}
@@ -1698,11 +1703,12 @@ def _resolve_media_batch(
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
             role=str(item.get("role") or ""),
+            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
         )
         reuse = [
             candidate for candidate in reuse_accepted
             if candidate.get("valid") is True
-            and (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+            and (candidate.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
         ]
         reuse_by_post[post_id] = reuse
         needed_web_by_post[post_id] = max(0, int(item["needed"]) - len(reuse))
@@ -1770,10 +1776,11 @@ def _resolve_media_batch(
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
             role=str(spec.get("role") or ""),
+            media_source_policy=media_source_policy,
         )
         accepted = [
             candidate for candidate in aprovados
-            if (candidate.get("evidence") or {}).get("verdict") == "deterministic_match"
+            if (candidate.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
         ]
         accepted_candidates_by_query[str(query)] = [dict(candidate) for candidate in accepted]
         from .media.visual_hash import canonical_visual_representatives
@@ -1828,6 +1835,7 @@ def _resolve_media_batch(
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
             role=str(item.get("role") or ""),
+            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
@@ -2147,10 +2155,14 @@ def _resolve_media_batch(
             required=needed,
             found=len(candidates),
             with_source=sum(bool(str(candidate.get("source_page_url") or "").strip()) for candidate in all_examined),
-            source_verified=sum(bool(candidate.get("valid")) for candidate in all_examined),
+            source_verified=sum(
+                bool(candidate.get("valid")) and candidate.get("provenance_mode") != "credit_only"
+                for candidate in all_examined
+            ),
             source_mismatch=verdicts.count("source_mismatch"),
             missing_source_page=verdicts.count("unresolved_source") + verdicts.count("missing_source_page"),
             relevance_match=verdicts.count("deterministic_match"),
+            credit_only_accepted=verdicts.count("credit_only_accepted"),
             relevance_ambiguous=verdicts.count("ambiguous"),
             relevance_reject=verdicts.count("reject"),
             duplicate_frame=verdicts.count("duplicate_frame") + verdicts.count("duplicate_existing_frame"),
@@ -2670,6 +2682,7 @@ def _enriquecer_candidatos(
     url_policy: str = "audit",
     attempt_id: str = "",
     role: str = "",
+    media_source_policy: str = "strict",
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -2702,10 +2715,11 @@ def _enriquecer_candidatos(
       pontuado e hasheado DUAS vezes (latência, retries e verificação
       duplicada, sem ganho nenhum).
     """
-    from urllib.parse import unquote
+    from urllib.parse import unquote, urlsplit
 
     from .media.evidence import evidence_score, source_context
     from .media.official_sources import official_source
+    from .media.text import credit_text_with_hosting_domain
     from .media.source_verify import validate_discovered_candidate
     # This function defines nested candidate classifiers whose URL-audit
     # callbacks capture append_telemetry.  Bind it before any classifier can
@@ -2715,12 +2729,39 @@ def _enriquecer_candidatos(
 
     cache_memo = enriched_cache if enriched_cache is not None else {}
     for candidate in candidates:
+        candidate.setdefault("direct_image_url", candidate.get("url", ""))
+        candidate.setdefault("discovery_image_url", candidate.get("direct_image_url", ""))
         if not candidate.get("candidate_id"):
             candidate["candidate_id"] = hashlib.sha256(
                 f"{candidate.get('engine','')}|{candidate.get('query', termo)}|{candidate.get('direct_image_url','')}".encode()
             ).hexdigest()[:20]
-        candidate.setdefault("discovery_image_url", candidate.get("direct_image_url", ""))
         candidate["media_library_id"] = candidate.get("media_library_id") or candidate.get("library_media_id")
+        if media_source_policy == "credit_only":
+            direct_url = str(candidate.get("direct_image_url") or "")
+            credit = str(candidate.get("credit_text") or "").strip()
+            if not credit:
+                credit = credit_text_with_hosting_domain("", direct_url)
+            candidate["credit_text"] = credit
+            candidate["provenance_mode"] = "credit_only"
+            candidate["source_page_verified"] = False
+            try:
+                parsed_direct_url = urlsplit(direct_url)
+                parsed_direct_url.port  # reject malformed ports before accepting the candidate
+                valid_direct_url = bool(
+                    parsed_direct_url.scheme.casefold() in {"http", "https"}
+                    and parsed_direct_url.hostname
+                    and not parsed_direct_url.username
+                    and not parsed_direct_url.password
+                )
+            except ValueError:
+                valid_direct_url = False
+            candidate["usable"] = valid_direct_url and bool(credit)
+            if not candidate["usable"]:
+                candidate["rejected_reason"] = "invalid_direct_image_url_or_credit"
+            # The direct asset URL and credit are the persisted attribution
+            # contract; a result-page URL is neither required nor asserted.
+            candidate.pop("source_page_url", None)
+            candidate.pop("source", None)
     aprovados: list[dict] = []
     rejeitados: list[dict] = []
     deferidos: list[dict] = []
@@ -2833,7 +2874,7 @@ def _enriquecer_candidatos(
         fortes = [
             dict(forte)
             for forte in aprovados
-            if (forte.get("evidence") or {}).get("verdict") == "deterministic_match"
+            if (forte.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
         ]
         if not fortes:
             return 0
@@ -2911,7 +2952,7 @@ def _enriquecer_candidatos(
             rejeitados.append(cand)
             _guardar_memo(cand)
             return
-        if verify:
+        if verify and media_source_policy != "credit_only":
             veredito = prevalidated_sources.pop(id(cand), None)
             if veredito is None:
                 veredito = validate_discovered_candidate(
@@ -2975,9 +3016,9 @@ def _enriquecer_candidatos(
             alt_original=ctx.get("alt_original", ""),
             figcaption=ctx.get("figcaption", ""),
             heading=ctx.get("heading", ""),
-            page_url=pagina,
+            page_url=pagina or (str(cand.get("direct_image_url") or "") if media_source_policy == "credit_only" else ""),
             query=termo,
-            source_page_present=bool(pagina),
+            source_page_present=bool(pagina) and media_source_policy != "credit_only",
             image_in_source=bool(cand.get("valid")),
             source_verification_reason=str(
                 cand.get("source_verification_reason_code") or ""
@@ -2986,6 +3027,8 @@ def _enriquecer_candidatos(
                 cand.get("source_verification_recoverable")
             ),
             source_comparison_proved=bool(cand.get("source_comparison_proved")),
+            allow_credit_only=media_source_policy == "credit_only",
+            credit_text=str(cand.get("credit_text") or ""),
         )
         cand["evidence"] = pontos
         cand["evidence_score"] = pontos["score"]
@@ -2997,7 +3040,7 @@ def _enriquecer_candidatos(
         cand["official_source"] = official_source(
             str(cand.get("direct_image_url") or ""), subject
         )
-        if pontos["verdict"] in ("deterministic_match", "ambiguous"):
+        if pontos["verdict"] in ("deterministic_match", "ambiguous", "credit_only_accepted"):
             # pHash imediato: a capacidade do resolver exige frame DISTINTO e,
             # sem o hash aqui, a contagem cairia para URL — o mesmo frame servido
             # por duas engines (URLs diferentes) contaria como dois fortes.
@@ -3025,13 +3068,13 @@ def _enriquecer_candidatos(
             deferidos.append(cand)
         else:
             (aprovados if pontos["verdict"] in (
-                "deterministic_match", "ambiguous", "insufficient_source_context"
+                "deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted"
             ) else rejeitados).append(cand)
         _guardar_memo(cand)
 
     teto_resolver = int(capacity) if capacity and capacity > 0 else 0
     resolver = None
-    if any(
+    if media_source_policy != "credit_only" and any(
         not str(c.get("source_page_url") or "").strip() or verify
         for c in pendentes
     ):
@@ -3043,6 +3086,14 @@ def _enriquecer_candidatos(
     for cand in pendentes:
         chave_original: str | None = None
         if _blocked_by_history(cand):
+            _classificar(cand)
+            continue
+        if media_source_policy == "credit_only":
+            cand["valid"] = True
+            cand["source_page_verified"] = False
+            cand["source_verification_status"] = "credit_only"
+            cand["source_verification_category"] = "credit_only_policy"
+            cand["source_verification_reason_code"] = "site_assumed_responsibility"
             _classificar(cand)
             continue
         sem_origem = not str(cand.get("source_page_url") or "").strip()
@@ -3132,7 +3183,7 @@ def _enriquecer_candidatos(
             deferidos.append(cand)
         elif (cand.get("evidence") or {}).get("recoverable"):
             deferidos.append(cand)
-        elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context"):
+        elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted"):
             aprovados.append(cand)
         else:
             rejeitados.append(cand)
@@ -3187,19 +3238,22 @@ def _enriquecer_candidatos(
                 eng = str(cand.get("engine") or "unknown")
                 linha = funil.setdefault(
                     eng, {"discovered": 0, "verified": 0, "subject_match": 0,
-                          "approved": 0, "selected": 0, "deferred": 0},
+                          "credit_only_accepted": 0, "approved": 0, "selected": 0, "deferred": 0},
                 )
                 linha["discovered"] += 1
-                if cand.get("valid"):
+                if cand.get("valid") and cand.get("provenance_mode") != "credit_only":
                     linha["verified"] += 1
-                if (cand.get("evidence") or {}).get("verdict") == "deterministic_match":
+                verdict = str((cand.get("evidence") or {}).get("verdict") or "")
+                if verdict == "deterministic_match":
                     linha["subject_match"] += 1
+                elif verdict == "credit_only_accepted":
+                    linha["credit_only_accepted"] += 1
             for cand in deferidos:
                 # Não investigado != reprovado: o funil conta em campo próprio.
                 eng = str(cand.get("engine") or "unknown")
                 funil.setdefault(
                     eng, {"discovered": 0, "verified": 0, "subject_match": 0,
-                          "approved": 0, "selected": 0, "deferred": 0},
+                          "credit_only_accepted": 0, "approved": 0, "selected": 0, "deferred": 0},
                 )["deferred"] += 1
             for cand in aprovados:
                 linha = funil[str(cand.get("engine") or "unknown")]
@@ -3227,7 +3281,7 @@ def _enriquecer_candidatos(
                         query=str(cand.get("query") or termo or ""),
                         subject=str(subject or ""),
                         image_domain=diagnostic_url_domain(cand.get("direct_image_url")),
-                        source_domain=diagnostic_url_domain(cand.get("source_page_url") or cand.get("direct_image_url")),
+                        source_domain=diagnostic_url_domain(cand.get("source_page_url")),
                         status=status,
                         reason_code=diagnostic["verdict"],
                         verification_level=str(cand.get("verification_level") or ""),
@@ -3977,6 +4031,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     hermes_command=getattr(config, "hermes_command", "hermes"),
                     hermes_model=getattr(config, "hermes_model", ""),
                     hermes_timeout=getattr(config, "hermes_timeout", config.http_timeout),
+                    media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                 )
             finally:
                 if previous_batch is None:
@@ -3997,7 +4052,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             media_assembly = None
             if media_manifest is not None:
                 batch, media_assembly = merge_media_manifest_into_editorial(
-                    batch, media_manifest
+                    batch,
+                    media_manifest,
+                    media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                 )
                 _write_audit(
                     args.batch_file.with_name("editorial.resolved.json"), batch
@@ -4016,7 +4073,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result["media_plan_assembly"] = media_assembly
         elif args.command == "checklist":
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
-            editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+            editorial = validate_editorial(
+                payload,
+                min_confidence=config.min_relevance_confidence,
+                media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+            )
             post = client.get_post(args.post_id)
             if editorial["site_relevance"]["decision"] == "process":
                 editorial = resolve_editorial_defaults(editorial, post)
@@ -4119,6 +4180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         post_id=post_id_ref,
                         emit_terminal=False,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+                        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return len(_frames_fortes)
@@ -4126,7 +4188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     chave_frame = str(
                         aprovado.get("phash") or aprovado.get("direct_image_url") or ""
                     )
-                    if (aprovado.get("evidence") or {}).get("verdict") == "deterministic_match":
+                    if (aprovado.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}:
                         _frames_fortes.add(chave_frame)
                     else:
                         _frames_ambiguos.add(chave_frame)
@@ -4190,6 +4252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     enriched_cache=memo,
                     post_id=post_id_ref,
                     url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+                    media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                 )
             if rejeitados:
                 append_telemetry(
@@ -4234,7 +4297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reuse=len(reuso),
                 strong=sum(
                     1 for c in aprovados
-                    if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+                    if (c.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
                 ),
                 ambiguous=len(_frames_ambiguos),
                 accepted=len(aprovados),
@@ -4343,6 +4406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         root=args.root,
                         enriched_cache=_memo_listicle,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+                        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return 0
@@ -4419,6 +4483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         post_id=(int(getattr(args, "post_id", 0)) if getattr(args, "post_id", None) else None),
                         emit_terminal=False,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+                        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item
@@ -4471,7 +4536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         needed=1, needed_web=1, reuse=0,
                         strong=sum(
                             1 for c in candidates
-                            if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+                            if (c.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
                         ),
                         ambiguous=sum(
                             1 for c in candidates
@@ -5092,15 +5157,23 @@ def _write_audit(path: Path, payload: Any) -> str:
 # completo, pHash, flags internas, rejeitados — fica no arquivo de auditoria).
 def _media_candidate(cand: dict) -> dict:
     """Projecao minima de um candidato utilizavel (economia de contexto)."""
-    return {
+    result = {
+        "candidate_id": cand.get("candidate_id"),
         "url": cand.get("direct_image_url"),
-        "source": cand.get("source_page_url"),
+        "credit_text": cand.get("credit_text"),
+        "provenance_mode": cand.get("provenance_mode") or "source_page",
         "score": cand.get("evidence_score"),
         "verdict": (cand.get("evidence") or {}).get("verdict"),
         "official_source": bool(cand.get("official_source")),
         "already_in_library": bool(cand.get("already_in_library")),
         "needs_vision": bool(cand.get("needs_vision")),
     }
+    if result["provenance_mode"] == "credit_only":
+        result["source_page_verified"] = False
+        result["rights_verified"] = False
+    elif cand.get("source_page_url"):
+        result["source_page_url"] = cand.get("source_page_url")
+    return result
 
 
 def _rejected_summary(rejeitados: list[dict]) -> dict[str, int]:
@@ -5128,8 +5201,8 @@ def _media_decision(aprovados: list[dict], *, options: int = 3, margin: int = 2)
     decisao x resultado dos gates (media_validate/apply/first_pass) — se os
     casos ``auto`` comecarem a ser rejeitados depois, o parametro sobe.
     """
-    fortes = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"]
-    fracos = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") != "deterministic_match"]
+    fortes = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}]
+    fracos = [c for c in aprovados if (c.get("evidence") or {}).get("verdict") not in {"deterministic_match", "credit_only_accepted"}]
     if fortes:
         nota_topo = int(fortes[0].get("evidence_score") or 0)
         nota_segundo = int(fortes[1].get("evidence_score") or 0) if len(fortes) > 1 else None
@@ -5202,7 +5275,7 @@ def _final_decision(
     SKILL (`reuse` = acervo cobre o déficit e não houve busca web).
     """
     fortes = sum(
-        1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+        1 for c in aprovados if (c.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
     )
     cobertura = "local" if len(reuso) >= int(needed) else ("mixed" if reuso else "web")
     decisao = _media_decision(aprovados, margin=int(margin))
@@ -5257,7 +5330,7 @@ def _compact_media_search(
     porque a capacidade já estava atendida não é rejeição.
     """
     fortes = sum(
-        1 for c in aprovados if (c.get("evidence") or {}).get("verdict") == "deterministic_match"
+        1 for c in aprovados if (c.get("evidence") or {}).get("verdict") in {"deterministic_match", "credit_only_accepted"}
     )
     decisao = _final_decision(aprovados, reuso, needed, margin=int(margin))
     faltam = max(0, int(needed) - len(reuso) - fortes)

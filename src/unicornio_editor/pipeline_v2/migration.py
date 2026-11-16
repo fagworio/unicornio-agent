@@ -322,6 +322,7 @@ def repair_schema_115142(
             validated = validate_editorial(
                 sanitized,
                 min_confidence=float(getattr(config, "min_relevance_confidence", 0.8)),
+                media_source_policy=str(getattr(config, "media_source_policy", "strict")),
             )
             checks["editorial_contract"] = True
         except (EditorialValidationError, TypeError, ValueError) as exc:
@@ -865,7 +866,11 @@ def repair_compose_114987(
                 checks["partial_checkpoint"] = False
         checks["editorial_draft"] = bool(draft)
         try:
-            validate_editorial(draft, min_confidence=float(getattr(config, "min_relevance_confidence", 0.8)))
+            validate_editorial(
+                draft,
+                min_confidence=float(getattr(config, "min_relevance_confidence", 0.8)),
+                media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+            )
             checks["editorial_contract"] = True
         except (EditorialValidationError, TypeError, ValueError):
             checks["editorial_contract"] = False

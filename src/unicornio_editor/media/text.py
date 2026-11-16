@@ -93,6 +93,25 @@ def credit_text_with_source_site(credit_text: str, source_page_url: str) -> str:
     return credit_text_with_source_name(credit_text, source_site_name(source_page_url))
 
 
+def credit_text_with_hosting_domain(credit_text: str, direct_image_url: str) -> str:
+    """Label the exact image-host hostname without claiming authorship/source rights."""
+    existing = plain_text(credit_text)
+    try:
+        parsed = urlsplit(str(direct_image_url or "").strip())
+        host = parsed.hostname or ""
+        if parsed.scheme.casefold() not in {"http", "https"} or not host:
+            return existing
+        host = host.encode("idna").decode("ascii").casefold().rstrip(".")
+    except (AttributeError, UnicodeError, ValueError):
+        return existing
+    if not host:
+        return existing
+    marker = f"domínio de hospedagem: {host}."
+    if marker.casefold() in existing.casefold():
+        return existing
+    return f"{existing} {marker}".strip() if existing else f"Crédito da imagem: {marker}"
+
+
 def credit_text_with_source_name(credit_text: str, site: str) -> str:
     """Add a source-site label already reduced to safe display text."""
     existing = plain_text(credit_text)

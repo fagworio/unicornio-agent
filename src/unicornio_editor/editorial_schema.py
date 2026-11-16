@@ -60,6 +60,8 @@ _MEDIA = {
     # num item de lista (auto/choose/auto) isso culpava a decisão errada.
     "decision_id",
     "decision",
+    "provenance_mode",
+    "source_page_verified",
     # Query de descoberta que retornou esta imagem (ex.: "redfall xbox
     # series"). Evidencia de relevancia (fluxo manual do editor): se a busca
     # filtrada retornou a imagem, ela e o que se procura. O agente DEVE
@@ -74,7 +76,14 @@ _LEGACY_MEDIA_RIGHTS_FIELDS = {
 }
 
 
-def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.8) -> dict[str, Any]:
+def validate_editorial(
+    payload: Mapping[str, Any],
+    *,
+    min_confidence: float = 0.8,
+    media_source_policy: str = "strict",
+) -> dict[str, Any]:
+    if media_source_policy not in {"strict", "credit_only"}:
+        raise EditorialValidationError("media_source_policy must be strict or credit_only")
     if not isinstance(payload, Mapping):
         raise EditorialValidationError("editorial result must be an object")
     _keys(
@@ -153,21 +162,26 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
     featured_count = 0
     for index, item in enumerate(media_plan):
         media = _object(item, f"media_plan[{index}]")
+        media_optional = {
+            "media_library_id", "search_query", "subject", "phash",
+            "evidence_score", "evidence_verdict", "candidate_id",
+            "credit_text",
+            "provenance_mode",
+            "source_page_verified",
+            # Rastreabilidade opcional (vem do ledger de decisões); o apply
+            # NUNCA confia nela para decidir, só para medir qualidade.
+            "decision_id", "decision",
+            "placement",
+            *_LEGACY_MEDIA_RIGHTS_FIELDS,
+        }
+        if media_source_policy == "credit_only":
+            media_optional.add("source_page_url")
         _keys(
             media, _MEDIA | _LEGACY_MEDIA_RIGHTS_FIELDS, f"media_plan[{index}]",
             # Campos de evidência são OPCIONAIS: o apply recalcula o score e não
             # confia no JSON (um media_plan manual/adulterado não pode passar
             # apenas por preencher evidence_score).
-            optional={
-                "media_library_id", "search_query", "subject", "phash",
-                "evidence_score", "evidence_verdict", "candidate_id",
-                "credit_text",
-                # Rastreabilidade opcional (vem do ledger de decisões); o apply
-                # NUNCA confia nela para decidir, só para medir qualidade.
-                "decision_id", "decision",
-                "placement",
-                *_LEGACY_MEDIA_RIGHTS_FIELDS,
-            },
+            optional=media_optional,
         )
         paragraph_index = media["paragraph_index"]
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
@@ -178,8 +192,26 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
                 f"media_plan[{index}].placement has unsupported value"
             )
         _nonempty_string(media["alt_text"], f"media_plan[{index}].alt_text")
-        for name in ("source_page_url", "direct_image_url"):
-            _http_url(media[name], f"media_plan[{index}].{name}")
+        _http_url(media["direct_image_url"], f"media_plan[{index}].direct_image_url")
+        source_page_url = str(media.get("source_page_url") or "").strip()
+        credit_text = str(media.get("credit_text") or "").strip()
+        if media_source_policy == "credit_only":
+            # The page is a non-authoritative diagnostic under this policy; it
+            # is discarded below and never fetched or used as an acceptance gate.
+            if not credit_text:
+                from .media.text import credit_text_with_hosting_domain
+                credit_text = credit_text_with_hosting_domain(
+                    "", str(media["direct_image_url"])
+                )
+            _nonempty_string(credit_text, f"media_plan[{index}].credit_text")
+            provenance_mode = "credit_only"
+        elif source_page_url:
+            _http_url(source_page_url, f"media_plan[{index}].source_page_url")
+            provenance_mode = "source_page"
+        else:
+            raise EditorialValidationError(
+                f"media_plan[{index}].source_page_url is required by strict media source policy"
+            )
         is_featured = media["is_featured"]
         if not isinstance(is_featured, bool):
             raise EditorialValidationError(f"media_plan[{index}].is_featured must be boolean")
@@ -187,10 +219,22 @@ def validate_editorial(payload: Mapping[str, Any], *, min_confidence: float = 0.
             featured_count += 1
         # Accept old plans so checkpoints and saved drafts remain readable,
         # but do not carry legal-validation fields into the active plan.
-        normalized_media.append({
+        normalized = {
             key: value for key, value in media.items()
             if key not in _LEGACY_MEDIA_RIGHTS_FIELDS
-        })
+        }
+        if media_source_policy == "credit_only":
+            normalized["provenance_mode"] = provenance_mode
+            normalized["source_page_verified"] = False
+            normalized["rights_verified"] = False
+            normalized["credit_text"] = credit_text
+            normalized.pop("source_page_url", None)
+        elif source_page_url:
+            normalized.pop("provenance_mode", None)
+            normalized["source_page_url"] = source_page_url
+        else:
+            normalized.pop("source_page_url", None)
+        normalized_media.append(normalized)
     if featured_count > 1:
         raise EditorialValidationError("media_plan must contain at most one featured image")
 
@@ -274,7 +318,18 @@ def _number(value: Any, name: str) -> float:
 
 def _http_url(value: Any, name: str) -> str:
     _nonempty_string(value, name)
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        parsed.port  # validate syntax and range of an optional port
+    except ValueError as exc:
+        raise EditorialValidationError(f"{name} must be a valid HTTP(S) URL") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise EditorialValidationError(f"{name} must be an absolute HTTP(S) URL")
     return value

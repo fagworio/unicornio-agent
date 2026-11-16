@@ -7,6 +7,16 @@ from unicornio_editor.config import ConfigError, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_media_source_policy_defaults_to_credit_only_and_strict_remains_selectable(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
+            self.assertEqual(load_config().media_source_policy, "credit_only")
+        with patch.dict(
+            os.environ,
+            {"WORDPRESS_URL": "http://wp.test", "MEDIA_SOURCE_POLICY": "strict"},
+            clear=True,
+        ):
+            self.assertEqual(load_config().media_source_policy, "strict")
+
     def test_defaults_to_dry_run(self):
         with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
             config = load_config()

@@ -33,14 +33,20 @@ def upload_image(
 ) -> dict[str, Any]:
     """Upload a technically validated, converted image to WordPress.
 
-    Source membership and relevance are checked by the caller before upload;
-    this boundary only enforces the media format and basic source identity.
-    Legacy rights keys on ``candidate`` are deliberately ignored.
+    Source-page membership is required only for source_page mode. Under the
+    explicitly selected credit_only site policy, the direct URL and visible
+    credit are retained and rights are not claimed as verified. The boundary
+    still enforces download, WebP format, and identity checks. Legacy rights
+    keys on ``candidate`` are deliberately ignored.
     """
     evidence = dict(candidate)
-    if not str(evidence.get("source_page_url") or "").strip():
-        raise ValueError("source_page_url is required before upload")
-    if not str(evidence.get("direct_image_url") or "").strip():
+    direct_url = str(evidence.get("direct_image_url") or "").strip()
+    credit_only = str(evidence.get("provenance_mode") or "") == "credit_only"
+    if not str(evidence.get("source_page_url") or "").strip() and not credit_only:
+        raise ValueError("source_page_url is required unless provenance_mode=credit_only")
+    if credit_only and not str(evidence.get("credit_text") or "").strip():
+        raise ValueError("credit_text is required for credit_only media")
+    if not direct_url:
         raise ValueError("direct_image_url is required before upload")
     path = Path(path)
     if path.suffix.lower() != ".webp":

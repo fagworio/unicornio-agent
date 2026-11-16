@@ -35,31 +35,31 @@ Engajamento significa reduzir atrito de leitura e aumentar utilidade, nao fabric
 
 ## Imagens: decisão editorial e controles técnicos
 
-O pipeline não verifica, classifica nem atesta licença, autorização,
-titularidade ou permissão legal de uso. A decisão editorial sobre o uso de uma
-imagem externa pertence ao operador/editor e deve seguir as políticas aplicáveis
-fora do software. Um resultado de busca, crédito, domínio oficial ou presença
-em uma página não é tratado pelo código como autorização.
+A política de mídia é selecionada por `MEDIA_SOURCE_POLICY` (`credit_only` no
+loader de produção; `strict` como compatibilidade explícita). Nenhum modo
+verifica ou atesta licença, autorização, titularidade ou permissão legal. A
+responsabilidade editorial pelo uso é do site.
 
-Os controles automatizados são técnicos e editoriais: a página de origem e a
-URL direta do asset devem ser identificáveis; a origem declarada é comparada
-com os bytes obtidos; URLs inseguras, divergências, conteúdo inacessível,
-arquivos inválidos e imagens irrelevantes ou duplicadas são bloqueados. Mídia
-nova aceita é convertida para WebP e enviada à Media Library local do
-WordPress. Imagens preservadas no HTML final precisam corresponder a
-attachments V2 tecnicamente verificados; hotlinks ou imagens externas não
-reconciliadas bloqueiam a validação.
+No modo `credit_only`, o pipeline exige URL direta HTTP(S) válida e crédito
+visível; não exige `source_page_url` e não bloqueia a candidata porque essa
+página não existe ou não lista a variante direta. Se o crédito vier vazio, o
+código gera `Crédito da imagem: domínio de hospedagem: <host>.` — o host é
+identificado como hospedagem, nunca como autor ou fonte verificada. O plano e
+o relatório registram `provenance_mode=credit_only`,
+`source_page_verified=false` e `rights_verified=false`.
 
-ALT deve descrever a imagem de forma factual e compatível com o contexto. Para
-imagens adquiridas ou reutilizadas pelo V2 com uma página de origem verificada,
-o pipeline acrescenta automaticamente `Crédito da imagem: [site de origem]` à
-legenda do anexo e à composição inline/featured. O texto identifica somente o
-site da página de origem; não declara autoria nem constitui evidência legal.
-Créditos editoriais já existentes são preservados e a atribuição do mesmo site
-não é duplicada. Para mídia histórica sem proveniência verificável, o pipeline
-preserva a legenda disponível e não inventa uma fonte. Campos jurídicos em
-planos e estados históricos são ignorados pelo fluxo atual e não são reescritos
-por compatibilidade.
+Relevância continua sendo uma validação independente: query de busca sozinha
+não aprova a imagem; nome do arquivo, ALT/crédito e contexto específico devem
+corresponder à obra ou item. URLs inseguras, bytes inválidos, baixa qualidade,
+dimensões incompatíveis, imagens irrelevantes ou duplicadas continuam
+bloqueadas. A mídia nova é convertida para WebP e enviada à Media Library local
+do WordPress; o HTML, a destacada, o checklist, o estado READY e o readback
+continuam exigidos.
+
+No modo `strict`, página-fonte e URL direta válidas continuam obrigatórias e a
+presença/identidade técnica do asset na página é verificada. Créditos
+editoriais já existentes são preservados. Campos jurídicos históricos são
+ignorados e nunca são reescritos por compatibilidade.
 
 ## SEO
 - uma keyword principal;

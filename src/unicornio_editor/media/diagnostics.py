@@ -16,12 +16,14 @@ _MATCHED_FIELDS = frozenset({
     "page_title",
     "alt_original",
     "figcaption",
+    "credit_text",
     "heading",
     "page_url",
     "query",
 })
 _SAFE_VERDICTS = frozenset({
     "deterministic_match",
+    "credit_only_accepted",
     "ambiguous",
     "insufficient_source_context",
     "unresolved_source",
@@ -73,6 +75,8 @@ def _verification_category(candidate: dict[str, Any], evidence: dict[str, Any]) 
     if candidate.get("capacity_deferred"):
         return "not_required_capacity"
     if candidate.get("valid") is True:
+        if str(evidence.get("verdict") or "") == "credit_only_accepted":
+            return "credit_only_site_policy"
         if str(evidence.get("verdict") or "") in {
             "deterministic_match", "ambiguous", "insufficient_source_context"
         }:
@@ -174,9 +178,13 @@ def sanitize_candidate_diagnostic(
         "source_reference_present": bool(
             str(candidate.get("source_page_url") or "").strip()
         ),
-        "source_verified": bool(candidate.get("valid")),
+        "source_verified": bool(candidate.get("source_page_verified")) if candidate.get("provenance_mode") == "credit_only" else bool(candidate.get("valid")),
         "official_source": candidate.get("official_source") is True,
     }
+    if candidate.get("provenance_mode") == "credit_only":
+        result["provenance_mode"] = "credit_only"
+        result["source_page_verified"] = False
+        result["rights_verified"] = False
     return result
 
 

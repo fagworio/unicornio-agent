@@ -63,7 +63,8 @@ def resolve_batch_editorial_defaults(client: Any, batch: dict[str, Any]) -> dict
 
 
 def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query: str,
-                              post_id: int, index: int, featured: bool) -> dict[str, Any] | None:
+                              post_id: int, index: int, featured: bool,
+                              media_source_policy: str = "strict") -> dict[str, Any] | None:
     """Project one verified manifest candidate into the editorial schema.
 
     ``media-resolve-batch`` deliberately emits a compact candidate projection;
@@ -82,26 +83,49 @@ def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query:
         or ((candidate.get("evidence") or {}).get("verdict") if isinstance(candidate.get("evidence"), dict) else "")
         or ""
     ).strip()
+    credit_text = str(candidate.get("credit_text") or "").strip()
     if not direct_url.startswith(("http://", "https://")):
         return None
-    if not source_url.startswith(("http://", "https://")):
+    if source_url and not source_url.startswith(("http://", "https://")):
+        source_url = ""
+    if not source_url and media_source_policy != "credit_only":
         return None
-    # Ambiguous candidates require the separate vision stage.  The automatic
-    # bridge may use only a deterministic hard-gate match; it must never turn
-    # an unresolved candidate into an upload decision.
-    if verdict and verdict != "deterministic_match":
+    if not credit_text:
+        from .media.text import credit_text_with_hosting_domain, credit_text_with_source_site
+        credit_text = (
+            credit_text_with_hosting_domain("", direct_url)
+            if media_source_policy == "credit_only"
+            else credit_text_with_source_site("", source_url)
+        )
+    if not credit_text:
+        return None
+    allowed_verdicts = {"deterministic_match"}
+    if not source_url and media_source_policy == "credit_only":
+        allowed_verdicts.add("credit_only_accepted")
+    # Ambiguous candidates still need a definitive decision before assembly.
+    if verdict and verdict not in allowed_verdicts:
         return None
     alt_suffix = "imagem principal" if featured else "imagem de apoio"
     item: dict[str, Any] = {
         "paragraph_index": 0,
-        "source_page_url": source_url,
         "direct_image_url": direct_url,
         "alt_text": f"{subject} - {alt_suffix}"[:240],
+        "credit_text": credit_text,
         "is_featured": featured,
         "subject": subject,
         "search_query": query,
         "candidate_id": str(candidate.get("candidate_id") or f"media-{post_id}-{index + 1}"),
+        "provenance_mode": (
+            "credit_only" if media_source_policy == "credit_only"
+            else ("source_page" if source_url else "credit_only")
+        ),
     }
+    if source_url and media_source_policy != "credit_only":
+        item["source_page_url"] = source_url
+    item["source_page_verified"] = bool(
+        media_source_policy != "credit_only" and source_url and verdict == "deterministic_match"
+    )
+    item["rights_verified"] = False
     for key in ("media_library_id", "evidence_score", "phash"):
         if candidate.get(key) is not None:
             item[key] = candidate[key]
@@ -113,6 +137,8 @@ def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query:
 def merge_media_manifest_into_editorial(
     batch: dict[str, Any],
     manifest_path: Path | str,
+    *,
+    media_source_policy: str = "strict",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Attach verified media candidates to an editorial batch deterministically.
 
@@ -181,6 +207,7 @@ def merge_media_manifest_into_editorial(
                 post_id=post_id,
                 index=len(projected),
                 featured=not projected,
+                media_source_policy=media_source_policy,
             )
             if planned is None:
                 report["rejected_candidates"] += 1
@@ -493,22 +520,26 @@ def _context_for_post(
     previous_relevance_reason = (
         state.get("last_error") or "" if retry_mode else ""
     )
+    media_policy = str(getattr(config, "media_source_policy", "strict"))
     requirements = {
         "internal_links_enabled": bool(config.internal_links_enabled),
-        # Tudo que depende de IMAGEM pertence a etapa deterministica seguinte
-        # (`media-resolve-batch`), que busca, verifica a origem tecnica e
-        # preenche a legenda opcional. O que o modelo desta chamada ve sao apenas as
-        # obrigacoes de TEXTO/SEO (`requirements`), sem contagem de imagem:
-        # ver `_model_facing_context`.
+        # A imagem direta e o crédito são o contrato persistido. A página-fonte
+        # é obrigatória apenas no modo estrito; credit_only nunca a representa
+        # como evidência de origem ou licença.
         "media_stage": {
             "stage": "media-resolve-batch",
             "runs_after": "editorial-generate-batch",
+            "media_source_policy": media_policy,
             "required_inline_images": required_image_count(
                 words, title=title, content=cleaned_html
             ),
             "featured_required": True,
-            "caption_optional": True,
-            "source_page_required_for_new_media": True,
+            "source_page_required_for_new_media": media_policy != "credit_only",
+            "credit_required": True,
+            "credit_generation": (
+                "hosting_domain_not_author" if media_policy == "credit_only"
+                else "source_page_site_label"
+            ),
             "editorial_media_plan": [],
             "not_a_reason_for_needs_retry": [
                 "imagens",

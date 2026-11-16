@@ -8,6 +8,7 @@ an output envelope that ``apply-batch`` can consume.
 
 from __future__ import annotations
 
+import copy
 import json
 import socket
 from pathlib import Path
@@ -53,15 +54,15 @@ _MEDIA_ITEM_SCHEMA = {
     "type": "object",
     "properties": {
         "paragraph_index": {"type": "integer"},
-        "source_page_url": {"type": "string"},
         "direct_image_url": {"type": "string"},
+        "credit_text": {"type": "string", "minLength": 1},
         "alt_text": {"type": "string"},
         "is_featured": {"type": "boolean"},
     },
     "required": [
         "paragraph_index",
-        "source_page_url",
         "direct_image_url",
+        "credit_text",
         "alt_text",
         "is_featured",
     ],
@@ -133,6 +134,17 @@ _OUTPUT_SCHEMA = {
     "required": ["batch_id", "results"],
     "additionalProperties": False,
 }
+
+
+def _output_schema_for_policy(media_source_policy: str) -> dict[str, Any]:
+    if media_source_policy not in {"strict", "credit_only"}:
+        raise EditorialProviderError("media_source_policy must be strict or credit_only", retryable=False)
+    schema = copy.deepcopy(_OUTPUT_SCHEMA)
+    if media_source_policy == "strict":
+        media_item = schema["properties"]["results"]["items"]["properties"]["editorial"]["properties"]["media_plan"]["items"]
+        media_item["properties"]["source_page_url"] = {"type": "string", "minLength": 1}
+        media_item["required"].append("source_page_url")
+    return schema
 
 _SYSTEM_PROMPT = """You are the UnicornioHater editorial transformation service.
 You receive a prepared JSON envelope containing one or two independent posts.
@@ -252,6 +264,7 @@ def _normalize_output(
     min_confidence: float,
     relevance_policies: dict[int, set[str]] | None = None,
     localization_requirements: dict[int, bool] | None = None,
+    media_source_policy: str = "strict",
 ) -> dict[str, Any]:
     if set(payload) != {"batch_id", "results"}:
         raise EditorialProviderError("resposta editorial possui campos inesperados")
@@ -362,7 +375,11 @@ def _normalize_output(
                 seen.add(post_id)
                 continue
             try:
-                checked = validate_editorial(editorial, min_confidence=min_confidence)
+                checked = validate_editorial(
+                    editorial,
+                    min_confidence=min_confidence,
+                    media_source_policy=media_source_policy,
+                )
                 allowed_topics = set((relevance_policies or {}).get(post_id) or ())
                 matched_topics = {
                     str(topic).strip().casefold()
@@ -425,6 +442,7 @@ def generate_editorial_batch(
     hermes_command: str = "hermes",
     hermes_model: str = "",
     hermes_timeout: float | None = None,
+    media_source_policy: str = "strict",
 ) -> dict[str, Any]:
     """Generate and validate one editorial batch.
 
@@ -458,6 +476,7 @@ def generate_editorial_batch(
             retryable=False,
         )
     batch_id, posts = _read_input(input_path)
+    output_schema = _output_schema_for_policy(media_source_policy)
     request_payload = {
         "model": model,
         "messages": [
@@ -481,7 +500,7 @@ def generate_editorial_batch(
             "json_schema": {
                 "name": "editorial_batch",
                 "strict": True,
-                "schema": _OUTPUT_SCHEMA,
+                "schema": output_schema,
             },
         },
     }
@@ -491,7 +510,7 @@ def generate_editorial_batch(
             f"{_SYSTEM_PROMPT}\n\n"
             "Return the JSON object directly, with no Markdown fences and no commentary. "
             "It must conform exactly to this JSON Schema:\n"
-            + json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+            + json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
             + "\n\nInput envelope:\n"
             + json.dumps(
                 {"batch_id": batch_id, "posts": posts}, ensure_ascii=False
@@ -572,6 +591,7 @@ def generate_editorial_batch(
             int(item["post_id"]): bool((item.get("localization") or {}).get("required"))
             for item in posts
         },
+        media_source_policy=media_source_policy,
     )
     input_retry_modes = {
         int(item["post_id"]): str(item.get("retry_mode") or "").strip()

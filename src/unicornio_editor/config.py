@@ -129,6 +129,9 @@ class Config:
     v2_cycle_max_stagnant_rounds: int = 3
     v2_cycle_max_drain_rounds: int = 3
     v2_cycle_max_duration_seconds: float = 3600.0
+    # Direct Config() callers preserve the historical strict contract; the
+    # production loader explicitly defaults to the site's credit-only policy.
+    media_source_policy: str = "strict"
 
     def __repr__(self) -> str:
         return (
@@ -148,6 +151,7 @@ class Config:
             f"vision_enabled={self.vision_enabled!r}, vision_detail={self.vision_detail!r}, "
             f"vision_mode={self.vision_mode!r}, vision_model={self.vision_model!r}, "
             f"editorial_provider={self.editorial_provider!r}, "
+            f"media_source_policy={self.media_source_policy!r}, "
             f"v2_admission_after={self.v2_admission_after!r})"
         )
 
@@ -427,6 +431,7 @@ def load_config() -> Config:
         v2_cycle_max_stagnant_rounds=_int("EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS", 3, 1, 100),
         v2_cycle_max_drain_rounds=_int("EDITOR_V2_CYCLE_MAX_DRAIN_ROUNDS", 3, 1, 100),
         v2_cycle_max_duration_seconds=_float("EDITOR_V2_CYCLE_MAX_DURATION_SECONDS", 3600.0, 1.0, 86400.0),
+        media_source_policy=_choice("MEDIA_SOURCE_POLICY", "credit_only", {"strict", "credit_only"}),
     )
 
 

@@ -1095,7 +1095,11 @@ def run_pre_publish_checklist(
 
     # 14. Strict editorial schema validation.
     try:
-        validate_editorial(editorial, min_confidence=config.min_relevance_confidence)
+        validate_editorial(
+            editorial,
+            min_confidence=config.min_relevance_confidence,
+            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+        )
         check("schema_editorial", True, "JSON editorial valido no schema estrito")
     except EditorialValidationError as exc:
         check("schema_editorial", False, str(exc))

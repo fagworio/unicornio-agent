@@ -415,7 +415,11 @@ def _apply_editorial_unlocked(
         attempt=attempts_before + 1, first_pass=attempts_before == 0,
     )
     backup = SnapshotStore(root).save(post_id, post)
-    editorial = validate_editorial(payload, min_confidence=config.min_relevance_confidence)
+    editorial = validate_editorial(
+        payload,
+        min_confidence=config.min_relevance_confidence,
+        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+    )
     decision = editorial["site_relevance"]["decision"]
     confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
     if decision == "skip" and confidence < config.min_skip_confidence:
@@ -1565,6 +1569,19 @@ def _item_evidence_relevant(
                 search_query="",
                 entities=target_entities,
             )
+    if str(item.get("provenance_mode") or "") == "credit_only":
+        direct_url = str(item.get("direct_image_url") or "").strip()
+        credit = str(item.get("credit_text") or "").strip()
+        if not direct_url or not credit:
+            return False
+        return image_is_relevant(
+            alt_text="",
+            credit_text=credit,
+            source_url=direct_url,
+            search_query="",
+            entities=_item_entities(item, entities, editorial),
+            source_only=False,
+        )
     # A evidência é o que a ORIGEM diz (arquivo + página). O subject NÃO entra
     # aqui: ele é o alvo da checagem (entra como entities), e incluí-lo na
     # própria evidência o faria casar consigo mesmo — qualquer item passaria.
@@ -2428,12 +2445,19 @@ def _execute_media_plan(
             role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
             engine=_diagnostic_media_engine(item),
             candidate_id=str(item.get("candidate_id") or ""),
-            source_domain=diagnostic_url_domain(source),
+            source_domain=(
+                diagnostic_url_domain(item.get("source_page_url"))
+                if str(item.get("provenance_mode") or "") != "credit_only" else ""
+            ),
+            image_domain=diagnostic_url_domain(item.get("direct_image_url")),
+            provenance_mode=str(item.get("provenance_mode") or "source_page"),
             detail=detail[:160],
         )
         if stage == "source_verify":
             normalized_detail = detail.casefold()
-            if status == "passed":
+            if status == "waived" and str(detail or "") == "credit_only_site_policy":
+                verification = "credit_only_site_policy"
+            elif status == "passed":
                 verification = "source_verified"
             elif any(token in normalized_detail for token in ("pagina de origem", "source_page", "fonte instavel")):
                 verification = "missing_source_page"
@@ -2587,7 +2611,7 @@ def _execute_media_plan(
                 vision_evidence_record: dict[str, Any] | None = None
                 evidence = {
                     name: item.get(name)
-                    for name in ("source_page_url", "direct_image_url", "alt_text", "credit_text")
+                    for name in ("source_page_url", "direct_image_url", "alt_text", "credit_text", "provenance_mode")
                 }
                 suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
                 attachment = _attachment_evidence(item)
@@ -2615,17 +2639,21 @@ def _execute_media_plan(
                 _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
+                source_verify_status = "passed"
                 if (
                     str(item.get("origin_type") or item.get("source_origin_type") or "")
                     == "article_source"
                     and bool(item.get("provenance_verified") or item.get("source_verified"))
                 ):
                     # The candidate was extracted from this exact article
-                    # document. Re-fetching the source page here reintroduces
-                    # the old resolver gate (and can fail on a CDN/hotlink),
-                    # while the remaining download, format, relevance,
+                    # document. The remaining download, format, relevance,
                     # dimension, WebP and pHash gates still run normally.
                     ok, verify_reason = True, "article_source_extracted"
+                elif str(item.get("provenance_mode") or "") == "credit_only" and str(item.get("credit_text") or "").strip():
+                    # Explicit site policy: the direct asset URL and visible
+                    # credit suffice; this is not source-page or license proof.
+                    ok, verify_reason = True, "credit_only_site_policy"
+                    source_verify_status = "waived"
                 else:
                     ok, verify_reason = verify_downloaded_against_source(
                         source_page_url=str(item.get("source_page_url") or ""),
@@ -2655,7 +2683,7 @@ def _execute_media_plan(
                             "source_comparison_proved"
                         ],
                     }
-                _funnel("source_verify", "passed", item, position, verify_reason)
+                _funnel("source_verify", source_verify_status, item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))
                 if (
                     not is_featured
@@ -2974,6 +3002,9 @@ def _execute_media_plan(
                     "subject": item.get("subject"), "item_number": item.get("item_number"),
                     "section_heading": item.get("section_heading"), "section_slot": item.get("section_slot"),
                     "featured": is_featured, "width": width, "height": height,
+                    "provenance_mode": str(item.get("provenance_mode") or "source_page"),
+                    "source_page_verified": source_verify_status == "passed",
+                    "rights_verified": False if str(item.get("provenance_mode") or "") == "credit_only" else None,
                     "transparency": transparency, "phash": final_phash,
                     "sha256": identity.sha256, "visual_group_id": identity.visual_group_id,
                     "visual_verification": visual_record,
@@ -3068,7 +3099,12 @@ def _execute_media_plan(
         required=len(plan),
         found=len(plan),
         with_source=sum(bool(str(item.get("source_page_url") or "").strip()) for item in plan),
-        source_verified=sum(result.get("status") not in {"rejected", "error"} for result in results),
+        source_verified=sum(result.get("source_page_verified") is True for result in results),
+        credit_only_accepted=sum(
+            result.get("status") in {"accepted", "ok"}
+            and result.get("provenance_mode") == "credit_only"
+            for result in results
+        ),
         source_mismatch=sum("mismatch" in str(result.get("detail") or "").casefold() for result in results),
         missing_source_page=sum("origem" in str(result.get("detail") or "").casefold() for result in results if result.get("status") == "rejected"),
         relevance_match=sum(bool((item.get("evidence") or {}).get("verdict") == "deterministic_match") for item in plan),
@@ -4311,6 +4347,7 @@ def _publish_post_unlocked(
         editorial = validate_editorial(
             json.loads(editorial_path.read_text(encoding="utf-8")),
             min_confidence=config.min_relevance_confidence,
+            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
         )
     except (ValueError, OSError) as exc:
         return {

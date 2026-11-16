@@ -704,6 +704,7 @@ class ProductionEditorialStage:
                 hermes_command=getattr(self.config, "hermes_command", "hermes"),
                 hermes_model=getattr(self.config, "hermes_model", ""),
                 hermes_timeout=getattr(self.config, "hermes_timeout", self.config.http_timeout),
+                media_source_policy=str(getattr(self.config, "media_source_policy", "strict")),
             )
             envelope = load_editorial_batch(generated["output"])
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)
@@ -813,7 +814,11 @@ class ProductionEditorialStage:
                 normalize_editorial_dashes(editorial.get("cleaned_html", "")),
                 post_title=post_title,
             )
-            editorial = validate_editorial(editorial, min_confidence=self.config.min_relevance_confidence)
+            editorial = validate_editorial(
+                editorial,
+                min_confidence=self.config.min_relevance_confidence,
+                media_source_policy=str(getattr(self.config, "media_source_policy", "strict")),
+            )
             editorial["decision"] = (editorial.get("site_relevance") or {}).get("decision")
             if isinstance(localization, dict):
                 _write_json(self.root, post_id, "editorial.localization.json", {

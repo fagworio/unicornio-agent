@@ -272,7 +272,9 @@ def _prepare_automatic_pipeline_case(
     return post_id
 
 
-def _automatic_pipeline_config(case, source: ControlledSource, post_id: int) -> Config:
+def _automatic_pipeline_config(
+    case, source: ControlledSource, post_id: int, *, media_source_policy: str = "strict"
+) -> Config:
     return Config(
         content_source="wordpress",
         wordpress_url=case.url,
@@ -292,6 +294,7 @@ def _automatic_pipeline_config(case, source: ControlledSource, post_id: int) -> 
         visual_comparison_min_confidence=0.85,
         max_source_retries=0,
         v2_admission_allowlist=(post_id,),
+        media_source_policy=media_source_policy,
     )
 
 
@@ -323,6 +326,159 @@ def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch)
         assert after["featured_media"] > 0
         assert after["content_sha256"] != before["content_sha256"]
         assert "wp-content/uploads" in str((after_post.get("content") or {}).get("raw") or "")
+
+
+def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, monkeypatch):
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setattr(
+        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        lambda *args, **kwargs: (None, "official_not_found"),
+    )
+    case = wordpress_e2e_case
+    post_id = case.post_id("credit_only_media_ready")
+    with ControlledSource() as source:
+        source_url = f"{source.base_url}/article"
+        editorial = _automatic_pipeline_editorial()
+        case.client.update_post(post_id, {
+            "title": editorial["seo"]["title"],
+            "meta": {"original_link": source_url, "_hermes_state": "new"},
+        })
+        config = _automatic_pipeline_config(
+            case, source, post_id, media_source_policy="credit_only"
+        )
+        prepared = prepare_batch(
+            case.client, config, case.root, [post_id], batch_id="batch-credit-only-e2e"
+        )
+        assert prepared["prepared"] == 1, prepared
+
+        names = list(source.images)
+
+        def controlled_direct_search(queries, *, accept=None, **_kwargs):
+            rows = []
+            for query in queries:
+                candidates = [
+                    {
+                        "candidate_id": f"credit-only-{index + 1}",
+                        "direct_image_url": f"{source.base_url}/images/{name}",
+                        "discovery_image_url": f"{source.base_url}/images/{name}",
+                        "engine": "controlled",
+                        "query": query,
+                    }
+                    for index, name in enumerate(names)
+                ]
+                if accept is not None:
+                    accept(candidates, query)
+                rows.append({
+                    "query": query,
+                    "candidates": candidates,
+                    "completion_reason": "TARGET_REACHED",
+                    "engine_reports": {"controlled": {"failure_kind": "ok"}},
+                })
+            return rows
+
+        monkeypatch.setattr(search, "search_web_images_batch", controlled_direct_search)
+        media_input = {
+            "schema_version": 1,
+            "batch_id": prepared["batch_id"],
+            "posts": [{
+                "post_id": post_id,
+                "subject": "Hollow Knight Silksong",
+                "query": "Hollow Knight Silksong gameplay",
+                "needed": 3,
+                "limit": 3,
+                "engine": "controlled",
+                "size": "xga",
+                "ratio": "w",
+            }],
+        }
+        resolved = _resolve_media_batch(
+            case.client, config, case.root, media_input, full=True, allow_reuse=False
+        )
+        manifest_path = case.root / "work" / "batches" / prepared["batch_id"] / "media.manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_row = next(row for row in manifest["posts"] if int(row["post_id"]) == post_id)
+        assert len(manifest_row["candidates"]) == 3, resolved
+        for candidate in manifest_row["candidates"]:
+            assert "source_page_url" not in candidate
+            assert candidate["provenance_mode"] == "credit_only"
+            assert candidate["source_page_verified"] is False
+            assert candidate["rights_verified"] is False
+            assert "domínio de hospedagem: 127.0.0.1" in candidate["credit_text"]
+
+        editorial_output = manifest_path.with_name("editorial.output.json")
+        editorial_output.write_text(json.dumps({
+            "schema_version": 1,
+            "batch_id": prepared["batch_id"],
+            "results": [{
+                "post_id": post_id,
+                "status": "ok",
+                "editorial": {**editorial, "media_plan": []},
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        batch = load_editorial_batch(editorial_output)
+        batch = resolve_batch_editorial_defaults(case.client, batch)
+        batch, assembly = merge_media_manifest_into_editorial(
+            batch, manifest_path, media_source_policy=config.media_source_policy
+        )
+        assert assembly["assembled"] == 1, assembly
+        plan = batch["items"][0]["editorial"]["media_plan"]
+        assert len(plan) == 3
+        assert all(item.get("provenance_mode") == "credit_only" for item in plan)
+        assert all(item.get("source_page_verified") is False for item in plan)
+        assert all(item.get("rights_verified") is False for item in plan)
+        assert all("source_page_url" not in item for item in plan)
+
+        upload_count = 0
+        original_upload = case.client.upload_media
+
+        def counted_upload(*args, **kwargs):
+            nonlocal upload_count
+            upload_count += 1
+            return original_upload(*args, **kwargs)
+
+        monkeypatch.setattr(case.client, "upload_media", counted_upload)
+        first_batch = _apply_editorial_batch(
+            case.client, config, case.root, batch, dry_run=False, compact=False
+        )
+        first = first_batch["posts"][0]
+        assert first["status"] == "ready", first
+        media_results = first["media_plan_results"]
+        assert len([item for item in media_results if item.get("status") == "accepted"]) == 3
+        assert all(item.get("provenance_mode") == "credit_only" for item in media_results)
+        assert all(item.get("source_page_verified") is False for item in media_results)
+        assert all(item.get("rights_verified") is False for item in media_results)
+        assert upload_count == 3
+
+        post = case.client.get_post(post_id)
+        raw = str(((post.get("content") or {}).get("raw") or ""))
+        assert _snapshot(post)["ready_state"] == "ready"
+        assert int(post.get("featured_media") or 0) > 0
+        assert raw.count("<img") == 2
+        assert raw.count("domínio de hospedagem: 127.0.0.1") == 2
+        for result in media_results:
+            attachment = case.client.get_media(int(result["media_id"]))
+            caption = str(((attachment.get("caption") or {}).get("rendered") or ""))
+            assert "domínio de hospedagem: 127.0.0.1" in caption
+
+        second_batch = _apply_editorial_batch(
+            case.client, config, case.root, batch, dry_run=False, compact=False
+        )
+        assert second_batch["posts"][0]["status"] == "noop", second_batch
+        assert upload_count == 3
+        case.observations.append({
+            "scenario": "credit_only_media_ready",
+            "post_id": post_id,
+            "manifest_candidates": len(manifest_row["candidates"]),
+            "assembled_plan": len(plan),
+            "accepted": len([item for item in media_results if item.get("status") == "accepted"]),
+            "uploads": upload_count,
+            "inline_readback": raw.count("<img"),
+            "ready_state": _snapshot(post)["ready_state"],
+            "source_page_verified": False,
+            "rights_verified": False,
+            "second_apply": second_batch["posts"][0]["status"],
+        })
 
 
 def test_automatic_media_pipeline_retries_without_partial_apply(wordpress_e2e_case, monkeypatch):
