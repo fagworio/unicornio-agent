@@ -1429,7 +1429,12 @@ def _apply_editorial_batch(
 
             try:
                 result = apply_editorial(
-                    client, config, root, post_id, item["editorial"]
+                    client,
+                    config,
+                    root,
+                    post_id,
+                    item["editorial"],
+                    media_fallback_candidates=item.get("media_fallback_candidates"),
                 )
                 audit = root / "backups" / str(post_id) / "apply.latest.json"
                 _write_audit(audit, {**result, "batch_id": batch_id})
@@ -1719,10 +1724,10 @@ def _resolve_media_batch(
         reserve = min(MEDIA_CANDIDATE_REPLACEMENT_RESERVE, requested_reserve)
         candidate_capacity_by_post[post_id] = (
             needed_web_by_post[post_id] + reserve
-            if needed_web_by_post[post_id] > 0
+            if int(item["needed"]) > 0
             else 0
         )
-        if needed_web_by_post[post_id] > 0:
+        if candidate_capacity_by_post[post_id] > 0:
             searchable.append(item)
     queries = [str(item["query"] or item["subject"]) for item in searchable]
     limit = max((
@@ -2183,10 +2188,16 @@ def _resolve_media_batch(
             "post_id": post_id,
             "subject": subject,
             "role": str(item.get("role") or ""),
+            "featured_required": bool(item.get("featured_required", True)),
             "needed": needed,
+            "required_inline_images": item.get("required_inline_images"),
+            "inline_deficit": item.get("inline_deficit"),
+            "replacement_reserve": max(
+                0, candidate_capacity_by_post[post_id] - needed_web
+            ),
             "reuse": reuso,
             "needed_web": needed_web,
-            "candidates": compact_candidates[:needed],
+            "candidates": compact_candidates[:candidate_capacity_by_post[post_id]],
             "deferred": len(deferidos),
             "rejected": len(rejeitados),
             "candidate_diagnostics": candidate_diagnostics[:20],
@@ -2251,6 +2262,239 @@ def _resolve_media_batch(
             for post in output
         ]
     return result
+
+
+def _resolve_media_targets_batch(
+    client: WordPressClient,
+    config: Any,
+    root: Path,
+    batch: dict[str, Any],
+    *,
+    full: bool = False,
+    allow_reuse: bool = True,
+    excluded_urls: dict[int, set[str]] | None = None,
+    excluded_source_page_urls: dict[int, set[str]] | None = None,
+    excluded_fingerprints: dict[int, set[str]] | None = None,
+    excluded_url_hashes: dict[int, set[str]] | None = None,
+    excluded_source_page_url_hashes: dict[int, set[str]] | None = None,
+    attempt_id: str = "",
+) -> dict[str, Any]:
+    """Resolve listicle media per item/H2, preserving each target boundary."""
+    posts = batch.get("posts") or []
+    output_by_id: dict[int, dict[str, Any]] = {}
+    all_vision_items: list[dict[str, Any]] = []
+    economics = {
+        "posts": len(posts),
+        "search_queries": 0,
+        "external_http_requests": 0,
+        "candidates_examined": 0,
+        "candidates_rejected": 0,
+        "llm_requests": 0,
+        "tool_calls": 1,
+    }
+
+    def resolve_flat(rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        resolved = _resolve_media_batch(
+            client,
+            config,
+            root,
+            {"schema_version": batch["schema_version"], "batch_id": batch["batch_id"], "posts": rows},
+            full=True,
+            allow_reuse=allow_reuse,
+            excluded_urls=excluded_urls,
+            excluded_source_page_urls=excluded_source_page_urls,
+            excluded_fingerprints=excluded_fingerprints,
+            excluded_url_hashes=excluded_url_hashes,
+            excluded_source_page_url_hashes=excluded_source_page_url_hashes,
+            attempt_id=attempt_id,
+        )
+        for row in resolved.get("posts") or []:
+            if isinstance(row, dict) and isinstance(row.get("post_id"), int):
+                output_by_id[int(row["post_id"])] = row
+        all_vision_items.extend(
+            row for row in (resolved.get("vision_items") or []) if isinstance(row, dict)
+        )
+        for key in ("search_queries", "external_http_requests", "candidates_examined", "candidates_rejected"):
+            economics[key] += int((resolved.get("economics") or {}).get(key) or 0)
+
+    resolve_flat([row for row in posts if not row.get("targets")])
+    for post in posts:
+        targets = post.get("targets")
+        if not isinstance(targets, list):
+            continue
+        target_outputs: list[dict[str, Any]] = []
+        target_search: list[dict[str, Any]] = []
+        for target in targets:
+            target_id = str(target["target_id"])
+            target_role = str(target["role"])
+            subject = str(target["subject"])
+            query = str(target["query"])
+            target_reserve = int(target.get("replacement_reserve") or 0)
+            request = {
+                "post_id": int(post["post_id"]),
+                "subject": subject,
+                "query": query,
+                "article_title": str(post.get("article_title") or ""),
+                "needed": 1,
+                "limit": min(10, max(3, 1 + target_reserve)),
+                "size": str(post.get("size") or "xga"),
+                "ratio": str(post.get("ratio") or "w"),
+                "engine": str(post.get("engine") or "auto"),
+                "role": target_role,
+                "featured_required": target_role == "featured",
+                "replacement_reserve": target_reserve,
+                "existing_media_urls": post.get("existing_media_urls") or [],
+                "existing_media_phashes": post.get("existing_media_phashes") or {},
+            }
+            resolved = _resolve_media_batch(
+                client,
+                config,
+                root,
+                {
+                    "schema_version": batch["schema_version"],
+                    "batch_id": batch["batch_id"],
+                    "posts": [request],
+                },
+                full=True,
+                allow_reuse=allow_reuse,
+                excluded_urls=excluded_urls,
+                excluded_source_page_urls=excluded_source_page_urls,
+                excluded_fingerprints=excluded_fingerprints,
+                excluded_url_hashes=excluded_url_hashes,
+                excluded_source_page_url_hashes=excluded_source_page_url_hashes,
+                attempt_id=f"{attempt_id}:{target_id}"[:64],
+            )
+            child_economics = resolved.get("economics") or {}
+            economics["search_queries"] += int(child_economics.get("search_queries") or 0)
+            economics["external_http_requests"] += int(child_economics.get("external_http_requests") or 0)
+            economics["candidates_examined"] += int(child_economics.get("candidates_examined") or 0)
+            economics["candidates_rejected"] += int(child_economics.get("candidates_rejected") or 0)
+            row = next(
+                (entry for entry in (resolved.get("posts") or []) if isinstance(entry, dict)),
+                {},
+            )
+            id_map: dict[str, str] = {}
+
+            def project_candidates(name: str) -> list[dict[str, Any]]:
+                projected: list[dict[str, Any]] = []
+                for index, raw_candidate in enumerate(row.get(name) or []):
+                    if not isinstance(raw_candidate, dict):
+                        continue
+                    candidate = dict(raw_candidate)
+                    original_id = str(candidate.get("candidate_id") or f"candidate-{index + 1}")
+                    candidate_id = f"{target_id}--{original_id}"
+                    id_map[original_id] = candidate_id
+                    candidate.update({
+                        "candidate_id": candidate_id,
+                        "target_id": target_id,
+                        "role": target_role,
+                        "subject": subject,
+                        "search_query": query,
+                    })
+                    for key in (
+                        "paragraph_index", "placement", "item_identity", "item_title",
+                        "item_group", "item_number", "section_heading", "section_slot",
+                        "html_position",
+                    ):
+                        if key in target:
+                            candidate[key] = target[key]
+                    projected.append(candidate)
+                return projected
+
+            reused = project_candidates("reuse")
+            candidates = project_candidates("candidates")
+            audit_candidates = project_candidates("audit_candidates")
+            for raw_vision in resolved.get("vision_items") or []:
+                if not isinstance(raw_vision, dict):
+                    continue
+                vision = dict(raw_vision)
+                original_id = str(vision.get("candidate_id") or "")
+                vision["candidate_id"] = id_map.get(original_id, f"{target_id}--{original_id}")
+                vision["post_id"] = int(post["post_id"])
+                vision["subject"] = subject
+                vision["target_id"] = target_id
+                all_vision_items.append(vision)
+            target_output = {
+                **target,
+                "reuse": reused,
+                "candidates": candidates,
+                "audit_candidates": audit_candidates,
+                "search": row.get("search") or {},
+                "candidate_diagnostics": row.get("candidate_diagnostics") or [],
+                "candidate_diagnostic_summary": row.get("candidate_diagnostic_summary") or {},
+            }
+            target_outputs.append(target_output)
+            target_search.append({
+                "target_id": target_id,
+                "subject": subject,
+                "query": query,
+                **(dict(row.get("search") or {})),
+            })
+        output_by_id[int(post["post_id"])] = {
+            key: value for key, value in post.items() if key != "targets"
+        } | {
+            "targets": target_outputs,
+            "target_search": target_search,
+            "candidate_diagnostic_summary": {
+                "targets": len(target_outputs),
+                "accepted": sum(len(row["reuse"]) + len(row["candidates"]) for row in target_outputs),
+            },
+        }
+
+    output = [output_by_id[int(post["post_id"])] for post in posts]
+    result: dict[str, Any] = {
+        "schema_version": batch["schema_version"],
+        "batch_id": batch["batch_id"],
+        "count": len(output),
+        "posts": output,
+        "vision_items": all_vision_items,
+        "economics": economics,
+    }
+    audit = _write_audit(
+        root / "work" / "batches" / batch["batch_id"] / "media.manifest.json",
+        result,
+    )
+    result["audit"] = audit
+    if all_vision_items:
+        result["vision_batch_file"] = _write_audit(
+            root / "work" / "batches" / batch["batch_id"] / "vision.input.json",
+            {
+                "schema_version": batch["schema_version"],
+                "batch_id": batch["batch_id"],
+                "items": all_vision_items,
+            },
+        )
+    if not full:
+        result["posts"] = [
+            {
+                **post,
+                "targets": [
+                    {key: value for key, value in target.items() if key != "audit_candidates"}
+                    for target in post.get("targets") or []
+                ],
+            }
+            for post in output
+        ]
+    return result
+
+
+def _resolve_media_batch_dispatch(
+    client: WordPressClient,
+    config: Any,
+    root: Path,
+    batch: dict[str, Any],
+    *,
+    full: bool = False,
+) -> dict[str, Any]:
+    """Route listicle target envelopes through item-scoped discovery."""
+    resolver = (
+        _resolve_media_targets_batch
+        if any(post.get("targets") for post in batch.get("posts") or [])
+        else _resolve_media_batch
+    )
+    return resolver(client, config, root, batch, full=full)
 
 
 def _canary_preflight(
@@ -4032,6 +4276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     hermes_model=getattr(config, "hermes_model", ""),
                     hermes_timeout=getattr(config, "hermes_timeout", config.http_timeout),
                     media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                    emit_media_input=True,
                 )
             finally:
                 if previous_batch is None:
@@ -4856,7 +5101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             os.environ["UNICORNIO_BATCH_ID"] = batch["batch_id"]
             os.environ["UNICORNIO_BATCH_STAGE"] = "media-resolve"
             try:
-                result = _resolve_media_batch(
+                result = _resolve_media_batch_dispatch(
                     client, config, args.root, batch, full=bool(args.full)
                 )
             finally:
@@ -5157,6 +5402,15 @@ def _write_audit(path: Path, payload: Any) -> str:
 # completo, pHash, flags internas, rejeitados — fica no arquivo de auditoria).
 def _media_candidate(cand: dict) -> dict:
     """Projecao minima de um candidato utilizavel (economia de contexto)."""
+    evidence_value = cand.get("evidence")
+    evidence = evidence_value if isinstance(evidence_value, dict) else {}
+    raw_fields_value = evidence.get("evidence")
+    raw_fields = raw_fields_value if isinstance(raw_fields_value, dict) else {}
+    origin_fields = {
+        key: str(raw_fields[key])[:500]
+        for key in ("filename", "og_title", "page_title", "alt_original", "figcaption", "heading", "page_url")
+        if isinstance(raw_fields.get(key), str) and raw_fields[key].strip()
+    }
     result = {
         "candidate_id": cand.get("candidate_id"),
         "url": cand.get("direct_image_url"),
@@ -5168,6 +5422,19 @@ def _media_candidate(cand: dict) -> dict:
         "already_in_library": bool(cand.get("already_in_library")),
         "needs_vision": bool(cand.get("needs_vision")),
     }
+    if origin_fields:
+        result["origin_evidence"] = {
+            "verdict": str(evidence.get("verdict") or "")[:48],
+            "score": evidence.get("score"),
+            "local_score": evidence.get("local_score"),
+            "subject": str(evidence.get("subject") or "")[:200],
+            "matched": [
+                str(value)[:48]
+                for value in (evidence.get("matched") or [])
+                if str(value) in {"filename", "og_title", "page_title", "alt_original", "figcaption", "heading", "page_url"}
+            ],
+            "fields": origin_fields,
+        }
     if result["provenance_mode"] == "credit_only":
         result["source_page_verified"] = False
         result["rights_verified"] = False

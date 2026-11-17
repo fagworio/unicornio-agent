@@ -25,7 +25,7 @@ from .config import Config
 from .editorial_schema import validate_editorial
 from .html_cleaner import _repair_orphan_media, clean_html
 from .language import editorial_language_report
-from .list_quality import detect_list_format, extract_list_items
+from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .locking import LockError, LockManager
 from .manifest import (
     META_READY_MANIFEST,
@@ -356,12 +356,60 @@ def apply_editorial(
     root: Path,
     post_id: int,
     payload: dict[str, Any],
+    *,
+    media_fallback_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Apply an editorial result while exclusively owning the post."""
     assert_post_not_quarantined(root, post_id, operation="apply")
     with _acquire_post_lock(root, config, post_id) as lock_handle:
         guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
-        return _apply_editorial_unlocked(guarded_client, config, root, post_id, payload)
+        return _apply_editorial_unlocked(
+            guarded_client,
+            config,
+            root,
+            post_id,
+            payload,
+            media_fallback_candidates=media_fallback_candidates,
+        )
+
+
+def _v1_checklist_media_context(
+    editorial: dict[str, Any],
+    content: str,
+    accepted_media: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Provide checklist media facts, including item-scoped list identities."""
+    seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+    title = str(seo.get("title") or editorial.get("title") or "")
+    categories = editorial.get("categories") or ()
+    media_rows = [dict(row) for row in accepted_media if isinstance(row, dict)]
+    if detect_list_format(title, content, categories) is not None:
+        recorded = {
+            str(row.get("media_url") or "").strip(): row
+            for row in media_rows
+            if str(row.get("media_url") or "").strip()
+        }
+        scoped: list[dict[str, Any]] = []
+        for asset in list_item_media_assets(title, content, categories):
+            row = dict(asset)
+            known = recorded.get(str(asset.get("media_url") or "").strip())
+            if known:
+                row.update(known)
+            # The final HTML section remains the authority for item association;
+            # keep its identity even when an older partial record lacks it.
+            for key in (
+                "subject", "item_title", "item_identity", "item_number",
+                "item_group", "section_heading", "section_slot", "html_position",
+            ):
+                if asset.get(key) is not None:
+                    row[key] = asset[key]
+            scoped.append(row)
+        media_rows = scoped
+    context: dict[str, Any] = {"inline": {"accepted": media_rows}}
+    featured = next((row for row in accepted_media if row.get("featured")), None)
+    if featured:
+        context["featured"] = {**featured, "status": "valid"}
+    return context
 
 
 def _apply_editorial_unlocked(
@@ -370,6 +418,8 @@ def _apply_editorial_unlocked(
     root: Path,
     post_id: int,
     payload: dict[str, Any],
+    *,
+    media_fallback_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Preflight completo: valida, resolve, executa mídia, monta conteúdo e
     roda o checklist INTEIRO antes de gravar qualquer coisa no WordPress.
@@ -568,6 +618,7 @@ def _apply_editorial_unlocked(
     media_results, featured_id, featured_credit = _execute_media_plan(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id,
         post_title=_post_title(post) or "",
+        media_fallback_candidates=media_fallback_candidates,
     )
     combined_media_results = prior_media + [
         item for item in media_results
@@ -590,6 +641,15 @@ def _apply_editorial_unlocked(
                 "credit_text": result["credit_text"],
                 "width": result.get("width"),
                 "height": result.get("height"),
+                "target_id": result.get("target_id"),
+                "item_identity": result.get("item_identity"),
+                "item_title": result.get("item_title"),
+                "item_group": result.get("item_group"),
+                "item_number": result.get("item_number"),
+                "section_heading": result.get("section_heading"),
+                "section_slot": result.get("section_slot"),
+                "html_position": result.get("html_position"),
+                "subject": result.get("subject"),
             }
             for result in combined_media_results
             if result.get("media_url") and not result.get("featured")
@@ -627,6 +687,11 @@ def _apply_editorial_unlocked(
         # o gate relevancia_imagens bloqueia e o agente corrige.
         content, inline_normalization = _normalize_inline_images(client, config, content, image_entities)
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
+    checklist_media_context = _v1_checklist_media_context(
+        {**editorial_with_media, "title": _post_title(post)},
+        content,
+        [*prior_media, *media_results],
+    )
     # Tentativas anteriores (antes desta): base do teto deterministico de
     # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
     checklist = run_pre_publish_checklist(
@@ -644,6 +709,7 @@ def _apply_editorial_unlocked(
         config=config,
         client=client,
         attempts=attempts_before,
+        media_context=checklist_media_context,
     )
     # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
     # item do checklist com falha impede READY — o apply NUNCA grava um post
@@ -1483,6 +1549,25 @@ def _item_entities(
     article entity set.
     """
     declarado = " ".join(str(item.get("subject") or "").split()).strip().lower()
+    if bool(item.get("is_featured")) or str(item.get("role") or "").casefold() == "featured":
+        editorial_payload = editorial if isinstance(editorial, dict) else {}
+        seo_value = editorial_payload.get("seo")
+        seo = seo_value if isinstance(seo_value, dict) else {}
+        generic_focus = {"game", "games", "jogo", "jogos", "videogame", "anime", "filme", "series"}
+        global_subject = " ".join(str(
+            editorial_payload.get("game_name") or seo.get("focus_keyword") or ""
+        ).split()).strip().casefold()
+        if global_subject and global_subject not in generic_focus:
+            return {global_subject} | {
+                entity.casefold() for entity in entities
+                if entity and entity.casefold() in global_subject
+            }
+        declared_matches = sorted(
+            (entity.casefold() for entity in entities if entity and entity.casefold() in declarado),
+            key=len,
+            reverse=True,
+        )
+        return {declared_matches[0]} if declared_matches else set(entities)
     expected_subject = _expected_subject(item, editorial)
     if expected_subject:
         # Specific section identities stay item-scoped. Generic headings such
@@ -1697,6 +1782,93 @@ def _featured_preflight_evidence_matches(
     )
 
 
+def _revalidated_origin_page_relevance(
+    item: dict[str, Any],
+    entities: set[str],
+    editorial: dict[str, Any] | None,
+    *,
+    config: Config | None,
+    root: Path | None,
+    source_page_cache: dict[str, list[str] | None],
+    source_html_cache: dict[str, str],
+) -> bool:
+    """Re-fetch the source and score its own context for serialized V1 plans.
+
+    Resolver evidence is retained for audit, but is not trusted by itself after
+    crossing a process/JSON boundary. The consuming process independently
+    verifies that the direct asset is still listed by the origin and computes
+    relevance from current origin HTML (never from generated ALT/credit/query).
+    """
+    page_url = str(item.get("source_page_url") or "").strip()
+    image_url = str(item.get("direct_image_url") or "").strip()
+    evidence = item.get("origin_evidence")
+    item_subject = str(
+        item.get("subject")
+        or (evidence.get("subject") if isinstance(evidence, dict) else "")
+        or ""
+    ).strip()
+    if (
+        str(item.get("provenance_mode") or "") != "source_page"
+        or not page_url
+        or not image_url
+        or not item_subject
+    ):
+        return False
+    from .media.source_verify import validate_discovered_candidate
+    from .media.evidence import evidence_score, source_context
+
+    target_entities = _item_entities(item, entities, editorial)
+    subject = next(
+        (
+            str(value).strip()
+            for value in target_entities
+            if str(value).strip().casefold() == item_subject.casefold()
+        ),
+        "",
+    )
+    if not subject:
+        return False
+
+    try:
+        verification = validate_discovered_candidate(
+            {"source_page_url": page_url, "direct_image_url": image_url},
+            cache=source_page_cache,
+            cache_html=source_html_cache,
+            subject=subject,
+            audit=None,
+            url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
+        )
+    except Exception:  # noqa: BLE001 - inability to revalidate is fail-closed
+        return False
+    if verification.get("valid") is not True:
+        return False
+    html = source_html_cache.get(page_url)
+    if not isinstance(html, str) or not html:
+        return False
+    context = source_context(
+        html,
+        str(verification.get("matched_image_url") or image_url),
+        base_url=page_url,
+    )
+    scored = evidence_score(
+        subject,
+        filename=context.get("filename", ""),
+        og_title=context.get("og_title", ""),
+        page_title=context.get("page_title", ""),
+        alt_original=context.get("alt_original", ""),
+        figcaption=context.get("figcaption", ""),
+        heading=context.get("heading", ""),
+        page_url=page_url,
+        query="",
+        source_page_present=True,
+        image_in_source=True,
+        source_verification_reason=str(verification.get("reason_code") or ""),
+        source_verification_recoverable=bool(verification.get("recoverable")),
+        source_comparison_proved=bool(verification.get("source_comparison_proved")),
+    )
+    return scored.get("verdict") == "deterministic_match"
+
+
 def _media_item_rejection(
     item: dict[str, Any],
     entities: set[str],
@@ -1705,6 +1877,8 @@ def _media_item_rejection(
     editorial: dict[str, Any] | None = None,
     root: Path | None = None,
     config: Config | None = None,
+    source_page_cache: dict[str, list[str] | None] | None = None,
+    source_html_cache: dict[str, str] | None = None,
 ) -> str | None:
     """Motivo de rejeicao de um item do media_plan, ou None se valido.
 
@@ -1757,6 +1931,16 @@ def _media_item_rejection(
             return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
         return None
     if is_featured:
+        if _revalidated_origin_page_relevance(
+            item,
+            entities,
+            editorial,
+            config=config,
+            root=root,
+            source_page_cache=source_page_cache if source_page_cache is not None else {},
+            source_html_cache=source_html_cache if source_html_cache is not None else {},
+        ):
+            return None
         # Featured must depict the cited subject itself: only the real
         # source file/page name counts as evidence. The agent-written
         # alt/credit can decorate a wrong image (e.g. a Disney castle
@@ -1792,7 +1976,18 @@ def _media_item_rejection(
     # embora a descoberta já a tivesse rejeitado (o agente provava a si mesmo).
     # Aplicado aqui: só a evidência de ORIGEM (arquivo + página) e o subject que
     # a descoberta carimbou no item (entidades LOCAIS, não o conjunto do artigo).
-    if not _item_evidence_relevant(item, entities, editorial):
+    if (
+        not _item_evidence_relevant(item, entities, editorial)
+        and not _revalidated_origin_page_relevance(
+            item,
+            entities,
+            editorial,
+            config=config,
+            root=root,
+            source_page_cache=source_page_cache if source_page_cache is not None else {},
+            source_html_cache=source_html_cache if source_html_cache is not None else {},
+        )
+    ):
         listed = ", ".join(sorted(_item_entities(item, entities, editorial))) or "nenhuma"
         return f"imagem sem relacao com o conteudo (entidades distintas: {listed})"
     return None
@@ -1872,6 +2067,8 @@ def validate_media_plan(
     rejected: list[dict[str, Any]] = []
     featured_vision: list[dict[str, Any]] = []
     seen_sources: set[str] = set()
+    source_page_cache: dict[str, list[str] | None] = {}
+    source_html_cache: dict[str, str] = {}
     for index, item in enumerate(plan):
         if root is not None:
             append_telemetry(
@@ -1891,7 +2088,17 @@ def validate_media_plan(
                     urlparse(str(item.get("direct_image_url") or "")).hostname or ""
                 ).lower(),
             )
-        reason = _media_item_rejection(item, entities, client, cache, vision_editorial, root=root, config=config)
+        reason = _media_item_rejection(
+            item,
+            entities,
+            client,
+            cache,
+            vision_editorial,
+            root=root,
+            config=config,
+            source_page_cache=source_page_cache,
+            source_html_cache=source_html_cache,
+        )
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
         if reason is None and bool(item.get("is_featured")):
@@ -2355,6 +2562,7 @@ def _execute_media_plan(
     featured_visual_asset: dict[str, Any] | None = None,
     visual_comparison_budget: list[int] | None = None,
     on_accepted: Callable[[dict[str, Any]], None] | None = None,
+    media_fallback_candidates: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -2558,7 +2766,7 @@ def _execute_media_plan(
             continue
         pending.append((position, item))
 
-    if pending:
+    if pending or media_fallback_candidates:
         with tempfile.TemporaryDirectory(prefix="unicornio-media-") as directory:
             tmp = Path(directory)
             # Materialise existing accepted media once.  The dictionaries are
@@ -2997,10 +3205,18 @@ def _execute_media_plan(
                     "status": "accepted",
                     "paragraph_index": item["paragraph_index"],
                     "placement": item.get("placement"),
+                    "candidate_id": item.get("candidate_id"),
+                    "target_id": item.get("target_id"),
                     "media_id": media_id, "media_url": media_url,
                     "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
-                    "subject": item.get("subject"), "item_number": item.get("item_number"),
-                    "section_heading": item.get("section_heading"), "section_slot": item.get("section_slot"),
+                    "subject": item.get("subject"),
+                    "item_identity": item.get("item_identity"),
+                    "item_title": item.get("item_title") or item.get("subject"),
+                    "item_group": item.get("item_group"),
+                    "item_number": item.get("item_number"),
+                    "section_heading": item.get("section_heading"),
+                    "section_slot": item.get("section_slot"),
+                    "html_position": item.get("html_position"),
                     "featured": is_featured, "width": width, "height": height,
                     "provenance_mode": str(item.get("provenance_mode") or "source_page"),
                     "source_page_verified": source_verify_status == "passed",
@@ -3075,6 +3291,111 @@ def _execute_media_plan(
 
             for position, result in processed:
                 outcomes[position] = result
+
+            fallback_queue = [
+                candidate
+                for candidate in (media_fallback_candidates or [])
+                if isinstance(candidate, dict)
+            ][:max(len(plan), 2)]
+            used_fallbacks: set[int] = set()
+            asset_fields = (
+                "direct_image_url", "source_page_url", "credit_text", "candidate_id",
+                "provenance_mode", "source_page_verified", "rights_verified",
+                "evidence_verdict", "evidence_score", "origin_evidence", "evidence",
+                "phash", "media_library_id", "author", "license", "license_url",
+                "captured_at", "source_verified", "provenance_verified", "origin_type",
+                "source_origin_type",
+            )
+
+            def _fallback_is_candidate_specific(result: dict[str, Any]) -> bool:
+                status = str(result.get("status") or "").casefold()
+                reason_code = str(result.get("reason_code") or "").casefold()
+                stage = str(result.get("failure_stage") or "").casefold()
+                if status == "rejected":
+                    return reason_code != "vision_provider_error"
+                return status == "error" and stage in {"download", "source_verify", "conversion"}
+
+            def _fallback_matches_slot(candidate: dict[str, Any], slot: dict[str, Any]) -> bool:
+                candidate_target = str(candidate.get("target_id") or "").strip()
+                slot_target = str(slot.get("target_id") or "").strip()
+                if candidate_target or slot_target:
+                    return bool(candidate_target and candidate_target == slot_target)
+                candidate_identity = str(candidate.get("item_identity") or "").strip()
+                slot_identity = str(slot.get("item_identity") or "").strip()
+                if candidate_identity or slot_identity:
+                    return bool(candidate_identity and candidate_identity == slot_identity)
+                # Normal articles can use a shared reserve for either role;
+                # role/ALT are copied from the failed slot before validation.
+                return True
+
+            for position in sorted(outcomes):
+                primary_result = outcomes[position]
+                if not _fallback_is_candidate_specific(primary_result):
+                    continue
+                slot = plan[position]
+                tried = 0
+                while True:
+                    candidate_index = next(
+                        (
+                            index for index, candidate in enumerate(fallback_queue)
+                            if index not in used_fallbacks and _fallback_matches_slot(candidate, slot)
+                        ),
+                        None,
+                    )
+                    if candidate_index is None:
+                        break
+                    used_fallbacks.add(candidate_index)
+                    candidate = fallback_queue[candidate_index]
+                    tried += 1
+                    fallback_item = dict(slot)
+                    for name in asset_fields:
+                        if name in candidate:
+                            fallback_item[name] = candidate[name]
+                    fallback_item["paragraph_index"] = slot.get("paragraph_index")
+                    fallback_item["placement"] = slot.get("placement")
+                    fallback_item["is_featured"] = bool(slot.get("is_featured"))
+                    fallback_item["role"] = "featured" if fallback_item["is_featured"] else "inline"
+                    subject = str(slot.get("subject") or editorial.get("game_name") or "imagem")
+                    role_label = "imagem principal" if fallback_item["is_featured"] else "imagem de apoio"
+                    fallback_item["alt_text"] = f"{subject} - {role_label}"[:160]
+
+                    reason = _rejection_reason(fallback_item)
+                    if reason is None:
+                        reason = _duplicate_source_reason([fallback_item], 0, seen_sources)
+                    if reason:
+                        _funnel("fallback", "rejected", fallback_item, position, reason)
+                        continue
+
+                    _funnel("fallback", "attempted", fallback_item, position)
+                    try:
+                        _, fallback_result = _process_item((position, fallback_item))
+                    except Exception as exc:  # noqa: BLE001 - candidate-scoped fallback
+                        if on_accepted is not None and position in confirmed_uploads:
+                            raise
+                        _funnel("fallback", "error", fallback_item, position, type(exc).__name__)
+                        fallback_result = _structured_media_failure(
+                            exc,
+                            stage="worker",
+                            reason_code="media_processing_error",
+                            recoverable=True,
+                        ) | {"paragraph_index": slot.get("paragraph_index")}
+                    if fallback_result.get("status") in {"accepted", "ok"}:
+                        fallback_result["fallback_used"] = True
+                        fallback_result["fallback_for_candidate_id"] = slot.get("candidate_id")
+                        outcomes[position] = fallback_result
+                        _funnel("fallback", "accepted", fallback_item, position)
+                        break
+                    _funnel(
+                        "fallback",
+                        "failed",
+                        fallback_item,
+                        position,
+                        str(fallback_result.get("reason_code") or fallback_result.get("detail") or "rejected"),
+                    )
+                    if not _fallback_is_candidate_specific(fallback_result):
+                        break
+                if tried and outcomes[position] is primary_result:
+                    outcomes[position] = {**primary_result, "fallback_candidates_tried": tried}
 
     # Reconstrói results na ordem do plano (paragrafos), rejeitados e
     # processados intercalados como antes.

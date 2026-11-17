@@ -14,12 +14,18 @@ from PIL import Image, ImageDraw
 
 from unicornio_editor.checklist import run_pre_publish_checklist
 from unicornio_editor.batch import (
+    build_media_resolve_batch_input,
+    load_media_resolve_batch,
     load_editorial_batch,
     merge_media_manifest_into_editorial,
     prepare_batch,
     resolve_batch_editorial_defaults,
 )
-from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch
+from unicornio_editor.cli import (
+    _apply_editorial_batch,
+    _resolve_media_batch,
+    _resolve_media_targets_batch,
+)
 from unicornio_editor.config import Config
 from unicornio_editor.media.inserter import insert_media
 from unicornio_editor.media.source_verify import discover_article_source_candidates
@@ -124,11 +130,11 @@ class ControlledSource:
                             alt = "Hollow Knight Silksong key art"
                             caption = "Arte de Hollow Knight Silksong, por E2E Artist."
                         elif "one" in name:
-                            alt = "Hollow Knight Silksong gameplay screenshot one"
-                            caption = "Captura de gameplay de Hollow Knight Silksong, por E2E Artist."
+                            alt = "Hollow Knight Silksong gameplay screenshot one: exploração em Pharloom"
+                            caption = "Hollow Knight Silksong gameplay screenshot one: exploração em Pharloom, por E2E Artist."
                         else:
-                            alt = "Hollow Knight Silksong gameplay screenshot two"
-                            caption = "Outra captura de gameplay de Hollow Knight Silksong, por E2E Artist."
+                            alt = "Hollow Knight Silksong gameplay screenshot two: combate em Pharloom"
+                            caption = "Hollow Knight Silksong gameplay screenshot two: combate em Pharloom, por E2E Artist."
                         figures.append(
                             f'<figure><img src="{image_url}" alt="{alt}" width="1600" height="900">'
                             f"<figcaption>{caption}</figcaption></figure>"
@@ -326,6 +332,148 @@ def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch)
         assert after["featured_media"] > 0
         assert after["content_sha256"] != before["content_sha256"]
         assert "wp-content/uploads" in str((after_post.get("content") or {}).get("raw") or "")
+
+
+def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_e2e_case, monkeypatch):
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setattr(
+        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        lambda *args, **kwargs: (None, "official_not_found"),
+    )
+    case = wordpress_e2e_case
+    with ControlledSource() as source:
+        source_url = f"{source.base_url}/article"
+        post_id = case.post_id("v1_listicle_targets_ready")
+        editorial = _automatic_pipeline_editorial()
+        editorial["seo"]["title"] = "2 jogos de Hollow Knight Silksong"
+        editorial["seo"]["meta_description"] = (
+            "Veja dois momentos de Hollow Knight Silksong em Pharloom, com exploração vertical, "
+            "cenários detalhados e combates que destacam o ritmo da aventura."
+        )
+        editorial["cleaned_html"] = (
+            "<p>Hollow Knight Silksong apresenta momentos distintos em Pharloom.</p>"
+            "<h2>1. Hollow Knight Silksong gameplay screenshot one: exploração em Pharloom</h2>"
+            "<p>A primeira imagem destaca a exploração e os caminhos verticais de Pharloom.</p>"
+            "<h2>2. Hollow Knight Silksong gameplay screenshot two: combate em Pharloom</h2>"
+            "<p>A segunda imagem mostra outro momento de combate durante a aventura.</p>"
+        )
+        case.client.update_post(post_id, {
+            "title": editorial["seo"]["title"],
+            "featured_media": 0,
+            "content": {"raw": "<p>Conteúdo original aguardando revisão.</p>"},
+            "meta": {"original_link": source_url, "_hermes_state": "new"},
+        })
+        config = _automatic_pipeline_config(case, source, post_id)
+        prepared = prepare_batch(
+            case.client,
+            config,
+            case.root,
+            [post_id],
+            batch_id="batch-v1-list-targets-e2e",
+        )
+        assert prepared["prepared"] == 1, prepared
+        source_candidates = discover_article_source_candidates(
+            source_url,
+            subject="Hollow Knight Silksong",
+            limit=8,
+            stats={},
+            url_policy="off",
+            root=case.root,
+        )
+        assert len(source_candidates) == 3
+        assert all(candidate.get("source_verified") is True for candidate in source_candidates)
+        candidates_by_name = {
+            str(candidate.get("direct_image_url") or "").rsplit("/", 1)[-1]: candidate
+            for candidate in source_candidates
+        }
+        editorial_request = {
+            "schema_version": 1,
+            "batch_id": prepared["batch_id"],
+            "results": [{"post_id": post_id, "status": "ok", "editorial": editorial}],
+        }
+        media_input = build_media_resolve_batch_input(editorial_request, case.root)
+        media_batch = load_media_resolve_batch(media_input["path"])
+        assert len(media_batch["posts"][0]["targets"]) == 3
+
+        def controlled_list_search(queries, *, accept=None, **_kwargs):
+            rows = []
+            for query in queries:
+                lowered = query.casefold()
+                if "screenshot one" in lowered:
+                    name = "hollow-knight-silksong-screenshot-one.png"
+                elif "screenshot two" in lowered:
+                    name = "hollow-knight-silksong-screenshot-two.png"
+                else:
+                    name = "hollow-knight-silksong-key-art.png"
+                candidate = dict(candidates_by_name[name])
+                candidate.update({
+                    "candidate_id": f"controlled-{name}",
+                    "engine": "controlled",
+                    "query": query,
+                })
+                candidates = [candidate]
+                if accept is not None:
+                    accept(candidates, query)
+                rows.append({
+                    "query": query,
+                    "candidates": candidates,
+                    "completion_reason": "TARGET_REACHED",
+                    "engine_reports": {"controlled": {"failure_kind": "ok"}},
+                })
+            return rows
+
+        monkeypatch.setattr(search, "search_web_images_batch", controlled_list_search)
+        resolved = _resolve_media_targets_batch(
+            case.client, config, case.root, media_batch, full=True, allow_reuse=False
+        )
+        manifest_path = case.root / "work" / "batches" / prepared["batch_id"] / "media.manifest.json"
+        assert len(resolved["posts"][0]["targets"]) == 3
+        assert manifest_path.is_file()
+
+        editorial_output = manifest_path.with_name("editorial.output.json")
+        editorial_output.write_text(json.dumps(editorial_request, ensure_ascii=False), encoding="utf-8")
+        batch = load_editorial_batch(editorial_output)
+        batch = resolve_batch_editorial_defaults(case.client, batch)
+        batch, assembly = merge_media_manifest_into_editorial(
+            batch, manifest_path, media_source_policy=config.media_source_policy
+        )
+        assert assembly["assembled"] == 1, assembly
+        planned = batch["items"][0]["editorial"]["media_plan"]
+        assert len(planned) == 3
+        assert len([item for item in planned if not item["is_featured"]]) == 2
+        assert {item["item_identity"] for item in planned if not item["is_featured"]} == {
+            "root:number-1", "root:number-2",
+        }
+
+        applied = _apply_editorial_batch(
+            case.client, config, case.root, batch, dry_run=False, compact=False
+        )
+        result = applied["posts"][0]
+        post = case.client.get_post(post_id)
+        snapshot = _snapshot(post)
+        raw = str(((post.get("content") or {}).get("raw") or ""))
+        assert result["status"] == "ready", result
+        assert snapshot["ready_state"] == "ready"
+        assert snapshot["status"] == "pending"
+        assert snapshot["featured_media"] > 0
+        assert raw.count("<img") == 2
+        assert raw.index("screenshot-one") < raw.index("<h2>2.")
+        assert raw.index("screenshot-two") > raw.index("<h2>2.")
+        assert len([row for row in result["media_plan_results"] if row.get("status") == "accepted"]) == 3
+        case.observations.append({
+            "scenario": "v1_listicle_targets_ready",
+            "post_id": post_id,
+            "targets": len(media_batch["posts"][0]["targets"]),
+            "inline_readback": raw.count("<img"),
+            "ready_state": snapshot["ready_state"],
+            "featured_media": snapshot["featured_media"],
+            "media_ids": sorted({
+                int(row["media_id"])
+                for row in result["media_plan_results"]
+                if row.get("status") == "accepted" and row.get("media_id")
+            }),
+        })
 
 
 def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, monkeypatch):

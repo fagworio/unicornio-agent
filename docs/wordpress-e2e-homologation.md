@@ -22,12 +22,13 @@ Os testes usam WordPressClient e WordPressWriterV2 reais sobre REST autenticada.
 12. Substituição de candidata de mídia rejeitada por alternativa válida antes do readback READY.
 13. Persistência e retomada de `visual_identity_pending` após cooldown.
 14. Recuperação pré-Writer de checkpoint correlacionado ao Registry V5 com `outcome="started"`, readback REST real do post e de dois attachments, sem upload duplicado nem alteração do post.
+15. Fluxo V1 de listicle com consulta de mídia por item/H2, reserva vinculada ao target, inserção e checklist de cobertura antes de READY confirmado por readback.
 
 O relatório registra snapshots do WordPress antes/depois, eventos REST sanitizados, resumo dos journals, linhas relevantes do Registry, SHA completo, tree SHA, versão do WordPress, PHP, WP-CLI, imagens e resultado da suíte completa. Não inclui Application Password, senha do administrador ou credenciais do banco.
 
 ## Homologação e artefato
 
-O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os quatorze cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
+O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os quinze cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
 
 Para executar manualmente, use a aba Actions e escolha WordPress Writer V2 E2E → Run workflow. O relatório é para o SHA indicado em tested_sha e tree_sha; não deve ser tratado como homologação de uma árvore diferente.
 

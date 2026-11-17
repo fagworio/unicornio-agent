@@ -1230,6 +1230,11 @@ class WorkflowTests(unittest.TestCase):
             "direct_image_url": "https://source.example/wolverine.jpg",
             "alt_text": "Wolverine artwork",
             "is_featured": False,
+            "target_id": "root:number-1",
+            "item_identity": "root:number-1",
+            "item_title": "Wolverine",
+            "section_heading": "Wolverine",
+            "section_slot": 0,
         }
         editorial = {
             "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
@@ -1257,6 +1262,8 @@ class WorkflowTests(unittest.TestCase):
                 )
         self.assertEqual(results[0]["status"], "accepted")
         self.assertEqual(results[0]["media_id"], 77)
+        self.assertEqual(results[0]["item_identity"], "root:number-1")
+        self.assertEqual(results[0]["target_id"], "root:number-1")
         upload.assert_called_once()
 
     def test_media_plan_falls_back_to_serial_when_pool_cannot_start(self):
@@ -1504,6 +1511,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["media_plan_results"][0]["status"], "blocked")
         self.assertFalse(report["wordpress_changed"])
         self.assertEqual(client.updated, [])
+
+    def test_apply_passes_item_scoped_media_context_to_list_checklist(self):
+        payload = editorial_payload()
+        payload["seo"]["title"] = "2 jogos para conhecer"
+        payload["cleaned_html"] = (
+            "<h2>1. Metroid Prime 4: exploração espacial</h2>"
+            '<figure><img src="https://media.test/metroid.webp" alt="Metroid Prime 4" /></figure>'
+            "<p>Descrição do primeiro jogo.</p>"
+            "<h2>2. Hades II: ação mitológica</h2>"
+            '<figure><img src="https://media.test/hades.webp" alt="Hades II" /></figure>'
+            "<p>Descrição do segundo jogo.</p>"
+        )
+        checklist = {"all_passed": True, "failed": [], "items": []}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch(
+                 "unicornio_editor.workflow.validate_media_plan",
+                 return_value={"featured_vision": [], "rejected": []},
+             ), \
+             mock.patch(
+                 "unicornio_editor.workflow.run_pre_publish_checklist",
+                 return_value=checklist,
+             ) as checklist_call:
+            apply_editorial(FakeClient(self.post()), self.config(True), Path(directory), 42, payload)
+
+        context = checklist_call.call_args.kwargs["media_context"]
+        self.assertEqual([row["item_identity"] for row in context["inline"]["accepted"]], [
+            "root:number-1", "root:number-2",
+        ])
 
     def test_apply_normalizes_existing_featured_to_1280x720(self):
         post = self.post()
@@ -3378,6 +3413,35 @@ def test_listicle_image_gate_keeps_section_subject():
     ) == {"bleach"}
 
 
+def test_featured_listicle_media_uses_article_subject_not_an_item_heading():
+    editorial = {
+        "seo": {
+            "title": "2 jogos de Hollow Knight Silksong",
+            "focus_keyword": "Hollow Knight Silksong",
+        },
+        "game_name": "Hollow Knight Silksong",
+        "cleaned_html": (
+            "<p>Introdução.</p>"
+            "<h2>1. Hollow Knight Silksong gameplay screenshot one: exploração</h2><p>Item um.</p>"
+            "<h2>2. Hollow Knight Silksong gameplay screenshot two: combate</h2><p>Item dois.</p>"
+        ),
+    }
+    item = {
+        "paragraph_index": 0,
+        "is_featured": True,
+        "subject": "Hollow Knight Silksong",
+    }
+
+    subjects = _item_entities(
+        item,
+        {"Hollow Knight Silksong", "Hollow Knight Silksong gameplay screenshot one"},
+        editorial,
+    )
+
+    assert "hollow knight silksong" in subjects
+    assert "hollow knight silksong gameplay screenshot one: exploração" not in subjects
+
+
 def test_execute_media_plan_uploads_new_final_phash(tmp_path):
     item = {
         "paragraph_index": 0,
@@ -3497,6 +3561,149 @@ def test_execute_media_plan_preserves_download_failure_classification(tmp_path):
     assert results[0]["failure_kind"] == "http_404"
     assert results[0]["recoverable"] is True
     assert results[0]["retry_same_source"] is False
+
+
+def test_execute_media_plan_uses_reserved_candidate_after_download_failure(tmp_path):
+    from unicornio_editor.media.downloader import MediaDownloadError
+
+    source_file = tmp_path / "source.img"
+    source_file.write_bytes(b"valid fallback bytes")
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Texto sobre Wolverine no videogame.</p>",
+        "media_plan": [{
+            "paragraph_index": 0,
+            "source_page_url": "https://source.example/primary",
+            "direct_image_url": "https://cdn.example/primary.jpg",
+            "alt_text": "Wolverine imagem de apoio",
+            "credit_text": "Crédito da imagem: Publisher. Cena promocional.",
+            "subject": "Wolverine",
+            "candidate_id": "primary",
+            "is_featured": False,
+            "provenance_mode": "source_page",
+        }],
+    }
+    fallback = {
+        "source_page_url": "https://source.example/fallback",
+        "direct_image_url": "https://cdn.example/fallback.jpg",
+        "credit_text": "Crédito da imagem: Publisher. Wolverine artwork.",
+        "subject": "Wolverine",
+        "candidate_id": "fallback-1",
+        "provenance_mode": "source_page",
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+
+    def download(url, *_args, **_kwargs):
+        if url.endswith("primary.jpg"):
+            raise MediaDownloadError("image download failed (HTTP 404)")
+        return source_file
+
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", side_effect=download), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
+         mock.patch("unicornio_editor.workflow.upload_image", return_value={"id": 77, "source_url": "https://wp.test/77.webp"}) as upload:
+        results, _, _ = _execute_media_plan(
+            editorial,
+            config,
+            object(),
+            tmp_path,
+            preflight={"rejected": [], "featured_vision": []},
+            post_id=115088,
+            media_fallback_candidates=[fallback],
+        )
+
+    upload.assert_called_once()
+    assert results[0]["status"] == "accepted"
+    assert results[0]["candidate_id"] == "fallback-1"
+
+
+def test_execute_media_plan_uses_reserved_candidate_after_preflight_rejection(tmp_path):
+    source_file = tmp_path / "source.img"
+    source_file.write_bytes(b"valid fallback bytes")
+    editorial = {
+        "seo": {"title": "Wolverine videogame", "focus_keyword": "Wolverine"},
+        "cleaned_html": "<p>Texto sobre Wolverine no videogame.</p>",
+        "media_plan": [{
+            "paragraph_index": 0,
+            "source_page_url": "https://source.example/primary",
+            "direct_image_url": "https://cdn.example/primary.jpg",
+            "alt_text": "Wolverine imagem de apoio",
+            "credit_text": "Crédito da imagem: Publisher. Cena promocional.",
+            "subject": "Wolverine",
+            "candidate_id": "primary",
+            "is_featured": False,
+            "provenance_mode": "source_page",
+        }],
+    }
+    fallback = {
+        "source_page_url": "https://source.example/fallback",
+        "direct_image_url": "https://cdn.example/fallback.jpg",
+        "credit_text": "Crédito da imagem: Publisher. Wolverine artwork.",
+        "subject": "Wolverine",
+        "candidate_id": "fallback-1",
+        "provenance_mode": "source_page",
+    }
+    config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+    with mock.patch("unicornio_editor.workflow._media_item_rejection", return_value=None), \
+         mock.patch("unicornio_editor.workflow.download_image", return_value=source_file), \
+         mock.patch("unicornio_editor.workflow.convert_to_webp", return_value=tmp_path / "inline.webp"), \
+         mock.patch("unicornio_editor.workflow.verify_downloaded_against_source", return_value=(True, "verified")), \
+         mock.patch("unicornio_editor.workflow.image_dimensions", return_value=(1280, 720)), \
+         mock.patch("unicornio_editor.workflow.image_has_transparency", return_value=False), \
+         mock.patch("unicornio_editor.media.visual_hash.phash_from_path", return_value="1111111111111111"), \
+         mock.patch("unicornio_editor.media.visual_identity.verify_candidate_identity", return_value=_verified_media_identity()), \
+         mock.patch("unicornio_editor.workflow.upload_image", return_value={"id": 78, "source_url": "https://wp.test/78.webp"}) as upload:
+        results, _, _ = _execute_media_plan(
+            editorial,
+            config,
+            object(),
+            tmp_path,
+            preflight={
+                "rejected": [{"index": 0, "reason": "primary source evidence rejected"}],
+                "featured_vision": [],
+            },
+            post_id=115088,
+            media_fallback_candidates=[fallback],
+        )
+
+    upload.assert_called_once()
+    assert results[0]["status"] == "accepted"
+    assert results[0]["candidate_id"] == "fallback-1"
+    assert results[0]["fallback_used"] is True
+
+
+def test_v1_checklist_media_context_binds_rendered_images_to_each_list_item():
+    from unicornio_editor.workflow import _v1_checklist_media_context
+
+    html = (
+        "<h2>1. Metroid Prime 4: exploração espacial</h2>"
+        '<figure><img src="https://media.test/metroid.webp" alt="Metroid Prime 4" /></figure>'
+        "<p>Descrição do primeiro jogo.</p>"
+        "<h2>2. Hades II: ação mitológica</h2>"
+        '<figure><img src="https://media.test/hades.webp" alt="Hades II" /></figure>'
+        "<p>Descrição do segundo jogo.</p>"
+    )
+    editorial = {
+        "title": "2 jogos para conhecer",
+        "seo": {"title": "2 jogos para conhecer"},
+    }
+    accepted = [
+        {"media_id": 101, "media_url": "https://media.test/metroid.webp", "target_id": "root:number-1"},
+        {"media_id": 102, "media_url": "https://media.test/hades.webp", "target_id": "root:number-2"},
+    ]
+
+    context = _v1_checklist_media_context(editorial, html, accepted)
+
+    rows = context["inline"]["accepted"]
+    assert [row["item_identity"] for row in rows] == [
+        "root:number-1", "root:number-2",
+    ]
+    assert [row["media_id"] for row in rows] == [101, 102]
 
 
 def test_execute_media_plan_revalidates_changed_featured_bytes_before_upload(tmp_path):

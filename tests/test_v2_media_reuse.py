@@ -1234,10 +1234,82 @@ def test_media_resolve_requests_bounded_replacement_capacity(monkeypatch, tmp_pa
 
     row = result["posts"][0]
     assert 2 in enrichment_capacities
+    assert len(row["candidates"]) == 2
     assert len(row["audit_candidates"]) == 2
     assert row["search"]["coverage"]["candidate_capacity"] == 2
     assert row["search"]["coverage"]["replacement_reserve_requested"] == 1
     assert row["search"]["completion_reason"] == "TARGET_REACHED"
+
+
+def test_media_resolve_searches_reserve_even_when_reuse_fills_required_slots(monkeypatch, tmp_path):
+    import unicornio_editor.cli as cli
+    import unicornio_editor.media.search as search
+
+    monkeypatch.setenv("EDITOR_MEDIA_SEARCH_PROVIDERS", "bing")
+    monkeypatch.setattr(cli, "_reuse_from_library", lambda *_args, **_kwargs: [{
+        "url": "https://cdn.test/reused.webp",
+        "source": "https://source.test/reused",
+        "media_id": 71,
+    }])
+    candidates = [{
+        "candidate_id": "replacement-1",
+        "direct_image_url": "https://cdn.test/replacement.webp",
+        "source_page_url": "https://source.test/replacement",
+        "engine": "bing",
+        "phash": "a" * 16,
+        "usable": True,
+    }]
+    enrichment_capacities = []
+
+    def enrich(rows, **kwargs):
+        enrichment_capacities.append(kwargs["capacity"])
+        for row in rows:
+            row.update({
+                "valid": True,
+                "evidence": {"verdict": "deterministic_match", "score": 9},
+            })
+        return list(rows), [], []
+
+    def search_batch(queries, *, limit, accept, **_kwargs):
+        assert limit == 1
+        assert accept(candidates, queries[0]) == 1
+        return [{
+            "query": queries[0],
+            "candidates": candidates,
+            "engine_reports": {"bing": {"failure_kind": "ok"}},
+            "completion_reason": "TARGET_REACHED",
+        }]
+
+    monkeypatch.setattr(cli, "_enriquecer_candidatos", enrich)
+    monkeypatch.setattr(search, "search_web_images_batch", search_batch)
+
+    result = cli._resolve_media_batch(
+        object(),
+        Config(),
+        tmp_path,
+        {
+            "schema_version": 1,
+            "batch_id": "reuse-filled-slots-with-reserve",
+            "posts": [{
+                "post_id": 115235,
+                "subject": "Test",
+                "query": "test query",
+                "needed": 1,
+                "limit": 1,
+                "replacement_reserve": 1,
+                "engine": "auto",
+            }],
+        },
+        full=True,
+        allow_reuse=True,
+    )
+
+    row = result["posts"][0]
+    assert row["needed_web"] == 0
+    assert len(row["reuse"]) == 1
+    assert len(row["candidates"]) == 1
+    assert row["replacement_reserve"] == 1
+    assert 1 in enrichment_capacities
 
 
 def test_legacy_library_entry_without_legal_metadata_is_reusable_with_technical_source(tmp_path):

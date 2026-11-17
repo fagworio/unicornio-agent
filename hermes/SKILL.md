@@ -35,14 +35,28 @@ unicornio-editor cards --compact --root .
 unicornio-editor prepare-batch POST_ID --batch-id BATCH_ID --root .
 unicornio-editor editorial-generate-batch \
   work/batches/BATCH_ID/editorial.input.json --root .
+# Somente se a resposta indicar media_input.status=required:
+unicornio-editor media-resolve-batch \
+  work/batches/BATCH_ID/media.input.json --compact --root .
 unicornio-editor apply-batch work/batches/BATCH_ID/editorial.output.json \
   --compact --root .
 ```
 
-`media-resolve-batch` e `vision-batch` só são executados quando o card pedir,
-antes do `apply`. O monitor continua sendo somente leitura (`queue --monitor`)
+`editorial-generate-batch` calcula o déficit de mídia usando o HTML editorial
+final e os fatos preparados, grava `media.input.json` e informa
+`media_input.status`. Se for `required`, execute o caminho retornado por
+`media_input.path`; `needed` já inclui a featured somente quando uma nova featured
+é necessária. Se houver `vision_batch_file` no resultado da busca, execute
+`vision-batch` antes do `apply`. Não estime contagens nem omita a etapa quando o
+arquivo de mídia existir. O monitor continua somente leitura (`queue --monitor`)
 e o Publisher permanece separado e pausado. Esta instalação não executa
 `v2-cycle`, `v2-run`, `start-v2-cycle` ou qualquer supervisor V2.
+
+O resolver também retorna até duas candidatas de reserva, fora da quota de mídia.
+`apply-batch` as tenta automaticamente quando uma candidata principal falha em
+evidência/origem, download, conversão ou validação visual; não repita a busca nem
+conte as reservas como imagens adicionais. Falhas do endpoint de upload não são
+tratadas como falha da candidata.
 
 Antes de cada preparação e aplicação, o código revalida `pending`, quarentena,
 cooldown, tentativas, lock e estado. Um post com `_hermes_work_state` é V2,

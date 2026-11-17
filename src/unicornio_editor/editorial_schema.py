@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
@@ -49,9 +50,20 @@ _MEDIA = {
     # Evidência determinística da descoberta (o apply RECALCULA e não confia
     # nestes campos — eles existem para auditoria e para o índice local).
     "subject",
+    "target_id",
+    "item_identity",
+    "item_title",
+    "item_group",
+    "item_number",
+    "section_heading",
+    "section_slot",
+    "html_position",
     "phash",
     "evidence_score",
     "evidence_verdict",
+    # Resolver provenance is retained across JSON, but apply independently
+    # re-fetches and re-scores the origin page before accepting the asset.
+    "origin_evidence",
     "candidate_id",
     # Rastreabilidade da DECISÃO de mídia que escolheu esta imagem: o
     # `decision_id` vem do ledger append-only (work/media_decisions.jsonl) que o
@@ -165,9 +177,12 @@ def validate_editorial(
         media_optional = {
             "media_library_id", "search_query", "subject", "phash",
             "evidence_score", "evidence_verdict", "candidate_id",
+            "origin_evidence",
             "credit_text",
             "provenance_mode",
             "source_page_verified",
+            "target_id", "item_identity", "item_title", "item_group",
+            "item_number", "section_heading", "section_slot", "html_position",
             # Rastreabilidade opcional (vem do ledger de decisões); o apply
             # NUNCA confia nela para decidir, só para medir qualidade.
             "decision_id", "decision",
@@ -187,9 +202,38 @@ def validate_editorial(
         if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
             raise EditorialValidationError(f"media_plan[{index}].paragraph_index must be non-negative")
         placement = media.get("placement")
-        if placement is not None and placement != "after_editorial_body":
+        if placement is not None and placement not in {
+            "after_editorial_body", "after_list_item_description",
+        }:
             raise EditorialValidationError(
                 f"media_plan[{index}].placement has unsupported value"
+            )
+        list_fields = {
+            "item_identity", "item_title", "item_group",
+            "item_number", "section_heading", "section_slot", "html_position",
+        }
+        if any(key in media for key in list_fields):
+            for name in ("target_id", "item_identity", "item_title", "section_heading"):
+                _nonempty_string(media.get(name), f"media_plan[{index}].{name}")
+            if "item_group" in media and not isinstance(media["item_group"], str):
+                raise EditorialValidationError(f"media_plan[{index}].item_group must be a string")
+            item_number = media.get("item_number")
+            if item_number is not None and (
+                isinstance(item_number, bool) or not isinstance(item_number, int) or item_number < 1
+            ):
+                raise EditorialValidationError(f"media_plan[{index}].item_number must be positive or null")
+            for name in ("section_slot", "html_position"):
+                value = media.get(name)
+                if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                ):
+                    raise EditorialValidationError(f"media_plan[{index}].{name} must be non-negative")
+        if placement == "after_list_item_description" and not all(
+            str(media.get(key) or "").strip()
+            for key in ("target_id", "item_identity", "item_title", "section_heading")
+        ):
+            raise EditorialValidationError(
+                f"media_plan[{index}] list placement requires item identity and heading"
             )
         _nonempty_string(media["alt_text"], f"media_plan[{index}].alt_text")
         _http_url(media["direct_image_url"], f"media_plan[{index}].direct_image_url")
@@ -223,6 +267,10 @@ def validate_editorial(
             key: value for key, value in media.items()
             if key not in _LEGACY_MEDIA_RIGHTS_FIELDS
         }
+        if media.get("origin_evidence") is not None:
+            normalized["origin_evidence"] = _normalize_origin_evidence(
+                media["origin_evidence"], f"media_plan[{index}].origin_evidence"
+            )
         if media_source_policy == "credit_only":
             normalized["provenance_mode"] = provenance_mode
             normalized["source_page_verified"] = False
@@ -333,3 +381,51 @@ def _http_url(value: Any, name: str) -> str:
     ):
         raise EditorialValidationError(f"{name} must be an absolute HTTP(S) URL")
     return value
+
+
+def _normalize_origin_evidence(value: Any, name: str) -> dict[str, Any]:
+    evidence = _object(value, name)
+    evidence_keys = {"verdict", "score", "local_score", "subject", "matched", "fields"}
+    _keys(evidence, evidence_keys, name, optional=evidence_keys - {"fields"})
+    fields_value = _object(evidence["fields"], f"{name}.fields")
+    allowed_fields = {
+        "filename", "og_title", "page_title", "alt_original",
+        "figcaption", "heading", "page_url",
+    }
+    _keys(fields_value, allowed_fields, f"{name}.fields", optional=allowed_fields)
+    fields: dict[str, str] = {}
+    for key, raw in fields_value.items():
+        if not isinstance(raw, str) or not raw.strip() or len(raw) > 500:
+            raise EditorialValidationError(f"{name}.fields.{key} must be a non-empty string up to 500 chars")
+        fields[key] = _http_url(raw, f"{name}.fields.page_url") if key == "page_url" else raw
+    if not fields:
+        raise EditorialValidationError(f"{name}.fields must contain at least one source field")
+
+    normalized: dict[str, Any] = {"fields": fields}
+    verdict = evidence.get("verdict")
+    if verdict is not None:
+        if not isinstance(verdict, str) or not verdict.strip() or len(verdict) > 48:
+            raise EditorialValidationError(f"{name}.verdict must be a non-empty string up to 48 chars")
+        normalized["verdict"] = verdict
+    subject = evidence.get("subject")
+    if subject is not None:
+        if not isinstance(subject, str) or not subject.strip() or len(subject) > 200:
+            raise EditorialValidationError(f"{name}.subject must be a non-empty string up to 200 chars")
+        normalized["subject"] = subject
+    matched = evidence.get("matched")
+    if matched is not None:
+        if (
+            not isinstance(matched, list)
+            or len(matched) > len(allowed_fields)
+            or any(not isinstance(item, str) or item not in allowed_fields for item in matched)
+        ):
+            raise EditorialValidationError(f"{name}.matched contains invalid source field names")
+        normalized["matched"] = matched
+    for key in ("score", "local_score"):
+        raw = evidence.get(key)
+        if raw is not None:
+            score = _number(raw, f"{name}.{key}")
+            if not math.isfinite(score):
+                raise EditorialValidationError(f"{name}.{key} must be finite")
+            normalized[key] = score
+    return normalized

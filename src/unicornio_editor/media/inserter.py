@@ -687,7 +687,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             "credit_text",
             "item_identity", "item_title", "item_group", "html_position",
             "item_number", "section_heading", "section_slot", "subject", "placement",
-            "role", "media_id",
+            "target_id", "role", "media_id",
         }
         if not required.issubset(item) or set(item) - allowed:
             raise MediaInsertionError("media placement has missing or unknown fields")
@@ -696,6 +696,7 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
             raise MediaInsertionError("paragraph_index must be non-negative")
         placement_kind = item.get("placement")
         after_editorial_body = placement_kind == "after_editorial_body"
+        after_list_item_description = placement_kind == "after_list_item_description"
         if "role" in item or "media_id" in item:
             if (
                 item.get("role") != "closing_featured_repeat"
@@ -705,8 +706,10 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
                 or item.get("media_id", 0) < 1
             ):
                 raise MediaInsertionError("only an identified featured repeat may carry a closing role")
-        if placement_kind is not None and not after_editorial_body:
+        if placement_kind is not None and not after_editorial_body and not after_list_item_description:
             raise MediaInsertionError("unsupported media placement")
+        if after_list_item_description and not listicle:
+            raise MediaInsertionError("after_list_item_description is only valid for listicles")
         if after_editorial_body and (
             listicle
             or not paragraph_ends
@@ -801,6 +804,20 @@ def insert_media(html: str, plan: list[Mapping[str, Any]], *, listicle: bool = F
                     f"list item at paragraph {index} has no target H2/H3 before it"
                 )
             position = start + heading.end()
+            if item.get("placement") == "after_list_item_description":
+                section_tail = html[position:]
+                next_heading = re.search(
+                    r"<h[23]\b[^>]*>", section_tail, re.IGNORECASE
+                )
+                section = section_tail[:next_heading.start()] if next_heading else section_tail
+                description = re.search(
+                    r"<p\b[^>]*>[\s\S]*?</p>", section, re.IGNORECASE
+                )
+                if not description:
+                    raise MediaInsertionError(
+                        f"list item at paragraph {index} has no description paragraph for extra media"
+                    )
+                position += description.end()
             html = html[:position] + figure + html[position:]
         return html
     for index, figure, item in sorted(placements, key=lambda value: value[0], reverse=True):

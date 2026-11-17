@@ -41,6 +41,75 @@ class EditorialSchemaTests(unittest.TestCase):
         self.assertEqual(len(normalized["media_plan"]), 1)
         self.assertNotIn("license", normalized["media_plan"][0])
 
+    def test_media_plan_accepts_item_scoped_list_targets_and_extra_placement(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "placement": "after_list_item_description",
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Hades II action",
+            "credit_text": "Crédito da imagem: Publisher.",
+            "is_featured": False,
+            "target_id": "extra-1-root:number-1",
+            "item_identity": "root:number-1",
+            "item_title": "Hades II",
+            "item_group": "Recomendações",
+            "item_number": 1,
+            "section_heading": "Hades II",
+            "section_slot": 0,
+            "html_position": 10,
+        }]
+
+        normalized = validate_editorial(payload)
+
+        self.assertEqual(normalized["media_plan"][0]["item_identity"], "root:number-1")
+        self.assertEqual(normalized["media_plan"][0]["placement"], "after_list_item_description")
+
+    def test_media_plan_preserves_bounded_origin_evidence_for_apply_revalidation(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Cena do jogo",
+            "is_featured": False,
+            "origin_evidence": {
+                "verdict": "deterministic_match",
+                "score": 9,
+                "local_score": 5,
+                "subject": "Metroid Prime 4",
+                "matched": ["page_title", "alt_original"],
+                "fields": {
+                    "page_title": "Metroid Prime 4 key art",
+                    "alt_original": "Metroid Prime 4 artwork",
+                    "page_url": "https://publisher.example/story",
+                },
+            },
+        }]
+
+        evidence = validate_editorial(payload)["media_plan"][0]["origin_evidence"]
+
+        self.assertEqual(evidence["fields"]["alt_original"], "Metroid Prime 4 artwork")
+        self.assertEqual(evidence["score"], 9.0)
+
+    def test_media_plan_rejects_unbounded_or_unknown_origin_evidence(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Cena do jogo",
+            "is_featured": False,
+            "origin_evidence": {
+                "fields": {"page_title": "x" * 501},
+                "secret": "must not cross the schema boundary",
+            },
+        }]
+
+        with self.assertRaises(EditorialValidationError):
+            validate_editorial(payload)
+
     def test_historical_legal_fields_are_readable_but_removed_from_active_plan(self):
         payload = valid_payload()
         payload["media_plan"] = [{
@@ -62,6 +131,21 @@ class EditorialSchemaTests(unittest.TestCase):
             "credit_text",
         })
         self.assertEqual(normalized["media_plan"][0]["credit_text"], "Legacy credit")
+
+    def test_featured_media_target_id_does_not_require_list_item_identity(self):
+        payload = valid_payload()
+        payload["media_plan"] = [{
+            "paragraph_index": 0,
+            "source_page_url": "https://publisher.example/story",
+            "direct_image_url": "https://cdn.example/game.webp",
+            "alt_text": "Arte principal do jogo",
+            "is_featured": True,
+            "target_id": "featured",
+        }]
+
+        normalized = validate_editorial(payload)
+
+        self.assertEqual(normalized["media_plan"][0]["target_id"], "featured")
 
     def test_media_exhausted_optional_boolean(self):
         # media_exhausted e opcional (default ausente) e deve ser booleano.

@@ -274,11 +274,22 @@ subject, require_key_art}]}`. Apenas decisões visuais definitivas entram no
 cache. O batch faz uma chamada `low`; se houver ambiguidade, faz no máximo uma
 segunda chamada `high` somente com o subconjunto ambíguo.
 
-`media-resolve-batch` recebe até dois posts no formato
-`{batch_id, posts: [{post_id, subject, needed, query}]}`. Ele executa reuso da
-Media Library, descoberta em paralelo, verificação da página de origem,
-relevância e pHash sem nova inferência do modelo. Gera um plano compacto e,
-quando necessário, `vision.input.json` para a única etapa multimodal seguinte.
+`editorial-generate-batch` gera `media.input.json` a partir do HTML editorial
+final. `media-resolve-batch` recebe até dois posts no formato
+`{batch_id, posts: [{post_id, subject, needed, query, featured_required,
+replacement_reserve}]}`.
+`needed` é o déficit inline mais um candidato featured somente quando a featured
+precisa ser fornecida/substituída. Portanto, duas inline requeridas mais uma
+featured ausente geram `needed: 3`; se a featured existente for válida, todas as
+candidatas serão inline. `replacement_reserve: 2` busca até duas alternativas
+extras; elas não contam como slots nem como mídia obrigatória. No `apply-batch`,
+uma reserva substitui um candidato rejeitado por evidência, download, conversão
+ou validação visual; falhas de upload do WordPress não consomem reservas. Hermes
+deve executar o arquivo gerado sem recalcular os números. O resolver executa
+reuso da Media Library, descoberta em paralelo,
+verificação da página de origem, relevância e pHash sem nova inferência do
+modelo. Gera um plano compacto e, quando necessário, `vision.input.json` para a
+única etapa multimodal seguinte.
 
 A manutenção é somente relatório e nunca atualiza o WordPress. Para testes locais do Devilbox, consulte `tests/wordpress/README.md`.
 

@@ -9,6 +9,7 @@ from unittest import mock
 
 from unicornio_editor.batch import (
     BatchError,
+    build_media_resolve_batch_input,
     load_media_resolve_batch,
     merge_media_manifest_into_editorial,
     prepare_batch,
@@ -17,7 +18,11 @@ from unicornio_editor.batch import (
 )
 from unicornio_editor.config import Config
 from unicornio_editor.batch import load_editorial_batch
-from unicornio_editor.cli import _apply_editorial_batch, preflight_apply_candidate
+from unicornio_editor.cli import (
+    _apply_editorial_batch,
+    _media_candidate,
+    preflight_apply_candidate,
+)
 from unicornio_editor.wordpress import WordPressError
 
 
@@ -110,6 +115,282 @@ class BatchContextTests(unittest.TestCase):
                     model_context["requirements"]["media_stage"]["editorial_media_plan"], []
                 )
                 self.assertTrue((root / "backups" / str(post_id) / "prepared.json").exists())
+
+    def test_media_request_counts_inline_deficit_plus_missing_featured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-media-count"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            prepared = {
+                "post_id": 1,
+                "title": "Post comum sobre videogames",
+                "cleaned_html": "<p>Texto original sobre videogames.</p>",
+                "entities": ["videogames"],
+                "featured": {"action": "provide", "valid": False},
+            }
+            (batch_dir / "post-1.json").write_text(json.dumps(prepared), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 1,
+                    "status": "ok",
+                    "editorial": {
+                        "title": None,
+                        "game_name": None,
+                        "cleaned_html": None,
+                    },
+                }],
+            }
+
+            result = build_media_resolve_batch_input(editorial, root)
+
+            self.assertEqual(result["count"], 1)
+            media_input = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+            request = media_input["posts"][0]
+            self.assertEqual(request["inline_deficit"], 2)
+            self.assertTrue(request["featured_required"])
+            self.assertEqual(request["needed"], 3)
+
+    def test_long_normal_article_requests_six_inline_plus_featured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-long-media-count"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            long_html = "<p>" + "videogame " * 1100 + "</p>"
+            (batch_dir / "post-1.json").write_text(json.dumps({
+                "post_id": 1,
+                "title": "Post longo sobre videogames",
+                "cleaned_html": long_html,
+                "entities": ["videogames"],
+                "featured": {"action": "provide", "valid": False},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 1,
+                    "status": "ok",
+                    "editorial": {"title": None, "game_name": None, "cleaned_html": None},
+                }],
+            }
+
+            result = build_media_resolve_batch_input(editorial, root)
+
+            request = result["posts"][0]
+            self.assertEqual(request["required_inline_images"], 6)
+            self.assertEqual(request["inline_deficit"], 6)
+            self.assertEqual(request["needed"], 7)
+            normalized = load_media_resolve_batch(Path(result["path"]))
+            self.assertEqual(normalized["posts"][0]["needed"], 7)
+
+    def test_listicle_media_request_scales_past_seven_and_binds_each_heading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-list-media"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            html = "<p>Introdução sobre recomendações.</p>" + "".join(
+                f"<h2>{index}. Jogo {index}: experiência distinta</h2>"
+                f"<p>Descrição editorial completa do jogo número {index}, com contexto e detalhes.</p>"
+                for index in range(1, 11)
+            )
+            (batch_dir / "post-55.json").write_text(json.dumps({
+                "post_id": 55,
+                "title": "10 jogos para conhecer",
+                "cleaned_html": html,
+                "entities": ["jogos"],
+                "featured": {"action": "provide", "valid": False},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 55,
+                    "status": "ok",
+                    "editorial": {
+                        "title": None,
+                        "game_name": None,
+                        "categories": ["Jogos"],
+                        "cleaned_html": None,
+                    },
+                }],
+            }
+
+            result = build_media_resolve_batch_input(editorial, root)
+            request = result["posts"][0]
+
+            self.assertEqual(request["required_inline_images"], 10)
+            self.assertEqual(request["needed"], 11)
+            self.assertEqual(len(request["targets"]), 11)
+            inline_targets = [row for row in request["targets"] if row["role"] == "inline"]
+            self.assertEqual(len(inline_targets), 10)
+            self.assertEqual(inline_targets[0]["item_title"], "Jogo 1: experiência distinta")
+            self.assertEqual(inline_targets[0]["item_identity"], "root:number-1")
+            self.assertEqual(inline_targets[-1]["item_identity"], "root:number-10")
+            self.assertEqual(request["targets"][-1]["role"], "featured")
+            normalized = load_media_resolve_batch(Path(result["path"]))
+            self.assertEqual(len(normalized["posts"][0]["targets"]), 11)
+
+    def test_listicle_word_quota_extras_are_placed_after_item_descriptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-list-extra-media"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            long_description = "palavra editorial " * 180
+            html = (
+                "<h2>1. Jogo Um: análise detalhada</h2><p>" + long_description + "</p>"
+                + "<h2>2. Jogo Dois: análise detalhada</h2><p>" + long_description + "</p>"
+            )
+            (batch_dir / "post-56.json").write_text(json.dumps({
+                "post_id": 56,
+                "title": "2 jogos para conhecer",
+                "cleaned_html": html,
+                "entities": ["jogos"],
+                "featured": {"action": "ok", "valid": True},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 56,
+                    "status": "ok",
+                    "editorial": {"title": None, "game_name": None, "cleaned_html": None},
+                }],
+            }
+
+            request = build_media_resolve_batch_input(editorial, root)["posts"][0]
+
+            self.assertEqual(request["required_inline_images"], 4)
+            self.assertEqual(request["inline_deficit"], 4)
+            self.assertEqual(len(request["targets"]), 4)
+            extras = [row for row in request["targets"] if row.get("placement") == "after_list_item_description"]
+            self.assertEqual(len(extras), 2)
+            normalized = load_media_resolve_batch(
+                root / "work" / "batches" / batch_id / "media.input.json"
+            )
+            self.assertEqual(len(normalized["posts"][0]["targets"]), 4)
+
+    def test_media_resolver_runs_a_subject_query_per_list_target(self):
+        import unicornio_editor.cli as cli
+
+        targets = [
+            {
+                "target_id": "root:number-1",
+                "role": "inline",
+                "subject": "Metroid Prime 4",
+                "query": "Metroid Prime 4 artwork",
+                "paragraph_index": 0,
+                "item_identity": "root:number-1",
+                "item_title": "Metroid Prime 4",
+                "section_heading": "Metroid Prime 4",
+                "section_slot": 0,
+                "replacement_reserve": 1,
+            },
+            {
+                "target_id": "root:number-2",
+                "role": "inline",
+                "subject": "Hades II",
+                "query": "Hades II artwork",
+                "paragraph_index": 1,
+                "item_identity": "root:number-2",
+                "item_title": "Hades II",
+                "section_heading": "Hades II",
+                "section_slot": 1,
+                "replacement_reserve": 1,
+            },
+        ]
+        batch = {
+            "schema_version": 1,
+            "batch_id": "list-target-resolve",
+            "posts": [{
+                "post_id": 55,
+                "subject": "Games list",
+                "query": "Games list",
+                "needed": 2,
+                "required_inline_images": 2,
+                "inline_deficit": 2,
+                "featured_required": False,
+                "replacement_reserve": 0,
+                "targets": targets,
+            }],
+        }
+        resolved_subjects = []
+
+        def resolve(_client, _config, _root, sub_batch, **_kwargs):
+            request = sub_batch["posts"][0]
+            resolved_subjects.append(request["subject"])
+            candidate = {
+                "candidate_id": "same-provider-id",
+                "direct_image_url": f"https://cdn.test/{request['subject'].replace(' ', '-')}.webp",
+                "source_page_url": f"https://source.test/{request['subject'].replace(' ', '-')}",
+                "credit_text": "Crédito da imagem: Fonte."
+            }
+            return {
+                "posts": [{
+                    "post_id": 55,
+                    "reuse": [],
+                    "candidates": [candidate],
+                    "audit_candidates": [candidate],
+                    "search": {"completion_reason": "TARGET_REACHED"},
+                }],
+                "vision_items": [{
+                    "candidate_id": "same-provider-id",
+                    "image_url": candidate["direct_image_url"],
+                    "subject": request["subject"],
+                }],
+                "economics": {
+                    "search_queries": 1,
+                    "external_http_requests": 2,
+                    "candidates_examined": 1,
+                    "candidates_rejected": 0,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.cli._resolve_media_batch", side_effect=resolve
+        ):
+            result = cli._resolve_media_targets_batch(
+                object(),
+                Config("wordpress", "http://wp.test", "/wp-json/wp/v2"),
+                Path(directory),
+                batch,
+                full=True,
+            )
+
+        post = result["posts"][0]
+        self.assertEqual(resolved_subjects, ["Metroid Prime 4", "Hades II"])
+        self.assertEqual([row["item_identity"] for row in post["targets"]], [
+            "root:number-1", "root:number-2",
+        ])
+        candidate_ids = [
+            row["candidates"][0]["candidate_id"] for row in post["targets"]
+        ]
+        self.assertEqual(len(set(candidate_ids)), 2)
+        self.assertEqual(result["economics"]["search_queries"], 2)
+
+    def test_media_resolve_dispatch_uses_target_resolver_for_list_batches(self):
+        import unicornio_editor.cli as cli
+
+        batch = {
+            "schema_version": 1,
+            "batch_id": "list-dispatch",
+            "posts": [{"post_id": 55, "targets": [{"target_id": "root:number-1"}]}],
+        }
+        with mock.patch(
+            "unicornio_editor.cli._resolve_media_targets_batch",
+            return_value={"resolver": "targets"},
+        ) as target_resolver, mock.patch(
+            "unicornio_editor.cli._resolve_media_batch",
+            return_value={"resolver": "flat"},
+        ) as flat_resolver:
+            result = cli._resolve_media_batch_dispatch(
+                object(), Config("wordpress", "http://wp.test", "/wp-json/wp/v2"),
+                Path("."), batch, full=True,
+            )
+
+        self.assertEqual(result["resolver"], "targets")
+        target_resolver.assert_called_once()
+        flat_resolver.assert_not_called()
 
     def test_prepare_batch_exposes_uncertain_retry_context_and_allowed_topics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -238,22 +519,35 @@ class BatchContextTests(unittest.TestCase):
             path = Path(directory) / "media.json"
             path.write_text(json.dumps({
                 "batch_id": "media-test",
-                "posts": [{"post_id": 1, "subject": "Obra", "needed": 2}],
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Obra",
+                    "needed": 2,
+                    "replacement_reserve": 2,
+                }],
             }), encoding="utf-8")
             batch = load_media_resolve_batch(path)
             self.assertEqual(batch["posts"][0]["query"], "Obra")
             self.assertEqual(batch["posts"][0]["limit"], 3)
             self.assertEqual(batch["posts"][0]["role"], "")
+            self.assertEqual(batch["posts"][0]["replacement_reserve"], 2)
 
     def test_media_resolve_batch_preserves_known_media_role(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "media.json"
             path.write_text(json.dumps({
                 "batch_id": "media-role-test",
-                "posts": [{"post_id": 1, "subject": "Obra", "role": "featured"}],
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Obra",
+                    "needed": 2,
+                    "role": "inline",
+                    "featured_required": False,
+                }],
             }), encoding="utf-8")
             batch = load_media_resolve_batch(path)
-        self.assertEqual(batch["posts"][0]["role"], "featured")
+        self.assertEqual(batch["posts"][0]["role"], "inline")
+        self.assertFalse(batch["posts"][0]["featured_required"])
 
     def test_media_resolve_batch_rejects_more_than_two_posts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -330,7 +624,7 @@ class BatchContextTests(unittest.TestCase):
                     {"post_id": 3, "editorial": {}},
                 ],
             }
-            fake_result = lambda client, config, root, post_id, payload: {
+            fake_result = lambda client, config, root, post_id, payload, **_kwargs: {
                 "post_id": post_id,
                 "status": "ready",
                 "dry_run": False,
@@ -515,6 +809,264 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(plan[0]["candidate_id"], "c1")
             self.assertGreaterEqual(plan[2]["paragraph_index"] - plan[1]["paragraph_index"], 3)
             self.assertEqual(report["assembled"], 1)
+
+    def test_inline_only_media_manifest_never_promotes_first_inline_to_featured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-inline-only"
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Hollow Knight Silksong",
+                    "query": "Hollow Knight Silksong",
+                    "needed": 2,
+                    "role": "inline",
+                    "featured_required": False,
+                    "reuse": [],
+                    "candidates": [
+                        {"url": f"https://img.test/inline-{index}.webp",
+                         "source": "https://source.test/article",
+                         "verdict": "deterministic_match",
+                         "candidate_id": f"inline-{index}"}
+                        for index in range(2)
+                    ],
+                }],
+            }), encoding="utf-8")
+            editorial = {
+                "post_id": 1,
+                "status": "ok",
+                "editorial": {
+                    "cleaned_html": "".join(
+                        f"<p>Paragrafo substantivo {index} com texto suficiente para validar a inserção das imagens no artigo.</p>"
+                        for index in range(8)
+                    ),
+                    "media_plan": [],
+                },
+            }
+
+            merged, _ = merge_media_manifest_into_editorial({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "items": [editorial],
+            }, manifest)
+
+            plan = merged["items"][0]["editorial"]["media_plan"]
+            self.assertEqual(len(plan), 2)
+            self.assertTrue(all(item["is_featured"] is False for item in plan))
+
+    def test_compact_candidate_preserves_only_origin_evidence_fields(self):
+        candidate = _media_candidate({
+            "candidate_id": "opaque-cdn-1",
+            "direct_image_url": "https://cdn.test/991.webp",
+            "source_page_url": "https://publisher.test/article-123",
+            "credit_text": "Crédito da imagem: Publisher.",
+            "evidence_score": 9,
+            "evidence": {
+                "subject": "Metroid Prime 4",
+                "verdict": "deterministic_match",
+                "score": 9,
+                "local_score": 5,
+                "matched": ["page_title", "alt_original"],
+                "evidence": {
+                    "page_title": "Metroid Prime 4 key art",
+                    "alt_original": "Metroid Prime 4 artwork",
+                    "query": "private query should not be persisted as evidence",
+                },
+            },
+        })
+
+        self.assertEqual(candidate["source_page_url"], "https://publisher.test/article-123")
+        self.assertEqual(candidate["origin_evidence"]["fields"]["alt_original"], "Metroid Prime 4 artwork")
+        self.assertNotIn("query", candidate["origin_evidence"]["fields"])
+
+    def test_manifest_bridge_carries_origin_evidence_into_the_media_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-origin-evidence"
+            manifest = root / "media.manifest.json"
+            evidence = {
+                "verdict": "deterministic_match",
+                "score": 9,
+                "local_score": 5,
+                "subject": "Metroid Prime 4",
+                "matched": ["page_title", "alt_original"],
+                "fields": {
+                    "page_title": "Metroid Prime 4 key art",
+                    "alt_original": "Metroid Prime 4 artwork",
+                    "page_url": "https://publisher.test/article-123",
+                },
+            }
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Metroid Prime 4",
+                    "query": "Metroid Prime 4",
+                    "needed": 1,
+                    "featured_required": True,
+                    "candidates": [{
+                        "url": "https://cdn.test/991.webp",
+                        "source": "https://publisher.test/article-123",
+                        "verdict": "deterministic_match",
+                        "candidate_id": "opaque-cdn-1",
+                        "origin_evidence": evidence,
+                    }],
+                }],
+            }), encoding="utf-8")
+            editorial = {
+                "post_id": 1,
+                "status": "ok",
+                "editorial": {"cleaned_html": "", "media_plan": []},
+            }
+
+            merged, _ = merge_media_manifest_into_editorial({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "items": [editorial],
+            }, manifest)
+
+            planned = merged["items"][0]["editorial"]["media_plan"][0]
+            self.assertEqual(planned["origin_evidence"]["fields"]["page_title"], "Metroid Prime 4 key art")
+
+    def test_manifest_keeps_replacement_candidates_outside_required_slots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-media-reserve"
+            manifest = root / "media.manifest.json"
+            candidates = [
+                {
+                    "url": f"https://img.test/candidate-{index}.webp",
+                    "source": "https://source.test/article",
+                    "verdict": "deterministic_match",
+                    "candidate_id": f"candidate-{index}",
+                }
+                for index in range(3)
+            ]
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Game",
+                    "query": "Game",
+                    "needed": 1,
+                    "replacement_reserve": 2,
+                    "featured_required": False,
+                    "candidates": candidates,
+                }],
+            }), encoding="utf-8")
+            editorial = {
+                "post_id": 1,
+                "status": "ok",
+                "editorial": {
+                    "cleaned_html": "".join(
+                        f"<p>Paragrafo substantivo {index} com texto editorial suficiente para validar espaços de mídia no artigo e manter a leitura fluida.</p>"
+                        for index in range(8)
+                    ),
+                    "media_plan": [],
+                },
+            }
+
+            merged, _ = merge_media_manifest_into_editorial({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "items": [editorial],
+            }, manifest)
+
+            item = merged["items"][0]
+            self.assertEqual(len(item["editorial"]["media_plan"]), 1)
+            self.assertEqual(len(item["media_fallback_candidates"]), 2)
+
+    def test_manifest_bridge_preserves_list_item_identity_and_scoped_reserves(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-list-target-bridge"
+            manifest = root / "media.manifest.json"
+            html = (
+                "<h2>1. Metroid Prime 4: exploração</h2><p>Descrição do primeiro item.</p>"
+                "<h2>2. Hades II: ação</h2><p>Descrição do segundo item.</p>"
+            )
+
+            def candidate(target_id, name):
+                return {
+                    "candidate_id": f"{target_id}-{name}",
+                    "url": f"https://cdn.test/{target_id}-{name}.webp",
+                    "source": f"https://source.test/{target_id}-{name}",
+                    "verdict": "deterministic_match",
+                    "credit_text": f"Crédito da imagem: Fonte {name}.",
+                }
+
+            targets = []
+            for number, subject in ((1, "Metroid Prime 4: exploração"), (2, "Hades II: ação")):
+                identity = f"root:number-{number}"
+                targets.append({
+                    "target_id": identity,
+                    "role": "inline",
+                    "subject": subject,
+                    "query": subject,
+                    "paragraph_index": number - 1,
+                    "item_identity": identity,
+                    "item_title": subject,
+                    "item_group": "",
+                    "item_number": number,
+                    "section_heading": subject,
+                    "section_slot": number - 1,
+                    "html_position": number * 10,
+                    "replacement_reserve": 1,
+                    "reuse": [],
+                    "candidates": [candidate(identity, "primary"), candidate(identity, "reserve")],
+                })
+            targets.append({
+                "target_id": "featured",
+                "role": "featured",
+                "subject": "Jogos",
+                "query": "Jogos key art",
+                "replacement_reserve": 1,
+                "reuse": [],
+                "candidates": [candidate("featured", "primary"), candidate("featured", "reserve")],
+            })
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "posts": [{
+                    "post_id": 55,
+                    "subject": "Jogos",
+                    "query": "Jogos",
+                    "needed": 3,
+                    "featured_required": True,
+                    "required_inline_images": 2,
+                    "inline_deficit": 2,
+                    "targets": targets,
+                }],
+            }), encoding="utf-8")
+            batch = {
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "items": [{
+                    "post_id": 55,
+                    "status": "ok",
+                    "editorial": {"cleaned_html": html, "media_plan": []},
+                }],
+            }
+
+            merged, report = merge_media_manifest_into_editorial(batch, manifest)
+
+            item = merged["items"][0]
+            plan = item["editorial"]["media_plan"]
+            self.assertEqual(len(plan), 3)
+            inline = [row for row in plan if not row["is_featured"]]
+            self.assertEqual([row["item_identity"] for row in inline], [
+                "root:number-1", "root:number-2",
+            ])
+            self.assertEqual([row["target_id"] for row in inline], [
+                "root:number-1", "root:number-2",
+            ])
+            self.assertEqual(len(item["media_fallback_candidates"]), 3)
+            self.assertEqual(report["fallback_candidates"], 3)
 
     def test_batch_defaults_restore_original_html_when_model_omits_rewrite(self):
         post = _post(1, "Videogame sem reescrita")

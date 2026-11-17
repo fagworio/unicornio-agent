@@ -106,12 +106,19 @@ unicornio-editor media-search-web "TERMO" --post-id POST_ID --needed 2
 
 ## 2.1 `media-resolve-batch` (zero turno LLM intermediário)
 
-Para dois posts normais, o modelo entrega uma vez os subjects e déficits. O
-comando concentra reuso da Media Library, busca paralela, prova de origem,
+Após a chamada editorial, o código gera `media.input.json` com subject, déficit
+inline calculado sobre o HTML final e a necessidade de featured. `needed` é a
+quantidade de candidatas novas: déficit inline + uma featured somente quando ela
+precisa ser fornecida/substituída. Hermes não calcula nem altera esse valor. O
+arquivo também solicita até duas candidatas de reserva, que não aumentam a quota
+de slots. `apply-batch` tenta a reserva após falha individual de origem/download,
+conversão ou validação visual; erro de upload não consome reserva. O comando
+concentra reuso da Media Library, busca paralela, prova de origem,
 relevância e pHash:
 
 ```bash
-unicornio-editor media-resolve-batch media-batch.json --compact
+unicornio-editor media-resolve-batch \
+  work/batches/BATCH_ID/media.input.json --compact
 ```
 
 Ele não faz upload nem altera WordPress. O resultado inclui um plano compacto e

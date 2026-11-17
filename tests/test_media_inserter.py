@@ -319,6 +319,51 @@ class MediaInserterTests(unittest.TestCase):
         self.assertIn("<h3>Hades II</h3>[caption", result)
         self.assertNotIn("<h3>Confira mais novidades em nosso Portal de Notícias!</h3>[caption", result)
 
+    def test_listicle_extra_media_can_follow_item_description_without_breaking_order(self):
+        from unicornio_editor.list_quality import validate_list_content
+
+        html = (
+            "<h2>1. Jogo Um: análise</h2><p>Descrição completa do primeiro jogo.</p>"
+            "<h2>2. Jogo Dois: análise</h2><p>Descrição completa do segundo jogo.</p>"
+        )
+        plan = [
+            {
+                **_item(index=0, url="https://media.example/one.webp"),
+                "item_title": "Jogo Um: análise",
+                "section_heading": "Jogo Um: análise",
+                "subject": "Jogo Um: análise",
+                "item_identity": "root:number-1",
+            },
+            {
+                **_item(index=0, url="https://media.example/one-extra.webp"),
+                "placement": "after_list_item_description",
+                "item_title": "Jogo Um: análise",
+                "section_heading": "Jogo Um: análise",
+                "subject": "Jogo Um: análise",
+                "item_identity": "root:number-1",
+            },
+            {
+                **_item(index=1, url="https://media.example/two.webp"),
+                "item_title": "Jogo Dois: análise",
+                "section_heading": "Jogo Dois: análise",
+                "subject": "Jogo Dois: análise",
+                "item_identity": "root:number-2",
+            },
+        ]
+
+        result = insert_media(html, plan, listicle=True)
+
+        first_heading = result.index("<h2>1.")
+        first_main = result.index("one.webp")
+        first_description = result.index("Descrição completa do primeiro jogo.")
+        first_extra = result.index("one-extra.webp")
+        second_heading = result.index("<h2>2.")
+        self.assertLess(first_heading, first_main)
+        self.assertLess(first_main, first_description)
+        self.assertLess(first_description, first_extra)
+        self.assertLess(first_extra, second_heading)
+        validate_list_content("2 jogos para conhecer", result)
+
     def test_enforces_distance_between_images(self):
         plan = [
             _item(index=1, url="https://media.example/1.webp", alt="Um"),

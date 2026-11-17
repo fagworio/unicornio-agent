@@ -417,6 +417,57 @@ def list_item_media_coverage(
     }
 
 
+def list_item_media_assets(
+    title: str,
+    html: str,
+    categories: object = (),
+) -> list[dict[str, object]]:
+    """Return one relevant, structurally item-scoped image per list heading.
+
+    Existing editorial images can satisfy the list coverage contract without
+    acquiring duplicates. An image is associated only with the section after
+    its own H2/H3 and must still pass the normal deterministic relevance gate.
+    """
+    from .media.relevance import extract_entities, image_is_relevant, iter_content_images
+
+    items = extract_list_items(title, html, categories)
+    assets: list[dict[str, object]] = []
+    for position, item in enumerate(items):
+        next_start = items[position + 1].heading_start if position + 1 < len(items) else len(html)
+        section = html[item.heading_end:next_start]
+        subject_entities = extract_entities(
+            title=item.heading,
+            content_html="",
+            focus_keyword=item.heading,
+        )
+        if not subject_entities and item.heading.strip():
+            subject_entities = {item.heading.strip()}
+        for image in iter_content_images(section):
+            media_url = str(image.get("src") or "").strip()
+            if not media_url or not image_is_relevant(
+                alt_text=str(image.get("alt") or ""),
+                credit_text=str(image.get("caption") or ""),
+                source_url=media_url,
+                entities=subject_entities,
+            ):
+                continue
+            assets.append({
+                "media_url": media_url,
+                "alt_text": str(image.get("alt") or ""),
+                "credit_text": str(image.get("caption") or ""),
+                "subject": item.heading,
+                "item_title": item.item_title,
+                "item_identity": item.identity,
+                "item_number": item.number,
+                "item_group": item.group_heading,
+                "section_heading": item.heading,
+                "section_slot": item.paragraph_index,
+                "html_position": item.heading_start,
+            })
+            break
+    return assets
+
+
 def _media_url_key(value: str) -> str:
     parsed = urlsplit(unescape(str(value or "").strip()))
     if not parsed.scheme or not parsed.netloc:

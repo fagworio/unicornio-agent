@@ -6,6 +6,7 @@ from unicornio_editor.list_quality import (
     detect_list_format,
     extract_list_items,
     list_item_media_coverage,
+    list_item_media_assets,
     validate_list_content,
 )
 
@@ -146,6 +147,23 @@ class ListQualityTests(unittest.TestCase):
         report = validate_list_content("5 recomendações de filmes", html)
         self.assertTrue(report["passed"])
         self.assertEqual(report["items"], 5)
+
+    def test_existing_list_media_context_is_item_scoped_and_relevance_checked(self):
+        html = (
+            "<h2>1. Metroid Prime 4: exploração espacial</h2>"
+            '<figure><img src="https://media.test/metroid-prime-4.webp" alt="Metroid Prime 4" />'
+            "<figcaption>Imagem oficial de Metroid Prime 4</figcaption></figure>"
+            "<p>Descrição do primeiro jogo.</p>"
+            "<h2>2. Hades II: ação mitológica</h2>"
+            '<figure><img src="https://media.test/metroid-prime-4.webp" alt="Metroid Prime 4" /></figure>'
+            "<p>Descrição do segundo jogo.</p>"
+        )
+
+        assets = list_item_media_assets("2 jogos para conhecer", html)
+
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["item_title"], "Metroid Prime 4: exploração espacial")
+        self.assertEqual(assets[0]["item_identity"], "root:number-1")
 
     def test_mentions_five_films_without_list_structure_is_normal_article(self):
         html = (

@@ -67,6 +67,16 @@ class EditorialHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def _editorial_for_response(self):
+        if type(self).editorial_mode == "process":
+            return {
+                **_EDITORIAL,
+                "site_relevance": {
+                    "decision": "process",
+                    "confidence": 1.0,
+                    "reason": "dentro da pauta",
+                    "matched_topics": ["games"],
+                },
+            }
         if type(self).editorial_mode == "string":
             # Structured Outputs strict entrega o contrato serializado.
             return json.dumps(_EDITORIAL)
@@ -194,6 +204,30 @@ class EditorialProviderTests(unittest.TestCase):
             self.assertEqual(payload["results"][1]["status"], "needs_retry")
             telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
             self.assertIn('"event": "editorial_model_request"', telemetry)
+
+    def test_v1_generation_emits_exact_media_request_from_prepared_facts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_dir = root / "work" / "batches" / "editorial-test"
+            batch_dir.mkdir(parents=True)
+            (batch_dir / "post-1.json").write_text(json.dumps({
+                "post_id": 1,
+                "title": "Post comum sobre videogames",
+                "cleaned_html": "<p>Texto original sobre videogames.</p>",
+                "entities": ["videogames"],
+                "featured": {"action": "provide", "valid": False},
+            }), encoding="utf-8")
+            EditorialHandler.editorial_mode = "process"
+
+            result = self._run(root, emit_media_input=True)
+
+            self.assertEqual(result["media_input"]["status"], "required")
+            payload = json.loads(Path(result["media_input"]["path"]).read_text(encoding="utf-8"))
+            request = payload["posts"][0]
+            self.assertEqual(request["inline_deficit"], 2)
+            self.assertEqual(request["needed"], 3)
+            self.assertTrue(request["featured_required"])
+            self.assertEqual(request["replacement_reserve"], 2)
 
     @mock.patch("unicornio_editor.editorial_provider.hermes_command_available", return_value=True)
     @mock.patch("unicornio_editor.editorial_provider.call_hermes_oneshot")

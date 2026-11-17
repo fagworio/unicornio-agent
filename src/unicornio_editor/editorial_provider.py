@@ -17,7 +17,13 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .ai_provider import AIProviderError, call_hermes_oneshot, hermes_command_available
-from .batch import BATCH_SCHEMA_VERSION, BatchError, batch_directory, validate_batch_id
+from .batch import (
+    BATCH_SCHEMA_VERSION,
+    BatchError,
+    batch_directory,
+    build_media_resolve_batch_input,
+    validate_batch_id,
+)
 from .editorial_schema import EditorialValidationError, validate_editorial
 
 
@@ -443,6 +449,7 @@ def generate_editorial_batch(
     hermes_model: str = "",
     hermes_timeout: float | None = None,
     media_source_policy: str = "strict",
+    emit_media_input: bool = False,
 ) -> dict[str, Any]:
     """Generate and validate one editorial batch.
 
@@ -601,6 +608,11 @@ def generate_editorial_batch(
         result["retry_mode"] = input_retry_modes.get(int(result["post_id"]), "")
     destination = Path(output_path) if output_path else batch_directory(root or Path(input_path).parent, batch_id) / "editorial.output.json"
     output = _write_json(destination, normalized)
+    media_input = None
+    if emit_media_input:
+        if root is None:
+            raise BatchError("root é obrigatório para gerar media.input.json")
+        media_input = build_media_resolve_batch_input(normalized, root)
     usage = body.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -647,7 +659,7 @@ def generate_editorial_batch(
                     post_id=int(result["post_id"]),
                     normalization=str(normalization),
                 )
-    return {
+    result = {
         "schema_version": BATCH_SCHEMA_VERSION,
         "batch_id": batch_id,
         "provider_requests": 1,
@@ -658,6 +670,9 @@ def generate_editorial_batch(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
     }
+    if emit_media_input:
+        result["media_input"] = media_input
+    return result
 
 
 __all__ = ["EditorialProviderError", "generate_editorial_batch"]
