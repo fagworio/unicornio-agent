@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import socket
 import threading
 import uuid
 from contextlib import contextmanager
@@ -22,10 +23,18 @@ from .config import Config
 class WordPressError(RuntimeError):
     """Base error for WordPress API failures."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, api_code: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        api_code: str = "",
+        error_code: str = "wordpress_error",
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.api_code = api_code
+        self.error_code = error_code
 
 
 class SafetyError(WordPressError):
@@ -61,7 +70,8 @@ class WordPressClient:
 
     def list_pending(
         self, *, page: int = 1, per_page: int = 10, include: list[int] | None = None,
-        status: str = "pending",
+        status: str = "pending", fields: tuple[str, ...] | None = None,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         if not 1 <= page <= 10000 or not 1 <= per_page <= 100:
             raise ValueError("page and per_page are outside safe limits")
@@ -75,10 +85,12 @@ class WordPressClient:
             "page": page,
             "per_page": per_page,
         }
+        if fields:
+            query["_fields"] = ",".join(fields)
         if include:
             query["include"] = ",".join(str(int(pid)) for pid in include)
         try:
-            data = self._request("GET", "/posts", query)
+            data = self._request("GET", "/posts", query, timeout=timeout)
         except WordPressError as exc:
             # WordPress REST uses this exact 400 when a read-only collection
             # scan requests a page beyond its current max_pages. Treat only a
@@ -106,11 +118,11 @@ class WordPressClient:
             fallback_query: dict[str, Any] = {
                 "context": "edit", "page": page, "per_page": per_page,
             }
+            if fields:
+                fallback_query["_fields"] = ",".join(fields)
             if include:
                 fallback_query["include"] = ",".join(str(int(pid)) for pid in include)
-            data = self._request(
-                "GET", "/posts", fallback_query
-            )
+            data = self._request("GET", "/posts", fallback_query, timeout=timeout)
         if not isinstance(data, list):
             raise WordPressError("WordPress returned an invalid posts collection")
         return [
@@ -118,15 +130,38 @@ class WordPressClient:
             if isinstance(post, dict) and post.get("status") == status
         ]
 
-    def get_post(self, post_id: int) -> dict[str, Any]:
+    def list_pending_card_candidates(
+        self,
+        *,
+        page: int = 1,
+        per_page: int = 100,
+        include: list[int] | None = None,
+        status: str = "pending",
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch only the fields needed to choose cards; hydrate selected IDs later."""
+        return self.list_pending(
+            page=page,
+            per_page=per_page,
+            include=include,
+            status=status,
+            fields=("id", "status", "date", "meta"),
+            timeout=timeout,
+        )
+
+    def get_post(self, post_id: int, *, timeout: float | None = None) -> dict[str, Any]:
         # context=edit e obrigatorio: sem ele a REST nao expoe content.raw,
         # title.raw nem os custom fields (meta) que o pipeline consome.
         return self._expect_object(
-            self._request("GET", f"/posts/{self._id(post_id)}", {"context": "edit"})
+            self._request(
+                "GET", f"/posts/{self._id(post_id)}", {"context": "edit"}, timeout=timeout
+            )
         )
 
-    def get_media(self, media_id: int) -> dict[str, Any]:
-        return self._expect_object(self._request("GET", f"/media/{self._id(media_id)}"))
+    def get_media(self, media_id: int, *, timeout: float | None = None) -> dict[str, Any]:
+        return self._expect_object(
+            self._request("GET", f"/media/{self._id(media_id)}", timeout=timeout)
+        )
 
     def search_media(self, query: str, *, per_page: int = 10) -> list[dict[str, Any]]:
         """Search the local Media Library by title/alt/caption/description.
@@ -277,6 +312,8 @@ class WordPressClient:
         path: str,
         query: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
         if query:
@@ -301,7 +338,10 @@ class WordPressClient:
         try:
             if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
                 self._assert_write_guard()
-            with urlopen(request, timeout=self.config.http_timeout) as response:
+            with urlopen(
+                request,
+                timeout=self.config.http_timeout if timeout is None else timeout,
+            ) as response:
                 raw = response.read()
         except UrlHTTPError as exc:
             detail = exc.read(512).decode("utf-8", errors="replace")
@@ -318,7 +358,15 @@ class WordPressClient:
                 api_code=api_code,
             ) from exc
         except URLError as exc:
-            raise WordPressError(f"WordPress connection failed: {exc.reason}") from exc
+            reason = exc.reason
+            is_timeout = isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower()
+            if is_timeout:
+                raise WordPressError(
+                    "WordPress request timed out", error_code="wordpress_timeout"
+                ) from exc
+            raise WordPressError(
+                f"WordPress connection failed: {reason}", error_code="wordpress_error"
+            ) from exc
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:

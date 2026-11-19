@@ -605,6 +605,69 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(result["posts"][0]["status"], "preflight_blocked")
             self.assertEqual(result["session"]["posts_touched"], [])
 
+    def test_apply_batch_releases_reservation_when_work_never_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-no-start",
+                "items": [{"post_id": 1, "editorial": {"placeholder": True}}],
+            }
+            fake_result = {
+                "post_id": 1,
+                "status": "noop",
+                "dry_run": False,
+                "wordpress_changed": False,
+                "checklist": {"items": []},
+                "media_plan_results": [],
+            }
+            with mock.patch(
+                "unicornio_editor.cli.preflight_apply_candidate",
+                return_value=(True, ""),
+            ), mock.patch("unicornio_editor.cli.apply_editorial", return_value=fake_result):
+                result = _apply_editorial_batch(
+                    BatchClient({1: _post(1, "Post pendente")}),
+                    config,
+                    root,
+                    batch,
+                    dry_run=False,
+                    compact=True,
+                )
+            self.assertEqual(result["session"]["posts_touched"], [])
+            self.assertEqual(result["session"]["posts_reserved"], [])
+
+    def test_uncertain_second_pass_releases_reservation_when_lock_stage_never_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-uncertain-no-start",
+                "items": [{
+                    "post_id": 1,
+                    "status": "needs_retry",
+                    "retry_mode": "uncertain_second_pass",
+                    "reason": "evidência insuficiente",
+                }],
+            }
+            with mock.patch("unicornio_editor.cli.read_state", return_value={"state": "uncertain", "attempts": 1}), mock.patch(
+                "unicornio_editor.cli.uncertain_second_pass_eligible", return_value=True
+            ), mock.patch(
+                "unicornio_editor.cli.mark_uncertain",
+                return_value={"post_id": 1, "status": "uncertain", "state": "uncertain", "wordpress_changed": False},
+            ):
+                result = _apply_editorial_batch(
+                    BatchClient({1: _post(1, "Post pendente")}),
+                    config,
+                    root,
+                    batch,
+                    dry_run=False,
+                    compact=True,
+                )
+            self.assertEqual(result["session"]["posts_touched"], [])
+            self.assertEqual(result["session"]["posts_reserved"], [])
+
     def test_apply_batch_isolates_wordpress_error_during_preflight(self):
         class FlakyClient(BatchClient):
             def get_post(self, post_id):
@@ -624,14 +687,19 @@ class BatchContextTests(unittest.TestCase):
                     {"post_id": 3, "editorial": {}},
                 ],
             }
-            fake_result = lambda client, config, root, post_id, payload, **_kwargs: {
-                "post_id": post_id,
-                "status": "ready",
-                "dry_run": False,
-                "wordpress_changed": True,
-                "checklist": {"items": []},
-                "media_plan_results": [],
-            }
+            def fake_result(client, config, root, post_id, payload, **kwargs):
+                callback = kwargs.get("on_work_started")
+                if callback is not None:
+                    callback()
+                return {
+                    "post_id": post_id,
+                    "status": "ready",
+                    "dry_run": False,
+                    "wordpress_changed": True,
+                    "checklist": {"items": []},
+                    "media_plan_results": [],
+                }
+
             with mock.patch("unicornio_editor.cli.validate_editorial", return_value={}), mock.patch(
                 "unicornio_editor.cli.apply_editorial", side_effect=fake_result
             ) as applied:

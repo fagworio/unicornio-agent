@@ -49,6 +49,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.vision_timeout, 180.0)
         self.assertEqual(config.vision_batch_timeout_seconds, 720.0)
 
+    def test_card_selection_timeout_defaults_below_cron_deadline_and_is_configurable(self):
+        with patch.dict(os.environ, {"WORDPRESS_URL": "http://wp.test"}, clear=True):
+            self.assertEqual(load_config().cards_selection_timeout_seconds, 150.0)
+        with patch.dict(
+            os.environ,
+            {
+                "WORDPRESS_URL": "http://wp.test",
+                "EDITOR_CARDS_SELECTION_TIMEOUT_SECONDS": "45",
+            },
+            clear=True,
+        ):
+            self.assertEqual(load_config().cards_selection_timeout_seconds, 45.0)
+
     def test_v2_admission_cutoff_is_normalized_to_utc(self):
         with patch.dict(
             os.environ,

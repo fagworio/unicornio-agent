@@ -35,6 +35,7 @@ from .editorial_provider import EditorialProviderError
 from .maintenance import generate_report
 from .media.diagnostics import diagnostic_url_domain
 from .workflow import (
+    CardsSelectionTimeout,
     MediaFunnelInvariantError,
     WorkflowError,
     apply_editorial,
@@ -57,6 +58,7 @@ from .workflow import (
 from .state import STATE_AWAITING_HUMAN, STATE_BLOCKED, read_state, uncertain_second_pass_eligible
 from .media.text import sanitize_title
 from .pipeline_v2.model import MEDIA_CANDIDATE_REPLACEMENT_RESERVE
+from .session_budget import SessionBudgetError
 from .wordpress import WordPressClient, WordPressError
 
 
@@ -1055,6 +1057,14 @@ def _compact_cards(report: dict) -> dict:
         "cards": cards,
         "uncertain_second_pass_eligible": report.get("uncertain_second_pass_eligible", 0),
         "uncertain_second_pass_reserved": report.get("uncertain_second_pass_reserved", 0),
+        "cards_selection_elapsed_ms": report.get("cards_selection_elapsed_ms"),
+        "cards_selection_filter_elapsed_ms": report.get("cards_selection_filter_elapsed_ms"),
+        "cards_selection_pages_scanned": report.get("cards_selection_pages_scanned"),
+        "cards_selection_candidates": report.get("cards_selection_candidates"),
+        "cards_selection_details_fetched": report.get("cards_selection_details_fetched"),
+        "cards_selection_featured_lookups": report.get("cards_selection_featured_lookups"),
+        "pending_scan_complete": report.get("pending_scan_complete"),
+        "has_more_pending": report.get("has_more_pending"),
     }
 
 
@@ -1326,20 +1336,38 @@ def _apply_editorial_batch(
                     and retry_mode in {"uncertain_second_pass", ""}
                 ):
                     projection = session_budget.status(root, config)
-                    allowed, projection = session_budget.reserve_touch(root, post_id, config)
-                    if allowed:
-                        session_budget.commit_touch(root, post_id, config)
+                    owner_id = session_budget.current_owner_id()
+                    allowed, projection = session_budget.reserve_touch(
+                        root, post_id, config, owner_id=owner_id
+                    )
                     if not allowed:
-                        stopped = session_budget.stop_reason(root, config) or (
+                        stopped = projection.get("error_code") or session_budget.stop_reason(root, config) or (
                             "teto de posts tocados por sessao atingido "
                             f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
                         )
                         remaining = [int(row["post_id"]) for row in batch["items"][index:]]
                         break
+                    work_started = False
+
+                    def on_uncertain_work_started() -> None:
+                        nonlocal work_started
+                        committed, _ = session_budget.commit_touch(
+                            root, post_id, config, owner_id=owner_id
+                        )
+                        if not committed:
+                            raise session_budget.SessionBudgetError(
+                                "session budget reservation could not be committed by its owner"
+                            )
+                        work_started = True
+
                     try:
                         escalated = mark_uncertain(
-                            client, config, root, post_id,
+                            client,
+                            config,
+                            root,
+                            post_id,
                             str(item.get("reason") or "segunda passagem editorial sem resultado")[:240],
+                            on_work_started=on_uncertain_work_started,
                         )
                         escalated["status"] = "awaiting_human"
                         escalated["action"] = "decisão humana necessária após segunda passagem"
@@ -1353,8 +1381,29 @@ def _apply_editorial_batch(
                                 "action": escalated.get("action"),
                             }
                         outcomes.append(escalated)
+                    except session_budget.SessionBudgetError as exc:
+                        outcomes.append({
+                            "post_id": post_id,
+                            "status": "budget_blocked",
+                            "wordpress_changed": False,
+                            "error_code": exc.error_code,
+                            "error": str(exc)[:240],
+                        })
+                        stopped = exc.error_code
+                        remaining = [
+                            int(row["post_id"])
+                            for row in batch["items"][index if not work_started else index + 1:]
+                        ]
+                        break
                     except Exception as exc:  # noqa: BLE001 - isolate one post
                         outcomes.append({"post_id": post_id, "status": "error", "wordpress_changed": False, "error": str(exc)[:240]})
+                    finally:
+                        if not work_started:
+                            session_budget.release_reservation(
+                                root, post_id, config, owner_id=owner_id
+                            )
+                    if stopped:
+                        break
                     continue
                 outcomes.append({
                     "post_id": post_id,
@@ -1409,24 +1458,41 @@ def _apply_editorial_batch(
             projection = session_budget.status(root, config)
             already_touched = post_id in projection["posts_touched"]
             reason = session_budget.stop_reason(root, config)
+            owner_id = session_budget.current_owner_id()
             if dry_run:
                 allowed, projection = session_budget.touch_allowed(root, post_id, config)
                 no_slot = not allowed
             elif reason and not already_touched:
-                no_slot = True
+                allowed, projection, no_slot = False, projection, True
             else:
-                allowed, projection = session_budget.reserve_touch(root, post_id, config)
-                if allowed:
-                    session_budget.commit_touch(root, post_id, config)
+                allowed, projection = session_budget.reserve_touch(
+                    root, post_id, config, owner_id=owner_id
+                )
                 no_slot = not allowed
             if not dry_run and no_slot:
-                stopped = reason or (
+                stopped = projection.get("error_code") or reason or (
                     "teto de posts tocados por sessao atingido "
                     f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
                 )
                 remaining = [int(row["post_id"]) for row in batch["items"][index:]]
                 break
 
+            work_started = False
+
+            def on_work_started() -> None:
+                nonlocal work_started
+                if dry_run:
+                    return
+                committed, _ = session_budget.commit_touch(
+                    root, post_id, config, owner_id=owner_id
+                )
+                if not committed:
+                    raise session_budget.SessionBudgetError(
+                        "session budget reservation could not be committed by its owner"
+                    )
+                work_started = True
+
+            result = None
             try:
                 result = apply_editorial(
                     client,
@@ -1435,12 +1501,29 @@ def _apply_editorial_batch(
                     post_id,
                     item["editorial"],
                     media_fallback_candidates=item.get("media_fallback_candidates"),
+                    on_work_started=on_work_started if not dry_run else None,
                 )
                 audit = root / "backups" / str(post_id) / "apply.latest.json"
                 _write_audit(audit, {**result, "batch_id": batch_id})
                 if not result.get("dry_run") and result.get("status") == "ready":
                     session_budget.record_ready(root, config)
                 outcomes.append(_compact_apply(result) if compact else result)
+            except session_budget.SessionBudgetError as exc:
+                if isinstance(result, dict):
+                    outcome = _compact_apply(result) if compact else dict(result)
+                    outcome["session_budget_error"] = exc.error_code
+                    outcomes.append(outcome)
+                else:
+                    outcomes.append({
+                        "post_id": post_id,
+                        "status": "budget_blocked",
+                        "wordpress_changed": False,
+                        "error_code": exc.error_code,
+                        "error": str(exc)[:240],
+                    })
+                stopped = exc.error_code
+                remaining = [int(row["post_id"]) for row in batch["items"][index + 1:]]
+                break
             except Exception as exc:  # noqa: BLE001 - isolate one post
                 outcomes.append(
                     {
@@ -1450,6 +1533,11 @@ def _apply_editorial_batch(
                         "error": str(exc)[:240],
                     }
                 )
+            finally:
+                if not dry_run and not work_started:
+                    session_budget.release_reservation(
+                        root, post_id, config, owner_id=owner_id
+                    )
     finally:
         if previous_batch is None:
             os.environ.pop("UNICORNIO_BATCH_ID", None)
@@ -4187,7 +4275,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 available_posts = int(orcamento["remaining_posts"]) + reserved_remaining
                 per_page = min(per_page, available_posts)
             if motivo:
-                result = {"count": 0, "cards": [], "stop": motivo}
+                result = {
+                    "count": 0,
+                    "cards": [],
+                    "stop": motivo,
+                    "error_code": "budget_exhausted",
+                }
                 if args.compact:
                     _write_audit(args.root / "work" / "cards.latest.json", result)
             else:
@@ -4205,7 +4298,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not card.get("uncertain_second_pass_eligible"):
                         reserved_cards.append(card)
                         continue
-                    allowed, _projection = session_budget.reserve_touch(args.root, int(card["id"]), config)
+                    allowed, _projection = session_budget.reserve_touch(
+                        args.root,
+                        int(card["id"]),
+                        config,
+                        owner_id=session_budget.current_owner_id(),
+                    )
                     if allowed:
                         reserved += 1
                         reserved_cards.append(card)
@@ -5304,44 +5402,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _record_cmd_output(args, result)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 return 0
-            # Reserva ATOMICA da vaga: checar e registrar nao pode ter janela
-            # entre dois processos (cron + manual) — senao os dois passariam pelo
-            # teto. Em dry-run nada e reservado; com o budget de CONTEXTO
-            # estourado um post NOVO nem chega a reservar (a sessao acabou).
-            projecao_antes = session_budget.status(args.root, config)
-            ja_tocado = int(args.post_id) in projecao_antes["posts_touched"]
-            motivo = session_budget.stop_reason(args.root, config)
+            # Reserve capacity before entering the workflow; the callback commits
+            # it only after the post lock and editorial validation both succeed.
+            projection_before = session_budget.status(args.root, config)
+            already_touched = int(args.post_id) in projection_before["posts_touched"]
+            reason = session_budget.stop_reason(args.root, config)
             dry = bool(getattr(args, "dry_run", False))
+            owner_id = session_budget.current_owner_id()
             if dry:
-                permitido, orcamento = session_budget.touch_allowed(
+                allowed, budget = session_budget.touch_allowed(
                     args.root, args.post_id, config
                 )
-                sem_vaga = not permitido
-            elif motivo and not ja_tocado:
-                permitido, orcamento, sem_vaga = False, projecao_antes, True
+                no_slot = not allowed
+            elif reason and not already_touched:
+                allowed, budget, no_slot = False, projection_before, True
             else:
-                permitido, orcamento = session_budget.claim_touch(
-                    args.root, args.post_id, config
+                allowed, budget = session_budget.reserve_touch(
+                    args.root, args.post_id, config, owner_id=owner_id
                 )
-                sem_vaga = not permitido
-            if not dry and sem_vaga:
-                # Encerra a sessao ANTES de escrever: o post fica intacto para a
-                # proxima janela (nenhum estado/attempt e consumido, nenhum gate
-                # e afrouxado — o unico efeito e a sessao parar de crescer).
+                no_slot = not allowed
+            if not dry and no_slot:
                 result = {
                     "post_id": args.post_id,
-                    "status": "session_budget_exhausted",
+                    "status": "reservation_blocked" if budget.get("error_code") else "session_budget_exhausted",
+                    "error_code": budget.get("error_code"),
                     "wordpress_changed": False,
-                    "reason": motivo
+                    "reason": budget.get("error_code") or reason
                     or (
                         "teto de posts tocados por sessao atingido "
-                        f"({orcamento['posts_touched_count']}/{orcamento['max_posts_touched']})"
+                        f"({budget['posts_touched_count']}/{budget['max_posts_touched']})"
                     ),
                     "action": "nenhum comando novo: encerre a sessao; o post fica para a proxima janela",
-                    "session": orcamento,
+                    "session": budget,
                 }
             else:
-                result = apply_editorial(client, config, args.root, args.post_id, payload)
+                work_started = False
+
+                def on_work_started() -> None:
+                    nonlocal work_started
+                    if dry:
+                        return
+                    committed, _ = session_budget.commit_touch(
+                        args.root, args.post_id, config, owner_id=owner_id
+                    )
+                    if not committed:
+                        raise session_budget.SessionBudgetError(
+                            "session budget reservation could not be committed by its owner"
+                        )
+                    work_started = True
+
+                try:
+                    result = apply_editorial(
+                        client,
+                        config,
+                        args.root,
+                        args.post_id,
+                        payload,
+                        on_work_started=on_work_started if not dry else None,
+                    )
+                finally:
+                    if not dry and not work_started:
+                        session_budget.release_reservation(
+                            args.root, args.post_id, config, owner_id=owner_id
+                        )
                 if merged_note:
                     result["merged_from_draft"] = merged_note
                 if not result.get("dry_run") and result.get("status") == "ready":
@@ -5362,7 +5485,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             # for bounded backoff; quality blocks and clean skips are normal.
             return 75
         return 0
-    except (ConfigError, EditorialProviderError, WordPressError, WorkflowError, OSError, ValueError) as exc:
+    except SessionBudgetError as exc:
+        payload = {"error": str(exc), "error_code": exc.error_code}
+        wait_ms = getattr(exc, "wait_ms", None)
+        if wait_ms is not None:
+            payload["wait_ms"] = wait_ms
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 2
+    except CardsSelectionTimeout as exc:
+        print(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                    "stage": exc.stage,
+                    "pages_scanned": exc.pages_scanned,
+                    "elapsed_seconds": round(exc.elapsed_seconds, 3),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except WordPressError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                    "status_code": exc.status_code,
+                    "api_code": exc.api_code or None,
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except (ConfigError, EditorialProviderError, WorkflowError, OSError, ValueError) as exc:
         # WorkflowError incluido de proposito: um traceback Python no contexto do
         # agente e caro e inutil — o operador (e o LLM) precisam do motivo em
         # JSON, nao da stack inteira.

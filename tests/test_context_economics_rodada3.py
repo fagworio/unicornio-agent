@@ -21,7 +21,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -222,6 +222,7 @@ class HardSessionStopTests(unittest.TestCase):
         self.assertEqual(resultado["count"], 0)
         self.assertEqual(resultado["cards"], [])
         self.assertIn("budget de contexto", resultado["stop"])
+        self.assertEqual(resultado["error_code"], "budget_exhausted")
         self.assertFalse(montar.called, "nao pode montar card depois do orcamento estourado")
         self.assertTrue(resultado["session"]["context_budget_exceeded"])
 
@@ -233,6 +234,51 @@ class HardSessionStopTests(unittest.TestCase):
         self.assertTrue(montar.called)
         self.assertEqual(resultado["count"], 1)  # o mock devolve 1 card
         self.assertNotIn("stop", resultado)
+
+    def test_cards_selection_timeout_is_emitted_as_structured_error(self):
+        from unicornio_editor import cli
+        from unicornio_editor.workflow import CardsSelectionTimeout
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=5)
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient", return_value=mock.Mock()), \
+                    mock.patch.object(
+                        cli,
+                        "build_cards",
+                        side_effect=CardsSelectionTimeout("pending_candidates", 4, 150.0),
+                    ), \
+                    redirect_stderr(stderr):
+                exit_code = cli.main(["cards", "--root", str(root), "--compact"])
+
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error_code"], "cards_selection_timeout")
+        self.assertEqual(payload["pages_scanned"], 4)
+
+    def test_cards_wordpress_timeout_is_emitted_as_structured_error(self):
+        from unicornio_editor import cli
+        from unicornio_editor.wordpress import WordPressError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=5)
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient", return_value=mock.Mock()), \
+                    mock.patch.object(
+                        cli,
+                        "build_cards",
+                        side_effect=WordPressError("request timed out", error_code="wordpress_timeout"),
+                    ), \
+                    redirect_stderr(stderr):
+                exit_code = cli.main(["cards", "--root", str(root), "--compact"])
+
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error_code"], "wordpress_timeout")
 
     def test_touched_cap_stops_cards_before_building_any_card(self):
         with tempfile.TemporaryDirectory() as directory:

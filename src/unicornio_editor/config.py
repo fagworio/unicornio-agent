@@ -132,6 +132,7 @@ class Config:
     # Direct Config() callers preserve the historical strict contract; the
     # production loader explicitly defaults to the site's credit-only policy.
     media_source_policy: str = "strict"
+    cards_selection_timeout_seconds: float = 150.0
 
     def __repr__(self) -> str:
         return (
@@ -141,6 +142,7 @@ class Config:
             f"wordpress_api_base={self.wordpress_api_base!r}, "
             f"app_user={self.app_user!r}, dry_run={self.dry_run!r}, "
             f"batch_limit={self.batch_limit!r}, http_timeout={self.http_timeout!r}, "
+            f"cards_selection_timeout_seconds={self.cards_selection_timeout_seconds!r}, "
             f"media_operation_timeout_seconds={self.media_operation_timeout_seconds!r}, "
             f"lock_ttl={self.lock_ttl!r}, "
             f"min_relevance_confidence={self.min_relevance_confidence!r}, "
@@ -360,6 +362,9 @@ def load_config() -> Config:
         dry_run=dry_run,
         batch_limit=_int("EDITOR_BATCH_LIMIT", 5, 1, 10),
         http_timeout=_float("EDITOR_HTTP_TIMEOUT", 15.0, 1.0, 120.0),
+        cards_selection_timeout_seconds=_float(
+            "EDITOR_CARDS_SELECTION_TIMEOUT_SECONDS", 150.0, 1.0, 175.0
+        ),
         media_operation_timeout_seconds=_float(
             "EDITOR_MEDIA_OPERATION_TIMEOUT_SECONDS", 180.0, 0.0, 3600.0
         ),

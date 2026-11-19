@@ -75,12 +75,16 @@ class SessionCapFlowTests(unittest.TestCase):
 
         patch_file = root / "patch.json"
         patch_file.write_text(json.dumps({"cleaned_html": "<p>x</p>"}), encoding="utf-8")
+
+        def fake_apply(*_args, **kwargs):
+            callback = kwargs.get("on_work_started")
+            if callback is not None:
+                callback()
+            return {"post_id": post_id, "status": "ready", "wordpress_changed": True}
+
         with mock.patch.object(cli, "load_config", return_value=config), mock.patch.object(
             cli, "WordPressClient", return_value=mock.Mock()
-        ), mock.patch.object(
-            cli, "apply_editorial",
-            return_value={"post_id": post_id, "status": "ready", "wordpress_changed": True},
-        ) as applied:
+        ), mock.patch.object(cli, "apply_editorial", side_effect=fake_apply) as applied:
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 cli.main(["apply", str(post_id), str(patch_file), "--root", str(root), "--compact"])
@@ -160,6 +164,127 @@ class SessionCapConcurrencyTests(unittest.TestCase):
             projection = session_budget.status(root, config)
             self.assertEqual(projection["posts_touched"], [501])
             self.assertEqual(projection["posts_reserved"], [])
+
+    def test_reservation_owner_cannot_be_overridden_by_another_executor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            self.assertTrue(
+                session_budget.reserve_touch(root, 502, config, owner_id="run-a")[0]
+            )
+            self.assertFalse(
+                session_budget.commit_touch(root, 502, config, owner_id="run-b")[0]
+            )
+            self.assertFalse(
+                session_budget.release_reservation(root, 502, config, owner_id="run-b")[0]
+            )
+            self.assertEqual(session_budget.status(root, config)["posts_reserved"], [502])
+            self.assertTrue(
+                session_budget.commit_touch(root, 502, config, owner_id="run-a")[0]
+            )
+            self.assertEqual(session_budget.status(root, config)["posts_touched"], [502])
+
+    def test_live_process_reservation_is_not_recovered_by_another_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch.dict(
+                os.environ,
+                {"HERMES_SESSION_ID": "same-hermes-session", "UNICORNIO_SESSION_OWNER_ID": ""},
+                clear=False,
+            ):
+                owner = session_budget.current_owner_id()
+                self.assertTrue(session_budget.reserve_touch(root, 505, config, owner_id=owner)[0])
+                owner_record = session_budget.load_session(root, config)["reservation_owners"]["505"]
+                allowed, projection = session_budget.reserve_touch(
+                    root, 505, config, owner_id="another-run"
+                )
+            self.assertEqual(owner_record["owner_kind"], "process")
+            self.assertFalse(allowed)
+            self.assertEqual(projection["error_code"], "reservation_owned_by_other_executor")
+            self.assertEqual(projection["posts_reserved"], [505])
+            self.assertEqual(session_budget.load_session(root, config)["reservation_recovery_history"], [])
+
+    def test_unverifiable_process_start_identity_does_not_prove_pid_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch("unicornio_editor.locking._process_start_identity", return_value=None):
+                owner = session_budget.current_owner_id()
+                self.assertTrue(session_budget.reserve_touch(root, 508, config, owner_id=owner)[0])
+            allowed, projection = session_budget.reserve_touch(
+                root, 508, config, owner_id="another-run"
+            )
+            self.assertFalse(allowed)
+            self.assertEqual(projection["error_code"], "reservation_owned_by_other_executor")
+
+    def test_reservation_is_recovered_only_after_proving_owner_process_exited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": ""}, clear=False):
+                data = session_budget._vazio()
+                data["posts_reserved"] = [506]
+                data["reservation_owners"]["506"] = {
+                    "owner_id": "process:99999999:old-start",
+                    "owner_kind": "process",
+                    "owner_host": session_budget.socket.gethostname(),
+                    "owner_pid": 99999999,
+                    "owner_start_identity": "old-start",
+                }
+                session_budget._salvar(root, data, now=1000.0)
+                with mock.patch(
+                    "unicornio_editor.locking._process_start_identity",
+                    return_value=None,
+                ), mock.patch(
+                    "unicornio_editor.session_budget.os.kill",
+                    side_effect=ProcessLookupError,
+                ):
+                    allowed, projection = session_budget.reserve_touch(
+                        root, 506, config, owner_id="recovery-run", now=1001.0
+                    )
+                self.assertTrue(allowed)
+                self.assertEqual(projection["posts_reserved"], [506])
+                recovered = session_budget.load_session(root, config, now=1001.0)
+                self.assertEqual(
+                    recovered["reservation_recovery_history"][-1]["proof"],
+                    "owner_process_exited",
+                )
+
+    def test_reservation_is_recovered_when_pid_start_identity_was_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            host_identity = session_budget.hashlib.sha256(
+                session_budget.socket.gethostname().encode("utf-8")
+            ).hexdigest()[:12]
+            old_owner = f"process:{host_identity}:{os.getpid()}:old-start-identity"
+            self.assertTrue(
+                session_budget.reserve_touch(root, 507, config, owner_id=old_owner)[0]
+            )
+            allowed, _ = session_budget.reserve_touch(
+                root, 507, config, owner_id="recovery-run"
+            )
+            self.assertTrue(allowed)
+            recovered = session_budget.load_session(root, config)
+            self.assertEqual(
+                recovered["reservation_recovery_history"][-1]["proof"],
+                "owner_pid_reused",
+            )
+
+    def test_commit_revalidates_limit_against_other_touches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            self.assertTrue(
+                session_budget.reserve_touch(root, 503, config, owner_id="run-a")[0]
+            )
+            session_budget.record_touch(root, 504, config)
+            stricter = _config(max_posts_touched_per_run=1)
+            self.assertFalse(
+                session_budget.commit_touch(root, 503, stricter, owner_id="run-a")[0]
+            )
+            self.assertEqual(session_budget.status(root, stricter)["posts_touched"], [504])
 
     def test_reserve_five_process_two_then_continue_three(self):
         with tempfile.TemporaryDirectory() as directory:

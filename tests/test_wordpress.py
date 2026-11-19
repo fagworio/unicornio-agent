@@ -5,6 +5,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
+from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
 from unicornio_editor.config import Config
@@ -101,6 +102,31 @@ class WordPressClientTests(unittest.TestCase):
         self.assertEqual(query["status"], ["pending"])
         self.assertEqual(query["context"], ["edit"])
         self.assertEqual(query["per_page"], ["2"])
+
+    def test_card_candidates_request_only_selection_metadata(self):
+        posts = WordPressClient(self.config).list_pending_card_candidates(per_page=100)
+        self.assertEqual(posts[0]["id"], 42)
+        query = parse_qs(urlparse(ApiHandler.requests[0][1]).query)
+        self.assertEqual(query["_fields"], ["id,status,date,meta"])
+        self.assertEqual(query["per_page"], ["100"])
+
+    def test_card_candidate_request_honors_remaining_deadline(self):
+        with mock.patch("unicornio_editor.wordpress.urlopen") as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
+                b'[{"id":42,"status":"pending"}]'
+            )
+            posts = WordPressClient(self.config).list_pending_card_candidates(timeout=0.25)
+        self.assertEqual(posts[0]["id"], 42)
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 0.25)
+
+    def test_request_classifies_socket_timeout_separately(self):
+        with mock.patch(
+            "unicornio_editor.wordpress.urlopen",
+            side_effect=URLError(TimeoutError("timed out")),
+        ):
+            with self.assertRaises(WordPressError) as raised:
+                WordPressClient(self.config).list_pending_card_candidates(timeout=0.25)
+        self.assertEqual(raised.exception.error_code, "wordpress_timeout")
 
     def test_list_pending_falls_back_to_local_filter_when_status_rejected(self):
         ApiHandler.allow_status_query = False

@@ -95,6 +95,15 @@ class SessionBudgetTests(unittest.TestCase):
                 session_budget.status(root, config, now=1000.0 + 11 * 60)["posts_touched_count"], 0
             )
 
+    def test_ledger_with_reserved_work_does_not_expire_while_owner_is_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2, session_window_minutes=10)
+            session_budget.reserve_touch(root, 56, config, owner_id="run-a", now=1000.0)
+            projection = session_budget.status(root, config, now=1000.0 + 11 * 60)
+            self.assertEqual(projection["posts_reserved"], [56])
+            self.assertEqual(projection["remaining_posts"], 1)
+
     def test_ready_counter_and_stop_reason(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -115,13 +124,59 @@ class SessionBudgetTests(unittest.TestCase):
             self.assertTrue(projecao["context_budget_exceeded"])
             self.assertIn("budget de contexto", session_budget.stop_reason(root, config))
 
-    def test_broken_ledger_never_raises(self):
+    def test_corrupt_ledger_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "work").mkdir()
             (root / "work" / "session_state.json").write_text("{nao e json", encoding="utf-8")
             config = _config()
-            self.assertEqual(session_budget.status(root, config)["posts_touched_count"], 0)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": ""}, clear=False):
+                with self.assertRaises(RuntimeError):
+                    session_budget.status(root, config)
+
+    def test_ledger_write_failure_blocks_new_touch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch("unicornio_editor.session_budget.os.replace", side_effect=OSError("disk full")):
+                with self.assertRaises(RuntimeError):
+                    session_budget.record_touch(root, 42, config)
+
+    def test_ledger_lock_contention_fails_closed_after_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch(
+                "unicornio_editor.session_budget._LEDGER_LOCK_TIMEOUT_SECONDS",
+                0.001,
+            ):
+                with mock.patch(
+                    "unicornio_editor.session_budget.fcntl.flock",
+                    side_effect=BlockingIOError,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        session_budget.reserve_touch(root, 42, config)
+
+    def test_ledger_read_and_lock_timings_are_recorded_without_payload_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": ""}, clear=False):
+                session_budget.status(root, config)
+                session_budget.reserve_touch(root, 43, config, owner_id="timing-test")
+            metrics_path = root / "work" / "telemetry.jsonl"
+            self.assertTrue(metrics_path.is_file())
+            rows = [
+                json.loads(line)
+                for line in metrics_path.read_text(encoding="utf-8").splitlines()
+            ]
+        read_events = [row for row in rows if row.get("event") == "session_budget_ledger_read"]
+        lock_events = [row for row in rows if row.get("event") == "session_budget_lock"]
+        self.assertTrue(read_events)
+        self.assertTrue(lock_events)
+        self.assertTrue(all(isinstance(row.get("duration_ms"), (int, float)) for row in read_events))
+        self.assertTrue(all(isinstance(row.get("wait_ms"), (int, float)) for row in lock_events))
+        self.assertTrue(all("ledger" not in row and "owner_id" not in row for row in rows))
 
     def test_hermes_session_ids_have_independent_ledgers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -165,18 +220,28 @@ class SessionBudgetTests(unittest.TestCase):
 class ApplySessionCapTests(unittest.TestCase):
     """P0: o apply é o guardião do teto (nenhum post NOVO acima da conta)."""
 
-    def _run_apply(self, root: Path, post_id: int, config: Config) -> dict:
+    def _run_apply(
+        self, root: Path, post_id: int, config: Config, *, start_work: bool = True
+    ) -> dict:
         from unicornio_editor import cli
 
         patch_file = root / "patch.json"
         patch_file.write_text(json.dumps({"cleaned_html": "<p>x</p>"}), encoding="utf-8")
         client = mock.Mock()
+
+        def fake_apply(*_args, **kwargs):
+            callback = kwargs.get("on_work_started")
+            if start_work and callback is not None:
+                callback()
+            return {
+                "post_id": post_id,
+                "status": "ready" if start_work else "noop",
+                "wordpress_changed": start_work,
+            }
+
         with mock.patch.object(cli, "load_config", return_value=config), mock.patch.object(
             cli, "WordPressClient", return_value=client
-        ), mock.patch.object(
-            cli, "apply_editorial", return_value={"post_id": post_id, "status": "ready",
-                                                  "wordpress_changed": True}
-        ) as applied:
+        ), mock.patch.object(cli, "apply_editorial", side_effect=fake_apply) as applied:
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 code = cli.main(
@@ -214,6 +279,16 @@ class ApplySessionCapTests(unittest.TestCase):
             result, _ = self._run_apply(root, 55, config)
             self.assertEqual(result["session"]["posts_touched"], [55])
             self.assertEqual(result["session"]["ready"], 1)
+
+    def test_apply_that_never_starts_releases_reservation_without_touching_post(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(dry_run=False, max_posts_touched_per_run=2)
+            result, _ = self._run_apply(root, 56, config, start_work=False)
+            projection = session_budget.status(root, config)
+            self.assertFalse(result["wordpress_changed"])
+            self.assertEqual(projection["posts_touched"], [])
+            self.assertEqual(projection["posts_reserved"], [])
 
 
 class MediaSelectionTests(unittest.TestCase):

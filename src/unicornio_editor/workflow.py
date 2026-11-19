@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from urllib.parse import urlparse
 
 from .backup import SnapshotStore, atomic_write_text
@@ -94,7 +94,7 @@ from .trailer import (
     TrailerError, build_trailer_html, find_cached_game_trailer_with_status,
     find_game_trailer_with_status,
 )
-from .wordpress import WordPressClient
+from .wordpress import WordPressClient, WordPressError
 from .pipeline_v2.quarantine import (
     QuarantinePolicyError,
     assert_post_not_quarantined,
@@ -180,6 +180,21 @@ def _structured_media_failure(
 
 class WorkflowError(RuntimeError):
     """Raised when a post cannot safely enter a workflow step."""
+
+
+class CardsSelectionTimeout(WorkflowError):
+    """Raised when card discovery reaches its explicit wall-clock budget."""
+
+    error_code = "cards_selection_timeout"
+
+    def __init__(self, stage: str, pages_scanned: int, elapsed_seconds: float):
+        self.stage = stage
+        self.pages_scanned = pages_scanned
+        self.elapsed_seconds = max(0.0, elapsed_seconds)
+        super().__init__(
+            f"cards selection timed out during {stage} after "
+            f"{self.elapsed_seconds:.3f}s ({pages_scanned} pages scanned)"
+        )
 
 
 class MediaFunnelInvariantError(WorkflowError):
@@ -358,6 +373,7 @@ def apply_editorial(
     payload: dict[str, Any],
     *,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
+    on_work_started: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Apply an editorial result while exclusively owning the post."""
     assert_post_not_quarantined(root, post_id, operation="apply")
@@ -370,6 +386,7 @@ def apply_editorial(
             post_id,
             payload,
             media_fallback_candidates=media_fallback_candidates,
+            on_work_started=on_work_started,
         )
 
 
@@ -420,6 +437,7 @@ def _apply_editorial_unlocked(
     payload: dict[str, Any],
     *,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
+    on_work_started: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Preflight completo: valida, resolve, executa mídia, monta conteúdo e
     roda o checklist INTEIRO antes de gravar qualquer coisa no WordPress.
@@ -450,6 +468,15 @@ def _apply_editorial_unlocked(
         eligibility = assert_v1_mutation_allowed(post, root, operation="apply")
     except RuntimeError as exc:
         raise WorkflowError(str(exc)) from exc
+    editorial = validate_editorial(
+        payload,
+        min_confidence=config.min_relevance_confidence,
+        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+    )
+    decision = editorial["site_relevance"]["decision"]
+    confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
+    if on_work_started is not None:
+        on_work_started()
     state_before = read_state(post)
     partial_path = _partial_manifest_path(root, post_id)
     if state_before.get("state") == STATE_PARTIAL:
@@ -465,13 +492,6 @@ def _apply_editorial_unlocked(
         attempt=attempts_before + 1, first_pass=attempts_before == 0,
     )
     backup = SnapshotStore(root).save(post_id, post)
-    editorial = validate_editorial(
-        payload,
-        min_confidence=config.min_relevance_confidence,
-        media_source_policy=str(getattr(config, "media_source_policy", "strict")),
-    )
-    decision = editorial["site_relevance"]["decision"]
-    confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
     if decision == "skip" and confidence < config.min_skip_confidence:
         # Conservative skip (token + accuracy policy): a low-confidence skip is
         # NOT final — record it as uncertain so the post stays pending (out of
@@ -5736,7 +5756,43 @@ def build_cards(
     from .html_cleaner import clean_html
     from .media.relevance import extract_entities
 
+    selection_started_at = time.monotonic()
+    selection_timeout = float(getattr(config, "cards_selection_timeout_seconds", 150.0))
+    selection_deadline = selection_started_at + selection_timeout
+    pages_scanned = 0
+    details_fetched = 0
+    featured_lookups = 0
+    pending_scan_complete: bool | None = None
+
+    def _remaining_timeout(stage: str) -> float:
+        now = time.monotonic()
+        remaining = selection_deadline - now
+        if remaining <= 0:
+            raise CardsSelectionTimeout(stage, pages_scanned, now - selection_started_at)
+        return remaining
+
     per_page = per_page or config.max_posts_per_run
+    candidate_reader: Callable[..., list[dict[str, Any]]] | None = None
+    reader = getattr(client, "list_pending_card_candidates", None)
+    if callable(reader):
+        candidate_reader = cast(Callable[..., list[dict[str, Any]]], reader)
+    lightweight_candidates = candidate_reader is not None
+
+    def _list_candidates(
+        *,
+        page: int = 1,
+        per_page: int,
+        include: list[int] | None = None,
+        timeout: float | None = None,
+    ):
+        if candidate_reader is not None:
+            if isinstance(client, WordPressClient):
+                return candidate_reader(
+                    page=page, per_page=per_page, include=include, timeout=timeout
+                )
+            return candidate_reader(page=page, per_page=per_page, include=include)
+        return client.list_pending(page=page, per_page=per_page, include=include)
+
     rework_ids = _rework_ids(root)
     posts: list[dict[str, Any]] = []
     if rework_ids:
@@ -5747,9 +5803,38 @@ def build_cards(
         # vencido — espelha o eligible_rework_ids do queue. (Sem isso, o
         # slice cego rework_ids[:per_page] saturava o lote com awaiting_human
         # e o trabalho real — rework elegível + posts novos — ficava invisível.)
-        candidates = client.list_pending(
-            include=rework_ids[:100], per_page=min(len(rework_ids[:100]), 100)
-        )
+        rework_started_at = time.monotonic()
+        rework_timeout = _remaining_timeout("rework_candidates")
+        try:
+            candidates = _list_candidates(
+                include=rework_ids[:100],
+                per_page=min(len(rework_ids[:100]), 100),
+                timeout=rework_timeout,
+            )
+        except WordPressError as exc:
+            try:
+                append_telemetry(
+                    root,
+                    "cards_selection_rest_failed",
+                    stage="rework_candidates",
+                    error_code=exc.error_code,
+                    status_code=exc.status_code,
+                )
+            except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                pass
+            raise
+        pages_scanned += 1
+        try:
+            append_telemetry(
+                root,
+                "cards_selection_rest",
+                stage="rework_candidates",
+                page=0,
+                result_count=len(candidates),
+                duration_ms=round((time.monotonic() - rework_started_at) * 1000, 1),
+            )
+        except Exception:  # noqa: BLE001 - metrics cannot block card selection
+            pass
         for cand in candidates:
             post_id = cand.get("id")
             if not isinstance(post_id, int):
@@ -5766,12 +5851,48 @@ def build_cards(
         # Percorre a fila até encontrar candidatos elegíveis. Consultar só a
         # página 1 fazia o monitor acordar o agente para trabalho que cards
         # não conseguia enxergar quando os primeiros pending já eram READY.
-        page_size = max(remaining * 5, 20)
+        page_size = 100 if lightweight_candidates else max(remaining * 5, 20)
+        pending_scan_complete = False
         for page in range(1, 101):
-            chunk = client.list_pending(page=page, per_page=page_size)
+            page_timeout = _remaining_timeout("pending_candidates")
+            page_started_at = time.monotonic()
+            try:
+                chunk = _list_candidates(
+                    page=page, per_page=page_size, timeout=page_timeout
+                )
+            except WordPressError as exc:
+                try:
+                    append_telemetry(
+                        root,
+                        "cards_selection_rest_failed",
+                        stage="pending_candidates",
+                        page=page,
+                        error_code=exc.error_code,
+                        status_code=exc.status_code,
+                    )
+                except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                    pass
+                raise
+            pages_scanned += 1
+            page_elapsed = time.monotonic() - page_started_at
+            try:
+                append_telemetry(
+                    root,
+                    "cards_selection_rest",
+                    stage="pending_candidates",
+                    page=page,
+                    result_count=len(chunk),
+                    duration_ms=round(page_elapsed * 1000, 1),
+                    elapsed_ms=round((time.monotonic() - selection_started_at) * 1000, 1),
+                )
+            except Exception:  # noqa: BLE001 - metrics cannot block card selection
+                pass
+            _remaining_timeout("pending_candidates")
             posts.extend(chunk)
             if len(chunk) < page_size:
+                pending_scan_complete = True
                 break
+    candidate_filter_started_at = time.monotonic()
     posts = filter_quarantined_posts(root, posts)
     seen: set[int] = set()
     ordered: list[dict[str, Any]] = []
@@ -5797,6 +5918,7 @@ def build_cards(
         int(post["id"])
         for post in sorted(eligible_uncertain, key=lambda p: int(p["id"]))[:uncertain_quota]
     }
+    _remaining_timeout("uncertain_candidate_selection")
     def _priority(post: dict[str, Any]) -> tuple[int, int]:
         state_value = _state_for_card(post)
         post_id = int(post.get("id") or 0)
@@ -5814,31 +5936,89 @@ def build_cards(
             return (2, post_id)
         return (3, post_id)
     ordered.sort(key=_priority)
+    _remaining_timeout("candidate_ordering")
+    candidate_filter_elapsed_ms = round(
+        (time.monotonic() - candidate_filter_started_at) * 1000, 1
+    )
     uncertain_retry_mode = bool(reserved_uncertain_ids)
+
+    def _card_gate(candidate: dict[str, Any]):
+        state_info = read_state(candidate)
+        eligibility = resolve_post_eligibility(candidate, root)
+        state = eligibility.state
+        if eligibility.is_v2:
+            return None
+        candidate_id = candidate.get("id")
+        uncertain_retry_eligible = (
+            state == STATE_UNCERTAIN
+            and uncertain_retry_mode
+            and candidate_id in reserved_uncertain_ids
+            and uncertain_second_pass_eligible(candidate)
+        )
+        if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
+            if not uncertain_retry_eligible:
+                return None
+        blocked = state == STATE_BLOCKED
+        if state in (STATE_BLOCKED, STATE_PARTIAL) and not retry_eligible(
+            {**state_info, "state": state}
+        ):
+            return None
+        return state_info, eligibility, state, uncertain_retry_eligible, blocked
+
     for post in ordered:
+        _remaining_timeout("candidate_filter")
         post_id = post.get("id")
         if not isinstance(post_id, int):
             continue
+        gate = _card_gate(post)
+        if gate is None:
+            continue
+        if lightweight_candidates:
+            hydrator = getattr(client, "get_post", None)
+            if not callable(hydrator):
+                raise WorkflowError("WordPress client cannot hydrate selected card candidates")
+            detail_timeout = _remaining_timeout("selected_post_details")
+            detail_started_at = time.monotonic()
+            try:
+                post = (
+                    hydrator(post_id, timeout=detail_timeout)
+                    if isinstance(client, WordPressClient)
+                    else hydrator(post_id)
+                )
+            except WordPressError as exc:
+                try:
+                    append_telemetry(
+                        root,
+                        "cards_selection_rest_failed",
+                        stage="selected_post_details",
+                        post_id=post_id,
+                        error_code=exc.error_code,
+                        status_code=exc.status_code,
+                    )
+                except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                    pass
+                raise
+            details_fetched += 1
+            try:
+                append_telemetry(
+                    root,
+                    "cards_selection_detail",
+                    post_id=post_id,
+                    duration_ms=round((time.monotonic() - detail_started_at) * 1000, 1),
+                    outcome="fetched",
+                )
+            except Exception:  # noqa: BLE001 - metrics cannot block card selection
+                pass
+            _remaining_timeout("selected_post_details")
+            if not isinstance(post, dict) or post.get("id") != post_id:
+                raise WorkflowError(f"WordPress returned invalid details for selected post {post_id}")
+            if post.get("status") != "pending":
+                continue
+            gate = _card_gate(post)
+            if gate is None:
+                continue
+        state_info, eligibility, state, uncertain_retry_eligible, blocked = gate
         backups_dir = root / "backups" / str(post_id)
-        state_info = read_state(post)
-        eligibility = resolve_post_eligibility(post, root)
-        state = eligibility.state
-        # V2 posts are surfaced by the V2 scheduler, never as V1 cards.
-        if eligibility.is_v2:
-            continue
-        uncertain_retry_eligible = False
-        if state in (STATE_UNCERTAIN, STATE_AWAITING_HUMAN, STATE_SKIPPED, STATE_READY):
-            uncertain_retry_eligible = (
-                state == STATE_UNCERTAIN
-                and uncertain_retry_mode
-                and int(post_id) in reserved_uncertain_ids
-                and uncertain_second_pass_eligible(post)
-            )
-            if not uncertain_retry_eligible:
-                continue  # fora da fila, salvo fallback sequencial de uncertain
-        blocked = state == STATE_BLOCKED
-        if state in (STATE_BLOCKED, STATE_PARTIAL) and not retry_eligible({**state_info, "state": state}):
-            continue
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
         rendered = (post.get("content") or {}).get("rendered") or ""
@@ -5861,11 +6041,51 @@ def build_cards(
         # deve continuar do draft persistido, não do conteúdo antigo.
         wordpress_images = _images_summary(wordpress_cleaned, title, extract_entities(title=title, content_html=wordpress_cleaned))
         images = _images_summary(working_cleaned, title, entities)
-        wordpress_featured = _featured_diagnosis(client, post, entities)
+        featured_timeout = _remaining_timeout("featured_media") if isinstance(client, WordPressClient) else None
+        featured_id = post.get("featured_media")
+        if isinstance(featured_id, int) and featured_id > 0:
+            featured_lookups += 1
+        featured_started_at = time.monotonic()
+        try:
+            wordpress_featured = _featured_diagnosis(
+                client, post, entities, timeout=featured_timeout
+            )
+        except WordPressError as exc:
+            try:
+                append_telemetry(
+                    root,
+                    "cards_selection_rest_failed",
+                    stage="featured_media",
+                    post_id=post_id,
+                    error_code=exc.error_code,
+                    status_code=exc.status_code,
+                )
+            except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                pass
+            raise
+        try:
+            append_telemetry(
+                root,
+                "cards_selection_featured",
+                post_id=post_id,
+                duration_ms=round((time.monotonic() - featured_started_at) * 1000, 1),
+                lookup=bool(isinstance(featured_id, int) and featured_id > 0),
+                outcome=wordpress_featured.get("diagnostic_error_code") or "ok",
+            )
+        except Exception:  # noqa: BLE001 - metrics cannot block card selection
+            pass
+        _remaining_timeout("featured_media")
         partial_media_drift = None
         partial_manifest = _load_partial_manifest(root, post_id) if state == STATE_PARTIAL else {}
         featured = (
-            _working_featured_diagnosis(client, post, entities, partial_manifest)
+            _working_featured_diagnosis(
+                client,
+                post,
+                entities,
+                partial_manifest,
+                timeout=featured_timeout,
+                wordpress_fallback=wordpress_featured,
+            )
             if state == STATE_PARTIAL
             else wordpress_featured
         )
@@ -5948,10 +6168,29 @@ def build_cards(
                 "prepared": (backups_dir / "prepared.json").is_file(),
             }
         )
+        if len(cards) >= per_page:
+            break
     # Rework first, FIFO por id (os mais antigos primeiro): posts reabertos
     # pelo publish gate sao corrigidos antes de posts novos — e o lote
     # rotaciona, em vez de os mesmos 10 blocked monopolizarem o topo.
     selected = cards[:per_page]
+    _remaining_timeout("result_assembly")
+    elapsed_ms = round((time.monotonic() - selection_started_at) * 1000, 1)
+    try:
+        append_telemetry(
+            root,
+            "cards_selection_complete",
+            elapsed_ms=elapsed_ms,
+            candidate_filter_elapsed_ms=candidate_filter_elapsed_ms,
+            pages_scanned=pages_scanned,
+            candidates=len(ordered),
+            selected=len(selected),
+            details_fetched=details_fetched,
+            featured_lookups=featured_lookups,
+            pending_scan_complete=pending_scan_complete,
+        )
+    except Exception:  # noqa: BLE001 - metrics cannot block card output
+        pass
     try:
         append_telemetry(
             root,
@@ -5970,6 +6209,16 @@ def build_cards(
         "uncertain_second_pass_reserved": sum(
             1 for card in selected if card.get("uncertain_second_pass_eligible")
         ),
+        "cards_selection_elapsed_ms": elapsed_ms,
+        "cards_selection_filter_elapsed_ms": candidate_filter_elapsed_ms,
+        "cards_selection_pages_scanned": pages_scanned,
+        "cards_selection_candidates": len(ordered),
+        "cards_selection_details_fetched": details_fetched,
+        "cards_selection_featured_lookups": featured_lookups,
+        "pending_scan_complete": pending_scan_complete,
+        "has_more_pending": False if pending_scan_complete is True else (
+            True if pending_scan_complete is False else None
+        ),
     }
 
 
@@ -5977,6 +6226,8 @@ def _featured_diagnosis(
     client: WordPressClient,
     post: dict[str, Any],
     entities: set[str],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Diagnóstico determinístico da featured atual (Fase 4.2).
 
@@ -6003,8 +6254,13 @@ def _featured_diagnosis(
     webp: bool | None = None
     dimensions: str | None = None
     relevant: bool | None = None
+    diagnostic_error_code = ""
     try:
-        media = client.get_media(featured_id)
+        media = (
+            client.get_media(featured_id, timeout=timeout)
+            if isinstance(client, WordPressClient) and timeout is not None
+            else client.get_media(featured_id)
+        )
         details = media.get("media_details") or {}
         width, height = details.get("width"), details.get("height")
         dimensions = f"{width or '?'}x{height or '?'}"
@@ -6023,8 +6279,12 @@ def _featured_diagnosis(
             relevant = image_is_relevant(
                 alt_text="", credit_text="", source_url=evidence, entities=entities, source_only=True
             )
-    except Exception:  # noqa: BLE001 - media lookup failure: diagnostico conservador
-        pass
+    except WordPressError as exc:
+        if exc.error_code == "wordpress_timeout":
+            raise
+        diagnostic_error_code = exc.error_code
+    except Exception:  # noqa: BLE001 - conservador, sem esconder motivo do diagnóstico
+        diagnostic_error_code = "media_lookup_failed"
     valid = bool(relevant and webp and dimensions == "1280x720")
     if valid:
         action = "ok"
@@ -6032,7 +6292,7 @@ def _featured_diagnosis(
         action = "replace"
     else:
         action = "normalize"
-    return {
+    result = {
         "exists": True,
         "relevant": relevant,
         "webp": webp,
@@ -6040,6 +6300,9 @@ def _featured_diagnosis(
         "valid": valid,
         "action": action,
     }
+    if diagnostic_error_code:
+        result["diagnostic_error_code"] = diagnostic_error_code
+    return result
 
 
 def _working_featured_diagnosis(
@@ -6047,6 +6310,9 @@ def _working_featured_diagnosis(
     post: dict[str, Any],
     entities: set[str],
     manifest: dict[str, Any],
+    *,
+    timeout: float | None = None,
+    wordpress_fallback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the PARTIAL featured ledger before falling back to WordPress."""
     featured = manifest.get("featured") if isinstance(manifest, dict) else None
@@ -6075,7 +6341,9 @@ def _working_featured_diagnosis(
             "reason": featured.get("reason"),
             "source": "partial_manifest",
         }
-    wordpress = _featured_diagnosis(client, post, entities)
+    wordpress = wordpress_fallback or _featured_diagnosis(
+        client, post, entities, timeout=timeout
+    )
     return {**wordpress, "source": "wordpress"}
 
 
@@ -6513,6 +6781,30 @@ def mark_uncertain(
     root: Path,
     post_id: int,
     reason: str,
+    *,
+    on_work_started: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    assert_post_not_quarantined(root, post_id, operation="mark_uncertain")
+    with _acquire_post_lock(root, config, post_id) as lock_handle:
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
+        return _mark_uncertain_unlocked(
+            guarded_client,
+            config,
+            root,
+            post_id,
+            reason,
+            on_work_started=on_work_started,
+        )
+
+
+def _mark_uncertain_unlocked(
+    client: WordPressClient,
+    config: Config,
+    root: Path,
+    post_id: int,
+    reason: str,
+    *,
+    on_work_started: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Registra a decisão do agente de não processar o post agora.
 
@@ -6568,6 +6860,8 @@ def mark_uncertain(
         )
     if config.dry_run:
         raise WorkflowError("uncertain e uma operacao de escrita: exige write mode (EDITOR_DRY_RUN=false)")
+    if on_work_started is not None:
+        on_work_started()
     motivo = reason.strip()
     state_before = read_state(post)
     attempts_before = int(state_before.get("attempts") or 0)

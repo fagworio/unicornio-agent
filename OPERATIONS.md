@@ -27,6 +27,23 @@ Edite `.env` e comece com:
 EDITOR_DRY_RUN=true
 ```
 
+## Seleção de cards e diagnóstico de timeout
+
+`cards` percorre a fila em páginas leves (até 100 itens por consulta) e só
+carrega o post completo e diagnostica a imagem featured dos cards selecionados.
+O limite `EDITOR_CARDS_SELECTION_TIMEOUT_SECONDS` controla o prazo total da
+seleção (default `150`, máximo `175` segundos); cada consulta REST usa o tempo
+restante, sem alterar `EDITOR_HTTP_TIMEOUT`. Um timeout retorna erro JSON com
+`error_code` (`cards_selection_timeout`, `wordpress_timeout` ou
+`ledger_lock_timeout`), nunca uma fila vazia.
+
+Em `cards --compact`, `pending_scan_complete=true` indica que a paginação chegou
+a uma página menor que o limite; `false` com `has_more_pending=true` indica que
+o limite de 100 páginas foi atingido e ainda pode haver candidatos. Falhas REST
+continuam sendo erros explícitos. Tempos por página, hidratação, featured,
+filtragem e lock/leitura do ledger são registrados em `work/telemetry.jsonl`,
+sem conteúdo de post ou identificadores de owner.
+
 ## Smoke test
 
 ### Paridade do ambiente de testes

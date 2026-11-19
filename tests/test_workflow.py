@@ -385,6 +385,144 @@ class WorkflowTests(unittest.TestCase):
             cards = build_cards(PagedClient(posts), self.config(False), Path(directory), per_page=2)
         self.assertEqual([card["id"] for card in cards["cards"]], [21])
 
+    def test_cards_only_diagnoses_featured_for_selected_candidates(self):
+        class CountingClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts = posts
+                self.media_lookups = 0
+
+            def list_pending(self, *, page=1, per_page=20, include=None, **_kwargs):
+                if include:
+                    return [post for post in self.posts if post["id"] in include]
+                start = (page - 1) * per_page
+                return self.posts[start:start + per_page]
+
+            def get_media(self, media_id):
+                self.media_lookups += 1
+                return super().get_media(media_id)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "config" / "v2-quarantine.json"
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            policy.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}))
+            posts = []
+            for post_id in range(1, 41):
+                post = self.post()
+                post["id"] = post_id
+                posts.append(post)
+            client = CountingClient(posts)
+
+            report = build_cards(client, self.config(False), root, per_page=2)
+
+        self.assertEqual(report["count"], 2)
+        self.assertEqual(client.media_lookups, 2)
+
+    def test_cards_hydrates_only_selected_lightweight_candidates(self):
+        class LightweightClient(FakeClient):
+            def __init__(self, posts):
+                super().__init__(posts[0])
+                self.posts_by_id = {post["id"]: post for post in posts}
+                self.candidate_pages = 0
+                self.detail_fetches = []
+
+            def list_pending_card_candidates(self, *, page=1, per_page=100, include=None, status="pending"):
+                self.candidate_pages += 1
+                selected = list(self.posts_by_id.values())
+                if include:
+                    selected = [post for post in selected if post["id"] in include]
+                start = (page - 1) * per_page
+                return [
+                    {"id": post["id"], "status": status, "date": post.get("date"), "meta": post.get("meta", {})}
+                    for post in selected[start:start + per_page]
+                ]
+
+            def list_pending(self, **_kwargs):
+                return []
+
+            def get_post(self, post_id):
+                self.detail_fetches.append(post_id)
+                return self.posts_by_id[post_id]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "config" / "v2-quarantine.json"
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            policy.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}))
+            posts = []
+            for post_id in range(1, 2501):
+                post = self.post()
+                post["id"] = post_id
+                posts.append(post)
+            client = LightweightClient(posts)
+
+            report = build_cards(client, self.config(False), root, per_page=2)
+
+        self.assertEqual(report["count"], 2)
+        self.assertEqual(client.candidate_pages, 26)
+        self.assertEqual(client.detail_fetches, [1, 2])
+        self.assertEqual(report["cards_selection_featured_lookups"], 2)
+
+    def test_cards_selection_timeout_is_not_returned_as_empty_queue(self):
+        from dataclasses import replace
+        from unicornio_editor.workflow import WorkflowError
+
+        class CandidateClient(FakeClient):
+            def __init__(self):
+                super().__init__(self_post())
+                self.candidate_pages = 0
+
+            def list_pending_card_candidates(self, **_kwargs):
+                self.candidate_pages += 1
+                return []
+
+        def self_post():
+            return {"id": 1, "status": "pending", "title": {"raw": "x"}, "content": {"raw": ""}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = replace(self.config(False), cards_selection_timeout_seconds=1.0)
+            client = CandidateClient()
+            with mock.patch("unicornio_editor.workflow.time.monotonic", side_effect=[10.0, 12.0]):
+                with self.assertRaises(WorkflowError) as raised:
+                    build_cards(client, config, root, per_page=1)
+
+        self.assertEqual(getattr(raised.exception, "error_code", None), "cards_selection_timeout")
+        self.assertEqual(client.candidate_pages, 0)
+
+    def test_cards_reports_truncated_scan_instead_of_confirming_queue_exhaustion(self):
+        class FullPageClient(FakeClient):
+            def __init__(self):
+                ready_post = {
+                    "id": 1,
+                    "status": "pending",
+                    "meta": {"_hermes_state": "ready"},
+                }
+                super().__init__(ready_post)
+                self.pages = 0
+
+            def list_pending_card_candidates(self, *, page=1, per_page=100, include=None, status="pending"):
+                self.pages += 1
+                return [
+                    {"id": post_id, "status": status, "meta": {"_hermes_state": "ready"}}
+                    for post_id in range(1, per_page + 1)
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "config" / "v2-quarantine.json"
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            policy.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}))
+            client = FullPageClient()
+
+            report = build_cards(client, self.config(False), root, per_page=1)
+
+        self.assertEqual(report["count"], 0)
+        self.assertEqual(report["cards_selection_pages_scanned"], 100)
+        self.assertFalse(report["pending_scan_complete"])
+        self.assertTrue(report["has_more_pending"])
+
     def test_queue_reports_blocked_as_rework_not_edited(self):
         # Fix do loop verificar->corrigir->publicar: post com
         # editorial.blocked.json (publish gate reabriu, ou apply recusou) NAO
@@ -2209,6 +2347,50 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(queue["edited"], 1)
             self.assertEqual(queue["ready_ids"], [42])
 
+    def test_apply_work_started_callback_runs_after_lock_before_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            callback_calls = []
+
+            def on_work_started():
+                lock_path = root / "work" / "locks" / "42.lock"
+                lock_record = json.loads(lock_path.read_text(encoding="utf-8"))
+                self.assertFalse(lock_record["released"])
+                self.assertFalse((root / "backups" / "42").exists())
+                callback_calls.append("started")
+
+            report = apply_editorial(
+                client,
+                self.config(False),
+                root,
+                42,
+                editorial_payload(),
+                on_work_started=on_work_started,
+            )
+
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(callback_calls, ["started"])
+            self.assertTrue((root / "backups" / "42").exists())
+
+    def test_apply_invalid_editorial_does_not_confirm_work_started(self):
+        from unicornio_editor.editorial_schema import EditorialValidationError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            callback_calls = []
+            with self.assertRaises(EditorialValidationError):
+                apply_editorial(
+                    FakeClient(self.post()),
+                    self.config(False),
+                    root,
+                    42,
+                    {},
+                    on_work_started=lambda: callback_calls.append("started"),
+                )
+            self.assertEqual(callback_calls, [])
+            self.assertFalse((root / "backups" / "42").exists())
+
     def test_publish_ready_cheap_path_via_manifest(self):
         # Fase 11: nada mudou no WP desde o apply -> publica sem revalidar.
         with tempfile.TemporaryDirectory() as directory:
@@ -2762,6 +2944,32 @@ class WorkflowTests(unittest.TestCase):
             queue = build_queue_report(client, root)
             self.assertIn(42, queue["uncertain_ids"])
             self.assertNotIn(42, queue["skipped_ids"])
+
+    def test_mark_uncertain_work_started_callback_runs_after_lock_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            callback_calls = []
+
+            def on_work_started():
+                lock_record = json.loads(
+                    (root / "work" / "locks" / "42.lock").read_text(encoding="utf-8")
+                )
+                self.assertFalse(lock_record["released"])
+                self.assertFalse((root / "backups" / "42" / "uncertain.json").exists())
+                callback_calls.append("started")
+
+            result = mark_uncertain(
+                client,
+                self.config(False),
+                root,
+                42,
+                reason="sem evidencia suficiente",
+                on_work_started=on_work_started,
+            )
+
+            self.assertEqual(result["status"], "uncertain")
+            self.assertEqual(callback_calls, ["started"])
 
     def test_mark_uncertain_rejects_after_relevance_process(self):
         with tempfile.TemporaryDirectory() as directory:
