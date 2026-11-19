@@ -18,6 +18,7 @@ from unicornio_editor.batch import (
 )
 from unicornio_editor.config import Config
 from unicornio_editor.batch import load_editorial_batch
+from unicornio_editor.locking import LockManager
 from unicornio_editor.cli import (
     _apply_editorial_batch,
     _media_candidate,
@@ -62,6 +63,13 @@ def _post(post_id, title):
 class BatchContextTests(unittest.TestCase):
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
+
+    def test_post_locks_allow_distinct_posts_to_progress_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = LockManager(Path(directory) / "work" / "locks", ttl=900)
+            with manager.acquire(1) as first, manager.acquire(2) as second:
+                first.assert_owned()
+                second.assert_owned()
 
     def test_prepare_batch_writes_manifest_and_one_context_per_post(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,6 +123,136 @@ class BatchContextTests(unittest.TestCase):
                     model_context["requirements"]["media_stage"]["editorial_media_plan"], []
                 )
                 self.assertTrue((root / "backups" / str(post_id) / "prepared.json").exists())
+
+    def test_prepare_batch_reports_locked_post_and_continues_sibling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = BatchClient({1: _post(1, "Post um"), 2: _post(2, "Post dois")})
+            lock_manager = LockManager(root / "work" / "locks", ttl=900)
+            with lock_manager.acquire(1):
+                result = prepare_batch(
+                    client, self.config(), root, [1, 2], batch_id="batch-lock-isolation"
+                )
+            self.assertEqual(
+                [item["status"] for item in result["items"]],
+                ["lock_blocked", "prepared"],
+            )
+            self.assertFalse((root / "backups" / "1").exists())
+            self.assertTrue((root / "backups" / "2" / "prepared.json").exists())
+
+    def test_prepare_batch_holds_post_lock_before_first_wordpress_read(self):
+        from unicornio_editor.locking import LockError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = LockManager(root / "work" / "locks", ttl=900)
+            events = []
+            original_acquire = LockManager.acquire
+
+            def tracked_acquire(lock_manager, post_id):
+                try:
+                    handle = original_acquire(lock_manager, post_id)
+                except LockError:
+                    events.append(("lock_blocked", post_id))
+                    raise
+                events.append(("lock_acquired", post_id))
+                return handle
+
+            class LockCheckingClient(BatchClient):
+                def get_post(self, post_id):
+                    events.append(("read", post_id))
+                    try:
+                        with manager.acquire(post_id):
+                            pass
+                    except LockError:
+                        events.append(("probe_blocked", post_id))
+                    else:
+                        events.append(("probe_acquired", post_id))
+                        raise AssertionError("WordPress post read occurred without its lock")
+                    return super().get_post(post_id)
+
+            with mock.patch.object(LockManager, "acquire", new=tracked_acquire):
+                result = prepare_batch(
+                    LockCheckingClient({1: _post(1, "Post um")}),
+                    self.config(),
+                    root,
+                    [1],
+                    batch_id="batch-read-under-lock",
+                )
+
+            self.assertEqual(result["prepared"], 1)
+            read_indices = [index for index, event in enumerate(events) if event == ("read", 1)]
+            acquired_indices = [
+                index for index, event in enumerate(events) if event == ("lock_acquired", 1)
+            ]
+            self.assertTrue(read_indices)
+            self.assertTrue(all(any(acquired < read for acquired in acquired_indices) for read in read_indices))
+
+    def test_five_post_sequence_skips_first_locked_and_processes_four_in_bounded_batches(self):
+        from unicornio_editor.locking import LockError
+        from unicornio_editor.session_budget import status as session_status
+        from unicornio_editor.workflow import WorkflowError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = replace(self.config(), dry_run=False, max_posts_touched_per_run=5)
+            client = BatchClient({post_id: _post(post_id, f"Post {post_id}") for post_id in range(1, 6)})
+            policy = root / "config" / "v2-quarantine.json"
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            policy.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}))
+            writes = []
+            prepare_results = []
+            apply_results = []
+
+            def apply_one(_client, _config, post_root, post_id, _editorial, **kwargs):
+                try:
+                    with LockManager(post_root / "work" / "locks", ttl=900).acquire(post_id) as lock:
+                        lock.assert_owned()
+                        kwargs["on_work_started"]()
+                        writes.append(post_id)
+                        return {
+                            "post_id": post_id,
+                            "status": "ready",
+                            "dry_run": False,
+                            "wordpress_changed": True,
+                        }
+                except LockError as exc:
+                    raise WorkflowError(f"post {post_id} is already being processed") from exc
+
+            with LockManager(root / "work" / "locks", ttl=900).acquire(1):
+                for batch_number, ids in enumerate(([1, 2], [3, 4], [5]), start=1):
+                    self.assertLessEqual(len(ids), 2)
+                    batch_id = f"batch-five-{batch_number}"
+                    prepared = prepare_batch(client, config, root, ids, batch_id=batch_id)
+                    prepare_results.extend(prepared["items"])
+                    eligible = [
+                        {"post_id": int(item["post_id"]), "status": "ok", "editorial": {"placeholder": True}}
+                        for item in prepared["items"]
+                        if item.get("status") == "prepared"
+                    ]
+                    if not eligible:
+                        continue
+                    with mock.patch(
+                        "unicornio_editor.cli.preflight_apply_candidate", return_value=(True, "")
+                    ), mock.patch("unicornio_editor.cli.apply_editorial", side_effect=apply_one):
+                        applied = _apply_editorial_batch(
+                            client,
+                            config,
+                            root,
+                            {"schema_version": 1, "batch_id": batch_id, "items": eligible},
+                            dry_run=False,
+                            compact=False,
+                        )
+                    apply_results.extend(applied["posts"])
+
+            self.assertEqual([item["status"] for item in prepare_results], [
+                "lock_blocked", "prepared", "prepared", "prepared", "prepared"
+            ])
+            self.assertEqual([item["status"] for item in apply_results], ["ready"] * 4)
+            self.assertEqual(writes, [2, 3, 4, 5])
+            self.assertEqual(len(writes), len(set(writes)))
+            self.assertEqual(session_status(root, config)["posts_touched"], [2, 3, 4, 5])
+            self.assertEqual(session_status(root, config)["posts_reserved"], [])
 
     def test_media_request_counts_inline_deficit_plus_missing_featured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -605,6 +743,49 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(result["posts"][0]["status"], "preflight_blocked")
             self.assertEqual(result["session"]["posts_touched"], [])
 
+    def test_apply_batch_marks_one_lock_blocked_and_continues_sibling(self):
+        from unicornio_editor.locking import LockError
+        from unicornio_editor.workflow import WorkflowError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-lock-continue",
+                "items": [
+                    {"post_id": 1, "editorial": {"placeholder": 1}},
+                    {"post_id": 2, "editorial": {"placeholder": 2}},
+                ],
+            }
+
+            def apply_one(_client, _config, _root, post_id, _editorial, **kwargs):
+                if post_id == 1:
+                    try:
+                        raise LockError("post 1 is already locked")
+                    except LockError as lock_error:
+                        raise WorkflowError("post 1 is already being processed") from lock_error
+                kwargs["on_work_started"]()
+                return {"post_id": post_id, "status": "ready", "wordpress_changed": True}
+
+            with mock.patch(
+                "unicornio_editor.cli.preflight_apply_candidate", return_value=(True, "")
+            ), mock.patch("unicornio_editor.cli.apply_editorial", side_effect=apply_one):
+                result = _apply_editorial_batch(
+                    BatchClient({1: _post(1, "Post um"), 2: _post(2, "Post dois")}),
+                    config,
+                    root,
+                    batch,
+                    dry_run=False,
+                    compact=False,
+                )
+
+        self.assertEqual([row["status"] for row in result["posts"]], ["lock_blocked", "ready"])
+        self.assertEqual(result["posts"][0]["error_code"], "post_lock_blocked")
+        self.assertEqual(result["lock_blocked"], 1)
+        self.assertEqual(result["session"]["posts_touched"], [2])
+        self.assertEqual(result["session"]["posts_reserved"], [])
+
     def test_apply_batch_releases_reservation_when_work_never_starts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -665,6 +846,100 @@ class BatchContextTests(unittest.TestCase):
                     dry_run=False,
                     compact=True,
                 )
+            self.assertEqual(result["session"]["posts_touched"], [])
+            self.assertEqual(result["session"]["posts_reserved"], [])
+
+    def test_uncertain_second_pass_locks_before_read_and_continues_after_blocked_item(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            posts = {}
+            for post_id in (1, 2):
+                post = _post(post_id, f"Post {post_id} incerto")
+                post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+                posts[post_id] = post
+            events = []
+
+            class EventClient(BatchClient):
+                def get_post(self, post_id):
+                    events.append(("read", post_id))
+                    return super().get_post(post_id)
+
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-uncertain-lock-order",
+                "items": [
+                    {"post_id": post_id, "status": "needs_retry", "retry_mode": "uncertain_second_pass"}
+                    for post_id in (1, 2)
+                ],
+            }
+            original_acquire = LockManager.acquire
+
+            def tracked_acquire(manager, post_id):
+                events.append(("acquire", post_id))
+                return original_acquire(manager, post_id)
+
+            def fake_mark_uncertain(_client, _config, _root, post_id, _reason, **kwargs):
+                lock_handle = kwargs.get("lock_handle")
+                events.append(("mark", post_id, lock_handle is not None))
+                if lock_handle is not None:
+                    lock_handle.assert_owned()
+                kwargs["on_work_started"]()
+                return {
+                    "post_id": post_id,
+                    "state": "awaiting_human",
+                    "wordpress_changed": True,
+                }
+
+            with LockManager(root / "work" / "locks", ttl=900).acquire(1):
+                events.clear()
+                with mock.patch.object(LockManager, "acquire", new=tracked_acquire), mock.patch(
+                    "unicornio_editor.cli.uncertain_second_pass_eligible", return_value=True
+                ), mock.patch(
+                    "unicornio_editor.cli.mark_uncertain", side_effect=fake_mark_uncertain
+                ):
+                    result = _apply_editorial_batch(
+                        EventClient(posts), config, root, batch, dry_run=False, compact=True
+                    )
+
+            self.assertEqual([row["status"] for row in result["posts"]], ["lock_blocked", "awaiting_human"])
+            self.assertEqual(result["lock_blocked"], 1)
+            self.assertEqual(result["session"]["posts_touched"], [2])
+            self.assertNotIn(("read", 1), events)
+            self.assertLess(events.index(("acquire", 2)), events.index(("read", 2)))
+            self.assertIn(("mark", 2, True), events)
+
+    def test_uncertain_second_pass_does_not_commit_touch_after_lock_is_lost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=False)
+            post = _post(9, "Post incerto")
+            post["meta"] = {"_hermes_state": "uncertain", "_hermes_attempts": "1"}
+            batch = {
+                "schema_version": 1,
+                "batch_id": "batch-uncertain-lock-lost",
+                "items": [{
+                    "post_id": 9,
+                    "status": "needs_retry",
+                    "retry_mode": "uncertain_second_pass",
+                }],
+            }
+
+            def lose_lock_before_work(_client, _config, _root, _post_id, _reason, **kwargs):
+                kwargs["lock_handle"].release()
+                kwargs["on_work_started"]()
+                return {"post_id": 9, "state": "awaiting_human", "wordpress_changed": True}
+
+            with mock.patch(
+                "unicornio_editor.cli.uncertain_second_pass_eligible", return_value=True
+            ), mock.patch(
+                "unicornio_editor.cli.mark_uncertain", side_effect=lose_lock_before_work
+            ):
+                result = _apply_editorial_batch(
+                    BatchClient({9: post}), config, root, batch, dry_run=False, compact=True
+                )
+
+            self.assertEqual(result["posts"][0]["status"], "lock_blocked")
             self.assertEqual(result["session"]["posts_touched"], [])
             self.assertEqual(result["session"]["posts_reserved"], [])
 

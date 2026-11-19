@@ -148,15 +148,14 @@ def _reservation_owner_recovery_proof(record: dict[str, Any]) -> str | None:
         type(pid) is not int
         or pid < 1
         or not isinstance(start_identity, str)
-        or not start_identity
-        or start_identity == "unknown"
     ):
         return None
     from .locking import _process_start_identity
 
-    current_identity = _process_start_identity(pid)
-    if current_identity is not None:
-        return "owner_pid_reused" if current_identity != start_identity else None
+    if start_identity and start_identity != "unknown":
+        current_identity = _process_start_identity(pid)
+        if current_identity is not None:
+            return "owner_pid_reused" if current_identity != start_identity else None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -325,7 +324,6 @@ def _normalizar(dados: Any) -> dict[str, Any]:
         int(pid) for pid in (dados.get("posts_reserved") or [])
         if isinstance(pid, (int, float)) or (isinstance(pid, str) and pid.isdigit())
     ]
-    reserved = [pid for pid in reserved if pid not in touched]
     raw_owners = dados.get("reservation_owners", {})
     if not isinstance(raw_owners, dict):
         raise LedgerCorruptError("session budget reservation owners must be an object")
@@ -350,6 +348,25 @@ def _normalizar(dados: Any) -> dict[str, Any]:
             start_identity = record.get("owner_start_identity")
             if type(pid) is not int or pid < 1 or not isinstance(host, str) or not isinstance(start_identity, str):
                 raise LedgerCorruptError("session budget process owner identity is malformed")
+            owner_parts = owner_id.strip().split(":", 3)
+            if len(owner_parts) == 4:
+                identity_matches = (
+                    owner_parts[0] == "process"
+                    and owner_parts[1]
+                    == hashlib.sha256(host.encode("utf-8")).hexdigest()[:12]
+                    and owner_parts[2] == str(pid)
+                    and owner_parts[3] == start_identity
+                )
+            else:
+                # Read pre-host-fence ledgers but still verify their PID/start tuple.
+                identity_matches = (
+                    len(owner_parts) == 3
+                    and owner_parts[0] == "process"
+                    and owner_parts[1] == str(pid)
+                    and owner_parts[2] == start_identity
+                )
+            if not identity_matches:
+                raise LedgerCorruptError("session budget process owner identity does not match owner id")
             normalized_owner.update({
                 "owner_pid": pid,
                 "owner_host": host,
@@ -482,8 +499,13 @@ def _validate_owner_id(owner_id: str) -> str:
 def _projection(dados: dict[str, Any], config: Config) -> dict[str, Any]:
     tocados = list(dados["posts_touched"])
     reservados = list(dados["posts_reserved"])
+    reservados_de_capacidade = [pid for pid in reservados if pid not in tocados]
     teto = int(config.max_posts_touched_per_run)
-    restantes = max(0, teto - len(tocados) - len(reservados)) if cap_ativo(config) else None
+    restantes = (
+        max(0, teto - len(tocados) - len(reservados_de_capacidade))
+        if cap_ativo(config)
+        else None
+    )
     orcamento = int(config.session_context_bytes_budget)
     usado = int(dados["context_bytes"])
     return {
@@ -496,6 +518,7 @@ def _projection(dados: dict[str, Any], config: Config) -> dict[str, Any]:
         "posts_touched_count": len(tocados),
         "posts_reserved": reservados,
         "posts_reserved_count": len(reservados),
+        "posts_reserved_capacity_count": len(reservados_de_capacidade),
         "remaining_posts": restantes,
         "context_bytes_used": usado,
         "context_bytes_budget": orcamento,
@@ -556,8 +579,7 @@ def reserve_touch(
         data = load_session(root, config, now=now)
         projection = _projection(data, config)
         post_id = int(post_id)
-        if post_id in projection["posts_touched"]:
-            return True, projection
+        already_touched = post_id in projection["posts_touched"]
         recovery_proof = ""
         if post_id in projection["posts_reserved"]:
             existing = data["reservation_owners"].get(str(post_id))
@@ -582,7 +604,7 @@ def reserve_touch(
             })
             data["reservation_recovery_history"] = data["reservation_recovery_history"][-100:]
             projection = _projection(data, config)
-        if cap_ativo(config) and projection["remaining_posts"] == 0:
+        if not already_touched and cap_ativo(config) and projection["remaining_posts"] == 0:
             if recovery_proof:
                 _salvar(root, data, now=now)
             return False, projection
@@ -604,9 +626,18 @@ def commit_touch(
     with _ledger_lock(root):
         data = load_session(root, config, now=now)
         post_id = int(post_id)
-        if post_id in data["posts_touched"]:
-            return True, _projection(data, config)
         reservation = data["reservation_owners"].get(str(post_id))
+        if post_id in data["posts_touched"]:
+            if (
+                post_id not in data["posts_reserved"]
+                or not reservation
+                or reservation.get("owner_id") != owner
+            ):
+                return False, _projection(data, config)
+            data["posts_reserved"] = [pid for pid in data["posts_reserved"] if pid != post_id]
+            data["reservation_owners"].pop(str(post_id), None)
+            _salvar(root, data, now=now)
+            return True, _projection(data, config)
         if post_id not in data["posts_reserved"] or not reservation or reservation.get("owner_id") != owner:
             return False, _projection(data, config)
         other_reserved = [pid for pid in data["posts_reserved"] if pid != post_id]
@@ -688,7 +719,11 @@ def stop_reason(root: Path | str, config: Config, *, now: float | None = None) -
             f"({projecao['context_bytes_used']} de {projecao['context_bytes_budget']} bytes); "
             "encerre a sessao sem novos comandos — o proximo post fica para a proxima janela"
         )
-    if cap_ativo(config) and projecao["remaining_posts"] == 0 and not projecao["posts_reserved"]:
+    if (
+        cap_ativo(config)
+        and projecao["remaining_posts"] == 0
+        and not projecao["posts_reserved_capacity_count"]
+    ):
         return (
             f"teto de posts tocados por sessao atingido "
             f"({projecao['posts_touched_count']}/{projecao['max_posts_touched']}); "

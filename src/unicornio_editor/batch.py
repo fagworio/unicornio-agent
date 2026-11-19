@@ -23,8 +23,10 @@ from .media.inserter import plan_normal_media_insertions
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .state import read_state, uncertain_second_pass_eligible
 from .workflow import (
+    _acquire_post_lock,
     _featured_diagnosis,
     _images_summary,
+    is_post_lock_blocked,
     prepare_post,
     resolve_editorial_defaults,
 )
@@ -1054,40 +1056,43 @@ def prepare_batch(
             )
 
             assert_post_not_quarantined(root, post_id, operation="prepare_batch")
-            post = client.get_post(post_id)
-            prepared = prepare_post(client, root, post_id)
-            envelope = _context_for_post(
-                post=post,
-                prepared=prepared,
-                batch_id=batch_id,
-                config=config,
-                client=client,
-                root=root,
-            )
-            context_file = directory / f"post-{post_id}.json"
-            _write_json(context_file, envelope)
-            # Keep the legacy single-post artifact useful when a batch item is
-            # later processed by the existing apply/rework flow.
-            _write_json(root / "backups" / str(post_id) / "prepared.json", prepared)
-            contexts.append(_model_facing_context(envelope))
-            items.append(
-                {
-                    "post_id": post_id,
-                    "status": "prepared",
-                    "title": envelope["title"],
-                    "word_count": envelope["word_count"],
-                    "required_inline_images": envelope["requirements"]["media_stage"][
-                        "required_inline_images"
-                    ],
-                    "images": {
-                        key: envelope["images"].get(key)
-                        for key in ("valid", "missing", "irrelevant", "non_webp")
-                        if key in envelope["images"]
-                    },
-                    "context_file": str(context_file),
-                    "backup": prepared.get("backup"),
-                }
-            )
+            with _acquire_post_lock(root, config, post_id) as lock_handle:
+                post = client.get_post(post_id)
+                prepared = prepare_post(
+                    client, root, post_id, config=config, lock_handle=lock_handle
+                )
+                envelope = _context_for_post(
+                    post=post,
+                    prepared=prepared,
+                    batch_id=batch_id,
+                    config=config,
+                    client=client,
+                    root=root,
+                )
+                context_file = directory / f"post-{post_id}.json"
+                _write_json(context_file, envelope)
+                # Keep the legacy single-post artifact useful when a batch item is
+                # later processed by the existing apply/rework flow.
+                _write_json(root / "backups" / str(post_id) / "prepared.json", prepared)
+                contexts.append(_model_facing_context(envelope))
+                items.append(
+                    {
+                        "post_id": post_id,
+                        "status": "prepared",
+                        "title": envelope["title"],
+                        "word_count": envelope["word_count"],
+                        "required_inline_images": envelope["requirements"]["media_stage"][
+                            "required_inline_images"
+                        ],
+                        "images": {
+                            key: envelope["images"].get(key)
+                            for key in ("valid", "missing", "irrelevant", "non_webp")
+                            if key in envelope["images"]
+                        },
+                        "context_file": str(context_file),
+                        "backup": prepared.get("backup"),
+                    }
+                )
         except (PostQuarantinedError, QuarantinePolicyError) as exc:
             items.append({
                 "post_id": post_id,
@@ -1098,6 +1103,15 @@ def prepare_batch(
         except BatchError as exc:
             items.append({"post_id": post_id, "status": "error", "error": str(exc)[:240], "error_class": "contract"})
         except Exception as exc:  # noqa: BLE001 - isolate one post in a batch
+            if is_post_lock_blocked(exc):
+                items.append({
+                    "post_id": post_id,
+                    "status": "lock_blocked",
+                    "error_code": "post_lock_blocked",
+                    "error": str(exc)[:240],
+                    "wordpress_changed": False,
+                })
+                continue
             from .observability import record_unexpected_error
             record_unexpected_error(root, exc, post_id=post_id, run_id=batch_id, file="batch.py", field="prepare_batch")
             items.append(
@@ -1118,6 +1132,7 @@ def prepare_batch(
         "requested_ids": requested,
         "count": len(items),
         "prepared": sum(1 for item in items if item.get("status") == "prepared"),
+        "lock_blocked": sum(1 for item in items if item.get("status") == "lock_blocked"),
         "failed": sum(1 for item in items if item.get("status") == "error"),
         "items": items,
     }
@@ -1138,6 +1153,7 @@ def prepare_batch(
         "manifest": str(directory / "manifest.json"),
         "count": len(items),
         "prepared": manifest["prepared"],
+        "lock_blocked": manifest["lock_blocked"],
         "failed": manifest["failed"],
         "items": items,
         "editorial_input": str(editorial_input),

@@ -182,6 +182,18 @@ class WorkflowError(RuntimeError):
     """Raised when a post cannot safely enter a workflow step."""
 
 
+def is_post_lock_blocked(exc: BaseException) -> bool:
+    """Recognize an item-local post-lock conflict through workflow wrapping."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, LockError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class CardsSelectionTimeout(WorkflowError):
     """Raised when card discovery reaches its explicit wall-clock budget."""
 
@@ -201,7 +213,7 @@ class MediaFunnelInvariantError(WorkflowError):
     """Raised when media candidates lose their discovery identity."""
 
 
-def _acquire_post_lock(root: Path, config: Config, post_id: int):
+def _acquire_post_lock(root: Path, config: Config | None, post_id: int):
     """Serialize every mutating operation for one post.
 
     The WordPress status re-fetch protects against a late manual publish, but
@@ -209,7 +221,9 @@ def _acquire_post_lock(root: Path, config: Config, post_id: int):
     parallel. The filesystem lock covers that expensive side effect.
     """
     try:
-        return LockManager(root / "work" / "locks", ttl=config.lock_ttl).acquire(post_id)
+        return LockManager(
+            root / "work" / "locks", ttl=int(getattr(config, "lock_ttl", 900))
+        ).acquire(post_id)
     except LockError as exc:
         raise WorkflowError(f"post {post_id} is already being processed") from exc
 
@@ -248,7 +262,7 @@ def _guard_post_client(client: Any, lock_handle: Any, *, root: Path | None = Non
     return _PostLockGuardedClient(client, lock_handle, root=root, post_id=post_id)
 
 
-def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str, Any]:
+def _prepare_post_locked(client: WordPressClient, root: Path, post_id: int, lock_handle: Any) -> dict[str, Any]:
     assert_post_not_quarantined(root, post_id, operation="prepare")
     post = client.get_post(post_id)
     _require_pending(post)
@@ -256,6 +270,7 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
         assert_v1_mutation_allowed(post, root, operation="prepare")
     except RuntimeError as exc:
         raise WorkflowError(str(exc)) from exc
+    lock_handle.assert_owned()
     backup = SnapshotStore(root).save(post_id, post)
     raw = _raw_content(post)
     return {
@@ -266,6 +281,21 @@ def prepare_post(client: WordPressClient, root: Path, post_id: int) -> dict[str,
         "original_link": _original_link(post),
         "wordpress_changed": False,
     }
+
+
+def prepare_post(
+    client: WordPressClient,
+    root: Path,
+    post_id: int,
+    *,
+    config: Config | None = None,
+    lock_handle: Any | None = None,
+) -> dict[str, Any]:
+    """Snapshot under a per-post lock; default the lock TTL for legacy callers."""
+    if lock_handle is not None:
+        return _prepare_post_locked(client, root, post_id, lock_handle)
+    with _acquire_post_lock(root, config, post_id) as acquired_lock:
+        return _prepare_post_locked(client, root, post_id, acquired_lock)
 
 
 def _partial_manifest_path(root: Path, post_id: int) -> Path:
@@ -6783,8 +6813,19 @@ def mark_uncertain(
     reason: str,
     *,
     on_work_started: Callable[[], None] | None = None,
+    lock_handle: Any | None = None,
 ) -> dict[str, Any]:
     assert_post_not_quarantined(root, post_id, operation="mark_uncertain")
+    if lock_handle is not None:
+        guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
+        return _mark_uncertain_unlocked(
+            guarded_client,
+            config,
+            root,
+            post_id,
+            reason,
+            on_work_started=on_work_started,
+        )
     with _acquire_post_lock(root, config, post_id) as lock_handle:
         guarded_client = _guard_post_client(client, lock_handle, root=root, post_id=post_id)
         return _mark_uncertain_unlocked(

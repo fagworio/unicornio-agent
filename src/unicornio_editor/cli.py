@@ -38,6 +38,7 @@ from .workflow import (
     CardsSelectionTimeout,
     MediaFunnelInvariantError,
     WorkflowError,
+    _acquire_post_lock,
     apply_editorial,
     attach_trailer_audit,
     build_cards,
@@ -45,6 +46,7 @@ from .workflow import (
     compose_final_content,
     discard_post,
     get_cleaned_content,
+    is_post_lock_blocked,
     load_draft,
     mark_uncertain,
     original_link_of,
@@ -1318,100 +1320,133 @@ def _apply_editorial_batch(
                 continue
             if str(item.get("status") or "ok") == "needs_retry":
                 retry_mode = str(item.get("retry_mode") or "")
-                current = client.get_post(post_id)
-                current_state = read_state(current)
-                if retry_mode == "uncertain_second_pass" and not uncertain_second_pass_eligible(current):
-                    outcomes.append({
-                        "post_id": post_id,
-                        "status": "noop",
-                        "state": current_state.get("state"),
-                        "wordpress_changed": False,
-                        "stale": True,
-                        "idempotent": True,
-                    })
-                    continue
-                if (
-                    current_state.get("state") == "uncertain"
-                    and current_state.get("attempts", 0) >= 1
-                    and retry_mode in {"uncertain_second_pass", ""}
-                ):
-                    projection = session_budget.status(root, config)
-                    owner_id = session_budget.current_owner_id()
-                    allowed, projection = session_budget.reserve_touch(
-                        root, post_id, config, owner_id=owner_id
-                    )
-                    if not allowed:
-                        stopped = projection.get("error_code") or session_budget.stop_reason(root, config) or (
-                            "teto de posts tocados por sessao atingido "
-                            f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
-                        )
-                        remaining = [int(row["post_id"]) for row in batch["items"][index:]]
-                        break
-                    work_started = False
-
-                    def on_uncertain_work_started() -> None:
-                        nonlocal work_started
-                        committed, _ = session_budget.commit_touch(
-                            root, post_id, config, owner_id=owner_id
-                        )
-                        if not committed:
-                            raise session_budget.SessionBudgetError(
-                                "session budget reservation could not be committed by its owner"
-                            )
-                        work_started = True
-
-                    try:
-                        escalated = mark_uncertain(
-                            client,
-                            config,
-                            root,
-                            post_id,
-                            str(item.get("reason") or "segunda passagem editorial sem resultado")[:240],
-                            on_work_started=on_uncertain_work_started,
-                        )
-                        escalated["status"] = "awaiting_human"
-                        escalated["action"] = "decisão humana necessária após segunda passagem"
-                        if compact:
-                            escalated = {
-                                "post_id": escalated.get("post_id"),
-                                "status": "awaiting_human",
-                                "state": escalated.get("state"),
-                                "attempts": escalated.get("attempts"),
-                                "wordpress_changed": bool(escalated.get("wordpress_changed")),
-                                "action": escalated.get("action"),
-                            }
-                        outcomes.append(escalated)
-                    except session_budget.SessionBudgetError as exc:
-                        outcomes.append({
-                            "post_id": post_id,
-                            "status": "budget_blocked",
-                            "wordpress_changed": False,
-                            "error_code": exc.error_code,
-                            "error": str(exc)[:240],
-                        })
-                        stopped = exc.error_code
-                        remaining = [
-                            int(row["post_id"])
-                            for row in batch["items"][index if not work_started else index + 1:]
-                        ]
-                        break
-                    except Exception as exc:  # noqa: BLE001 - isolate one post
-                        outcomes.append({"post_id": post_id, "status": "error", "wordpress_changed": False, "error": str(exc)[:240]})
-                    finally:
-                        if not work_started:
-                            session_budget.release_reservation(
+                try:
+                    with _acquire_post_lock(root, config, post_id) as retry_lock:
+                        current = client.get_post(post_id)
+                        current_state = read_state(current)
+                        if retry_mode == "uncertain_second_pass" and not uncertain_second_pass_eligible(current):
+                            outcomes.append({
+                                "post_id": post_id,
+                                "status": "noop",
+                                "state": current_state.get("state"),
+                                "wordpress_changed": False,
+                                "stale": True,
+                                "idempotent": True,
+                            })
+                            continue
+                        if (
+                            current_state.get("state") == "uncertain"
+                            and current_state.get("attempts", 0) >= 1
+                            and retry_mode in {"uncertain_second_pass", ""}
+                        ):
+                            projection = session_budget.status(root, config)
+                            owner_id = session_budget.current_owner_id()
+                            allowed, projection = session_budget.reserve_touch(
                                 root, post_id, config, owner_id=owner_id
                             )
-                    if stopped:
-                        break
-                    continue
-                outcomes.append({
-                    "post_id": post_id,
-                    "status": "needs_retry",
-                    "wordpress_changed": False,
-                    "reason": str(item.get("reason") or "editorial batch marcou retry")[:240],
-                    "action": "gere novamente somente este post",
-                })
+                            if not allowed:
+                                stopped = projection.get("error_code") or session_budget.stop_reason(root, config) or (
+                                    "teto de posts tocados por sessao atingido "
+                                    f"({projection['posts_touched_count']}/{projection['max_posts_touched']})"
+                                )
+                                remaining = [int(row["post_id"]) for row in batch["items"][index:]]
+                                break
+                            work_started = False
+
+                            def on_uncertain_work_started() -> None:
+                                nonlocal work_started
+                                retry_lock.assert_owned()
+                                committed, _ = session_budget.commit_touch(
+                                    root, post_id, config, owner_id=owner_id
+                                )
+                                if not committed:
+                                    raise session_budget.SessionBudgetError(
+                                        "session budget reservation could not be committed by its owner"
+                                    )
+                                work_started = True
+
+                            try:
+                                escalated = mark_uncertain(
+                                    client,
+                                    config,
+                                    root,
+                                    post_id,
+                                    str(item.get("reason") or "segunda passagem editorial sem resultado")[:240],
+                                    on_work_started=on_uncertain_work_started,
+                                    lock_handle=retry_lock,
+                                )
+                                escalated["status"] = "awaiting_human"
+                                escalated["action"] = "decisão humana necessária após segunda passagem"
+                                if compact:
+                                    escalated = {
+                                        "post_id": escalated.get("post_id"),
+                                        "status": "awaiting_human",
+                                        "state": escalated.get("state"),
+                                        "attempts": escalated.get("attempts"),
+                                        "wordpress_changed": bool(escalated.get("wordpress_changed")),
+                                        "action": escalated.get("action"),
+                                    }
+                                outcomes.append(escalated)
+                            except session_budget.SessionBudgetError as exc:
+                                outcomes.append({
+                                    "post_id": post_id,
+                                    "status": "budget_blocked",
+                                    "wordpress_changed": False,
+                                    "error_code": exc.error_code,
+                                    "error": str(exc)[:240],
+                                })
+                                stopped = exc.error_code
+                                remaining = [
+                                    int(row["post_id"])
+                                    for row in batch["items"][index if not work_started else index + 1:]
+                                ]
+                                break
+                            except Exception as exc:  # noqa: BLE001 - isolate one post
+                                if is_post_lock_blocked(exc):
+                                    outcomes.append({
+                                        "post_id": post_id,
+                                        "status": "lock_blocked",
+                                        "error_code": "post_lock_blocked",
+                                        "wordpress_changed": False,
+                                        "error": str(exc)[:240],
+                                    })
+                                else:
+                                    outcomes.append({"post_id": post_id, "status": "error", "wordpress_changed": False, "error": str(exc)[:240]})
+                            finally:
+                                if not work_started:
+                                    session_budget.release_reservation(
+                                        root, post_id, config, owner_id=owner_id
+                                    )
+                            if stopped:
+                                break
+                        else:
+                            outcomes.append({
+                                "post_id": post_id,
+                                "status": "needs_retry",
+                                "wordpress_changed": False,
+                                "reason": str(item.get("reason") or "editorial batch marcou retry")[:240],
+                                "action": "gere novamente somente este post",
+                            })
+                except session_budget.SessionBudgetError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - isolate one post
+                    if is_post_lock_blocked(exc):
+                        outcomes.append({
+                            "post_id": post_id,
+                            "status": "lock_blocked",
+                            "error_code": "post_lock_blocked",
+                            "wordpress_changed": False,
+                            "error": str(exc)[:240],
+                        })
+                    else:
+                        outcomes.append({
+                            "post_id": post_id,
+                            "status": "error",
+                            "wordpress_changed": False,
+                            "error": str(exc)[:240],
+                        })
+                if stopped:
+                    break
                 continue
             # Retry do mesmo batch é idempotente: um item que já terminou READY
             # não deve ser reaplicado só porque o parceiro do batch falhou.
@@ -1525,14 +1560,25 @@ def _apply_editorial_batch(
                 remaining = [int(row["post_id"]) for row in batch["items"][index + 1:]]
                 break
             except Exception as exc:  # noqa: BLE001 - isolate one post
-                outcomes.append(
-                    {
-                        "post_id": post_id,
-                        "status": "error",
-                        "wordpress_changed": False,
-                        "error": str(exc)[:240],
-                    }
-                )
+                if is_post_lock_blocked(exc):
+                    outcomes.append(
+                        {
+                            "post_id": post_id,
+                            "status": "lock_blocked",
+                            "error_code": "post_lock_blocked",
+                            "wordpress_changed": False,
+                            "error": str(exc)[:240],
+                        }
+                    )
+                else:
+                    outcomes.append(
+                        {
+                            "post_id": post_id,
+                            "status": "error",
+                            "wordpress_changed": False,
+                            "error": str(exc)[:240],
+                        }
+                    )
             finally:
                 if not dry_run and not work_started:
                     session_budget.release_reservation(
@@ -1554,6 +1600,7 @@ def _apply_editorial_batch(
         "count": len(batch["items"]),
         "processed": len(outcomes),
         "ready": sum(1 for item in outcomes if item.get("status") == "ready"),
+        "lock_blocked": sum(1 for item in outcomes if item.get("status") == "lock_blocked"),
         "partial": sum(1 for item in outcomes if item.get("status") == "partial"),
         "noop": sum(1 for item in outcomes if item.get("status") == "noop"),
         "preflight_blocked": sum(1 for item in outcomes if item.get("status") == "preflight_blocked"),
@@ -4271,7 +4318,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             motivo = session_budget.stop_reason(args.root, config)
             per_page = config.max_posts_per_run if args.limit is None else int(args.limit)
             if orcamento["remaining_posts"] is not None:
-                reserved_remaining = int(orcamento.get("posts_reserved_count") or 0)
+                reserved_remaining = int(
+                    orcamento.get(
+                        "posts_reserved_capacity_count",
+                        orcamento.get("posts_reserved_count", 0),
+                    )
+                    or 0
+                )
                 available_posts = int(orcamento["remaining_posts"]) + reserved_remaining
                 per_page = min(per_page, available_posts)
             if motivo:
@@ -4322,7 +4375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result.get("uncertain_second_pass_reserved", 0) or 0
             )
         elif args.command == "prepare":
-            result = prepare_post(client, args.root, args.post_id)
+            result = prepare_post(client, args.root, args.post_id, config=config)
             if args.compact:
                 prepared_file = args.root / "backups" / str(args.post_id) / "prepared.json"
                 prepared_file.parent.mkdir(parents=True, exist_ok=True)
@@ -5521,10 +5574,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    except (ConfigError, EditorialProviderError, WorkflowError, OSError, ValueError) as exc:
-        # WorkflowError incluido de proposito: um traceback Python no contexto do
-        # agente e caro e inutil — o operador (e o LLM) precisam do motivo em
-        # JSON, nao da stack inteira.
+    except WorkflowError as exc:
+        payload = {"error": str(exc)}
+        if is_post_lock_blocked(exc):
+            payload["error_code"] = "post_lock_blocked"
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 2
+    except (ConfigError, EditorialProviderError, OSError, ValueError) as exc:
+        # Erros operacionais devem chegar em JSON curto, sem traceback Python no
+        # contexto do agente; o operador precisa do motivo, nao da stack inteira.
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
 

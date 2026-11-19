@@ -64,6 +64,19 @@ mesmo que `_hermes_state` esteja ausente ou inválido; ele não vira `NEW` e nã
 é migrado automaticamente. Estados incertos permanecem bloqueados. Use uma
 migração administrativa explícita somente quando houver evidência segura.
 
+### Bloqueios individuais de lock em batches
+
+- `lock_blocked` significa bloqueio individual, não falha global da fila.
+- Em `prepare-batch`, registre o item bloqueado e não o inclua nas etapas de
+  geração, mídia ou apply; continue com os demais cards elegíveis em microbatches
+  de no máximo dois posts, mantendo `batch_id` e IDs sem duplicação.
+- Em `apply-batch`, registre `lock_blocked` no post e continue os irmãos. Não
+  repita esse post no mesmo ciclo, não escreva nele e não remova/reconcilie locks
+  legados, inclusive o lock `115866`.
+- Com cinco cards e o primeiro bloqueado, percorra os outros quatro em lotes de
+  até dois. Um bloqueio antes do início real do apply não consome o orçamento;
+  pare apenas por orçamento esgotado ou divergência global de integridade.
+
 O fluxo V1 mantém snapshots, manifests, MediaRegistry e `_hermes_state`. READY
 só é produzido depois do checklist completo, mídia aplicada, featured válida e
 readback. Se Hermes não fornecer evidência estruturada de `vision_analyze`, a

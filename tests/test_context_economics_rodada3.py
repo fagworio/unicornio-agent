@@ -290,6 +290,17 @@ class HardSessionStopTests(unittest.TestCase):
         self.assertIn("teto de posts tocados", resultado["stop"])
         self.assertFalse(montar.called)
 
+    def test_rework_reservation_for_already_touched_post_does_not_add_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2, session_context_bytes_budget=0)
+            session_budget.record_touch(root, 10, config)
+            session_budget.reserve_touch(root, 10, config, owner_id="rework-owner")
+            result, build_cards_mock = self._run_cards(root, config)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(build_cards_mock.call_args.kwargs["per_page"], 1)
+
 
 class MonitorHashStabilityTests(unittest.TestCase):
     """O bloqueio de orçamento NÃO pode mudar a assinatura do monitor."""

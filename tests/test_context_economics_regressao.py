@@ -184,6 +184,31 @@ class SessionCapConcurrencyTests(unittest.TestCase):
             )
             self.assertEqual(session_budget.status(root, config)["posts_touched"], [502])
 
+    def test_touched_post_rework_still_requires_reservation_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            session_budget.record_touch(root, 509, config)
+            allowed, projection = session_budget.reserve_touch(
+                root, 509, config, owner_id="rework-owner"
+            )
+            self.assertTrue(allowed)
+            self.assertEqual(projection["posts_reserved"], [509])
+            self.assertEqual(projection["posts_reserved_capacity_count"], 0)
+            self.assertEqual(projection["remaining_posts"], 1)
+            self.assertFalse(
+                session_budget.commit_touch(root, 509, config, owner_id="other-owner")[0]
+            )
+            self.assertFalse(
+                session_budget.release_reservation(root, 509, config, owner_id="other-owner")[0]
+            )
+            self.assertTrue(
+                session_budget.commit_touch(root, 509, config, owner_id="rework-owner")[0]
+            )
+            final = session_budget.status(root, config)
+            self.assertEqual(final["posts_touched"], [509])
+            self.assertEqual(final["posts_reserved"], [])
+
     def test_live_process_reservation_is_not_recovered_by_another_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -218,6 +243,25 @@ class SessionCapConcurrencyTests(unittest.TestCase):
             self.assertFalse(allowed)
             self.assertEqual(projection["error_code"], "reservation_owned_by_other_executor")
 
+    def test_process_owner_record_must_match_its_persisted_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(max_posts_touched_per_run=2)
+            with mock.patch.dict(os.environ, {"HERMES_SESSION_ID": ""}, clear=False):
+                data = session_budget._vazio()
+                owner_id = session_budget.current_owner_id()
+                data["posts_reserved"] = [510]
+                data["reservation_owners"]["510"] = {
+                    "owner_id": owner_id,
+                    "owner_kind": "process",
+                    "owner_host": session_budget.socket.gethostname(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_identity": "mismatched-start-identity",
+                }
+                session_budget._salvar(root, data)
+                with self.assertRaises(session_budget.LedgerCorruptError):
+                    session_budget.load_session(root, config)
+
     def test_reservation_is_recovered_only_after_proving_owner_process_exited(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -226,11 +270,17 @@ class SessionCapConcurrencyTests(unittest.TestCase):
                 data = session_budget._vazio()
                 data["posts_reserved"] = [506]
                 data["reservation_owners"]["506"] = {
-                    "owner_id": "process:99999999:old-start",
+                    "owner_id": (
+                        "process:"
+                        + session_budget.hashlib.sha256(
+                            session_budget.socket.gethostname().encode("utf-8")
+                        ).hexdigest()[:12]
+                        + ":99999999:unknown"
+                    ),
                     "owner_kind": "process",
                     "owner_host": session_budget.socket.gethostname(),
                     "owner_pid": 99999999,
-                    "owner_start_identity": "old-start",
+                    "owner_start_identity": "unknown",
                 }
                 session_budget._salvar(root, data, now=1000.0)
                 with mock.patch(

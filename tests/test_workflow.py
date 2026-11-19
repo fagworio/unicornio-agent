@@ -292,11 +292,19 @@ class WorkflowTests(unittest.TestCase):
     def test_prepare_creates_snapshot_and_cleans_content(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient(self.post())
-            report = prepare_post(client, Path(directory), 42)
+            config = self.config(False)
+            report = prepare_post(client, Path(directory), 42, config=config)
             self.assertEqual(report["post_id"], 42)
             self.assertEqual(report["cleaned_html"], "<p>Original.</p>")
             self.assertTrue(Path(report["backup"]).exists())
             self.assertEqual(client.updated, [])
+
+    def test_prepare_post_preserves_legacy_three_argument_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient(self.post())
+            report = prepare_post(client, Path(directory), 42)
+            self.assertEqual(report["post_id"], 42)
+            self.assertTrue(Path(report["backup"]).exists())
 
     def test_apply_refuses_a_post_held_by_another_session(self):
         with tempfile.TemporaryDirectory() as directory:
