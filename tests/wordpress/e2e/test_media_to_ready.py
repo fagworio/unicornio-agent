@@ -993,6 +993,7 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
                 for item in editorial["media_plan"]
             ],
         }
+        _persist_audited_trailer_absence(root, editorial_with_media)
         content, _trailer, _trailer_status = compose_final_content(
             editorial_with_media, config, source_url, root=root,
         )
