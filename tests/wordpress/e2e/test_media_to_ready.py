@@ -248,6 +248,30 @@ def _automatic_pipeline_editorial() -> dict[str, Any]:
     }
 
 
+def _persist_audited_trailer_absence(root: Path, editorial: dict[str, Any]) -> None:
+    from unicornio_editor.trailer import (
+        cached_game_trailer_checked_at,
+        find_cached_game_trailer_with_status,
+        trailer_search_query,
+    )
+
+    game_name = str(editorial.get("game_name") or "")
+    trailer, status = find_cached_game_trailer_with_status(
+        game_name,
+        root=root,
+        discover=lambda *_args, **_kwargs: (None, "official_not_found"),
+    )
+    checked_at = cached_game_trailer_checked_at(root, game_name)
+    assert trailer is None and status == "official_not_found" and checked_at
+    editorial["trailer_unavailable"] = True
+    editorial["trailer_search_evidence"] = {
+        "query": trailer_search_query(game_name),
+        "provider": "youtube",
+        "searched_at": checked_at,
+        "result": "official_not_found",
+    }
+
+
 def _prepare_automatic_pipeline_case(
     case, scenario: str, source_url: str, editorial: dict[str, Any]
 ) -> int:
@@ -1262,6 +1286,7 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
                 "result": "official_not_found",
             },
         }
+        _persist_audited_trailer_absence(case.root, editorial)
 
         featured_item = {
             **by_name["hollow-knight-silksong-key-art.png"],
@@ -1471,6 +1496,7 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
                 for index, candidate in enumerate(candidate_rows[1:])
             ],
         }
+        _persist_audited_trailer_absence(case.root, editorial_with_media)
         content, _trailer, _trailer_status = compose_final_content(
             editorial_with_media, config, None, root=case.root,
         )

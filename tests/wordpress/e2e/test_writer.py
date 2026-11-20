@@ -713,8 +713,8 @@ def test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks(wordpre
         "seo": {
             "title": "Conteúdo fora da pauta editorial",
             "meta_description": (
-                "Registro de homologação descartável usado apenas para validar "
-                "isolamento de locks e readback no ambiente local."
+                "Registro de homologação descartável para validar isolamento de "
+                "locks e readback no ambiente local, sem alterar o conteúdo editorial do post."
             ),
             "focus_keyword": "homologação descartável",
         },
@@ -758,7 +758,11 @@ def test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks(wordpre
                 compact=False,
             )
             apply_statuses.extend(
-                {"post_id": int(item["post_id"]), "status": item["status"]}
+                {
+                    "post_id": int(item["post_id"]),
+                    "status": item["status"],
+                    "reason": str(item.get("reason") or item.get("error") or ""),
+                }
                 for item in applied["posts"]
             )
 
@@ -769,7 +773,7 @@ def test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks(wordpre
     assert [item["status"] for item in prepared_statuses] == [
         "lock_blocked", "prepared", "prepared", "prepared", "prepared"
     ]
-    assert [item["status"] for item in apply_statuses] == ["skipped"] * 4
+    assert [item["status"] for item in apply_statuses] == ["skipped"] * 4, apply_statuses
     assert [item["post_id"] for item in apply_statuses] == post_ids[1:]
     assert readbacks[post_ids[0]] == case._snapshot(before[post_ids[0]])
     for post_id in post_ids:
