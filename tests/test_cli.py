@@ -126,6 +126,17 @@ class CompactOutputTests(unittest.TestCase):
         self.assertNotIn("trailer", result)
         self.assertNotIn("checklist_items", result)
 
+    def test_compact_apply_preserves_trailer_search_status(self):
+        result = _compact_apply({
+            "post_id": 3,
+            "status": "ready",
+            "wordpress_changed": True,
+            "trailer_search_status": "found",
+            "checklist": {"items": [], "all_passed": True},
+            "media_plan_results": [],
+        })
+        self.assertEqual(result["trailer_search_status"], "found")
+
     def test_compact_apply_needs_rework_lists_only_failures(self):
         result = _compact_apply(
             {
@@ -657,6 +668,13 @@ class CompactOutputTests(unittest.TestCase):
                 {"name": "c", "detail": "detalhe c"},
             ],
         )
+
+    def test_compact_checklist_preserves_trailer_search_status(self):
+        result = _compact_checklist({
+            "items": [{"name": "trailer_youtube", "status": "pass"}],
+            "trailer_search_status": "official_not_found",
+        })
+        self.assertEqual(result["trailer_search_status"], "official_not_found")
 
 
     def test_record_cmd_output_covers_read_and_write_commands(self):

@@ -43,6 +43,15 @@ class SubjectTests(unittest.TestCase):
         self.assertEqual(subjects[0], "Wario")
         self.assertNotEqual(subjects[0], "ex-gerentes")
 
+    def test_semicolon_game_names_become_separate_plain_text_subjects(self):
+        subjects = editorial_subjects(
+            title="Hades II e Pokémon recebem novidades",
+            game_name="Pokémon &amp; Bros.; Hades II",
+        )
+        self.assertIn("Pokémon & Bros.", subjects)
+        self.assertIn("Hades II", subjects)
+        self.assertFalse(any(";" in subject for subject in subjects))
+
     def test_manchete_115234_ignora_contexto_gramatical_e_pr(self):
         title = "Ex-gerentes de PR da Nintendo dizem que sketch do SNL com Elon Musk como Wario foi o destaque"
         subjects = editorial_subjects(title=title, focus_keyword="notícia")

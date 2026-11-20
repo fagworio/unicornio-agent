@@ -48,7 +48,7 @@ from .media.diagnostics import diagnostic_url_domain
 from .media.inserter import append_featured_credit, insert_media
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
-from .media.text import sanitize_title
+from .media.text import sanitize_title, split_game_names
 from .media.source_verify import (
     verification_result,
     verify_downloaded_against_source,
@@ -91,8 +91,9 @@ from .state import (
     uncertain_second_pass_eligible,
 )
 from .trailer import (
-    TrailerError, build_trailer_html, find_cached_game_trailer_with_status,
-    find_game_trailer_with_status,
+    TrailerError, build_trailer_html, cached_game_trailer_checked_at,
+    find_cached_game_trailer_with_status, find_game_trailer_with_status,
+    trailer_search_query,
 )
 from .wordpress import WordPressClient, WordPressError
 from .pipeline_v2.quarantine import (
@@ -716,7 +717,7 @@ def _apply_editorial_unlocked(
         editorial_with_media, config, original_link_of(post), root=root
     )
     editorial_with_media = attach_trailer_audit(
-        editorial_with_media, trailer, search_status=trailer_status
+        editorial_with_media, trailer, search_status=trailer_status, root=root
     )
     # Atualiza o artefato durável com o resultado determinístico da busca. Em
     # uma revalidação STALE, o checklist consegue auditar por que não há embed.
@@ -944,6 +945,7 @@ def _apply_editorial_unlocked(
                 return {
                     "post_id": post_id, "wordpress_changed": False, "dry_run": False,
                     "status": "partial" if partial_state == STATE_PARTIAL else "awaiting_human",
+                    "trailer_search_status": trailer_status,
                     "state": partial_state, "attempts": state_info["attempts"],
                     "processing_passes": passes, "no_progress_attempts": no_progress,
                     "partial": manifest, "checklist": checklist,
@@ -1093,6 +1095,7 @@ def _apply_editorial_unlocked(
                 "wordpress_changed": baseline_changed or featured_normalized,
                 "dry_run": False,
                 "status": "needs_rework",
+                "trailer_search_status": trailer_status,
                 "state": backoff["state"],
                 "baseline_enriched": baseline_changed,
                 "attempts": backoff["attempts"],
@@ -1116,6 +1119,7 @@ def _apply_editorial_unlocked(
             "backup": str(backup),
             "content_preview": content,
             "trailer": trailer,
+            "trailer_search_status": trailer_status,
             "media_plan_results": media_results,
             "checklist": checklist,
             "images": _images_summary(content, _post_title(post) or editorial["seo"]["title"], image_entities),
@@ -1130,6 +1134,7 @@ def _apply_editorial_unlocked(
             "dry_run": False,
             "status": "retry",
             "retryable": True,
+            "trailer_search_status": trailer_status,
             "reason": "WordPress post changed during apply preflight; refusing stale overwrite",
         }
     manifest = build_ready_manifest(
@@ -1186,6 +1191,7 @@ def _apply_editorial_unlocked(
         "backup": str(backup),
         "status_after": result.get("status"),
         "trailer": trailer,
+        "trailer_search_status": trailer_status,
         "media_plan_results": media_results,
         "inline_normalization": inline_normalization,
         "featured_media": result.get("featured_media"),
@@ -5273,16 +5279,32 @@ def _discover_trailer(
     editorial: dict[str, Any], config: Config, *, root: Path | None = None
 ) -> tuple[dict[str, str] | None, str]:
     """Discover a YouTube trailer for game content; fail-closed to None."""
-    game_name = editorial.get("game_name")
-    if not isinstance(game_name, str) or not game_name.strip():
+    game_names = split_game_names(editorial.get("game_name"))
+    if not game_names:
         return None, "not_applicable"
-    try:
-        return find_cached_game_trailer_with_status(
-            game_name, root=root, timeout=config.http_timeout,
-            discover=find_game_trailer_with_status,
-        )
-    except TrailerError:
+    statuses: list[str] = []
+    first_verified: dict[str, str] | None = None
+    for game_name in game_names:
+        try:
+            trailer, status = find_cached_game_trailer_with_status(
+                game_name, root=root, timeout=config.http_timeout,
+                discover=find_game_trailer_with_status,
+            )
+        except TrailerError:
+            statuses.append("search_failed")
+            continue
+        statuses.append(status)
+        if trailer is not None and first_verified is None:
+            first_verified = trailer
+    if first_verified is not None:
+        return first_verified, "found"
+    if "search_failed" in statuses:
         return None, "search_failed"
+    if "unverified_candidates" in statuses:
+        return None, "unverified_candidates"
+    if all(status == "official_not_found" for status in statuses):
+        return None, "official_not_found"
+    return None, "search_failed"
 
 
 def attach_trailer_audit(
@@ -5290,21 +5312,28 @@ def attach_trailer_audit(
     trailer: dict[str, str] | None,
     *,
     search_status: str = "official_not_found",
+    root: Path | None = None,
 ) -> dict[str, Any]:
     """Attach code-generated evidence when no official trailer is found."""
     result = dict(editorial)
     game_name = editorial.get("game_name")
+    checked_at = (
+        cached_game_trailer_checked_at(root, game_name)
+        if isinstance(game_name, str) and game_name.strip()
+        else None
+    )
     if (
         isinstance(game_name, str)
         and game_name.strip()
         and trailer is None
         and search_status == "official_not_found"
+        and checked_at is not None
     ):
         result["trailer_unavailable"] = True
         result["trailer_search_evidence"] = {
-            "query": f"{game_name.strip()} trailer",
+            "query": trailer_search_query(game_name),
             "provider": "youtube",
-            "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "searched_at": checked_at,
             "result": "official_not_found",
         }
     else:

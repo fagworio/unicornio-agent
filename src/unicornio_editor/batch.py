@@ -20,6 +20,7 @@ from .content_quality import word_count
 from .language import detect_language, localization_required
 from .media.relevance import extract_entities
 from .media.inserter import plan_normal_media_insertions
+from .media.text import sanitize_title, split_game_names
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .state import read_state, uncertain_second_pass_eligible
 from .workflow import (
@@ -78,6 +79,18 @@ def build_media_resolve_batch_input(
     featured asset outside the inline-image quota without asking Hermes to do
     arithmetic or infer the role from a prose instruction.
     """
+    def identity_tokens(value: str) -> list[str]:
+        return re.findall(r"[^\W_]+", sanitize_title(value).casefold(), flags=re.UNICODE)
+
+    def heading_matches_game(game_name: str, heading: str) -> bool:
+        subject_tokens = identity_tokens(game_name)
+        heading_tokens = identity_tokens(heading)
+        width = len(subject_tokens)
+        return bool(width) and any(
+            heading_tokens[index:index + width] == subject_tokens
+            for index in range(len(heading_tokens) - width + 1)
+        )
+
     batch_id = validate_batch_id(str(editorial_batch.get("batch_id") or ""))
     results = editorial_batch.get("results")
     if not isinstance(results, list):
@@ -106,7 +119,9 @@ def build_media_resolve_batch_input(
         relevance = editorial.get("site_relevance")
         if isinstance(relevance, dict) and relevance.get("decision") != "process":
             continue
-        title = str(editorial.get("title") or context.get("title") or "").strip()
+        title = sanitize_title(editorial.get("title") or context.get("title") or "")
+        game_names = split_game_names(editorial.get("game_name"))
+        game_name = game_names[0] if game_names else ""
         cleaned_html = editorial.get("cleaned_html")
         if not isinstance(cleaned_html, str) or not cleaned_html.strip():
             cleaned_html = str(context.get("cleaned_html") or "")
@@ -185,7 +200,7 @@ def build_media_resolve_batch_input(
                     "replacement_reserve": 1,
                 })
             if featured_required:
-                feature_subject = str(editorial.get("game_name") or title).strip()
+                feature_subject = title if len(game_names) > 1 else game_name or title
                 targets.append({
                     "target_id": "featured",
                     "role": "featured",
@@ -194,14 +209,30 @@ def build_media_resolve_batch_input(
                     "replacement_reserve": 1,
                 })
         needed = len(targets) if targets is not None else inline_deficit + int(featured_required)
+        # No resolver query is emitted for this post when no candidate slots
+        # remain; the multi-game/H2 identity guard below applies only to posts
+        # that will actually generate media queries.
         if needed <= 0:
             continue
+        if len(game_names) > 1:
+            if promised_items is None:
+                raise BatchError(
+                    "multiple game_name subjects require explicit H2 media targets"
+                )
+            matched_item_ids: set[str] = set()
+            for name in game_names:
+                matches = [item for item in list_items if heading_matches_game(name, item.heading)]
+                if len(matches) != 1 or matches[0].identity in matched_item_ids:
+                    raise BatchError(
+                        "multiple game_name subjects require one unique matching H2 per game"
+                    )
+                matched_item_ids.add(matches[0].identity)
         if targets is None and needed > 7:
             raise BatchError(
                 f"post {post_id} precisa de {needed} imagens candidatas; "
                 "o limite atual de media-resolve-batch é 7"
             )
-        subject = str(editorial.get("game_name") or title).strip()
+        subject = title if len(game_names) > 1 else game_name or title
         if not subject:
             raise BatchError(f"subject vazio ao montar mídia para post {post_id}")
         requests.append({

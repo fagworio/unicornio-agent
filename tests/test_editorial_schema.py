@@ -1,3 +1,4 @@
+import datetime
 import unittest
 
 from unicornio_editor.editorial_schema import EditorialValidationError, validate_editorial
@@ -168,7 +169,7 @@ class EditorialSchemaTests(unittest.TestCase):
         payload["trailer_search_evidence"] = {
             "query": "Jogo sem trailer trailer",
             "provider": "youtube",
-            "searched_at": "2026-09-03T12:00:00+00:00",
+            "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "result": "official_not_found",
         }
         self.assertTrue(validate_editorial(payload)["trailer_unavailable"])
@@ -283,6 +284,13 @@ class EditorialSchemaTests(unittest.TestCase):
             validate_editorial(payload)["game_name"],
             "Clive Barker's Hellraiser: Revival",
         )
+
+    def test_needs_trailer_requires_explicit_game_identity(self):
+        payload = valid_payload()
+        payload["needs_trailer"] = True
+        payload["trailer_url"] = "https://www.youtube.com/watch?v=abcDEF12345"
+        with self.assertRaisesRegex(EditorialValidationError, "needs_trailer requires game_name"):
+            validate_editorial(payload)
 
     def test_rejects_game_name_non_string(self):
         payload = valid_payload()

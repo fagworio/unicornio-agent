@@ -1,3 +1,4 @@
+import datetime
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,16 +88,35 @@ class ChecklistTests(unittest.TestCase):
 
     def _run_checklist(
         self, post=None, editorial=None, content=None, backup=True, client=None,
-        media_context=None, config=None,
+        media_context=None, config=None, seed_negative_trailer_cache=False,
     ):
         with tempfile.TemporaryDirectory() as directory:
-            backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+            root = Path(directory)
+            backup_path = root / "backups" / "42" / "snapshot.json"
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             if backup:
                 backup_path.write_text("{}")
+            current_editorial = editorial or editorial_payload()
+            if seed_negative_trailer_cache:
+                from unicornio_editor.trailer import find_cached_game_trailer_with_status
+                from unicornio_editor.workflow import attach_trailer_audit
+                from unicornio_editor.media.text import split_game_names
+
+                for name in split_game_names(current_editorial.get("game_name")):
+                    find_cached_game_trailer_with_status(
+                        name,
+                        root=root,
+                        discover=lambda *_args, **_kwargs: (None, "official_not_found"),
+                    )
+                current_editorial = attach_trailer_audit(
+                    current_editorial,
+                    None,
+                    search_status="official_not_found",
+                    root=root,
+                )
             return run_pre_publish_checklist(
                 post=post or make_post(),
-                editorial=editorial or editorial_payload(),
+                editorial=current_editorial,
                 content=content or "<p>Texto revisado sobre o jogo videogame.</p>",
                 backup_path=backup_path if backup else None,
                 config=config or self.config(),
@@ -691,12 +711,40 @@ class ChecklistTests(unittest.TestCase):
             trailer_search_evidence={
                 "query": "Meu Jogo trailer",
                 "provider": "youtube",
+                "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                "result": "official_not_found",
+            },
+        )
+        result = self._run_checklist(editorial=editorial, seed_negative_trailer_cache=True)
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
+
+    def test_trailer_waiver_rejects_recent_editorial_evidence_without_persisted_cache(self):
+        editorial = editorial_payload(
+            game_name="Meu Jogo",
+            trailer_unavailable=True,
+            trailer_search_evidence={
+                "query": "Meu Jogo trailer",
+                "provider": "youtube",
+                "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                "result": "official_not_found",
+            },
+        )
+        result = self._run_checklist(editorial=editorial)
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "fail")
+
+    def test_trailer_waiver_fails_when_search_evidence_is_stale(self):
+        editorial = editorial_payload(
+            game_name="Meu Jogo",
+            trailer_unavailable=True,
+            trailer_search_evidence={
+                "query": "Meu Jogo trailer",
+                "provider": "youtube",
                 "searched_at": "2026-09-03T12:00:00+00:00",
                 "result": "official_not_found",
             },
         )
         result = self._run_checklist(editorial=editorial)
-        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "fail")
 
     def test_cta_fails_when_missing(self):
         result = self._run_checklist(content="<p>Texto revisado sobre o jogo videogame.</p>")
@@ -1099,7 +1147,7 @@ class ChecklistTests(unittest.TestCase):
                 trailer_unavailable=True,
                 trailer_search_evidence={
                     "result": "official_not_found",
-                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                     "provider": "youtube",
                     "query": "Redfall trailer",
                 },
@@ -1139,6 +1187,7 @@ class ChecklistTests(unittest.TestCase):
                     },
                 }
             },
+            seed_negative_trailer_cache=True,
         )
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
         assert item["status"] == "pass"
@@ -1167,7 +1216,7 @@ class ChecklistTests(unittest.TestCase):
                 trailer_unavailable=True,
                 trailer_search_evidence={
                     "result": "official_not_found",
-                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                     "provider": "youtube",
                     "query": "Redfall trailer",
                 },
@@ -1214,6 +1263,7 @@ class ChecklistTests(unittest.TestCase):
                 "visual_identity_policy": 4,
                 "visual_identity_evidence_valid": True,
             },
+            seed_negative_trailer_cache=True,
         )
 
         item = next(i for i in result["items"] if i["name"] == "imagens_no_corpo")
@@ -1249,7 +1299,7 @@ class ChecklistTests(unittest.TestCase):
             trailer_unavailable=True,
             trailer_search_evidence={
                 "result": "official_not_found",
-                "searched_at": "2026-10-16T12:00:00+00:00",
+                "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 "provider": "youtube",
                 "query": "Redfall trailer",
             },
@@ -1307,6 +1357,7 @@ class ChecklistTests(unittest.TestCase):
                 content=content,
                 media_context=media_context,
                 config=config,
+                seed_negative_trailer_cache=True,
             )
             verify.return_value = {
                 "accepted": True,
@@ -1320,6 +1371,7 @@ class ChecklistTests(unittest.TestCase):
                 content=content,
                 media_context=media_context,
                 config=config,
+                seed_negative_trailer_cache=True,
             )
 
         statuses = self.statuses(result)

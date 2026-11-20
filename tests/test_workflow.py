@@ -1248,6 +1248,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Confira mais novidades", raw)
         self.assertLess(raw.index("youtube-nocookie"), raw.index("Confira mais novidades"))
         self.assertEqual(report["trailer"]["video_id"], "abcDEF12345")
+        self.assertEqual(report["trailer_search_status"], "found")
 
     def test_apply_without_game_name_does_not_search(self):
         with mock.patch("unicornio_editor.workflow.find_game_trailer_with_status") as discovery:
@@ -1256,6 +1257,26 @@ class WorkflowTests(unittest.TestCase):
                 report = apply_editorial(client, self.config(False), Path(directory), 42, editorial_payload())
         discovery.assert_not_called()
         self.assertIsNone(report["trailer"])
+
+    def test_trailer_discovery_searches_each_semicolon_game_identity(self):
+        from unicornio_editor.workflow import _discover_trailer
+
+        trailer = {"video_id": "abcDEF12345", "title": "Game Two trailer"}
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+            side_effect=[(None, "official_not_found"), (trailer, "found")],
+        ) as discovery:
+            result = _discover_trailer(
+                {"game_name": "Game One; Game Two"},
+                self.config(False),
+                root=Path(directory),
+            )
+
+        self.assertEqual(result, (trailer, "found"))
+        self.assertEqual(
+            [call.args[0] for call in discovery.call_args_list],
+            ["Game One", "Game Two"],
+        )
 
     def test_apply_persists_audited_waiver_when_official_trailer_is_absent(self):
         payload = editorial_payload()
@@ -1271,6 +1292,38 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(saved["trailer_unavailable"])
         self.assertEqual(saved["trailer_search_evidence"]["result"], "official_not_found")
 
+    def test_trailer_waiver_requires_persisted_negative_search_evidence(self):
+        from unicornio_editor.workflow import attach_trailer_audit
+
+        editorial = {"game_name": "Game One"}
+        audited = attach_trailer_audit(
+            editorial, None, search_status="official_not_found", root=None
+        )
+
+        self.assertNotIn("trailer_unavailable", audited)
+        self.assertNotIn("trailer_search_evidence", audited)
+
+    def test_multi_game_trailer_waiver_requires_cache_record_for_every_game(self):
+        from unicornio_editor.trailer import find_cached_game_trailer_with_status
+        from unicornio_editor.workflow import attach_trailer_audit
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            find_cached_game_trailer_with_status(
+                "Game One",
+                root=root,
+                discover=lambda *_args, **_kwargs: (None, "official_not_found"),
+            )
+            audited = attach_trailer_audit(
+                {"game_name": "Game One; Game Two"},
+                None,
+                search_status="official_not_found",
+                root=root,
+            )
+
+        self.assertNotIn("trailer_unavailable", audited)
+        self.assertNotIn("trailer_search_evidence", audited)
+
     def test_apply_does_not_waive_trailer_when_search_failed(self):
         payload = editorial_payload()
         payload["game_name"] = "Jogo sem trailer"
@@ -1283,6 +1336,7 @@ class WorkflowTests(unittest.TestCase):
             )
         self.assertEqual(report["status"], "needs_rework")
         self.assertIn("trailer_youtube", report["blocked_reasons"])
+        self.assertEqual(report["trailer_search_status"], "search_failed")
 
     def test_apply_dry_run_reports_trailer_in_preview(self):
         trailer = {

@@ -404,6 +404,8 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertIn('"media_plan": []', _SYSTEM_PROMPT)
         self.assertIn("needs_trailer=false", _SYSTEM_PROMPT)
         self.assertIn("never invent image URLs", _SYSTEM_PROMPT)
+        self.assertIn("semicolon-delimited game names", _SYSTEM_PROMPT)
+        self.assertIn("game_name triggers deterministic trailer lookup", _SYSTEM_PROMPT)
 
     def test_trailer_without_url_is_normalized_instead_of_invalid(self):
         """Não há busca de trailer nesta chamada: needs_trailer sem URL é
@@ -450,7 +452,12 @@ class EditorialProviderTests(unittest.TestCase):
             self.assertIn('"event": "editorial_normalization"', telemetry)
 
     def test_valid_trailer_is_preserved_and_invalid_true_trailer_retries(self):
-        valid = {**_EDITORIAL, "needs_trailer": True, "trailer_url": "https://video.example/trailer"}
+        valid = {
+            **_EDITORIAL,
+            "game_name": "Example Game",
+            "needs_trailer": True,
+            "trailer_url": "https://video.example/trailer",
+        }
         result = _normalize_output(
             {
                 "batch_id": "batch-x",
@@ -464,7 +471,12 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["editorial"]["trailer_url"], valid["trailer_url"])
         self.assertEqual(result["results"][0]["normalizations"], [])
 
-        invalid = {**_EDITORIAL, "needs_trailer": True, "trailer_url": "not-a-url"}
+        invalid = {
+            **_EDITORIAL,
+            "game_name": "Example Game",
+            "needs_trailer": True,
+            "trailer_url": "not-a-url",
+        }
         retry = _normalize_output(
             {
                 "batch_id": "batch-x",

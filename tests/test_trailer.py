@@ -1,3 +1,4 @@
+import datetime
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,9 @@ from unicornio_editor.trailer import (
     find_game_trailer,
     find_game_trailer_with_status,
     find_cached_game_trailer_with_status,
+    cached_game_trailer_checked_at,
+    trailer_search_evidence_is_recent,
+    trailer_search_query,
     validate_trailer,
 )
 
@@ -43,6 +47,63 @@ class TrailerTests(unittest.TestCase):
 
 
 class TrailerDiscoveryTests(unittest.TestCase):
+    def test_game_name_queries_decode_entities_and_split_semicolon_names(self):
+        self.assertEqual(
+            trailer_search_query("Pokémon &amp; Bros.; Hades II"),
+            "Pokémon & Bros. trailer; Hades II trailer",
+        )
+        with mock.patch("unicornio_editor.trailer._search_youtube", return_value=[]) as search:
+            find_game_trailer_with_status("Pokémon &amp; Bros.")
+        self.assertEqual(search.call_args.args[0], "Pokémon & Bros. trailer")
+
+    def test_absence_evidence_must_be_recent_and_match_provider_and_query(self):
+        now = datetime.datetime(2026, 11, 19, 12, 0, tzinfo=datetime.timezone.utc)
+        evidence = {
+            "query": "Game One trailer; Game Two trailer",
+            "provider": "youtube",
+            "searched_at": (now - datetime.timedelta(minutes=5)).isoformat(),
+            "result": "official_not_found",
+        }
+        self.assertTrue(
+            trailer_search_evidence_is_recent(evidence, "Game One; Game Two", now=now)
+        )
+        stale = {
+            **evidence,
+            "searched_at": (now - datetime.timedelta(hours=6, seconds=1)).isoformat(),
+        }
+        self.assertFalse(
+            trailer_search_evidence_is_recent(stale, "Game One; Game Two", now=now)
+        )
+        wrong_provider = {**evidence, "provider": "fixture"}
+        self.assertFalse(
+            trailer_search_evidence_is_recent(wrong_provider, "Game One; Game Two", now=now)
+        )
+        wrong_query = {**evidence, "query": "Other Game trailer"}
+        self.assertFalse(
+            trailer_search_evidence_is_recent(wrong_query, "Game One; Game Two", now=now)
+        )
+
+    def test_negative_search_evidence_uses_original_cache_time(self):
+        discover = mock.Mock(return_value=(None, "official_not_found"))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            find_cached_game_trailer_with_status(
+                "Game One", root=root, discover=discover
+            )
+            checked_at = cached_game_trailer_checked_at(root, "Game One")
+            self.assertIsNotNone(checked_at)
+            self.assertTrue(
+                trailer_search_evidence_is_recent(
+                    {
+                        "query": trailer_search_query("Game One"),
+                        "provider": "youtube",
+                        "searched_at": checked_at,
+                        "result": "official_not_found",
+                    },
+                    "Game One",
+                )
+            )
+
     def test_verified_trailer_is_reused_from_persistent_cache(self):
         trailer = {"video_id": "abcDEF12345", "title": "Official Trailer"}
         discover = mock.Mock(return_value=(trailer, "found"))
@@ -52,11 +113,26 @@ class TrailerDiscoveryTests(unittest.TestCase):
                 "Example Game", root=root, discover=discover
             )
             second = find_cached_game_trailer_with_status(
-                "Game: Example", root=root, discover=discover
+                "EXAMPLE   GAME", root=root, discover=discover
             )
         self.assertEqual(first, (trailer, "found"))
         self.assertEqual(second, (trailer, "found"))
         discover.assert_called_once()
+
+    def test_trailer_cache_does_not_reuse_negative_result_for_reordered_identity(self):
+        first_discover = mock.Mock(return_value=(None, "official_not_found"))
+        second_discover = mock.Mock(return_value=(None, "search_failed"))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = find_cached_game_trailer_with_status(
+                "Alpha Beta Saga", root=root, discover=first_discover
+            )
+            second = find_cached_game_trailer_with_status(
+                "Saga Beta Alpha", root=root, discover=second_discover
+            )
+        self.assertEqual(first[1], "official_not_found")
+        self.assertEqual(second[1], "search_failed")
+        second_discover.assert_called_once()
 
     def test_search_failure_is_never_cached(self):
         discover = mock.Mock(return_value=(None, "search_failed"))

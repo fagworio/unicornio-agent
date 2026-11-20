@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import json
 from types import SimpleNamespace
@@ -2209,8 +2210,19 @@ def test_failed_historical_attempt_does_not_block_new_complete_strategy_roundtri
     )
     with __import__("tempfile").TemporaryDirectory() as directory:
         from pathlib import Path
+        from unicornio_editor.trailer import (
+            cached_game_trailer_checked_at,
+            find_cached_game_trailer_with_status,
+            trailer_search_query,
+        )
 
-        backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+        root = Path(directory)
+        find_cached_game_trailer_with_status(
+            "Redfall",
+            root=root,
+            discover=lambda *_args, **_kwargs: (None, "official_not_found"),
+        )
+        backup_path = root / "backups" / "42" / "snapshot.json"
         backup_path.parent.mkdir(parents=True)
         backup_path.write_text("{}")
         result = run_pre_publish_checklist(
@@ -2226,9 +2238,9 @@ def test_failed_historical_attempt_does_not_block_new_complete_strategy_roundtri
                 trailer_unavailable=True,
                 trailer_search_evidence={
                     "result": "official_not_found",
-                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "searched_at": cached_game_trailer_checked_at(root, "Redfall"),
                     "provider": "youtube",
-                    "query": "Redfall trailer",
+                    "query": trailer_search_query("Redfall"),
                 },
             ),
             content=content,
@@ -2278,8 +2290,19 @@ def test_serialized_incomplete_coverage_remains_blocked_by_checklist():
     )
     with __import__("tempfile").TemporaryDirectory() as directory:
         from pathlib import Path
+        from unicornio_editor.trailer import (
+            cached_game_trailer_checked_at,
+            find_cached_game_trailer_with_status,
+            trailer_search_query,
+        )
 
-        backup_path = Path(directory) / "backups" / "42" / "snapshot.json"
+        root = Path(directory)
+        find_cached_game_trailer_with_status(
+            "Redfall",
+            root=root,
+            discover=lambda *_args, **_kwargs: (None, "official_not_found"),
+        )
+        backup_path = root / "backups" / "42" / "snapshot.json"
         backup_path.parent.mkdir(parents=True)
         backup_path.write_text("{}")
         result = run_pre_publish_checklist(
@@ -2295,9 +2318,9 @@ def test_serialized_incomplete_coverage_remains_blocked_by_checklist():
                 trailer_unavailable=True,
                 trailer_search_evidence={
                     "result": "official_not_found",
-                    "searched_at": "2026-10-16T12:00:00+00:00",
+                    "searched_at": cached_game_trailer_checked_at(root, "Redfall"),
                     "provider": "youtube",
-                    "query": "Redfall trailer",
+                    "query": trailer_search_query("Redfall"),
                 },
             ),
             content=content,

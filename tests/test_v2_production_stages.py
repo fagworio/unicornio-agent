@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import json
 from dataclasses import replace
@@ -818,8 +819,8 @@ def test_compose_candidate_derives_title_from_seo_when_editorial_title_is_absent
         "trailer_unavailable": True,
         "trailer_search_evidence": {
             "query": "Hollow Knight Silksong trailer",
-            "provider": "controlled-e2e-fixture",
-            "searched_at": "2026-11-04T00:00:00+00:00",
+            "provider": "youtube",
+            "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "result": "official_not_found",
         },
     }
@@ -2641,7 +2642,7 @@ def test_v2_media_to_ready_uses_existing_inline_and_simulated_featured(tmp_path,
     # media-to-READY contract. Keep the integration test deterministic and
     # avoid waiting on a real socket when the network is unavailable.
     monkeypatch.setattr(
-        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        "unicornio_editor.workflow.find_game_trailer_with_status",
         lambda *args, **kwargs: (None, "official_not_found"),
     )
     outcome = PipelineRunner(store, stages, config=config).run_one(

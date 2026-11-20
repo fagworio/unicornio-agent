@@ -30,6 +30,7 @@ from typing import Any
 from .page_assets import extract_page_assets
 from ..list_quality import extract_list_items
 from urllib.parse import unquote, urlparse
+from .text import split_game_names
 
 from .relevance import CONCEPT_WORDS, STOPWORDS, extract_entities, normalize
 
@@ -173,11 +174,13 @@ def editorial_subjects(
         if key not in {normalize(item) for item in values}:
             values.append(normalized)
 
+    game_names = split_game_names(game_name)
+    primary_game_name = game_names[0] if len(game_names) == 1 else None
     post_rows = post_subjects(
         title=title,
         content_html=content_html,
         focus_keyword=focus_keyword,
-        game_name=game_name,
+        game_name=primary_game_name,
         categories=categories,
     )
     is_listicle = len(post_rows) > 1
@@ -198,7 +201,8 @@ def editorial_subjects(
         if normalize(group) in generic_context_entities:
             add(group)
 
-    add(str(game_name or ""))
+    for name in game_names:
+        add(name)
     add(str(focus_keyword or ""))
 
     if not is_listicle:
@@ -209,7 +213,7 @@ def editorial_subjects(
         title=title,
         content_html=content_html,
         focus_keyword=focus_keyword,
-        game_name=game_name,
+        game_name=primary_game_name,
     )
     for entity in sorted(entities, key=lambda item: (-len(item.split()), -len(item))):
         # The complete headline is useful as a query in other paths, but is

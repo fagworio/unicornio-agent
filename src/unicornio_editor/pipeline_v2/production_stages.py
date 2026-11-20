@@ -1388,7 +1388,9 @@ class ProductionComposeStage:
                 listicle=is_listicle,
             ) if placements else existing_html
             content, trailer, trailer_status = compose_final_content(working, self.config, context.get("original_link"), root=self.root)
-            working = attach_trailer_audit(working, trailer, search_status=trailer_status)
+            working = attach_trailer_audit(
+                working, trailer, search_status=trailer_status, root=self.root
+            )
             content = normalize_editorial_dashes(content)
             if media.featured.credit_text:
                 content = append_featured_credit(content, media.featured.credit_text)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import datetime
 import json
 import random
 import threading
@@ -239,9 +240,9 @@ def _automatic_pipeline_editorial() -> dict[str, Any]:
         "game_name": "Hollow Knight Silksong",
         "trailer_unavailable": True,
         "trailer_search_evidence": {
-            "query": "Hollow Knight Silksong trailer official",
-            "provider": "controlled-e2e-fixture",
-            "searched_at": "2026-11-04T00:00:00+00:00",
+            "query": "Hollow Knight Silksong trailer",
+            "provider": "youtube",
+            "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "result": "official_not_found",
         },
     }
@@ -306,7 +307,7 @@ def _automatic_pipeline_config(
 
 def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch):
     monkeypatch.setattr(
-        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        "unicornio_editor.workflow.find_game_trailer_with_status",
         lambda *args, **kwargs: (None, "official_not_found"),
     )
     case = wordpress_e2e_case
@@ -338,7 +339,7 @@ def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_
     import unicornio_editor.media.search as search
 
     monkeypatch.setattr(
-        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        "unicornio_editor.workflow.find_game_trailer_with_status",
         lambda *args, **kwargs: (None, "official_not_found"),
     )
     case = wordpress_e2e_case
@@ -480,7 +481,7 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
     import unicornio_editor.media.search as search
 
     monkeypatch.setattr(
-        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        "unicornio_editor.workflow.find_game_trailer_with_status",
         lambda *args, **kwargs: (None, "official_not_found"),
     )
     case = wordpress_e2e_case
@@ -674,7 +675,7 @@ def test_v1_safe_migration_reaches_ready_and_repeated_apply_is_noop(wordpress_e2
     """V2 untouched -> V1 bridge -> full batch media chain -> READY/idempotent."""
 
     monkeypatch.setattr(
-        "unicornio_editor.workflow.find_cached_game_trailer_with_status",
+        "unicornio_editor.workflow.find_game_trailer_with_status",
         lambda *args, **kwargs: (None, "official_not_found"),
     )
     case = wordpress_e2e_case
@@ -899,9 +900,9 @@ def test_controlled_source_acquisition_composes_checklists_and_commits_ready_med
             "game_name": "Hollow Knight Silksong",
             "trailer_unavailable": True,
             "trailer_search_evidence": {
-                "query": "Hollow Knight Silksong trailer official",
-                "provider": "controlled-e2e-fixture",
-                "searched_at": "2026-10-27T00:00:00+00:00",
+                "query": "Hollow Knight Silksong trailer",
+                "provider": "youtube",
+                "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 "result": "official_not_found",
             },
         }
@@ -1255,9 +1256,9 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
             "trailer_url": None,
             "trailer_unavailable": True,
             "trailer_search_evidence": {
-                "query": "Hollow Knight Silksong trailer official",
-                "provider": "controlled-e2e-fixture",
-                "searched_at": "2026-10-27T00:00:00+00:00",
+                "query": "Hollow Knight Silksong trailer",
+                "provider": "youtube",
+                "searched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 "result": "official_not_found",
             },
         }

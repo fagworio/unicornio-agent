@@ -30,6 +30,7 @@ from .media.vision_gate import (
     verify_image_subject_decision,
     vision_config_ready,
 )
+from .trailer import trailer_search_evidence_matches_cache
 from .wordpress import WordPressClient
 
 _CTA_MARKER = "Confira mais novidades em nosso Portal de"
@@ -1036,8 +1037,11 @@ def run_pre_publish_checklist(
         audited_waiver = (
             unavailable
             and isinstance(evidence, Mapping)
-            and evidence.get("result") == "official_not_found"
-            and bool(evidence.get("searched_at"))
+            and trailer_search_evidence_matches_cache(
+                evidence,
+                game_name,
+                _project_root(backup_path) if backup_path else None,
+            )
         )
         if has_trailer:
             check("trailer_youtube", True, f"game_name={game_name!r}; embed presente")

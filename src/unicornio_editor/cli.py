@@ -1118,6 +1118,16 @@ def _compact_apply(result: dict) -> dict:
         1 for m in media_results if m.get("status") in ("rejected", "blocked")
     )
     images = result.get("images") or {}
+
+    def include_trailer_status(compact: dict) -> dict:
+        status = result.get("trailer_search_status")
+        if status in {
+            "found", "official_not_found", "unverified_candidates",
+            "search_failed", "not_applicable",
+        }:
+            compact["trailer_search_status"] = status
+        return compact
+
     if result.get("status") == "needs_rework":
         reasons: list[dict] = []
         for name in (result.get("blocked_reasons") or []):
@@ -1144,7 +1154,7 @@ def _compact_apply(result: dict) -> dict:
             compact["baseline_enriched"] = True
         if images:
             compact["images"] = images
-        return compact
+        return include_trailer_status(compact)
     if result.get("status") == "uncertain":
         compact = {
             "post_id": post_id,
@@ -1154,7 +1164,7 @@ def _compact_apply(result: dict) -> dict:
         }
         if result.get("baseline_enriched"):
             compact["baseline_enriched"] = True
-        return compact
+        return include_trailer_status(compact)
     if result.get("status") == "partial":
         progress = result.get("partial") or {}
         partial_compact = {
@@ -1166,7 +1176,7 @@ def _compact_apply(result: dict) -> dict:
             partial_compact["partial_kind"] = progress.get("partial_kind", result.get("partial_kind"))
         if progress.get("featured") is not None:
             partial_compact["featured"] = progress.get("featured")
-        return {
+        return include_trailer_status({
             "post_id": post_id,
             "status": "partial",
             "state": result.get("state") or "partial",
@@ -1178,7 +1188,7 @@ def _compact_apply(result: dict) -> dict:
             "no_progress_attempts": result.get("no_progress_attempts", 0),
             "checklist": "pass" if not failed else "fail",
             "failed": failed,
-        }
+        })
     if result.get("status") == "skipped":
         compact = {
             "post_id": post_id,
@@ -1188,7 +1198,7 @@ def _compact_apply(result: dict) -> dict:
         }
         if result.get("baseline_enriched"):
             compact["baseline_enriched"] = True
-        return compact
+        return include_trailer_status(compact)
     if result.get("dry_run"):
         compact = {
             "post_id": post_id,
@@ -1201,7 +1211,7 @@ def _compact_apply(result: dict) -> dict:
             compact["images"] = {"required": images.get("required"), "valid": images.get("valid")}
         if failed:
             compact["failed"] = failed
-        return compact
+        return include_trailer_status(compact)
     compact = {
         "post_id": post_id,
         "status": "ready" if result.get("status") == "ready" else (
@@ -1216,7 +1226,7 @@ def _compact_apply(result: dict) -> dict:
         compact["images"] = {"required": images.get("required"), "valid": images.get("valid")}
     if failed:
         compact["failed"] = failed
-    return compact
+    return include_trailer_status(compact)
 
 
 def preflight_apply_candidate(
@@ -2711,7 +2721,14 @@ def _canary_preflight(
 def _compact_checklist(checklist: dict) -> dict:
     """Checklist failure-only: {status, failed} (detalhes vao para o relatorio)."""
     failed = _failed_items(checklist)
-    return {"status": "pass" if not failed else "fail", "failed": failed}
+    compact = {"status": "pass" if not failed else "fail", "failed": failed}
+    trailer_status = checklist.get("trailer_search_status")
+    if trailer_status in {
+        "found", "official_not_found", "unverified_candidates",
+        "search_failed", "not_applicable",
+    }:
+        compact["trailer_search_status"] = trailer_status
+    return compact
 
 
 _V2_RECOVERY_MONITOR_PROTOCOL = "v2"
@@ -4482,7 +4499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 editorial, config, original_link_of(post), root=args.root
             )
             editorial = attach_trailer_audit(
-                editorial, trailer, search_status=trailer_status
+                editorial, trailer, search_status=trailer_status, root=args.root
             )
             result = run_pre_publish_checklist(
                 post=post,
@@ -4493,6 +4510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client=client,
             )
             result["trailer"] = trailer
+            result["trailer_search_status"] = trailer_status
             if args.compact:
                 result = _compact_checklist(result)
         elif args.command == "publish":

@@ -124,6 +124,115 @@ class BatchContextTests(unittest.TestCase):
                 )
                 self.assertTrue((root / "backups" / str(post_id) / "prepared.json").exists())
 
+    def test_media_resolve_query_decodes_html_entities_in_game_and_title(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-query-entities"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            (batch_dir / "post-7.json").write_text(json.dumps({
+                "post_id": 7,
+                "title": "Pokémon &amp; Bros.",
+                "cleaned_html": "<p>Pokémon &amp; Bros. chega ao console.</p>",
+                "featured": {"action": "provide"},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 7,
+                    "status": "ok",
+                    "editorial": {
+                        "title": "Pokémon &amp; Bros.",
+                        "game_name": "Pokémon &amp; Bros.",
+                        "cleaned_html": None,
+                        "site_relevance": {"decision": "process"},
+                    },
+                }],
+            }
+
+            request = build_media_resolve_batch_input(editorial, root)["posts"][0]
+
+            self.assertEqual(request["subject"], "Pokémon & Bros.")
+            self.assertEqual(request["query"], "Pokémon & Bros.")
+
+    def test_media_resolve_rejects_ambiguous_multi_game_non_list_article(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-separate-game-subjects"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            (batch_dir / "post-8.json").write_text(json.dumps({
+                "post_id": 8,
+                "title": "Pokémon &amp; Bros. and Hades II",
+                "cleaned_html": "<p>Pokémon &amp; Bros. and Hades II.</p>",
+                "featured": {"action": "provide"},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 8,
+                    "status": "ok",
+                    "editorial": {
+                        "title": None,
+                        "game_name": "Pokémon &amp; Bros.; Hades II",
+                        "cleaned_html": None,
+                        "site_relevance": {"decision": "process"},
+                    },
+                }],
+            }
+
+            with self.assertRaisesRegex(
+                BatchError, "multiple game_name subjects require explicit H2 media targets"
+            ):
+                build_media_resolve_batch_input(editorial, root)
+
+    def test_multi_game_listicle_media_targets_each_game_h2_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_id = "batch-multi-game-h2-subjects"
+            batch_dir = root / "work" / "batches" / batch_id
+            batch_dir.mkdir(parents=True)
+            html = (
+                "<h2>1. Game One: aventura</h2><p>Descrição completa do primeiro jogo.</p>"
+                "<h2>2. Game Two: estratégia</h2><p>Descrição completa do segundo jogo.</p>"
+            )
+            (batch_dir / "post-9.json").write_text(json.dumps({
+                "post_id": 9,
+                "title": "2 jogos para aproveitar",
+                "cleaned_html": html,
+                "categories": ["Jogos"],
+                "featured": {"action": "provide"},
+            }), encoding="utf-8")
+            editorial = {
+                "batch_id": batch_id,
+                "results": [{
+                    "post_id": 9,
+                    "status": "ok",
+                    "editorial": {
+                        "title": None,
+                        "game_name": "Game One; Game Two",
+                        "categories": ["Jogos"],
+                        "cleaned_html": None,
+                        "site_relevance": {"decision": "process"},
+                    },
+                }],
+            }
+
+            request = build_media_resolve_batch_input(editorial, root)["posts"][0]
+            targets = request["targets"]
+
+            self.assertEqual(request["subject"], "2 jogos para aproveitar")
+            self.assertEqual(targets[0]["query"], "Game One: aventura 2 jogos para aproveitar")
+            self.assertEqual(targets[1]["query"], "Game Two: estratégia 2 jogos para aproveitar")
+            self.assertEqual(targets[-1]["role"], "featured")
+            self.assertEqual(targets[-1]["query"], "2 jogos para aproveitar")
+
+            editorial["results"][0]["editorial"]["game_name"] = "Game One; Unlisted Game"
+            with self.assertRaisesRegex(
+                BatchError, "multiple game_name subjects require one unique matching H2 per game"
+            ):
+                build_media_resolve_batch_input(editorial, root)
+
     def test_prepare_batch_reports_locked_post_and_continues_sibling(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -364,6 +473,14 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(len(inline_targets), 10)
             self.assertEqual(inline_targets[0]["item_title"], "Jogo 1: experiência distinta")
             self.assertEqual(inline_targets[0]["item_identity"], "root:number-1")
+            self.assertEqual(
+                inline_targets[0]["query"],
+                "Jogo 1: experiência distinta 10 jogos para conhecer",
+            )
+            self.assertEqual(
+                inline_targets[1]["query"],
+                "Jogo 2: experiência distinta 10 jogos para conhecer",
+            )
             self.assertEqual(inline_targets[-1]["item_identity"], "root:number-10")
             self.assertEqual(request["targets"][-1]["role"], "featured")
             normalized = load_media_resolve_batch(Path(result["path"]))

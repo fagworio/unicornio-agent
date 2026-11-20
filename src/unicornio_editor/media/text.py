@@ -38,6 +38,19 @@ def sanitize_title(value):
     return plain_text(value)
 
 
+def split_game_names(value) -> list[str]:
+    """Decode and split the editorial semicolon-delimited game identity field."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in plain_text(value).split(";"):
+        name = " ".join(part.split()).strip()
+        key = name.casefold()
+        if name and key not in seen:
+            names.append(name)
+            seen.add(key)
+    return names
+
+
 _COMMON_SECOND_LEVEL_DOMAINS = {
     "ac", "asn", "co", "com", "edu", "firm", "gen", "go", "gov",
     "id", "ind", "mil", "net", "ne", "or", "org", "pro",
@@ -187,6 +200,6 @@ def dedupe_credit_figures(html):
 
 
 __all__ = [
-    "plain_text", "sanitize_title", "dedupe_credit_figures",
+    "plain_text", "sanitize_title", "split_game_names", "dedupe_credit_figures",
     "source_site_name", "credit_text_with_source_site", "credit_text_with_source_name",
 ]

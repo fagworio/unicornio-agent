@@ -171,7 +171,9 @@ never invent image URLs, captions or provenance; never answer
 needs_retry because of missing inline images, a missing featured image or any
 image count; and return needs_trailer=false with trailer_url=null unless the
 envelope already carries a verified trailer URL. Do fill game_name when the
-subject is a game. Use needs_retry only when the text/SEO facts themselves
+subject is a game. If multiple distinct games are explicitly discussed, return
+semicolon-delimited game names rather than merging their identities; game_name triggers deterministic trailer lookup, and needs_trailer is not a search switch.
+Use needs_retry only when the text/SEO facts themselves
 cannot be handled safely. When decision=process, matched_topics MUST contain
 one or more values copied exactly from relevance_policy.allowed_topics. Do not
 return synonyms, subcategories, translations or derived labels in place of the

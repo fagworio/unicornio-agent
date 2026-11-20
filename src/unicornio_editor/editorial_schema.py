@@ -298,6 +298,8 @@ def validate_editorial(
     game_name = payload["game_name"]
     if game_name is not None and (not isinstance(game_name, str) or not game_name.strip()):
         raise EditorialValidationError("game_name must be null or a non-empty string")
+    if needs_trailer and not game_name:
+        raise EditorialValidationError("needs_trailer requires game_name")
 
     trailer_unavailable = payload.get("trailer_unavailable", False)
     if not isinstance(trailer_unavailable, bool):

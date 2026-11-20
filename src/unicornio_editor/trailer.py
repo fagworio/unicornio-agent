@@ -12,18 +12,25 @@ Two layers:
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 from pathlib import Path
-from html import escape
+from html import escape, unescape
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
+from .media.text import plain_text, split_game_names
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def trailer_search_query(game_name: str) -> str:
+    """Build a plain-text deterministic trailer query from the game identity."""
+    return "; ".join(f"{name} trailer" for name in split_game_names(game_name))
 
 
 class TrailerError(ValueError):
@@ -113,8 +120,8 @@ def find_game_trailer_with_status(
     """Discover a trailer and distinguish absence from a failed search."""
     if not isinstance(game_name, str) or not game_name.strip():
         raise TrailerError("game_name is required")
-    name = game_name.strip()
-    candidates = _search_youtube(f"{name} trailer", limit=max_candidates, timeout=timeout)
+    name = " ".join(unescape(game_name).split())
+    candidates = _search_youtube(trailer_search_query(name), limit=max_candidates, timeout=timeout)
     if candidates is None:
         return None, "search_failed"
     unverified_candidates = False
@@ -160,7 +167,11 @@ def find_cached_game_trailer_with_status(
     key = _cache_key(game_name)
     cache = _read_trailer_cache(root)
     entry = cache.get(key)
-    if isinstance(entry, dict) and _cache_fresh(entry):
+    if (
+        isinstance(entry, dict)
+        and _cache_entry_matches_game(entry, game_name)
+        and _cache_fresh(entry)
+    ):
         if entry.get("status") == "found" and isinstance(entry.get("trailer"), dict):
             return {str(k): str(v) for k, v in entry["trailer"].items()}, "found"
         if entry.get("status") == "official_not_found":
@@ -170,6 +181,8 @@ def find_cached_game_trailer_with_status(
         cache[key] = {
             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "status": status,
+            "provider": "youtube",
+            "query": trailer_search_query(game_name),
             "trailer": trailer,
         }
         _write_trailer_cache(root, cache)
@@ -177,7 +190,18 @@ def find_cached_game_trailer_with_status(
 
 
 def _cache_key(game_name: str) -> str:
-    return "-".join(sorted(_normalize(game_name))) or "unknown"
+    tokens = re.findall(r"[^\W_]+", plain_text(game_name).casefold(), flags=re.UNICODE)
+    canonical = " ".join(tokens)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else "unknown"
+
+
+def _cache_entry_matches_game(entry: Any, game_name: str) -> bool:
+    return (
+        isinstance(entry, dict)
+        and str(entry.get("provider") or "").strip().casefold() == "youtube"
+        and str(entry.get("query") or "").strip().casefold()
+        == trailer_search_query(game_name).casefold()
+    )
 
 
 def _trailer_cache_path(root: Path) -> Path:
@@ -210,6 +234,121 @@ def _cache_fresh(entry: dict) -> bool:
         return False
     ttl = _TRAILER_FOUND_TTL if entry.get("status") == "found" else _TRAILER_ABSENT_TTL
     return checked + ttl > datetime.now(timezone.utc)
+
+
+def cached_game_trailer_checked_at(root: Path | None, game_name: str) -> str | None:
+    """Return the persisted timestamp for the current negative search record."""
+    if root is None or not isinstance(game_name, str) or not game_name.strip():
+        return None
+    cache = _read_trailer_cache(Path(root))
+    checked_times: list[datetime] = []
+    for name in split_game_names(game_name):
+        entry = cache.get(_cache_key(name))
+        if (
+            not isinstance(entry, dict)
+            or not _cache_entry_matches_game(entry, name)
+            or entry.get("status") != "official_not_found"
+        ):
+            return None
+        try:
+            checked = datetime.fromisoformat(
+                str(entry.get("checked_at") or "").replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return None
+        if checked.tzinfo is None:
+            return None
+        checked_times.append(checked.astimezone(timezone.utc))
+    if not checked_times:
+        return None
+    return min(checked_times).isoformat(timespec="seconds")
+
+
+def trailer_search_evidence_is_recent(
+    evidence: Mapping[str, Any] | None,
+    game_name: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Validate a current, query-bound YouTube absence record for the READY gate."""
+    if not isinstance(evidence, Mapping) or not isinstance(game_name, str) or not game_name.strip():
+        return False
+    if (
+        str(evidence.get("provider") or "").strip().casefold() != "youtube"
+        or evidence.get("result") != "official_not_found"
+    ):
+        return False
+    expected_query = trailer_search_query(game_name).casefold()
+    recorded_query = " ".join(unescape(str(evidence.get("query") or "")).split()).casefold()
+    if not expected_query or recorded_query != expected_query:
+        return False
+    try:
+        checked = datetime.fromisoformat(
+            str(evidence.get("searched_at") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False
+    if checked.tzinfo is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return False
+    age = current.astimezone(timezone.utc) - checked.astimezone(timezone.utc)
+    return timedelta(0) <= age <= _TRAILER_ABSENT_TTL
+
+
+def trailer_search_evidence_matches_cache(
+    evidence: Mapping[str, Any] | None,
+    game_name: str,
+    root: Path | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Require a recent editorial waiver to match every persisted negative search."""
+    if (
+        root is None
+        or not isinstance(evidence, Mapping)
+        or not trailer_search_evidence_is_recent(evidence, game_name, now=now)
+    ):
+        return False
+    names = split_game_names(game_name)
+    if not names:
+        return False
+    cache = _read_trailer_cache(Path(root))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return False
+    checked_times: list[datetime] = []
+    for name in names:
+        entry = cache.get(_cache_key(name))
+        if (
+            not isinstance(entry, dict)
+            or not _cache_entry_matches_game(entry, name)
+            or entry.get("status") != "official_not_found"
+        ):
+            return False
+        try:
+            checked = datetime.fromisoformat(
+                str(entry.get("checked_at") or "").replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return False
+        if checked.tzinfo is None:
+            return False
+        checked = checked.astimezone(timezone.utc)
+        age = current.astimezone(timezone.utc) - checked
+        if not timedelta(0) <= age <= _TRAILER_ABSENT_TTL:
+            return False
+        checked_times.append(checked)
+    try:
+        evidence_checked = datetime.fromisoformat(
+            str(evidence.get("searched_at") or "").replace("Z", "+00:00")
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if evidence_checked.tzinfo is None:
+        return False
+    return evidence_checked.astimezone(timezone.utc) == min(checked_times)
 
 
 def build_trailer_html(trailer: Mapping[str, Any]) -> str:
