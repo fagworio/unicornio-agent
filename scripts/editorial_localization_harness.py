@@ -34,7 +34,11 @@ def main() -> int:
     from unicornio_editor.batch import load_editorial_batch
     from unicornio_editor.config import editorial_price_per_1m
     from unicornio_editor.content_quality import looks_like_operational_envelope, word_count
-    from unicornio_editor.editorial_provider import EditorialProviderError, generate_editorial_batch
+    from unicornio_editor.editorial_provider import (
+        EditorialProviderError,
+        complete_editorial_backoff,
+        generate_editorial_batch,
+    )
     from unicornio_editor.editorial_schema import EditorialValidationError, validate_editorial
     from unicornio_editor.language import editorial_language_report
     from unicornio_editor.observability import usage_cost_usd
@@ -61,6 +65,7 @@ def main() -> int:
             min_confidence=args.min_confidence,
             root=output_dir,
             output_path=output_dir / "editorial.output.json",
+            defer_backoff_clear=True,
         )
         batch = load_editorial_batch(output_dir / "editorial.output.json")
         input_posts = {
@@ -145,9 +150,12 @@ def main() -> int:
                 "estimated_cost_usd": estimated_cost,
             },
         })
+        technical_passed = all(item.get("technical_pass") for item in checks)
         _write_json(output_dir / "diagnostic.json", diagnostic)
         print(json.dumps(diagnostic, ensure_ascii=False, indent=2))
-        return 0 if all(item.get("technical_pass") for item in checks) else 2
+        if technical_passed:
+            complete_editorial_backoff(output_dir, str(batch["batch_id"]))
+        return 0 if technical_passed else 2
     except (EditorialProviderError, OSError, ValueError, json.JSONDecodeError) as exc:
         diagnostic.update({"status": "error", "error": str(exc)})
         _write_json(output_dir / "diagnostic.json", diagnostic)

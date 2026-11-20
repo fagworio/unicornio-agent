@@ -1,11 +1,15 @@
 import json
+import hashlib
 import socket
 import tempfile
 import threading
 import unittest
+from email.message import Message
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.request import urlopen as real_urlopen
 from unittest import mock
 
 from unicornio_editor.editorial_provider import (
@@ -15,6 +19,7 @@ from unicornio_editor.editorial_provider import (
     EditorialProviderError,
     generate_editorial_batch,
 )
+from unicornio_editor.retry_policy import editorial_backoff_status, record_editorial_backoff
 
 _EDITORIAL = {
     "site_relevance": {
@@ -193,6 +198,282 @@ class EditorialProviderTests(unittest.TestCase):
             source, api_key=api_key, base_url=self.base, model="editorial-test", root=root, **kwargs
         )
 
+    def test_active_rate_limit_backoff_blocks_provider_call_for_same_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_editorial_backoff(
+                root,
+                batch_id="editorial-test",
+                http_status=429,
+                retry_after_seconds=300,
+                failure_class="rate_limited",
+            )
+            headers = Message()
+            headers["Retry-After"] = "90"
+            rate_limited = HTTPError(
+                self.base, 429, "Too Many Requests", headers, BytesIO(b"")
+            )
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", side_effect=rate_limited
+            ) as provider, self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+
+        provider.assert_not_called()
+        self.assertEqual(raised.exception.failure_class, "rate_limited")
+        self.assertEqual(raised.exception.http_status, 429)
+        self.assertIsNotNone(raised.exception.retry_after_seconds)
+        self.assertGreater(int(raised.exception.retry_after_seconds or 0), 0)
+
+    def test_expired_rate_limit_backoff_requires_resuming_original_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_editorial_backoff(
+                root,
+                batch_id="prior-batch",
+                http_status=429,
+                retry_after_seconds=0,
+                failure_class="rate_limited",
+            )
+            with mock.patch("unicornio_editor.editorial_provider.urlopen") as provider, self.assertRaises(
+                EditorialProviderError
+            ) as raised:
+                self._run(root)
+
+        provider.assert_not_called()
+        self.assertEqual(raised.exception.failure_class, "batch_resume_required")
+        self.assertEqual(raised.exception.resume_batch_id, "prior-batch")
+
+    def test_matching_cached_output_does_not_bypass_active_backoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            self.assertTrue(Path(first["output"]).exists())
+            record_editorial_backoff(
+                root,
+                batch_id="editorial-test",
+                http_status=429,
+                retry_after_seconds=300,
+                failure_class="rate_limited",
+            )
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", wraps=real_urlopen
+            ) as provider, self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+            status = editorial_backoff_status(root)
+
+        provider.assert_not_called()
+        self.assertEqual(raised.exception.failure_class, "rate_limited")
+        self.assertTrue(status["active"])
+
+    def test_malformed_cached_output_id_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            output_path = Path(first["output"])
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            payload["results"][0]["post_id"] = "not-an-id"
+            output_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+
+        self.assertEqual(raised.exception.failure_class, "batch_output_invalid")
+
+    def test_non_object_cached_result_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            output_path = Path(first["output"])
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            payload["results"] = [None]
+            output_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+
+        self.assertEqual(raised.exception.failure_class, "batch_output_invalid")
+
+    def test_invalid_cached_output_error_does_not_disclose_destination_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private-output-path-marker"
+            root.mkdir()
+            first = self._run(root)
+            Path(first["output"]).write_text("not-json", encoding="utf-8")
+            with self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+
+        self.assertEqual(raised.exception.failure_class, "batch_output_invalid")
+        self.assertNotIn("private-output-path-marker", str(raised.exception))
+
+    def test_concurrent_editorial_output_writes_do_not_collide(self):
+        from unicornio_editor.editorial_provider import _write_json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "editorial.output.json"
+            barrier = threading.Barrier(2)
+            original_replace = Path.replace
+            failures = []
+
+            def synchronized_replace(source, target):
+                if source.parent == root and source.name.startswith(".editorial.output.json."):
+                    barrier.wait(timeout=5)
+                return original_replace(source, target)
+
+            def writer(value):
+                try:
+                    _write_json(output, {"value": value, "padding": "x" * 4096})
+                except Exception as exc:  # noqa: BLE001 - captured for the assertion
+                    failures.append(exc)
+
+            with mock.patch.object(Path, "replace", new=synchronized_replace):
+                threads = [threading.Thread(target=writer, args=(value,)) for value in (1, 2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertIn(json.loads(output.read_text(encoding="utf-8"))["value"], {1, 2})
+
+    def test_concurrent_same_batch_calls_provider_once_then_reuses_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_provider_entered = threading.Event()
+            second_provider_entered = threading.Event()
+            release_first = threading.Event()
+            second_started = threading.Event()
+            count_lock = threading.Lock()
+            provider_calls = 0
+            results = []
+            failures = []
+
+            def gated_urlopen(request, timeout):
+                nonlocal provider_calls
+                with count_lock:
+                    provider_calls += 1
+                    call_number = provider_calls
+                if call_number == 1:
+                    first_provider_entered.set()
+                    if not release_first.wait(timeout=5):
+                        raise TimeoutError("concurrent provider test was not released")
+                else:
+                    second_provider_entered.set()
+                return real_urlopen(request, timeout=timeout)
+
+            def run_batch(started=None):
+                if started is not None:
+                    started.set()
+                try:
+                    results.append(self._run(root))
+                except Exception as exc:  # noqa: BLE001 - assert thread failures below
+                    failures.append(exc)
+
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", side_effect=gated_urlopen
+            ):
+                first = threading.Thread(target=run_batch)
+                first.start()
+                self.assertTrue(first_provider_entered.wait(timeout=5))
+                second = threading.Thread(target=run_batch, args=(second_started,))
+                second.start()
+                self.assertTrue(second_started.wait(timeout=5))
+                duplicate_request_started = second_provider_entered.wait(timeout=0.5)
+                release_first.set()
+                first.join(timeout=10)
+                second.join(timeout=10)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertFalse(duplicate_request_started)
+        self.assertEqual(failures, [])
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(sorted(item["provider_requests"] for item in results), [0, 1])
+
+    def test_successful_retry_clears_expired_batch_backoff(self):
+        from unicornio_editor.editorial_provider import complete_editorial_backoff
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_editorial_backoff(
+                root,
+                batch_id="editorial-test",
+                http_status=429,
+                retry_after_seconds=0,
+                failure_class="rate_limited",
+            )
+
+            result = self._run(root)
+            state_after_generate = editorial_backoff_status(root)
+            complete_editorial_backoff(root, "editorial-test")
+
+            self.assertEqual(result["provider_requests"], 1)
+            self.assertEqual(state_after_generate["status"], "expired")
+            self.assertEqual(editorial_backoff_status(root)["status"], "none")
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"event": "editorial_provider_retry_completed"', telemetry)
+
+    def test_backoff_finalization_can_be_deferred_until_cli_success(self):
+        from unicornio_editor.editorial_provider import complete_editorial_backoff
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_editorial_backoff(
+                root,
+                batch_id="editorial-test",
+                http_status=429,
+                retry_after_seconds=0,
+                failure_class="rate_limited",
+            )
+
+            result = self._run(root)
+            state_after_generate = editorial_backoff_status(root)
+            complete_editorial_backoff(root, "editorial-test")
+            state_after_finalize = editorial_backoff_status(root)
+
+        self.assertEqual(result["provider_requests"], 1)
+        self.assertEqual(state_after_generate["status"], "expired")
+        self.assertEqual(state_after_finalize["status"], "none")
+
+    def test_retry_marker_remains_until_required_media_input_is_written(self):
+        from unicornio_editor.batch import BatchError
+        from unicornio_editor.editorial_provider import complete_editorial_backoff
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_dir = root / "work" / "batches" / "editorial-test"
+            batch_dir.mkdir(parents=True)
+            for post_id in (1, 2):
+                (batch_dir / f"post-{post_id}.json").write_text(
+                    json.dumps({"post_id": post_id}), encoding="utf-8"
+                )
+            record_editorial_backoff(
+                root,
+                batch_id="editorial-test",
+                http_status=429,
+                retry_after_seconds=0,
+                failure_class="rate_limited",
+            )
+            with mock.patch(
+                "unicornio_editor.editorial_provider.build_media_resolve_batch_input",
+                side_effect=BatchError("media input write failed"),
+            ), self.assertRaises(BatchError):
+                self._run(root, emit_media_input=True)
+            state = editorial_backoff_status(root)
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", wraps=real_urlopen
+            ) as provider:
+                resumed = self._run(root, emit_media_input=True)
+            state_after_resume = editorial_backoff_status(root)
+            complete_editorial_backoff(root, "editorial-test")
+            final_state = editorial_backoff_status(root)
+
+        self.assertEqual(state["status"], "expired")
+        self.assertEqual(state["batch_id"], "editorial-test")
+        provider.assert_not_called()
+        self.assertEqual(resumed["provider_requests"], 0)
+        self.assertEqual(state_after_resume["status"], "expired")
+        self.assertEqual(final_state["status"], "none")
+
     def test_generates_one_provider_request_and_preserves_partial_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -204,6 +485,155 @@ class EditorialProviderTests(unittest.TestCase):
             self.assertEqual(payload["results"][1]["status"], "needs_retry")
             telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
             self.assertIn('"event": "editorial_model_request"', telemetry)
+
+    def test_repeated_generation_reuses_matching_output_without_provider_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", wraps=real_urlopen
+            ) as provider:
+                second = self._run(root)
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+
+        provider.assert_not_called()
+        self.assertEqual(first["provider_requests"], 1)
+        self.assertEqual(second["provider_requests"], 0)
+        self.assertTrue(second["cached_output"])
+        self.assertEqual(first["output"], second["output"])
+        self.assertIn('"event": "editorial_output_reused"', telemetry)
+
+    def test_generated_output_has_a_separate_integrity_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self._run(root)
+            output = Path(result["output"])
+            integrity = output.with_name(f"{output.name}.integrity.json")
+
+            self.assertTrue(integrity.is_file())
+            manifest = json.loads(integrity.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["batch_id"], "editorial-test")
+            self.assertIn("output_sha256", manifest)
+
+    def test_modified_cached_output_fails_integrity_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            output = Path(first["output"])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            payload["results"][0]["editorial"]["title"] = "Altered cached output"
+            output.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", wraps=real_urlopen
+            ) as provider, self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+
+        provider.assert_not_called()
+        self.assertEqual(raised.exception.failure_class, "batch_output_conflict")
+
+    def test_matching_output_is_reused_without_provider_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+
+            reused = generate_editorial_batch(
+                root / "editorial.input.json",
+                api_key="",
+                base_url="",
+                model="",
+                root=root,
+            )
+
+        self.assertEqual(reused["output"], first["output"])
+        self.assertEqual(reused["provider_requests"], 0)
+
+    def test_existing_output_is_not_reused_for_changed_input_with_same_batch_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._run(root)
+            self.assertTrue(Path(first["output"]).exists())
+            input_path = root / "editorial.input.json"
+            changed = json.loads(input_path.read_text(encoding="utf-8"))
+            changed["posts"][0]["cleaned_html"] = "<p>Different content</p>"
+            input_path.write_text(json.dumps(changed), encoding="utf-8")
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", wraps=real_urlopen
+            ) as provider, self.assertRaises(EditorialProviderError) as raised:
+                generate_editorial_batch(
+                    input_path,
+                    api_key="k",
+                    base_url=self.base,
+                    model="editorial-test",
+                    root=root,
+                )
+
+        provider.assert_not_called()
+        self.assertEqual(raised.exception.failure_class, "batch_output_conflict")
+
+    def test_invalid_input_error_does_not_disclose_local_path_or_parser_detail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private_dir = Path(directory) / "private-input-path-marker"
+            private_dir.mkdir()
+            input_path = private_dir / "editorial.input.json"
+            input_path.write_text('{"secret-ish":"bad-json"', encoding="utf-8")
+
+            with self.assertRaises(EditorialProviderError) as raised:
+                generate_editorial_batch(
+                    input_path,
+                    api_key="k",
+                    base_url=self.base,
+                    model="editorial-test",
+                    root=private_dir,
+                )
+
+        self.assertEqual(raised.exception.failure_class, "request_input_invalid")
+        self.assertNotIn("private-input-path-marker", str(raised.exception))
+        self.assertNotIn("Expecting", str(raised.exception))
+
+    def test_input_digest_matches_the_exact_bytes_sent_to_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "editorial.input.json"
+            original_payload = {
+                "batch_id": "editorial-test",
+                "posts": [
+                    {"post_id": 1, "cleaned_html": "<p>Original source.</p>"},
+                    {"post_id": 2, "cleaned_html": "<p>Second source.</p>"},
+                ],
+            }
+            changed_payload = {
+                "batch_id": "editorial-test",
+                "posts": [
+                    {"post_id": 1, "cleaned_html": "<p>Changed source snapshot.</p>"},
+                    {"post_id": 2, "cleaned_html": "<p>Second source.</p>"},
+                ],
+            }
+            input_path.write_text(json.dumps(original_payload), encoding="utf-8")
+            changed_bytes = json.dumps(changed_payload).encode("utf-8")
+            original_read_bytes = Path.read_bytes
+
+            def snapshot_bytes(path):
+                if path == input_path:
+                    return changed_bytes
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", new=snapshot_bytes):
+                result = generate_editorial_batch(
+                    input_path,
+                    api_key="k",
+                    base_url=self.base,
+                    model="editorial-test",
+                    root=root,
+                )
+            output_payload = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
+            request_content = EditorialHandler.calls[-1]["messages"][1]["content"]
+
+        self.assertEqual(
+            output_payload["source_input_sha256"],
+            hashlib.sha256(changed_bytes).hexdigest(),
+        )
+        self.assertIn("Changed source snapshot", request_content)
+        self.assertNotIn("Original source", request_content)
 
     def test_v1_generation_emits_exact_media_request_from_prepared_facts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -373,7 +803,10 @@ class EditorialProviderTests(unittest.TestCase):
                     "unicornio_editor.editorial_provider.urlopen", side_effect=error
                 ), self.assertRaises(EditorialProviderError) as raised:
                     self._run(Path(directory))
-                self.assertEqual(raised.exception.failure_class, "api_http_error")
+                self.assertEqual(
+                    raised.exception.failure_class,
+                    "rate_limited" if status == 429 else "api_http_error",
+                )
                 self.assertEqual(raised.exception.http_status, status)
                 self.assertIs(raised.exception.retryable, retryable)
 
@@ -385,6 +818,83 @@ class EditorialProviderTests(unittest.TestCase):
                 self._run(Path(directory))
             self.assertEqual(raised.exception.failure_class, "timeout")
             self.assertTrue(raised.exception.retryable)
+
+    def test_provider_429_exposes_retry_after_without_sleeping(self):
+        headers = Message()
+        headers["Retry-After"] = "90"
+        error = HTTPError(self.base, 429, "Too Many Requests", headers, BytesIO(b""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", side_effect=error
+            ), self.assertRaises(EditorialProviderError) as raised:
+                self._run(root)
+            backoff = editorial_backoff_status(root)
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+
+        self.assertEqual(raised.exception.failure_class, "rate_limited")
+        self.assertEqual(raised.exception.http_status, 429)
+        self.assertEqual(raised.exception.retry_after_seconds, 90)
+        self.assertTrue(backoff["active"])
+        self.assertEqual(backoff["retry_after_seconds"], 90)
+        self.assertEqual(backoff["batch_id"], "editorial-test")
+        self.assertIn('"event": "editorial_provider_rate_limited"', telemetry)
+        self.assertNotIn("<p>A</p>", telemetry)
+
+    def test_provider_429_persists_backoff_when_root_is_omitted(self):
+        headers = Message()
+        headers["Retry-After"] = "45"
+        error = HTTPError(self.base, 429, "Too Many Requests", headers, BytesIO(b""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "editorial.input.json"
+            input_path.write_text(json.dumps({
+                "batch_id": "editorial-test",
+                "posts": [
+                    {"post_id": 1, "cleaned_html": "<p>A</p>"},
+                    {"post_id": 2, "cleaned_html": "<p>B</p>"},
+                ],
+            }), encoding="utf-8")
+            with mock.patch(
+                "unicornio_editor.editorial_provider.urlopen", side_effect=error
+            ), self.assertRaises(EditorialProviderError):
+                generate_editorial_batch(
+                    input_path,
+                    api_key="k",
+                    base_url=self.base,
+                    model="editorial-test",
+                )
+            backoff = editorial_backoff_status(root)
+
+        self.assertTrue(backoff["active"])
+        self.assertEqual(backoff["batch_id"], "editorial-test")
+        self.assertEqual(backoff["retry_after_seconds"], 45)
+
+    def test_hermes_429_persists_retry_after_for_the_original_batch(self):
+        from unicornio_editor.ai_provider import AIProviderError
+
+        error = AIProviderError(
+            "Hermes recebeu HTTP 429",
+            failure_class="rate_limited",
+            retryable=True,
+            metadata={"http_status": 429, "retry_after_seconds": 75},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch(
+                "unicornio_editor.editorial_provider.hermes_command_available",
+                return_value=True,
+            ), mock.patch(
+                "unicornio_editor.editorial_provider.call_hermes_oneshot",
+                side_effect=error,
+            ), self.assertRaises(EditorialProviderError) as raised:
+                self._run(root, provider="hermes", hermes_command="hermes")
+            backoff = editorial_backoff_status(root)
+
+        self.assertEqual(raised.exception.failure_class, "rate_limited")
+        self.assertEqual(raised.exception.retry_after_seconds, 75)
+        self.assertTrue(backoff["active"])
+        self.assertEqual(backoff["batch_id"], "editorial-test")
 
     def test_invalid_http_response_body_is_classified(self):
         with tempfile.TemporaryDirectory() as directory:

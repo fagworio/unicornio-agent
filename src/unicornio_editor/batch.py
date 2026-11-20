@@ -37,7 +37,7 @@ MEDIA_BATCH_REPLACEMENT_RESERVE = 2
 MEDIA_BATCH_MAX_INLINE_TARGETS = 12
 _BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _EDITORIAL_FAILURE_CLASSES = frozenset({
-    "api_http_error", "timeout", "transport_error", "invalid_response",
+    "api_http_error", "rate_limited", "timeout", "transport_error", "invalid_response",
     "editorial_schema_invalid", "editorial_content_retry",
     "request_input_invalid", "configuration_error",
 })

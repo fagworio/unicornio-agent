@@ -44,6 +44,37 @@ continuam sendo erros explícitos. Tempos por página, hidratação, featured,
 filtragem e lock/leitura do ledger são registrados em `work/telemetry.jsonl`,
 sem conteúdo de post ou identificadores de owner.
 
+## Limite de taxa e retomada editorial
+
+HTTP 429 do provider editorial é devolvido como erro JSON com `error_code`,
+`status_code`, `retry_after_seconds`, `retry_at` e `resume_batch_id`. O cabeçalho
+`Retry-After` aceita delay-seconds ou HTTP-date, é limitado a sete dias e não
+causa `sleep` dentro do processo. Sem valor utilizável, o cooldown local é de
+cinco minutos. O estado é persistido atomicamente em
+`work/editorial-provider-backoff.json`; estado inválido bloqueia chamadas novas.
+Admissão, leitura do cache, chamada ao provider e gravação do output são
+serializadas entre processos; uma segunda execução do mesmo batch reutiliza a
+saída validada em vez de duplicar a chamada.
+
+Após o vencimento, retome exatamente
+`work/batches/<resume_batch_id>/editorial.input.json`. Enquanto esse batch não
+for resolvido, outro batch recebe `batch_resume_required`. Uma saída editorial
+existente só é reutilizada quando o hash da entrada, o `batch_id` e os IDs
+coincidem e o sidecar `editorial.output.json.integrity.json` confirma o hash dos
+bytes da saída; saída incompatível resulta em `batch_output_conflict`, sem
+sobrescrita ou nova chamada ao provider. O sidecar detecta corrupção/edição
+acidental, mas não é uma assinatura contra um processo com permissão de escrita
+no mesmo diretório. A telemetria registra `editorial_provider_rate_limited`,
+`editorial_provider_retry_completed` e `editorial_output_reused`, sem conteúdo
+editorial. O CLI mantém o marcador expirado até registrar e imprimir a resposta
+estruturada; se o registro ou a saída falhar, a próxima execução deve retomar o
+mesmo batch e reutilizar os artefatos persistidos. Chamadores da API Python
+também mantêm o marcador por padrão e devem chamar
+`complete_editorial_backoff(root, batch_id)` somente depois de consumir os
+artefatos necessários com sucesso. O JSON de backoff é o estado autoritativo;
+eventos append-only de telemetria são best-effort e nunca autorizam repetir o
+provider ou limpar um marcador inválido.
+
 ## Smoke test
 
 ### Paridade do ambiente de testes

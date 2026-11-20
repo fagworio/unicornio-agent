@@ -45,6 +45,8 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertIn("vision_analyze", content)
         self.assertIn("lock_blocked significa bloqueio individual", content)
         self.assertIn("continue com os demais cards elegíveis", content)
+        self.assertIn("retry_after_seconds", content)
+        self.assertIn("resume_batch_id", content)
 
     def test_publish_cron_is_fail_closed_when_publication_is_disabled(self):
         script = ROOT / "hermes" / "publish-cron.sh"
@@ -605,6 +607,8 @@ jobs_file.write_text(json.dumps(data), encoding="utf-8")
         self.assertIn("content_not_required", content)
         self.assertIn("`lock_blocked` significa bloqueio individual", content)
         self.assertIn("continue com os demais cards elegíveis", content)
+        self.assertIn("retry_after_seconds", content)
+        self.assertIn("editorial-provider-backoff.json", content)
 
     def test_cost_guard_also_guards_context_volume(self):
         # Dolar nao percebe regressao de contexto: o guard tambem mede requests,

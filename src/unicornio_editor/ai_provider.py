@@ -9,12 +9,14 @@ provider as Hermes without copying credentials into Unicornio.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from .retry_policy import parse_retry_after_seconds
 
 
 class AIProviderError(RuntimeError):
@@ -143,11 +145,29 @@ def call_hermes_oneshot(
         output = (completed.stdout or "").strip()
         if completed.returncode != 0:
             detail = (completed.stderr or output or "processo Hermes terminou com erro").strip()
+            status_match = re.search(
+                r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|"
+                r"\bstatus(?:\s+code)?\s*[:=]\s*(\d{3})\b|"
+                r"\b(429)\s+too many requests\b",
+                detail,
+                re.IGNORECASE,
+            )
+            http_status = int(next(value for value in status_match.groups() if value)) if status_match else None
+            retry_header = re.search(r"(?im)^\s*retry-after\s*:\s*(.*?)\s*$", detail)
+            retry_after_seconds = parse_retry_after_seconds(
+                retry_header.group(1) if retry_header else None
+            )
+            rate_limited = http_status == 429
+            metadata = dict(invocation)
+            if http_status is not None:
+                metadata["http_status"] = http_status
+            if retry_after_seconds is not None:
+                metadata["retry_after_seconds"] = retry_after_seconds
             raise AIProviderError(
-                f"Hermes terminou com código {completed.returncode}: {detail[:500]}",
-                failure_class="provider_error",
+                f"Hermes terminou com código {completed.returncode}",
+                failure_class="rate_limited" if rate_limited else "provider_error",
                 retryable=True,
-                metadata=invocation,
+                metadata=metadata,
             )
         if not output:
             raise AIProviderError(

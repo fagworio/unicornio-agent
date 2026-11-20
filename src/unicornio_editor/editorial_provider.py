@@ -9,10 +9,14 @@ an output envelope that ``apply-batch`` can consume.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import socket
+import tempfile
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -22,9 +26,17 @@ from .batch import (
     BatchError,
     batch_directory,
     build_media_resolve_batch_input,
+    load_editorial_batch,
     validate_batch_id,
 )
 from .editorial_schema import EditorialValidationError, validate_editorial
+from .retry_policy import (
+    clear_expired_editorial_backoff,
+    editorial_backoff_status,
+    editorial_provider_request_lock,
+    parse_retry_after_seconds,
+    record_editorial_backoff,
+)
 
 
 class EditorialProviderError(RuntimeError):
@@ -37,11 +49,17 @@ class EditorialProviderError(RuntimeError):
         failure_class: str = "editorial_schema_invalid",
         retryable: bool = True,
         http_status: int | None = None,
+        retry_after_seconds: int | None = None,
+        retry_at: str | None = None,
+        resume_batch_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.failure_class = failure_class
         self.retryable = bool(retryable)
         self.http_status = http_status
+        self.retry_after_seconds = retry_after_seconds
+        self.retry_at = retry_at
+        self.resume_batch_id = resume_batch_id
 
 
 _RELEVANCE_SCHEMA = {
@@ -192,13 +210,14 @@ uncertainty. When localization.required is false, keep the token-economy
 contract: those fields may be null and valid existing Portuguese fields may be
 preserved by the pipeline."""
 
-def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
+def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]], str]:
     source = Path(path)
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        source_bytes = source.read_bytes()
+        payload = json.loads(source_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EditorialProviderError(
-            f"entrada editorial invalida: {source}: {exc}",
+            "entrada editorial ausente ou JSON inválido",
             failure_class="request_input_invalid",
             retryable=False,
         ) from exc
@@ -218,7 +237,7 @@ def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]]]:
         if post_id in ids:
             raise EditorialProviderError(f"post_id duplicado na entrada editorial: {post_id}", failure_class="request_input_invalid", retryable=False)
         ids.add(post_id)
-    return batch_id, posts
+    return batch_id, posts, hashlib.sha256(source_bytes).hexdigest()
 
 
 def _response_text(body: dict[str, Any]) -> str:
@@ -430,12 +449,238 @@ def _normalize_output(
 
 def _write_json(path: Path, payload: Any) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return str(path)
 
 
+def _editorial_output_integrity_path(destination: Path) -> Path:
+    return destination.with_name(f"{destination.name}.integrity.json")
+
+
+def _write_editorial_output_integrity(
+    destination: Path,
+    *,
+    batch_id: str,
+    input_sha256: str,
+) -> None:
+    output_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+    _write_json(
+        _editorial_output_integrity_path(destination),
+        {
+            "schema_version": 1,
+            "batch_id": batch_id,
+            "source_input_sha256": input_sha256,
+            "output_sha256": output_sha256,
+        },
+    )
+
+
+def _require_editorial_backoff_batch(root: Path | str | None, batch_id: str) -> None:
+    if root is None:
+        return
+    state = editorial_backoff_status(root)
+    if state.get("status") == "none":
+        return
+    if state.get("status") == "invalid":
+        raise EditorialProviderError(
+            "marcador de cooldown editorial inválido; retomar está bloqueado",
+            failure_class="retry_state_invalid",
+            retryable=False,
+        )
+    resume_batch_id = str(state.get("batch_id") or "")
+    if resume_batch_id != batch_id:
+        raise EditorialProviderError(
+            f"retome o batch editorial {resume_batch_id} antes de iniciar outro",
+            failure_class="batch_resume_required",
+            retryable=False,
+            http_status=429,
+            retry_after_seconds=int(state.get("remaining_seconds") or 0),
+            retry_at=str(state.get("not_before") or "") or None,
+            resume_batch_id=resume_batch_id,
+        )
+    if state.get("active"):
+        raise EditorialProviderError(
+            f"provedor editorial em cooldown até {state.get('not_before')}",
+            failure_class="rate_limited",
+            retryable=True,
+            http_status=429,
+            retry_after_seconds=int(state.get("remaining_seconds") or 0),
+            retry_at=str(state.get("not_before") or "") or None,
+            resume_batch_id=resume_batch_id,
+        )
+
+
+def _record_editorial_rate_limit(
+    root: Path | str | None,
+    batch_id: str,
+    retry_after_seconds: int | None,
+) -> dict[str, Any] | None:
+    if root is None:
+        return None
+    state = record_editorial_backoff(
+        root,
+        batch_id=batch_id,
+        http_status=429,
+        retry_after_seconds=retry_after_seconds,
+        failure_class="rate_limited",
+    )
+    try:
+        from .observability import append_telemetry
+
+        append_telemetry(
+            root,
+            "editorial_provider_rate_limited",
+            batch_id=batch_id,
+            http_status=429,
+            retry_after_seconds=state["retry_after_seconds"],
+            retry_at=state["not_before"],
+        )
+    except Exception:  # noqa: BLE001 - telemetry must not change retry safety
+        pass
+    return state
+
+
+def complete_editorial_backoff(root: Path | str, batch_id: str) -> bool:
+    """Clear an expired batch cooldown only after its caller completed successfully."""
+    state = clear_expired_editorial_backoff(root, batch_id=batch_id)
+    if state is None:
+        return False
+    try:
+        from .observability import append_telemetry
+
+        append_telemetry(
+            root,
+            "editorial_provider_retry_completed",
+            batch_id=batch_id,
+            retry_after_seconds=int(state.get("retry_after_seconds") or 0),
+        )
+    except Exception:  # noqa: BLE001 - observability must not reopen completed work
+        pass
+    return True
+
+
+def _reuse_existing_editorial_output(
+    destination: Path,
+    *,
+    batch_id: str,
+    posts: list[dict[str, Any]],
+    input_sha256: str,
+    root: Path | str | None,
+    emit_media_input: bool,
+) -> dict[str, Any] | None:
+    if not destination.exists():
+        return None
+    try:
+        output_bytes = destination.read_bytes()
+        payload = json.loads(output_bytes.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise BatchError("output editorial precisa ser um objeto JSON")
+        integrity = json.loads(
+            _editorial_output_integrity_path(destination).read_text(encoding="utf-8")
+        )
+        if not isinstance(integrity, dict):
+            raise BatchError("manifesto de integridade editorial inválido")
+        validated = load_editorial_batch(destination)
+        if destination.read_bytes() != output_bytes:
+            raise BatchError("output editorial mudou durante a validação")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, BatchError) as exc:
+        raise EditorialProviderError(
+            "output editorial existente inválido; não será sobrescrito",
+            failure_class="batch_output_invalid",
+            retryable=False,
+        ) from exc
+    expected_ids = {int(post["post_id"]) for post in posts}
+    output_ids = {int(item["post_id"]) for item in validated["items"]}
+    output_sha256 = hashlib.sha256(output_bytes).hexdigest()
+    if (
+        payload.get("batch_id") != batch_id
+        or payload.get("source_input_sha256") != input_sha256
+        or validated.get("batch_id") != batch_id
+        or output_ids != expected_ids
+        or type(integrity.get("schema_version")) is not int
+        or integrity.get("schema_version") != 1
+        or integrity.get("batch_id") != batch_id
+        or integrity.get("source_input_sha256") != input_sha256
+        or integrity.get("output_sha256") != output_sha256
+    ):
+        raise EditorialProviderError(
+            "output editorial existente não corresponde à entrada ou ao manifesto "
+            f"do batch {batch_id}; use um novo batch_id em vez de sobrescrever",
+            failure_class="batch_output_conflict",
+            retryable=False,
+            resume_batch_id=batch_id,
+        )
+    validated_items = validated["items"]
+    media_input = None
+    if emit_media_input:
+        if root is None:
+            raise BatchError("root é obrigatório para gerar media.input.json")
+        media_payload = {
+            "schema_version": validated["schema_version"],
+            "batch_id": batch_id,
+            "results": validated_items,
+        }
+        media_input = build_media_resolve_batch_input(media_payload, root)
+    if root is not None:
+        try:
+            from .observability import append_telemetry
+
+            append_telemetry(
+                root,
+                "editorial_output_reused",
+                batch_id=batch_id,
+                batch_size=len(posts),
+            )
+        except Exception:  # noqa: BLE001 - observability is fail-soft
+            pass
+    result: dict[str, Any] = {
+        "schema_version": BATCH_SCHEMA_VERSION,
+        "batch_id": batch_id,
+        "provider_requests": 0,
+        "cached_output": True,
+        "count": len(posts),
+        "ok": sum(1 for item in validated_items if item["status"] == "ok"),
+        "needs_retry": sum(
+            1 for item in validated_items if item["status"] == "needs_retry"
+        ),
+        "output": str(destination),
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+    if emit_media_input and media_input is not None:
+        result["media_input"] = media_input
+    return result
+
+
+def _serialize_editorial_provider_calls(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        input_path = args[0] if args else kwargs.get("input_path")
+        if input_path is None:
+            return function(*args, **kwargs)
+        root = kwargs.get("root")
+        operation_root = Path(root) if root is not None else Path(input_path).resolve().parent
+        with editorial_provider_request_lock(operation_root):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+@_serialize_editorial_provider_calls
 def generate_editorial_batch(
     input_path: Path | str,
     *,
@@ -452,6 +697,7 @@ def generate_editorial_batch(
     hermes_timeout: float | None = None,
     media_source_policy: str = "strict",
     emit_media_input: bool = False,
+    defer_backoff_clear: bool = True,
 ) -> dict[str, Any]:
     """Generate and validate one editorial batch.
 
@@ -460,6 +706,27 @@ def generate_editorial_batch(
     default remains ``openai`` for direct library callers and old tests; the
     production ``Config`` passes ``auto`` explicitly.
     """
+    batch_id, posts, input_sha256 = _read_input(input_path)
+    input_file = Path(input_path)
+    operation_root = Path(root) if root is not None else input_file.resolve().parent
+    destination = (
+        Path(output_path)
+        if output_path
+        else batch_directory(operation_root, batch_id) / "editorial.output.json"
+    )
+    _require_editorial_backoff_batch(operation_root, batch_id)
+    cached_result = _reuse_existing_editorial_output(
+        destination,
+        batch_id=batch_id,
+        posts=posts,
+        input_sha256=input_sha256,
+        root=operation_root,
+        emit_media_input=emit_media_input,
+    )
+    if cached_result is not None:
+        if not defer_backoff_clear:
+            complete_editorial_backoff(operation_root, batch_id)
+        return cached_result
     selected_provider = str(provider or "openai").strip().lower()
     if selected_provider not in {"auto", "openai", "hermes"}:
         raise EditorialProviderError(
@@ -484,7 +751,6 @@ def generate_editorial_batch(
             failure_class="configuration_error",
             retryable=False,
         )
-    batch_id, posts = _read_input(input_path)
     output_schema = _output_schema_for_policy(media_source_policy)
     request_payload = {
         "model": model,
@@ -534,8 +800,33 @@ def generate_editorial_batch(
                 cwd=Path(input_path).resolve().parent,
             )
         except AIProviderError as exc:
+            metadata = dict(exc.metadata or {})
+            raw_status = metadata.get("http_status")
+            http_status = (
+                int(raw_status)
+                if isinstance(raw_status, int) and not isinstance(raw_status, bool)
+                else (429 if exc.failure_class == "rate_limited" else None)
+            )
+            retry_after = metadata.get("retry_after_seconds")
+            retry_after = retry_after if isinstance(retry_after, int) and not isinstance(retry_after, bool) else None
+            failure_class = "rate_limited" if http_status == 429 else exc.failure_class
+            backoff = (
+                _record_editorial_rate_limit(operation_root, batch_id, retry_after)
+                if http_status == 429
+                else None
+            )
             raise EditorialProviderError(
-                str(exc), failure_class=exc.failure_class, retryable=exc.retryable
+                str(exc),
+                failure_class=failure_class,
+                retryable=exc.retryable,
+                http_status=http_status,
+                retry_after_seconds=(
+                    int(backoff["retry_after_seconds"])
+                    if backoff is not None
+                    else retry_after
+                ),
+                retry_at=str(backoff["not_before"]) if backoff is not None else None,
+                resume_batch_id=batch_id if http_status == 429 else None,
             ) from exc
         body = {
             "choices": [{"message": {"content": response_text}}],
@@ -553,11 +844,27 @@ def generate_editorial_batch(
                 response_bytes = response.read()
         except HTTPError as exc:
             retryable = exc.code in {408, 425, 429} or 500 <= int(exc.code) < 600
+            response_headers = getattr(exc, "headers", None)
+            retry_after = parse_retry_after_seconds(
+                response_headers.get("Retry-After") if response_headers else None
+            )
+            backoff = (
+                _record_editorial_rate_limit(operation_root, batch_id, retry_after)
+                if exc.code == 429
+                else None
+            )
             raise EditorialProviderError(
                 f"API editorial respondeu HTTP {exc.code}",
-                failure_class="api_http_error",
+                failure_class="rate_limited" if exc.code == 429 else "api_http_error",
                 retryable=retryable,
                 http_status=int(exc.code),
+                retry_after_seconds=(
+                    int(backoff["retry_after_seconds"])
+                    if backoff is not None
+                    else retry_after
+                ),
+                retry_at=str(backoff["not_before"]) if backoff is not None else None,
+                resume_batch_id=batch_id if exc.code == 429 else None,
             ) from exc
         except (URLError, OSError, TimeoutError, ValueError) as exc:
             reason = getattr(exc, "reason", exc)
@@ -608,13 +915,16 @@ def generate_editorial_batch(
     }
     for result in normalized["results"]:
         result["retry_mode"] = input_retry_modes.get(int(result["post_id"]), "")
-    destination = Path(output_path) if output_path else batch_directory(root or Path(input_path).parent, batch_id) / "editorial.output.json"
+    normalized["source_input_sha256"] = input_sha256
     output = _write_json(destination, normalized)
+    _write_editorial_output_integrity(
+        destination,
+        batch_id=batch_id,
+        input_sha256=input_sha256,
+    )
     media_input = None
     if emit_media_input:
-        if root is None:
-            raise BatchError("root é obrigatório para gerar media.input.json")
-        media_input = build_media_resolve_batch_input(normalized, root)
+        media_input = build_media_resolve_batch_input(normalized, operation_root)
     usage = body.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -674,7 +984,13 @@ def generate_editorial_batch(
     }
     if emit_media_input:
         result["media_input"] = media_input
+    if not defer_backoff_clear:
+        complete_editorial_backoff(operation_root, batch_id)
     return result
 
 
-__all__ = ["EditorialProviderError", "generate_editorial_batch"]
+__all__ = [
+    "EditorialProviderError",
+    "complete_editorial_backoff",
+    "generate_editorial_batch",
+]

@@ -77,6 +77,23 @@ migração administrativa explícita somente quando houver evidência segura.
   até dois. Um bloqueio antes do início real do apply não consome o orçamento;
   pare apenas por orçamento esgotado ou divergência global de integridade.
 
+### Cooldown e retomada do provider editorial (HTTP 429)
+
+- `error_code=rate_limited` inclui `retry_after_seconds`, `retry_at` e
+  `resume_batch_id`; o cooldown é persistido em
+  `work/editorial-provider-backoff.json` e o monitor mantém assinatura estável
+  até o vencimento. Não faça retry em loop nem remova o marcador manualmente.
+- Depois do vencimento, retome o mesmo batch usando
+  `work/batches/<resume_batch_id>/editorial.input.json`; não prepare um batch
+  substituto enquanto o anterior não for resolvido. Outro batch recebe
+  `batch_resume_required`.
+- A saída editorial existente só é reutilizada quando seu hash de entrada,
+  `batch_id` e IDs de posts correspondem. Se a entrada mudou, pare em
+  `batch_output_conflict`; não sobrescreva a saída nem repita a inferência com o
+  mesmo batch ID. Reuso válido não chama o provider novamente. O CLI só remove
+  o marcador expirado depois de registrar e imprimir o resultado estruturado;
+  se essa etapa falhar, retome o mesmo batch.
+
 O fluxo V1 mantém snapshots, manifests, MediaRegistry e `_hermes_state`. READY
 só é produzido depois do checklist completo, mídia aplicada, featured válida e
 readback. Se Hermes não fornecer evidência estruturada de `vision_analyze`, a

@@ -3048,6 +3048,28 @@ def _monitor_has_work(report: dict) -> bool:
     return bool(report.get("v2_eligible_ids"))
 
 
+def _editorial_rate_limit_monitor_marker(
+    root: Path,
+    report: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Hold the V1 cron signature stable until a persisted provider cooldown ends."""
+    if not _monitor_has_work(report):
+        return None
+    from .retry_policy import editorial_backoff_status
+
+    state = editorial_backoff_status(root, now=now)
+    if state.get("status") == "invalid":
+        return "editorial-backoff-invalid"
+    if state.get("active"):
+        return (
+            f"editorial-backoff:{state.get('batch_id')}@"
+            f"{state.get('not_before')}"
+        )
+    return None
+
+
 def _monitor_heartbeat_seconds() -> int:
     """Read the bounded liveness interval; zero disables the heartbeat."""
     try:
@@ -4318,6 +4340,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ],
                     "v2_eligible_ids": [],
                 }
+                rate_limit_marker = _editorial_rate_limit_monitor_marker(args.root, report)
+                if rate_limit_marker:
+                    print(rate_limit_marker)
+                    return 0
                 # Linha estavel hasheada pelo cron do Hermes (--monitor-script):
                 # so muda quando ha trabalho elegivel real, nunca a cada tick.
                 print(_monitor_line(report, None, include_liveness=True))
@@ -4417,7 +4443,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 batch_id=args.batch_id or None,
             )
         elif args.command == "editorial-generate-batch":
-            from .editorial_provider import generate_editorial_batch
+            from .editorial_provider import (
+                complete_editorial_backoff,
+                generate_editorial_batch,
+            )
 
             batch_id = ""
             try:
@@ -4445,6 +4474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     hermes_timeout=getattr(config, "hermes_timeout", config.http_timeout),
                     media_source_policy=str(getattr(config, "media_source_policy", "strict")),
                     emit_media_input=True,
+                    defer_backoff_clear=True,
                 )
             finally:
                 if previous_batch is None:
@@ -5549,6 +5579,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result.setdefault("session", session_budget.status(args.root, config))
         _record_cmd_output(args, result)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+        if args.command == "editorial-generate-batch" and batch_id:
+            complete_editorial_backoff(args.root, batch_id)
         if args.command == "v2-cycle":
             return _v2_cycle_exit_code(result)
         if args.command == "publish-ready" and (errors or retryable):
@@ -5601,7 +5633,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, EditorialProviderError, OSError, ValueError) as exc:
         # Erros operacionais devem chegar em JSON curto, sem traceback Python no
         # contexto do agente; o operador precisa do motivo, nao da stack inteira.
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        payload = {"error": str(exc)}
+        if isinstance(exc, EditorialProviderError):
+            payload.update({
+                "error_code": exc.failure_class,
+                "retryable": exc.retryable,
+            })
+            if exc.http_status is not None:
+                payload["status_code"] = exc.http_status
+            if exc.retry_after_seconds is not None:
+                payload["retry_after_seconds"] = exc.retry_after_seconds
+            if exc.retry_at:
+                payload["retry_at"] = exc.retry_at
+            if exc.resume_batch_id:
+                payload["resume_batch_id"] = exc.resume_batch_id
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
         return 2
 
 

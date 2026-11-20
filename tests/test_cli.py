@@ -10,7 +10,8 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+import datetime
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -624,6 +625,152 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(run_v2.called)
         self.assertTrue(printer.call_args.args[0].startswith("12 11"))
+
+    def test_queue_monitor_holds_stable_signature_until_editorial_retry_after(self):
+        from unicornio_editor.cli import _editorial_rate_limit_monitor_marker
+        from unicornio_editor.retry_policy import record_editorial_backoff
+
+        now = datetime.datetime(2026, 11, 20, 12, 0, tzinfo=datetime.timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_editorial_backoff(
+                root,
+                batch_id="batch-rate-limit",
+                http_status=429,
+                retry_after_seconds=60,
+                failure_class="rate_limited",
+                now=now,
+            )
+            report = {"unprocessed_ids": [11], "eligible_rework_ids": [], "posts": []}
+
+            marker = _editorial_rate_limit_monitor_marker(root, report, now=now)
+            repeated = _editorial_rate_limit_monitor_marker(root, report, now=now)
+            after_expiry = _editorial_rate_limit_monitor_marker(
+                root, report, now=now + datetime.timedelta(seconds=60)
+            )
+
+        self.assertEqual(marker, repeated)
+        self.assertIn("batch-rate-limit", marker)
+        self.assertIsNone(after_expiry)
+
+    def test_editorial_rate_limit_error_json_preserves_retry_and_resume_metadata(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+        from unicornio_editor.editorial_provider import EditorialProviderError
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_file = root / "editorial.input.json"
+            input_file.write_text(json.dumps({"batch_id": "batch-rate-limit", "posts": []}))
+            error = EditorialProviderError(
+                "provider HTTP 429",
+                failure_class="rate_limited",
+                retryable=True,
+                http_status=429,
+                retry_after_seconds=90,
+                retry_at="2026-11-20T12:01:30+00:00",
+                resume_batch_id="batch-rate-limit",
+            )
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch(
+                        "unicornio_editor.editorial_provider.generate_editorial_batch",
+                        side_effect=error,
+                    ), redirect_stderr(stderr):
+                code = cli.main([
+                    "editorial-generate-batch", str(input_file), "--root", str(root)
+                ])
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error_code"], "rate_limited")
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["retry_after_seconds"], 90)
+        self.assertEqual(payload["retry_at"], "2026-11-20T12:01:30+00:00")
+        self.assertEqual(payload["resume_batch_id"], "batch-rate-limit")
+
+    def test_editorial_cli_keeps_expired_cooldown_if_result_recording_fails(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+        from unicornio_editor.retry_policy import editorial_backoff_status, record_editorial_backoff
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_file = root / "editorial.input.json"
+            input_file.write_text(json.dumps({"batch_id": "batch-cli-resume", "posts": []}))
+
+            def generate(*_args, **kwargs):
+                self.assertTrue(kwargs.get("defer_backoff_clear"))
+                record_editorial_backoff(
+                    root,
+                    batch_id="batch-cli-resume",
+                    http_status=429,
+                    retry_after_seconds=0,
+                    failure_class="rate_limited",
+                )
+                return {"batch_id": "batch-cli-resume", "provider_requests": 0}
+
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch(
+                        "unicornio_editor.editorial_provider.generate_editorial_batch",
+                        side_effect=generate,
+                    ), mock.patch.object(
+                        cli, "_record_cmd_output", side_effect=OSError("record failed")
+                    ), mock.patch("builtins.print"), redirect_stderr(stderr):
+                code = cli.main([
+                    "editorial-generate-batch", str(input_file), "--root", str(root)
+                ])
+            state = editorial_backoff_status(root)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(state["status"], "expired")
+
+    def test_editorial_cli_clears_backoff_after_result_record_and_print(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+        from unicornio_editor.retry_policy import editorial_backoff_status, record_editorial_backoff
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_file = root / "editorial.input.json"
+            input_file.write_text(json.dumps({"batch_id": "batch-cli-resume", "posts": []}))
+
+            def generate(*_args, **kwargs):
+                self.assertTrue(kwargs.get("defer_backoff_clear"))
+                record_editorial_backoff(
+                    root,
+                    batch_id="batch-cli-resume",
+                    http_status=429,
+                    retry_after_seconds=0,
+                    failure_class="rate_limited",
+                )
+                return {"batch_id": "batch-cli-resume", "provider_requests": 0}
+
+            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                    mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "WordPressClient"), \
+                    mock.patch(
+                        "unicornio_editor.editorial_provider.generate_editorial_batch",
+                        side_effect=generate,
+                    ), mock.patch.object(cli, "_record_cmd_output"), \
+                    mock.patch("builtins.print"):
+                code = cli.main([
+                    "editorial-generate-batch", str(input_file), "--root", str(root)
+                ])
+            state = editorial_backoff_status(root)
+            telemetry = (root / "work" / "telemetry.jsonl").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(state["status"], "none")
+        self.assertIn('"event": "editorial_provider_retry_completed"', telemetry)
 
     def test_queue_monitor_ignores_v2_checkpoint_failures(self):
         from unicornio_editor import cli

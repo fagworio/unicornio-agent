@@ -21,7 +21,11 @@ from ..checklist import run_pre_publish_checklist
 # calculations use the canonical HTML-aware helper.
 from ..checklist import required_image_count, required_image_count_for_content
 from ..content_quality import _PT_STOPWORDS, _keyword_in_text, keyword_occurs_naturally, normalize_editorial_dashes
-from ..editorial_provider import EditorialProviderError, generate_editorial_batch
+from ..editorial_provider import (
+    EditorialProviderError,
+    complete_editorial_backoff,
+    generate_editorial_batch,
+)
 from ..editorial_schema import validate_editorial
 from ..language import editorial_language_report
 from ..html_cleaner import normalize_h1_headings
@@ -705,9 +709,13 @@ class ProductionEditorialStage:
                 hermes_model=getattr(self.config, "hermes_model", ""),
                 hermes_timeout=getattr(self.config, "hermes_timeout", self.config.http_timeout),
                 media_source_policy=str(getattr(self.config, "media_source_policy", "strict")),
+                defer_backoff_clear=True,
             )
             envelope = load_editorial_batch(generated["output"])
             item = next((item for item in envelope["items"] if int(item["post_id"]) == post_id), None)
+            completed_batch_id = str(
+                envelope.get("batch_id") or input_payload.get("batch_id") or ""
+            ).strip()
             if not item or item.get("status") == "needs_retry":
                 retry_kind = str((item or {}).get("retry_kind") or "none")
                 reason = str((item or {}).get("reason") or "editorial provider requested retry")
@@ -842,6 +850,8 @@ class ProductionEditorialStage:
                     f"media_structure:insufficient_paragraph_slots: {structure_error}",
                 )
             _write_json(self.root, post_id, "editorial.draft.json", editorial)
+            if completed_batch_id:
+                complete_editorial_backoff(self.root, completed_batch_id)
             return editorial
         except StageError:
             raise

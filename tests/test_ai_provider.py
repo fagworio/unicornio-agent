@@ -41,3 +41,41 @@ def test_hermes_timeout_exposes_process_timing_metadata():
     assert error.value.metadata["configured_timeout_seconds"] == 0.01
     assert "process_spawn_elapsed_ms" in error.value.metadata
     assert "provider_call_elapsed_ms" in error.value.metadata
+
+
+def test_hermes_rate_limit_stderr_exposes_http_status_and_retry_after():
+    process = mock.Mock(returncode=1)
+    process.communicate.return_value = ("", "429 Too Many Requests\nRetry-After: 60\n")
+    with mock.patch("unicornio_editor.ai_provider.hermes_command_available", return_value=True), \
+            mock.patch("unicornio_editor.ai_provider.subprocess.Popen", return_value=process):
+        with pytest.raises(AIProviderError) as error:
+            call_hermes_oneshot("prompt", timeout=5)
+
+    assert error.value.failure_class == "rate_limited"
+    assert error.value.metadata["http_status"] == 429
+    assert error.value.metadata["retry_after_seconds"] == 60
+
+
+def test_hermes_rate_limit_text_without_status_does_not_claim_http_429():
+    process = mock.Mock(returncode=1)
+    process.communicate.return_value = ("", "provider rate limit reached")
+    with mock.patch("unicornio_editor.ai_provider.hermes_command_available", return_value=True), \
+            mock.patch("unicornio_editor.ai_provider.subprocess.Popen", return_value=process):
+        with pytest.raises(AIProviderError) as error:
+            call_hermes_oneshot("prompt", timeout=5)
+
+    assert error.value.failure_class == "provider_error"
+    assert "http_status" not in error.value.metadata
+
+
+def test_hermes_failure_diagnostic_does_not_expose_raw_provider_output():
+    private_detail = "prompt=private editorial body response=secret-provider-payload"
+    process = mock.Mock(returncode=1)
+    process.communicate.return_value = ("", private_detail)
+    with mock.patch("unicornio_editor.ai_provider.hermes_command_available", return_value=True), \
+            mock.patch("unicornio_editor.ai_provider.subprocess.Popen", return_value=process):
+        with pytest.raises(AIProviderError) as error:
+            call_hermes_oneshot("prompt", timeout=5)
+
+    assert private_detail not in str(error.value)
+    assert "private editorial body" not in str(error.value)

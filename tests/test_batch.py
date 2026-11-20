@@ -757,6 +757,13 @@ class BatchContextTests(unittest.TestCase):
                         "retryable": "false",
                         "http_status": 700,
                     },
+                    {
+                        "post_id": 3,
+                        "status": "needs_retry",
+                        "failure_class": "rate_limited",
+                        "retryable": True,
+                        "http_status": 429,
+                    },
                 ],
             }), encoding="utf-8")
 
@@ -768,6 +775,9 @@ class BatchContextTests(unittest.TestCase):
         assert items[1]["failure_class"] == ""
         assert items[1]["retryable"] is True
         assert items[1]["http_status"] is None
+        assert items[2]["failure_class"] == "rate_limited"
+        assert items[2]["retryable"] is True
+        assert items[2]["http_status"] == 429
 
     def test_media_resolve_batch_is_bounded_and_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
