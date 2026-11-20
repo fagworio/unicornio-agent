@@ -686,3 +686,117 @@ def test_started_media_registry_checkpoint_recovers_with_real_wordpress_readback
         ),
         "media_usage": [dict(row) for row in usage],
     })
+
+
+def test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks(wordpress_e2e_case):
+    from unicornio_editor.batch import prepare_batch
+    from unicornio_editor.cli import _apply_editorial_batch
+    from unicornio_editor.locking import LockManager
+    from unicornio_editor.session_budget import status as session_status
+    from unicornio_editor.workflow import STATE_SKIPPED
+
+    case = wordpress_e2e_case
+    config = replace(case.client.config, max_posts_touched_per_run=5)
+    post_ids = [case.post_id(f"five_cards_{number}") for number in range(1, 6)]
+    before = {post_id: case.client.get_post(post_id) for post_id in post_ids}
+    prepared_statuses = []
+    apply_statuses = []
+    batch_ids = []
+    skip_editorial = {
+        "site_relevance": {
+            "decision": "skip",
+            "confidence": 0.99,
+            "reason": "Conteúdo de teste fora da linha editorial",
+            "matched_topics": [],
+        },
+        "cleaned_html": "",
+        "seo": {
+            "title": "Conteúdo fora da pauta editorial",
+            "meta_description": (
+                "Registro de homologação descartável usado apenas para validar "
+                "isolamento de locks e readback no ambiente local."
+            ),
+            "focus_keyword": "homologação descartável",
+        },
+        "media_plan": [],
+        "needs_trailer": False,
+        "trailer_url": None,
+        "game_name": None,
+    }
+
+    with LockManager(case.root / "work" / "locks", ttl=900).acquire(post_ids[0]):
+        for batch_number, ids in enumerate(
+            (post_ids[:2], post_ids[2:4], post_ids[4:]), start=1
+        ):
+            assert len(ids) <= 2
+            batch_id = f"wp-e2e-five-card-{batch_number}"
+            batch_ids.append(batch_id)
+            prepared = prepare_batch(
+                case.client, config, case.root, ids, batch_id=batch_id
+            )
+            prepared_statuses.extend(
+                {"post_id": int(item["post_id"]), "status": item["status"]}
+                for item in prepared["items"]
+            )
+            eligible = [
+                {
+                    "post_id": int(item["post_id"]),
+                    "status": "ok",
+                    "editorial": skip_editorial,
+                }
+                for item in prepared["items"]
+                if item.get("status") == "prepared"
+            ]
+            if not eligible:
+                continue
+            applied = _apply_editorial_batch(
+                case.client,
+                config,
+                case.root,
+                {"schema_version": 1, "batch_id": batch_id, "items": eligible},
+                dry_run=False,
+                compact=False,
+            )
+            apply_statuses.extend(
+                {"post_id": int(item["post_id"]), "status": item["status"]}
+                for item in applied["posts"]
+            )
+
+    readback_posts = {post_id: case.client.get_post(post_id) for post_id in post_ids}
+    readbacks = {
+        post_id: case._snapshot(post) for post_id, post in readback_posts.items()
+    }
+    assert [item["status"] for item in prepared_statuses] == [
+        "lock_blocked", "prepared", "prepared", "prepared", "prepared"
+    ]
+    assert [item["status"] for item in apply_statuses] == ["skipped"] * 4
+    assert [item["post_id"] for item in apply_statuses] == post_ids[1:]
+    assert readbacks[post_ids[0]] == case._snapshot(before[post_ids[0]])
+    for post_id in post_ids:
+        before_content = before[post_id].get("content") or {}
+        after_content = readback_posts[post_id].get("content") or {}
+        assert after_content == before_content
+    for post_id in post_ids[1:]:
+        assert readbacks[post_id]["status"] == "pending"
+        assert readbacks[post_id]["hermes_state"] == STATE_SKIPPED
+    budget = session_status(case.root, config)
+    assert set(budget["posts_touched"]) == set(post_ids[1:])
+    assert len(budget["posts_touched"]) == len(set(budget["posts_touched"]))
+    assert budget["posts_reserved"] == []
+    assert set(budget["posts_touched"]).isdisjoint(budget["posts_reserved"])
+    assert budget["max_posts_touched"] == 5
+    case.observations.append({
+        "scenario": "v1_five_card_queue",
+        "post_ids": post_ids,
+        "batch_ids": batch_ids,
+        "prepared": prepared_statuses,
+        "applied": apply_statuses,
+        "readbacks": readbacks,
+        "session_budget": {
+            "posts_touched": budget["posts_touched"],
+            "posts_reserved": budget["posts_reserved"],
+            "max_posts_touched": budget["max_posts_touched"],
+        },
+        "content_unchanged": True,
+        "scope": "V1 lock isolation and queue-state readback; no content or publish writes",
+    })

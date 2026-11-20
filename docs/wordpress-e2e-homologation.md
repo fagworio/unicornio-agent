@@ -19,16 +19,21 @@ Os testes usam WordPressClient e WordPressWriterV2 reais sobre REST autenticada.
 9. Coerência do MediaRegistry V5 com o resultado confirmado do Writer.
 10. Isolamento de transação pré-writer legado com readbacks WordPress reais e sem writes.
 11. Extração de três imagens de uma fonte HTTP controlada, prova Schema.org CC0 ligada a cada URL, download, conversão/upload WebP, comparação visual, composição, checklist integral, escrita READY pelo Writer V2 e readback real do WordPress.
-12. Substituição de candidata de mídia rejeitada por alternativa válida antes do readback READY.
-13. Persistência e retomada de `visual_identity_pending` após cooldown.
-14. Recuperação pré-Writer de checkpoint correlacionado ao Registry V5 com `outcome="started"`, readback REST real do post e de dois attachments, sem upload duplicado nem alteração do post.
-15. Fluxo V1 de listicle com consulta de mídia por item/H2, reserva vinculada ao target, inserção e checklist de cobertura antes de READY confirmado por readback.
+12. Pipeline automático de mídia até READY com Writer V2 e readback REST.
+13. Aplicação de mídia só com crédito/metadados, READY e reaplicação idempotente.
+14. Fluxo V1 de listicle com consulta de mídia por item/H2, reserva vinculada ao target, inserção e checklist de cobertura antes de READY confirmado por readback.
+15. Retry do pipeline automático sem aplicação parcial.
+16. Migração V2→V1 segura, READY e segunda aplicação no-op.
+17. Substituição de candidata de mídia rejeitada por alternativa válida antes do readback READY.
+18. Persistência e retomada de `visual_identity_pending` após cooldown.
+19. Recuperação pré-Writer de checkpoint correlacionado ao Registry V5 com `outcome="started"`, readback REST real do post e de dois attachments, sem upload duplicado nem alteração do post.
+20. Isolamento V1 de cinco cards com WordPress REST real: primeiro post bloqueado, quatro irmãos avaliados em microbatches de até dois, estados SKIPPED e conteúdo confirmados por readback, orçamento sem duplicidade. Este cenário valida a fila/locks; READY e mídia são cobertos pelos cenários específicos acima.
 
 O relatório registra snapshots do WordPress antes/depois, eventos REST sanitizados, resumo dos journals, linhas relevantes do Registry, SHA completo, tree SHA, versão do WordPress, PHP, WP-CLI, imagens e resultado da suíte completa. Não inclui Application Password, senha do administrador ou credenciais do banco.
 
 ## Homologação e artefato
 
-O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os quinze cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
+O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os vinte cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
 
 Para executar manualmente, use a aba Actions e escolha WordPress Writer V2 E2E → Run workflow. O relatório é para o SHA indicado em tested_sha e tree_sha; não deve ser tratado como homologação de uma árvore diferente.
 

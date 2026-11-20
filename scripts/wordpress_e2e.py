@@ -49,6 +49,7 @@ SCENARIOS = (
     "test_rejected_media_candidate_is_replaced_before_ready_readback",
     "test_visual_identity_retry_persists_and_resumes_after_cooldown",
     "test_started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks",
+    "test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -73,6 +74,9 @@ SCENARIO_OPERATIONS = {
     ],
     "started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks": [
         "started_media_registry_checkpoint_recovery",
+    ],
+    "v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks": [
+        "v1_five_card_queue",
     ],
 }
 POST_FIXTURES = {
@@ -100,6 +104,11 @@ POST_FIXTURES = {
     "isolation_committed_b": ("pending", True),
     "isolation_not_executed_a": ("pending", True),
     "isolation_not_executed_b": ("pending", True),
+    "five_cards_1": ("pending", False),
+    "five_cards_2": ("pending", False),
+    "five_cards_3": ("pending", False),
+    "five_cards_4": ("pending", False),
+    "five_cards_5": ("pending", False),
 }
 
 
