@@ -319,6 +319,135 @@ def _is_v1_fresh_media_layout_source(post: dict[str, Any], root: Path, post_id: 
     )
 
 
+class V1PartialResumeError(WorkflowError):
+    """A retained inline attachment or its recorded layout cannot be reused safely."""
+
+    def __init__(self, code: str, *, post_id: int) -> None:
+        super().__init__(f"{code}: post {post_id}")
+        self.error_code = code
+
+
+def _v1_partial_binding(post: dict[str, Any], editorial: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "post_id": post["id"],
+        "source": hashlib.sha256(json.dumps(
+            [_raw_content(post), _post_title(post), _original_link(post)],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()).hexdigest(),
+        "body": hashlib.sha256(editorial["cleaned_html"].encode()).hexdigest(),
+        "game_name": str(editorial.get("game_name") or ""),
+    }
+
+
+def verified_v1_partial_resume(
+    client: Any, root: Path, post: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Read authoritative, layout-bound retained inline assets for a normal article."""
+    if read_state(post).get("state") != STATE_PARTIAL:
+        return None
+    post_id = int(post["id"])
+    try:
+        manifest = _load_partial_manifest(root, post_id, required=True)
+    except WorkflowError as exc:
+        raise V1PartialResumeError("partial_resume_manifest_invalid", post_id=post_id) from exc
+    accepted = _partial_media_records(manifest)
+    if not accepted:
+        return None
+    binding = manifest.get("resume_binding")
+    try:
+        draft = load_draft(root, post_id)
+    except WorkflowError as exc:
+        code = "partial_resume_unbound" if binding is None else "partial_resume_draft_unverified"
+        raise V1PartialResumeError(code, post_id=post_id) from exc
+    body = draft.get("cleaned_html")
+    if binding is None and isinstance(body, str) and detect_list_format(
+        _post_title(post) or str((draft.get("seo") or {}).get("title") or ""), body,
+    ) is not None:
+        # Existing item-scoped listicle continuation is not a flat layout.
+        return None
+    if not isinstance(binding, dict):
+        raise V1PartialResumeError("partial_resume_unbound", post_id=post_id)
+    if not isinstance(body, str) or not body.strip() or binding != _v1_partial_binding(post, draft):
+        raise V1PartialResumeError("partial_resume_source_changed", post_id=post_id)
+    if detect_list_format(_post_title(post) or "", body) is not None:
+        raise V1PartialResumeError("partial_resume_listicle_requires_review", post_id=post_id)
+    slots: set[int] = set()
+    ids: set[int] = set()
+    urls: set[str] = set()
+    for row in accepted:
+        media_id = row.get("media_id")
+        slot = row.get("paragraph_index")
+        url = str(row.get("media_url") or "")
+        if (
+            type(media_id) is not int or media_id <= 0 or media_id in ids
+            or type(slot) is not int or slot < 0 or slot in slots
+            or not _is_webp_attachment_url(url) or _canonical_image_url(url) in urls
+            or not re.fullmatch(r"[0-9a-f]{16}", str(row.get("phash") or ""), re.IGNORECASE)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256") or ""), re.IGNORECASE)
+        ):
+            raise V1PartialResumeError("partial_attachment_record_invalid", post_id=post_id)
+        try:
+            attachment = client.get_media(media_id)
+        except WordPressError as exc:
+            code = "partial_attachment_missing" if exc.status_code in {404, 410} else "partial_attachment_unverified"
+            raise V1PartialResumeError(code, post_id=post_id) from exc
+        if not isinstance(attachment, dict):
+            raise V1PartialResumeError("partial_attachment_unverified", post_id=post_id)
+        details = attachment.get("media_details") or {}
+        if not isinstance(details, dict) or not all(key in details for key in ("width", "height")):
+            raise V1PartialResumeError("partial_attachment_unverified", post_id=post_id)
+        if (
+            attachment.get("id") != media_id or attachment.get("source_url") != url
+            or attachment.get("mime_type") != "image/webp"
+            or details.get("width") != row.get("width") or details.get("height") != row.get("height")
+        ):
+            raise V1PartialResumeError("partial_attachment_changed", post_id=post_id)
+        slots.add(slot)
+        ids.add(media_id)
+        urls.add(_canonical_image_url(url))
+    return {"binding": binding, "body": body, "accepted": accepted, "manifest": manifest}
+
+
+def _is_webp_attachment_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and parsed.path.lower().endswith(".webp")
+
+
+def _verify_v1_retained_bytes(
+    config: Config, post_id: int, retained: list[dict[str, Any]],
+) -> None:
+    # Media endpoint metadata can stay unchanged when an attachment's file is
+    # replaced in place. Compare the bytes before committing budget or writing.
+    with tempfile.TemporaryDirectory(prefix="unicornio-v1-retained-") as directory:
+        for row in retained:
+            try:
+                downloaded = download_image(
+                    row["media_url"], Path(directory) / f"{row['media_id']}.webp",
+                    max_attempts=1, url_policy=config.remote_url_policy,
+                )
+                digest = hashlib.sha256(Path(downloaded).read_bytes()).hexdigest()
+            except (MediaDownloadError, OSError) as exc:
+                raise V1PartialResumeError("partial_attachment_unverified", post_id=post_id) from exc
+            if digest != row["sha256"].lower():
+                raise V1PartialResumeError("partial_attachment_bytes_changed", post_id=post_id)
+
+
+def _retained_partial_candidate(candidate: dict[str, Any], retained: list[dict[str, Any]]) -> bool:
+    media_id = candidate.get("media_library_id") or candidate.get("media_id")
+    url = _canonical_image_url(str(candidate.get("direct_image_url") or candidate.get("url") or ""))
+    phash = str(candidate.get("phash") or "")
+    return any(
+        media_id == row["media_id"]
+        or (phash and phash == row["phash"])
+        or (url and url in {
+            _canonical_image_url(str(row.get("media_url") or "")),
+            _canonical_image_url(str(row.get("direct_image_url") or "")),
+        })
+        for row in retained
+    )
+
+
 def _load_partial_manifest(root: Path, post_id: int, *, required: bool = False) -> dict[str, Any]:
     path = _partial_manifest_path(root, post_id)
     try:
@@ -344,10 +473,23 @@ def _load_partial_manifest(root: Path, post_id: int, *, required: bool = False) 
     if required:
         accepted_items = accepted if isinstance(accepted, list) else []
         completed_items = [item for item in accepted_items if isinstance(item, dict) and not item.get("featured")]
+        baseline_urls = value.get("baseline_inline_urls")
+        if baseline_urls is None:
+            expected_completed = len(completed_items)
+        elif (
+            isinstance(baseline_urls, list)
+            and all(isinstance(url, str) and url for url in baseline_urls)
+            and len(baseline_urls) == len(set(baseline_urls))
+        ):
+            accepted_urls = {_canonical_image_url(str(item.get("media_url") or "")) for item in completed_items}
+            expected_completed = min(value["required"], len(set(baseline_urls) | (accepted_urls - {""})))
+        else:
+            expected_completed = -1
         if (
             any(not isinstance(item, dict) or not item.get("media_id") or not item.get("media_url") for item in accepted_items)
             or value["required"] < 0
-            or value["completed"] != len(completed_items)
+            or value["completed"] < 0
+            or value["completed"] != expected_completed
             or value["missing"] != max(0, value["required"] - value["completed"])
         ):
             raise WorkflowError(f"partial_manifest_invalid: post {post_id}: progresso inconsistente")
@@ -530,8 +672,6 @@ def _apply_editorial_unlocked(
     )
     decision = editorial["site_relevance"]["decision"]
     confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
-    if on_work_started is not None:
-        on_work_started()
     state_before = read_state(post)
     partial_path = _partial_manifest_path(root, post_id)
     if state_before.get("state") == STATE_PARTIAL:
@@ -540,7 +680,19 @@ def _apply_editorial_unlocked(
         partial_manifest = {}
         if partial_path.is_file():
             append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
+    partial_resume = None
+    if decision == "process" and partial_manifest.get("resume_binding") is not None:
+        partial_resume = verified_v1_partial_resume(client, root, post)
+        if partial_resume is not None:
+            if editorial.get("cleaned_html") is None:
+                editorial = {**editorial, "cleaned_html": partial_resume["body"]}
+            if _v1_partial_binding(post, editorial) != partial_resume["binding"]:
+                raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
+            if not config.dry_run:
+                _verify_v1_retained_bytes(config, post_id, partial_resume["accepted"])
     prior_media = _partial_media_records(partial_manifest)
+    if on_work_started is not None:
+        on_work_started()
     attempts_before = eligibility.attempts
     append_telemetry(
         root, "apply_started", post_id=post_id,
@@ -673,10 +825,18 @@ def _apply_editorial_unlocked(
         for item in (editorial.get("media_plan") or []):
             if isinstance(item, dict) and item.get("is_featured") and partial_featured_valid:
                 continue
-            if isinstance(item, dict) and item.get("paragraph_index") in partial_slots:
+            if isinstance(item, dict) and (
+                (not item.get("is_featured") and item.get("paragraph_index") in partial_slots)
+                or (partial_resume is not None and _retained_partial_candidate(item, prior_media))
+            ):
                 continue
             remaining_plan.append(item)
         editorial = {**editorial, "media_plan": remaining_plan}
+    if partial_resume is not None:
+        media_fallback_candidates = [
+            item for item in (media_fallback_candidates or [])
+            if not _retained_partial_candidate(item, prior_media)
+        ]
     media_preflight = validate_media_plan(
         client,
         editorial,
@@ -694,6 +854,10 @@ def _apply_editorial_unlocked(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id,
         post_title=_post_title(post) or "",
         media_fallback_candidates=media_fallback_candidates,
+        **({
+            "previous_inline_phashes": tuple(str(row["phash"]) for row in prior_media),
+            "previous_inline_visual_assets": [dict(row) for row in prior_media],
+        } if partial_resume is not None else {}),
     )
     combined_media_results = prior_media + [
         item for item in media_results
@@ -886,7 +1050,7 @@ def _apply_editorial_unlocked(
                     featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
                     featured_manifest["credit_text"] = featured_credit or featured_manifest.get("credit_text", "")
                 images_summary, media_drift = _reconcile_partial_media(
-                    content,
+                    editorial["cleaned_html"],
                     _post_title(post) or editorial["seo"]["title"],
                     image_entities,
                     accepted,
@@ -912,7 +1076,10 @@ def _apply_editorial_unlocked(
                     partial_kind = "featured_missing"
                 else:
                     partial_kind = "inline_missing"
-                previous_completed = len(prior_media)
+                baseline_inline_urls = _partial_relevant_urls(editorial["cleaned_html"], image_entities)
+                previous_completed = min(
+                    required, len(baseline_inline_urls | _partial_accepted_urls(prior_media))
+                )
                 featured_before_valid = (
                     (partial_manifest.get("featured") or {}).get("status") == "valid"
                 )
@@ -943,6 +1110,14 @@ def _apply_editorial_unlocked(
                     "missing": missing,
                     "partial_kind": partial_kind,
                     "accepted_media": accepted,
+                    "baseline_inline_urls": sorted(baseline_inline_urls),
+                    **(
+                        {"resume_binding": _v1_partial_binding(post, editorial)}
+                        if accepted and detect_list_format(
+                            _post_title(post) or editorial["seo"]["title"], editorial["cleaned_html"],
+                        ) is None and (not prior_media or partial_resume is not None)
+                        else {}
+                    ),
                     "featured": featured_manifest,
                     "processing_passes": passes,
                     "no_progress_attempts": no_progress,
@@ -1544,6 +1719,26 @@ def _images_summary(content: str, title: str, entities: set[str] | None = None) 
     }
 
 
+def _partial_relevant_urls(content: str, entities: set[str] | None) -> set[str]:
+    return {
+        _canonical_image_url(str(item.get("src") or ""))
+        for item in iter_content_images(content)
+        if item.get("src") and image_is_relevant(
+            alt_text=str(item.get("alt") or ""),
+            credit_text=str(item.get("caption") or ""),
+            source_url=str(item.get("src") or ""),
+            entities=entities or set(),
+        )
+    } - {""}
+
+
+def _partial_accepted_urls(rows: list[dict[str, Any]] | None) -> set[str]:
+    return {
+        _canonical_image_url(str(row.get("media_url") or ""))
+        for row in (rows or []) if isinstance(row, dict) and not row.get("featured")
+    } - {""}
+
+
 def _reconcile_partial_media(
     content: str,
     title: str,
@@ -1554,21 +1749,8 @@ def _reconcile_partial_media(
 ) -> tuple[dict[str, int], dict[str, Any] | None]:
     """Reconcile real HTML coverage with assets recorded by a PARTIAL run."""
     summary = _images_summary(content, title, entities)
-    content_urls: set[str] = set()
-    for item in iter_content_images(content):
-        src = str(item.get("src") or "").strip()
-        if src and image_is_relevant(
-            alt_text=str(item.get("alt") or ""),
-            credit_text=str(item.get("caption") or ""),
-            source_url=src,
-            entities=entities or set(),
-        ):
-            content_urls.add(src)
-    accepted_urls = {
-        str(item.get("media_url") or "").strip()
-        for item in (accepted_media or [])
-        if isinstance(item, dict) and not item.get("featured") and item.get("media_url")
-    }
+    content_urls = _partial_relevant_urls(content, entities)
+    accepted_urls = _partial_accepted_urls(accepted_media)
     required = summary["required"]
     effective_valid = min(required, len(content_urls | accepted_urls))
     reconciled = {**summary, "required": required, "valid": effective_valid, "missing": max(0, required - effective_valid)}
@@ -3294,6 +3476,7 @@ def _execute_media_plan(
                     "candidate_id": item.get("candidate_id"),
                     "target_id": item.get("target_id"),
                     "media_id": media_id, "media_url": media_url,
+                    "direct_image_url": item.get("direct_image_url"),
                     "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
                     "subject": item.get("subject"),
                     "item_identity": item.get("item_identity"),

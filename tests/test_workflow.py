@@ -2441,6 +2441,227 @@ class WorkflowTests(unittest.TestCase):
                 policy_version=self.config(False).policy_version,
             ))
 
+    def test_prepare_and_apply_batch_reuse_verified_partial_slots(self):
+        from unicornio_editor.batch import (
+            build_media_resolve_batch_input, merge_media_manifest_into_editorial,
+            prepare_batch, resolve_batch_editorial_defaults,
+        )
+        from unicornio_editor.cli import _apply_editorial_batch
+
+        paragraph = (
+            "A notícia sobre videogame descreve detalhes do lançamento e novidades nos jogos. " * 5
+        ).strip()
+        body = "<h2>Detalhes do lançamento</h2>" + f"<p>{paragraph}</p>" * 12
+
+        class Client(FakeClient):
+            def get_media(self, media_id):
+                if media_id == 7:
+                    return super().get_media(media_id)
+                return {
+                    "id": media_id,
+                    "source_url": f"https://wp.test/videogame-{media_id}.webp",
+                    "mime_type": "image/webp",
+                    "media_details": {"width": 800, "height": 450},
+                }
+
+        def file_bytes(media_id):
+            return f"fixture-asset-{media_id}".encode()
+
+        def accepted(slot, media_id):
+            return {
+                "status": "accepted", "paragraph_index": slot,
+                "media_id": media_id, "media_url": f"https://wp.test/videogame-{media_id}.webp",
+                "direct_image_url": f"https://images.test/videogame-{media_id}.webp",
+                "alt_text": "Notícia sobre videogame e lançamento importante",
+                "credit_text": "Crédito: Fonte original.", "width": 800, "height": 450,
+                "phash": f"{media_id:016x}", "sha256": hashlib.sha256(file_bytes(media_id)).hexdigest(),
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            payload = editorial_payload()
+            post["title"] = {"raw": payload["seo"]["title"]}
+            post["content"]["raw"] = body
+            client = Client(post)
+            payload["cleaned_html"] = body
+            existing = [accepted(1, 101), accepted(7, 102)]
+            with mock.patch("unicornio_editor.workflow._execute_media_plan",
+                            return_value=(existing, None, "")):
+                first = apply_editorial(client, self.config(False), root, 42, payload)
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual((first["partial"]["completed"], first["partial"]["required"]), (2, 4))
+            self.assertEqual(client.get_post(42)["content"]["raw"], body)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
+            config = self.config(False)
+            ledger_path = root / "backups" / "42" / "editorial.partial.json"
+            old_ledger = ledger_path.read_text()
+            legacy = json.loads(old_ledger)
+            legacy.pop("resume_binding")
+            ledger_path.write_text(json.dumps(legacy))
+            before = list(client.updated)
+            legacy_prepare = prepare_batch(client, config, root, [42], batch_id="unbound")
+            self.assertEqual(legacy_prepare["items"][0]["error_code"], "partial_resume_unbound")
+            self.assertEqual(json.loads(ledger_path.read_text()), legacy)
+            ledger_path.write_text(old_ledger)
+            original_get_media = client.get_media
+
+            for code, failure in (
+                ("partial_attachment_missing", WordPressError("not found", status_code=404)),
+                ("partial_attachment_unverified", WordPressError("transport timeout")),
+                ("partial_attachment_changed", {"source_url": "https://wp.test/changed.webp"}),
+            ):
+                with self.subTest(code=code):
+                    def probe(media_id):
+                        data = original_get_media(media_id)
+                        if media_id == 101:
+                            if isinstance(failure, Exception):
+                                raise failure
+                            data.update(failure)
+                        return data
+
+                    with mock.patch.object(client, "get_media", side_effect=probe):
+                        rejected = prepare_batch(client, config, root, [42], batch_id="negative-resume")
+                    self.assertEqual(rejected["items"][0]["error_code"], code)
+                    self.assertEqual(client.updated, before)
+                    self.assertEqual(ledger_path.read_text(), old_ledger)
+            prepared = prepare_batch(client, config, root, [42], batch_id="resume-workflow")
+            self.assertEqual(prepared["prepared"], 1, prepared["items"])
+            editorial = {**payload, "cleaned_html": None}
+            request = build_media_resolve_batch_input({
+                "batch_id": "resume-workflow",
+                "results": [{"post_id": 42, "status": "ok", "editorial": editorial}],
+            }, root)["posts"][0]
+
+            self.assertEqual(request["inline_deficit"], 2)
+            self.assertEqual(request["needed"], 2)
+            self.assertEqual(
+                set(request["existing_media_urls"]),
+                {row["media_url"] for row in existing},
+            )
+
+            def candidate(url, **kwargs):
+                return {"url": url, "source": "https://source.test/article",
+                        "verdict": "deterministic_match", **kwargs}
+
+            manifest = root / "resume.media.json"
+            manifest.write_text(json.dumps({
+                "batch_id": "resume-workflow",
+                "posts": [{
+                    "post_id": 42, "subject": "Videogame", "needed": 2,
+                    "featured_required": False, "replacement_reserve": 0,
+                    "reuse": [candidate(existing[0]["media_url"], media_library_id=101),
+                              candidate(existing[1]["direct_image_url"])],
+                    "candidates": [candidate(f"https://images.test/videogame-{i}.webp")
+                                   for i in (103, 104)],
+                }],
+            }))
+            batch = resolve_batch_editorial_defaults(client, {
+                "schema_version": 1, "batch_id": "resume-workflow",
+                "items": [{"post_id": 42, "editorial": editorial}],
+            }, root=root)
+            batch, assembly = merge_media_manifest_into_editorial(batch, manifest)
+            submitted = []
+            def execute(approved_editorial, _config, _client, _root, **options):
+                self.assertEqual(set(options["previous_inline_phashes"]),
+                                 {row["phash"] for row in existing})
+                rows = []
+                for index, item in enumerate(approved_editorial["media_plan"]):
+                    submitted.append(item["direct_image_url"])
+                    rows.append({**accepted(item["paragraph_index"], 103 + index),
+                                 "placement": item.get("placement")})
+                return rows, None, ""
+
+            def changed_bytes(_url, path, **_):
+                path.write_bytes(b"changed in place, same metadata")
+                return path
+
+            before_apply = list(client.updated)
+            with mock.patch("unicornio_editor.workflow._execute_media_plan") as not_run, mock.patch(
+                "unicornio_editor.workflow.download_image", side_effect=changed_bytes,
+            ):
+                changed = _apply_editorial_batch(client, config, root, batch, compact=False)
+            not_run.assert_not_called()
+            self.assertEqual(changed["posts"][0]["error_code"], "partial_attachment_bytes_changed")
+            self.assertEqual(changed["session"]["posts_touched"], [])
+            self.assertEqual(changed["session"]["posts_reserved"], [])
+            self.assertEqual(client.updated, before_apply)
+            self.assertEqual(ledger_path.read_text(), old_ledger)
+
+            checked_bytes = []
+            def download(url, path, **_):
+                media_id = int(url.split("-")[-1].split(".")[0])
+                checked_bytes.append(media_id)
+                path.write_bytes(file_bytes(media_id))
+                return path
+
+            with mock.patch("unicornio_editor.workflow._execute_media_plan", side_effect=execute), mock.patch(
+                "unicornio_editor.workflow.download_image", side_effect=download,
+            ):
+                second = _apply_editorial_batch(client, config, root, batch, compact=False)
+            self.assertEqual(checked_bytes, [101, 102])
+            self.assertEqual(second["ready"], 1, second["posts"])
+            self.assertEqual(submitted, [f"https://images.test/videogame-{i}.webp" for i in (103, 104)])
+            readback = client.get_post(42)
+            self.assertEqual(readback["status"], "pending")
+            final_body = readback["content"]["raw"]
+            for i in (101, 102, 103, 104):
+                self.assertEqual(final_body.count(f"https://wp.test/videogame-{i}.webp"), 1)
+            self.assertTrue(manifest_matches(
+                readback, parse_manifest(readback["meta"]["_hermes_ready_manifest"]),
+                readback["meta"]["_hermes_ready_hash"], policy_version=config.policy_version,
+            ))
+
+    def test_partial_manifest_consistently_counts_existing_inline_and_retained_attachment(self):
+        paragraph = (
+            "A notícia sobre videogame descreve detalhes do lançamento e novidades nos jogos. " * 5
+        ).strip()
+        story = editorial_payload()
+        original_figure = story["cleaned_html"].split("</p>", 1)[1].split("</figure>", 1)[0] + "</figure>"
+        story["cleaned_html"] = "<h2>Detalhes</h2>" + f"<p>{paragraph}</p>" * 12 + original_figure
+        accepted = [{
+            "status": "accepted", "paragraph_index": 1, "media_id": 101,
+            "media_url": "https://wp.test/videogame-retido.webp",
+            "alt_text": "Notícia sobre videogame e lançamento importante",
+            "credit_text": "Crédito: Fonte original.", "width": 800, "height": 450,
+            "phash": "0123456789abcdef", "sha256": hashlib.sha256(b"retained").hexdigest(),
+        }]
+
+        class Client(FakeClient):
+            def get_media(self, media_id):
+                if media_id != 101:
+                    return super().get_media(media_id)
+                return {
+                    "id": media_id, "source_url": accepted[0]["media_url"],
+                    "mime_type": "image/webp", "media_details": {"width": 800, "height": 450},
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = Client(self.post())
+            with mock.patch("unicornio_editor.workflow._execute_media_plan",
+                            return_value=(accepted, None, "")):
+                first = apply_editorial(client, self.config(False), root, 42, story)
+            self.assertEqual(first["status"], "partial")
+            manifest = _load_partial_manifest(root, 42, required=True)
+            self.assertEqual((manifest["required"], manifest["completed"], manifest["missing"]), (4, 2, 2))
+            self.assertEqual(len(manifest["accepted_media"]), 1)
+            self.assertEqual(len(manifest["baseline_inline_urls"]), 1)
+            self.assertIn("noticia-importante-1.webp", manifest["baseline_inline_urls"][0])
+            client.post["meta"]["_hermes_next_retry_at"] = ""
+
+            def download(_url, path, **_):
+                path.write_bytes(b"retained")
+                return path
+
+            with mock.patch("unicornio_editor.workflow._execute_media_plan", return_value=([], None, "")), mock.patch(
+                "unicornio_editor.workflow.download_image", side_effect=download,
+            ):
+                second = apply_editorial(client, self.config(False), root, 42, story)
+            self.assertEqual(second["status"], "partial")
+            self.assertEqual(second["partial"]["completed"], 2)
+            self.assertEqual(second["partial"]["no_progress_attempts"], 1)
+
     def test_layout_source_change_under_lock_does_not_touch_wordpress(self):
         from unicornio_editor.workflow import _post_write_guard_signature
 

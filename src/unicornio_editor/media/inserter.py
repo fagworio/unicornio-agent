@@ -332,6 +332,7 @@ def normal_media_slot_capacity(
     html: str,
     *,
     minimum_spacing: int = 3,
+    retained_slots: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     """Describe safe normal-article slots, reserving every existing image.
 
@@ -364,7 +365,9 @@ def normal_media_slot_capacity(
         if _plain_word_count(match.group(1)) >= 12
     ]
     first_slot = substantive[1] if len(substantive) >= 2 else None
-    existing_slots: set[int] = set()
+    if any(type(slot) is not int or slot < 0 or slot > last_slot for slot in retained_slots):
+        raise MediaInsertionError("retained paragraph slot is outside the verified layout")
+    existing_slots = set(retained_slots)
     for image in re.finditer(r"<img\b[^>]*>", html, flags=re.IGNORECASE):
         containing = next(
             (
@@ -475,6 +478,7 @@ def plan_normal_media_insertions(
     plan: list[Mapping[str, Any]],
     *,
     minimum_spacing: int = 3,
+    retained_slots: tuple[int, ...] = (),
 ) -> list[dict[str, Any]]:
     """Assign safe, deterministic paragraph slots for a normal article.
 
@@ -487,7 +491,9 @@ def plan_normal_media_insertions(
         raise MediaInsertionError("HTML and media plan have invalid types")
     if minimum_spacing < 1:
         raise MediaInsertionError("minimum_spacing must be positive")
-    layout = normal_media_slot_capacity(html, minimum_spacing=minimum_spacing)
+    layout = normal_media_slot_capacity(
+        html, minimum_spacing=minimum_spacing, retained_slots=retained_slots,
+    )
     count = len(plan)
     if count == 0:
         return []

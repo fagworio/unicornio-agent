@@ -37,6 +37,7 @@ from .media.diagnostics import diagnostic_url_domain
 from .workflow import (
     CardsSelectionTimeout,
     MediaFunnelInvariantError,
+    V1PartialResumeError,
     WorkflowError,
     _acquire_post_lock,
     apply_editorial,
@@ -1489,8 +1490,13 @@ def _apply_editorial_batch(
                     "wordpress_changed": False,
                     "error_code": media_assembly_error["error_code"],
                     "reason": media_assembly_error["reason"],
-                    "action_code": "editorial_restructure_required",
-                    "action": "revise a estrutura editorial deste post sem reduzir a cota ou o espaçamento",
+                    **({
+                        "action_code": "verify_partial_resume",
+                        "action": "verifique o rascunho e os anexos retidos; não recrie nem apague automaticamente",
+                    } if media_assembly_error["error_code"].startswith("partial_") else {
+                        "action_code": "editorial_restructure_required",
+                        "action": "revise a estrutura editorial deste post sem reduzir a cota ou o espaçamento",
+                    }),
                 })
                 continue
             try:
@@ -1587,6 +1593,12 @@ def _apply_editorial_batch(
                 stopped = exc.error_code
                 remaining = [int(row["post_id"]) for row in batch["items"][index + 1:]]
                 break
+            except V1PartialResumeError as exc:
+                outcomes.append({
+                    "post_id": post_id, "status": "preflight_blocked", "wordpress_changed": False,
+                    "error_code": exc.error_code, "reason": str(exc),
+                    "action_code": "verify_partial_resume",
+                })
             except Exception as exc:  # noqa: BLE001 - isolate one post
                 if is_post_lock_blocked(exc):
                     outcomes.append(
@@ -1820,7 +1832,7 @@ def _resolve_media_batch(
     for item in posts:
         post_id = int(item["post_id"])
         reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"])) if allow_reuse else []
-        blocked_urls = excluded_urls.get(post_id, set())
+        blocked_urls = excluded_urls.get(post_id, set()) | set(item.get("excluded_direct_image_urls") or [])
         blocked_source_page_urls = excluded_source_page_urls.get(post_id, set())
         blocked_fingerprints = excluded_fingerprints.get(post_id, set())
         blocked_url_hashes = excluded_url_hashes.get(post_id, set())
@@ -1829,7 +1841,8 @@ def _resolve_media_batch(
         existing_fingerprints = set((item.get("existing_media_phashes") or {}).values())
         reuse = [
             asset for asset in reuse
-            if str(asset.get("url") or asset.get("media_url") or "") not in blocked_urls
+            if asset.get("media_id") not in (item.get("existing_media_ids") or ())
+            and str(asset.get("url") or asset.get("media_url") or "") not in blocked_urls
             and str(asset.get("source") or asset.get("source_page_url") or "") not in blocked_source_page_urls
             and hashlib.sha256(str(asset.get("url") or asset.get("media_url") or "").encode("utf-8")).hexdigest() not in blocked_url_hashes
             and hashlib.sha256(str(asset.get("source") or asset.get("source_page_url") or "").encode("utf-8")).hexdigest() not in blocked_source_page_url_hashes
@@ -1907,7 +1920,7 @@ def _resolve_media_batch(
         if not spec:
             return 0
         post_id = int(spec["post_id"])
-        blocked_urls = excluded_urls.get(post_id, set())
+        blocked_urls = excluded_urls.get(post_id, set()) | set(spec.get("excluded_direct_image_urls") or [])
         blocked_source_page_urls = excluded_source_page_urls.get(post_id, set())
         blocked_fingerprints = excluded_fingerprints.get(post_id, set())
         blocked_url_hashes = excluded_url_hashes.get(post_id, set())
@@ -1995,7 +2008,7 @@ def _resolve_media_batch(
             post_id=post_id,
             existing_media_urls=item.get("existing_media_urls") or [],
             existing_media_phashes=item.get("existing_media_phashes") or {},
-            excluded_urls=excluded_urls.get(post_id, set()),
+            excluded_urls=excluded_urls.get(post_id, set()) | set(item.get("excluded_direct_image_urls") or []),
             excluded_source_page_urls=excluded_source_page_urls.get(post_id, set()),
             excluded_fingerprints=excluded_fingerprints.get(post_id, set()),
             excluded_url_hashes=excluded_url_hashes.get(post_id, set()),
@@ -5646,6 +5659,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = {"error": str(exc)}
         if is_post_lock_blocked(exc):
             payload["error_code"] = "post_lock_blocked"
+        elif isinstance(exc, V1PartialResumeError):
+            payload["error_code"] = exc.error_code
         print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
         return 2
     except (ConfigError, EditorialProviderError, OSError, ValueError) as exc:

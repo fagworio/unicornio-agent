@@ -29,17 +29,21 @@ from .media.inserter import (
 )
 from .media.text import sanitize_title, split_game_names
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
-from .state import read_state, uncertain_second_pass_eligible
+from .state import STATE_PARTIAL, read_state, uncertain_second_pass_eligible
 from .workflow import (
+    V1PartialResumeError,
     _acquire_post_lock,
     _featured_diagnosis,
     _images_summary,
     _is_v1_fresh_media_layout_source,
     _post_title,
     _post_write_guard_signature,
+    _reconcile_partial_media,
+    _retained_partial_candidate,
     is_post_lock_blocked,
     prepare_post,
     resolve_editorial_defaults,
+    verified_v1_partial_resume,
 )
 
 BATCH_SCHEMA_VERSION = 1
@@ -79,11 +83,37 @@ def resolve_batch_editorial_defaults(
                 and _is_v1_fresh_media_layout_source(post, root, post_id)
             ):
                 item["fresh_layout_source_signature"] = _post_write_guard_signature(post)
-            item["editorial"] = resolve_editorial_defaults(
-                dict(item.get("editorial") or {}), post
-            )
+            editorial = dict(item.get("editorial") or {})
+            relevance = editorial.get("site_relevance") or {}
+            if root is not None and isinstance(relevance, dict) and relevance.get("decision") == "process":
+                try:
+                    resume = verified_v1_partial_resume(client, root, post)
+                    if resume is not None:
+                        _bind_partial_editorial(editorial, resume, post_id)
+                        item["partial_resume"] = resume["accepted"]
+                except V1PartialResumeError as exc:
+                    item["media_assembly_error"] = {
+                        "error_code": exc.error_code,
+                        "reason": str(exc),
+                    }
+                    items.append(item)
+                    continue
+            item["editorial"] = resolve_editorial_defaults(editorial, post)
         items.append(item)
     return {**batch, "items": items}
+
+
+def _bind_partial_editorial(
+    editorial: dict[str, Any], resume: dict[str, Any], post_id: int,
+) -> None:
+    proposed = editorial.get("cleaned_html")
+    game_name = str(editorial.get("game_name") or "")
+    if (
+        (proposed is not None and proposed != resume["body"])
+        or game_name != resume["binding"]["game_name"]
+    ):
+        raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
+    editorial["cleaned_html"] = resume["body"]
 
 
 def build_media_resolve_batch_input(
@@ -115,6 +145,7 @@ def build_media_resolve_batch_input(
         raise BatchError("editorial batch precisa conter results[]")
     directory = batch_directory(root, batch_id)
     requests: list[dict[str, Any]] = []
+    partial_blocked: list[dict[str, Any]] = []
     seen: set[int] = set()
     for result in results:
         if not isinstance(result, dict) or result.get("status") != "ok":
@@ -133,10 +164,19 @@ def build_media_resolve_batch_input(
         if not isinstance(context, dict) or int(context.get("post_id") or 0) != post_id:
             raise BatchError(f"contexto preparado não corresponde ao post {post_id}")
         editorial = result.get("editorial")
-        editorial = editorial if isinstance(editorial, dict) else {}
+        editorial = dict(editorial) if isinstance(editorial, dict) else {}
         relevance = editorial.get("site_relevance")
         if isinstance(relevance, dict) and relevance.get("decision") != "process":
             continue
+        resume = context.get("partial_resume")
+        retained = []
+        if isinstance(resume, dict):
+            try:
+                _bind_partial_editorial(editorial, resume, post_id)
+            except V1PartialResumeError as exc:
+                partial_blocked.append({"post_id": post_id, "error_code": exc.error_code, "reason": str(exc)})
+                continue
+            retained = resume["accepted"]
         title = sanitize_title(editorial.get("title") or context.get("title") or "")
         game_names = split_game_names(editorial.get("game_name"))
         game_name = game_names[0] if game_names else ""
@@ -149,7 +189,10 @@ def build_media_resolve_batch_input(
             if str(value).strip()
         }
         words = word_count(cleaned_html)
-        images = _images_summary(cleaned_html, title, entities)
+        images = (
+            _reconcile_partial_media(cleaned_html, title, entities, retained)[0]
+            if retained else _images_summary(cleaned_html, title, entities)
+        )
         inline_deficit = max(0, int(images["required"]) - int(images["valid"]))
         required_inline_images = required_image_count(
             words, title=title, content=cleaned_html
@@ -263,6 +306,14 @@ def build_media_resolve_batch_input(
             "inline_deficit": inline_deficit,
             "featured_required": featured_required,
             "replacement_reserve": 0 if targets is not None else MEDIA_BATCH_REPLACEMENT_RESERVE,
+            **({
+                "existing_media_ids": [row["media_id"] for row in retained],
+                "existing_media_urls": [row["media_url"] for row in retained],
+                "existing_media_phashes": {row["media_url"]: row["phash"] for row in retained},
+                "excluded_direct_image_urls": list(dict.fromkeys(
+                    row["direct_image_url"] for row in retained if row.get("direct_image_url")
+                )),
+            } if retained else {}),
             **({"targets": targets} if targets is not None else {}),
         })
     if len(requests) > 2:
@@ -270,14 +321,16 @@ def build_media_resolve_batch_input(
     if not requests:
         stale_input = directory / "media.input.json"
         stale_input.unlink(missing_ok=True)
-        return {"status": "not_required", "path": None, "count": 0, "posts": []}
+        return {"status": "not_required", "path": None, "count": 0, "posts": [],
+                **({"partial_blocked": partial_blocked} if partial_blocked else {})}
     path = directory / "media.input.json"
     _write_json(path, {
         "schema_version": BATCH_SCHEMA_VERSION,
         "batch_id": batch_id,
         "posts": requests,
     })
-    return {"status": "required", "path": str(path), "count": len(requests), "posts": requests}
+    return {"status": "required", "path": str(path), "count": len(requests), "posts": requests,
+            **({"partial_blocked": partial_blocked} if partial_blocked else {})}
 
 
 def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query: str,
@@ -381,6 +434,7 @@ def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query:
 
 def _plan_v1_normal_inline(
     html: str, inline: list[dict[str, Any]], *, allow_restructure: bool,
+    retained_slots: tuple[int, ...] = (),
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
     # Blank spacers must not earn slots that final HTML cleanup will remove.
     if re.search(r"<img\b", html, re.IGNORECASE):
@@ -388,7 +442,7 @@ def _plan_v1_normal_inline(
     if allow_restructure:
         html = remove_empty_paragraphs(html)
     try:
-        return html, plan_normal_media_insertions(html, inline), None
+        return html, plan_normal_media_insertions(html, inline, retained_slots=retained_slots), None
     except MediaInsertionError as original:
         if not allow_restructure or original.code != "insufficient_paragraph_slots":
             raise
@@ -467,7 +521,11 @@ def merge_media_manifest_into_editorial(
     }
     for raw_item in batch.get("items") or []:
         item = dict(raw_item)
+        if item.get("media_assembly_error"):
+            merged_items.append(item)
+            continue
         editorial = dict(item.get("editorial") or {})
+        retained = item.get("partial_resume") or []
         existing_plan = editorial.get("media_plan")
         if existing_plan:
             report["unchanged"] += 1
@@ -483,6 +541,13 @@ def merge_media_manifest_into_editorial(
         if not isinstance(featured_required, bool):
             raise BatchError(f"featured_required inválido em post {post_id}")
         target_rows = media_row.get("targets")
+        if retained and target_rows is not None:
+            item["media_assembly_error"] = {
+                "error_code": "partial_resume_target_layout_changed",
+                "reason": "targets de lista não podem substituir a colocação retida deste artigo",
+            }
+            merged_items.append(item)
+            continue
         if isinstance(target_rows, list):
             featured_plan: list[dict[str, Any]] = []
             inline_plan: list[dict[str, Any]] = []
@@ -571,6 +636,9 @@ def merge_media_manifest_into_editorial(
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
+            if retained and _retained_partial_candidate(candidate, retained):
+                report["rejected_candidates"] += 1
+                continue
             direct_url = str(candidate.get("direct_image_url") or candidate.get("url") or "").strip()
             if not direct_url or direct_url in seen_urls:
                 continue
@@ -590,6 +658,16 @@ def merge_media_manifest_into_editorial(
             projected.append(planned)
         if projected:
             needed = max(0, int(media_row.get("needed") or 0))
+            if retained:
+                seo = editorial.get("seo") or {}
+                title = str(item.get("source_post_title") or seo.get("title") or "")
+                body = editorial["cleaned_html"]
+                entities = extract_entities(
+                    title=title, content_html=body, focus_keyword=str(seo.get("focus_keyword") or ""),
+                    game_name=editorial.get("game_name"),
+                )
+                coverage, _ = _reconcile_partial_media(body, title, entities, retained)
+                needed = min(needed, coverage["missing"] + int(featured_required))
             reserve = media_row.get("replacement_reserve", 0)
             if (
                 isinstance(reserve, bool)
@@ -617,7 +695,8 @@ def merge_media_manifest_into_editorial(
                 )
                 try:
                     planned_html, inline, normalization = _plan_v1_normal_inline(
-                        html, inline, allow_restructure=ordinary,
+                        html, inline, allow_restructure=ordinary and not retained,
+                        retained_slots=tuple(row["paragraph_index"] for row in retained),
                     )
                     if planned_html != html:
                         item["media_layout_source_signature"] = fresh_source
@@ -853,6 +932,24 @@ def load_media_resolve_batch(path: Path | str) -> dict[str, Any]:
                 f"replacement_reserve invalido em post {post_id} "
                 f"(use 0..{MEDIA_BATCH_REPLACEMENT_RESERVE})"
             )
+        existing_ids = item.get("existing_media_ids", [])
+        existing_urls = item.get("existing_media_urls", [])
+        existing_phashes = item.get("existing_media_phashes", {})
+        excluded_direct_urls = item.get("excluded_direct_image_urls", [])
+        if (
+            not isinstance(existing_ids, list) or len(existing_ids) > MEDIA_BATCH_MAX_INLINE_TARGETS
+            or any(type(media_id) is not int or media_id <= 0 for media_id in existing_ids)
+            or any(
+                not isinstance(urls, list) or len(urls) > MEDIA_BATCH_MAX_INLINE_TARGETS
+                or any(not isinstance(url, str) or not url.startswith(("https://", "http://")) or len(url) > 2048
+                       for url in urls)
+                for urls in (existing_urls, excluded_direct_urls)
+            )
+            or not isinstance(existing_phashes, dict) or set(existing_phashes) != set(existing_urls)
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{16}", value, re.IGNORECASE)
+                   for value in existing_phashes.values())
+        ):
+            raise BatchError(f"referências de mídia retida inválidas no post {post_id}")
         image_counts: dict[str, int | None] = {}
         for field in ("required_inline_images", "inline_deficit"):
             value = item.get(field)
@@ -942,6 +1039,10 @@ def load_media_resolve_batch(path: Path | str) -> dict[str, Any]:
             "role": role,
             "featured_required": featured_required,
             "replacement_reserve": reserve,
+            **({"existing_media_ids": existing_ids} if existing_ids else {}),
+            **({"existing_media_urls": existing_urls} if existing_urls else {}),
+            **({"existing_media_phashes": existing_phashes} if existing_phashes else {}),
+            **({"excluded_direct_image_urls": excluded_direct_urls} if excluded_direct_urls else {}),
             **image_counts,
             **({"targets": normalized_targets} if normalized_targets is not None else {}),
         })
@@ -1015,11 +1116,20 @@ def _context_for_post(
     title = _post_title(post)
     source_content = _post_content(post)
     cleaned_html = str(prepared.get("cleaned_html") or "")
+    state = read_state(post)
+    resume = (
+        verified_v1_partial_resume(client, root, post) if state.get("state") == STATE_PARTIAL
+        else None
+    )
+    if resume is not None:
+        cleaned_html = resume["body"]
     entities = extract_entities(title=title, content_html=cleaned_html)
     words = word_count(cleaned_html)
-    images = _images_summary(cleaned_html, title, entities)
+    images = (
+        _reconcile_partial_media(cleaned_html, title, entities, resume["accepted"])[0]
+        if resume is not None else _images_summary(cleaned_html, title, entities)
+    )
     featured = _featured_diagnosis(client, post, entities)
-    state = read_state(post)
     source_language = detect_language(f"{title}\n{source_content}")
     needs_localization = localization_required(source_language)
     localization = {
@@ -1079,6 +1189,8 @@ def _context_for_post(
         "source_language": source_language,
         "localization": localization,
         "cleaned_html": cleaned_html,
+        **({"partial_resume": {key: resume[key] for key in ("body", "binding", "accepted")}}
+           if resume is not None else {}),
         "seo_existing": _seo_snapshot(post),
         "featured_media": post.get("featured_media"),
         "entities": sorted(entities),
@@ -1222,6 +1334,12 @@ def prepare_batch(
                 "status": "quarantined",
                 "error": str(exc)[:240],
                 "error_class": "quarantine",
+            })
+        except V1PartialResumeError as exc:
+            items.append({
+                "post_id": post_id, "status": "error", "error": str(exc),
+                "error_code": exc.error_code, "error_class": "partial_resume",
+                "action": "verifique o rascunho e os anexos retidos; não recrie nem apague automaticamente",
             })
         except BatchError as exc:
             items.append({"post_id": post_id, "status": "error", "error": str(exc)[:240], "error_class": "contract"})
