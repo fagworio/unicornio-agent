@@ -58,6 +58,13 @@ Não estime contagens nem omita a etapa quando o arquivo de mídia existir. O mo
 e o Publisher permanece separado e pausado. Esta instalação não executa
 `v2-cycle`, `v2-run`, `start-v2-cycle` ou qualquer supervisor V2.
 
+A seleção V1 divide a capacidade entre NEW e retomada (PARTIAL ou recuperação)
+quando ambos existem. A rotação avança ao preparar, não ao reler os cards.
+Um lock observado antes de qualquer efeito exclui somente aquele ID da sessão
+Hermes atual, sem remover o lock nem gastar a vaga. Para `needs_retry` com
+`not_before`, aguarde o adiamento persistido; não repita o lote. O `Retry-After`
+global do provedor continua independente desse adiamento por post.
+
 O resolver também retorna até duas candidatas de reserva, fora da quota de mídia.
 `apply-batch` as tenta automaticamente quando uma candidata principal falha em
 evidência/origem, download, conversão ou validação visual; não repita a busca nem

@@ -20,6 +20,10 @@ from typing import Any
 class LockError(RuntimeError):
     """Raised when a post lock cannot be acquired or ownership is lost."""
 
+    def __init__(self, message: str = "", *, blocked_before_acquire: bool = False):
+        super().__init__(message)
+        self.blocked_before_acquire = blocked_before_acquire
+
 
 class LockHandle:
     def __init__(self, path: Path, fd: int, token: str, ttl: int):
@@ -959,7 +963,7 @@ class LockManager:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise LockError(f"post {post_id} is already locked") from exc
+                raise LockError(f"post {post_id} is already locked", blocked_before_acquire=True) from exc
 
             fd_stat = os.fstat(fd)
             path_stat = path.stat()
@@ -974,7 +978,8 @@ class LockManager:
                 if owner_status != "released":
                     raise LockError(
                         f"post {post_id} lock owner requires explicit reconciliation: "
-                        f"{owner_status} ({owner_reason})"
+                        f"{owner_status} ({owner_reason})",
+                        blocked_before_acquire=True,
                     )
 
             token = secrets.token_urlsafe(24)

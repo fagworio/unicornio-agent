@@ -531,6 +531,16 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
     )
     case = wordpress_e2e_case
     post_id = case.post_id("credit_only_media_ready")
+    retry_id = case.post_id("v1_batch_deferred_sibling")
+    retry_before = case.client.get_post(retry_id)
+
+    def post_mutations(target):
+        audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={target}")
+        return [event for event in audit.get("events", [])
+                if event.get("phase") == "response"
+                and event.get("method") in {"POST", "PUT", "PATCH", "DELETE"}]
+
+    assert post_mutations(retry_id) == []
     with ControlledSource(subject_confidence=0.60) as source:
         source_url = f"{source.base_url}/article"
         editorial = _automatic_pipeline_editorial()
@@ -542,9 +552,9 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             case, source, post_id, media_source_policy="credit_only"
         )
         prepared = prepare_batch(
-            case.client, config, case.root, [post_id], batch_id="batch-credit-only-e2e"
+            case.client, config, case.root, [retry_id, post_id], batch_id="batch-credit-only-e2e"
         )
-        assert prepared["prepared"] == 1, prepared
+        assert prepared["prepared"] == 2, prepared
 
         for index in (1, 2, 3):
             output = io.BytesIO()
@@ -667,10 +677,22 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             return uploaded
 
         monkeypatch.setattr(case.client, "upload_media", counted_upload)
+        batch["items"].insert(0, {
+            "post_id": retry_id,
+            "status": "needs_retry",
+            "reason": "controlled incomplete editorial reply",
+        })
         first_batch = _apply_editorial_batch(
             case.client, config, case.root, batch, dry_run=False, compact=False
         )
-        first = first_batch["posts"][0]
+        assert [row["post_id"] for row in first_batch["posts"]] == [retry_id, post_id]
+        deferred, first = first_batch["posts"]
+        assert deferred["status"] == "needs_retry", deferred
+        assert deferred["not_before"]
+        assert deferred["wordpress_changed"] is False
+        assert post_mutations(retry_id) == []
+        deferred_receipt = case.root / "backups" / str(retry_id) / "editorial.defer.json"
+        deferred_receipt_bytes = deferred_receipt.read_bytes()
         assert first["status"] == "ready", first
         media_results = first["media_plan_results"]
         assert len([item for item in media_results if item.get("status") == "accepted"]) == 3
@@ -711,10 +733,20 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             else:
                 assert asset_url in raw
 
+        ready_writes = post_mutations(post_id)
+        assert ready_writes
         second_batch = _apply_editorial_batch(
             case.client, config, case.root, batch, dry_run=False, compact=False
         )
-        assert second_batch["posts"][0]["status"] == "noop", second_batch
+        assert [row["status"] for row in second_batch["posts"]] == ["needs_retry", "noop"], second_batch
+        assert deferred_receipt.read_bytes() == deferred_receipt_bytes
+        assert post_mutations(retry_id) == []
+        assert post_mutations(post_id) == ready_writes
+        retry_after = case.client.get_post(retry_id)
+        ready_after = case.client.get_post(post_id)
+        for key in ("meta", "content", "featured_media", "status"):
+            assert retry_after[key] == retry_before[key], key
+            assert ready_after[key] == post[key], key
         assert upload_count == 3
 
         # On real WordPress this registered meta is exposed as "", even though
@@ -847,7 +879,11 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             "ready_state": _snapshot(post)["ready_state"],
             "source_page_verified": False,
             "rights_verified": False,
-            "second_apply": second_batch["posts"][0]["status"],
+            "second_apply": second_batch["posts"][1]["status"],
+            "deferred_sibling_id": retry_id,
+            "deferred_sibling_not_before": deferred["not_before"],
+            "deferred_sibling_post_mutations": len(post_mutations(retry_id)),
+            "same_batch_ready_reads_back_unchanged": True,
             "publisher_empty_work_state": post["meta"]["_hermes_work_state"],
             "publisher_readback": positive_after["status"],
             "publisher_cli_first_window_new": first_window["published_new"],

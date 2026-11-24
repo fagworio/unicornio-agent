@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from .backup import SnapshotStore
 from .ai_provider import hermes_command_available
 from .batch import (
+    batch_directory,
     load_editorial_batch,
     load_media_resolve_batch,
     load_vision_batch,
@@ -38,6 +39,11 @@ from .workflow import (
     CardsSelectionTimeout,
     MediaFunnelInvariantError,
     V1PartialResumeError,
+    PostLockContention,
+    _post_write_guard_signature,
+    load_epoch_protection,
+    known_wordpress_entity_missing,
+    wordpress_read_stops_batch,
     WorkflowError,
     _acquire_post_lock,
     apply_editorial,
@@ -1246,6 +1252,10 @@ def preflight_apply_candidate(
     current_post = client.get_post(post_id)
     if not isinstance(current_post, dict):
         return True, ""  # lightweight test doubles/legacy clients
+    if current_post.get("id") != post_id:
+        raise WordPressError(
+            f"WordPress returned invalid details for post {post_id}", error_code="wordpress_integrity",
+        )
     if current_post.get("status") != "pending":
         return False, f"post status is {current_post.get('status')}, expected pending"
     if root is not None:
@@ -1301,7 +1311,12 @@ def _apply_editorial_batch(
     touched post remains eligible for rework, matching the single-post apply.
     """
     from . import session_budget
+    from .eligibility import resolve_post_eligibility
+    from .retry_policy import editorial_backoff_status, record_v1_deferral, v1_deferral
 
+    apply_dry_run = dry_run or config.dry_run
+    lock_skips = session_budget.skipped_locked_posts(root, config)
+    epoch = load_epoch_protection(root)
     batch_id = str(batch["batch_id"])
     outcomes: list[dict[str, Any]] = []
     stopped = ""
@@ -1313,6 +1328,18 @@ def _apply_editorial_batch(
     try:
         for index, item in enumerate(batch["items"]):
             post_id = int(item["post_id"])
+            if epoch.is_protected(post_id):
+                outcomes.append({
+                    "post_id": post_id, "status": "quarantined", "error_code": "epoch_protected_transaction",
+                    "wordpress_changed": False,
+                })
+                continue
+            if post_id in lock_skips:
+                outcomes.append({
+                    "post_id": post_id, "status": "lock_blocked", "error_code": "post_lock_blocked",
+                    "wordpress_changed": False, "session_skipped": True,
+                })
+                continue
             from .pipeline_v2.quarantine import (
                 PostQuarantinedError,
                 QuarantinePolicyError,
@@ -1334,6 +1361,11 @@ def _apply_editorial_batch(
                 try:
                     with _acquire_post_lock(root, config, post_id) as retry_lock:
                         current = client.get_post(post_id)
+                        if not apply_dry_run and (not isinstance(current, dict) or current.get("id") != post_id):
+                            raise WordPressError(
+                                f"WordPress returned invalid details for post {post_id}",
+                                error_code="wordpress_integrity",
+                            )
                         current_state = read_state(current)
                         if retry_mode == "uncertain_second_pass" and not uncertain_second_pass_eligible(current):
                             outcomes.append({
@@ -1431,17 +1463,70 @@ def _apply_editorial_batch(
                             if stopped:
                                 break
                         else:
-                            outcomes.append({
-                                "post_id": post_id,
-                                "status": "needs_retry",
-                                "wordpress_changed": False,
+                            outcome = {
+                                "post_id": post_id, "status": "needs_retry", "wordpress_changed": False,
                                 "reason": str(item.get("reason") or "editorial batch marcou retry")[:240],
-                                "action": "gere novamente somente este post",
-                            })
+                            }
+                            if not apply_dry_run:
+                                eligibility = resolve_post_eligibility(current, root)
+                                if current.get("status") != "pending" or not eligibility.eligible_for_v1:
+                                    outcomes.append({
+                                        "post_id": post_id,
+                                        "status": "noop" if not eligibility.is_v2 and eligibility.state == "ready" else "preflight_blocked",
+                                        "state": eligibility.state, "wordpress_changed": False,
+                                    })
+                                    continue
+                                load_epoch_protection(root).assert_writable(post_id, effect="v1_queue_deferral")
+                                global_backoff = editorial_backoff_status(root)
+                                verified_global_backoff = (
+                                    global_backoff.get("active") and global_backoff.get("batch_id") == batch_id
+                                )
+                                if not verified_global_backoff:
+                                    try:
+                                        latest_path = root / "backups" / str(post_id) / "prepared.json"
+                                        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+                                        source_path = batch_directory(root, batch_id) / f"post-{post_id}.json"
+                                        source = json.loads(source_path.read_text(encoding="utf-8"))
+                                    except FileNotFoundError:
+                                        latest, source = {}, {}
+                                    signature = _post_write_guard_signature(current)
+                                    if (
+                                        latest.get("queue_batch_id") == batch_id
+                                        and current.get("modified_gmt")
+                                        and source.get("queue_source_signature") == signature
+                                    ):
+                                        retry_lock.assert_owned()
+                                        operational = item.get("failure_class") in {"timeout", "transport_error", "api_http_error"}
+                                        row = v1_deferral(root, current, digest=lambda _post: signature) or record_v1_deferral(
+                                            root, current, batch_id=batch_id, signature=signature,
+                                            reason_code="editorial_provider_retry" if operational else "editorial_needs_retry",
+                                            delay_minutes=(120 if operational else config.rework_cooldown_minutes),
+                                        )
+                                        outcome.update(
+                                            not_before=row["not_before"], error_code=row["reason_code"],
+                                            action="aguarde o adiamento antes de selecionar novamente",
+                                        )
+                                    else:
+                                        outcome.update(stale=True, action="prepare o post na revisão atual")
+                                else:
+                                    outcome["action"] = "respeite o cooldown global do provedor editorial"
+                            outcomes.append(outcome)
                 except session_budget.SessionBudgetError:
                     raise
+                except WordPressError as exc:
+                    if wordpress_read_stops_batch(client, exc):
+                        stopped = exc.error_code or "wordpress_retry_preflight_failed"
+                        remaining = [int(row["post_id"]) for row in batch["items"][index:]]
+                        break
+                    outcomes.append({
+                        "post_id": post_id, "status": "preflight_error", "wordpress_changed": False,
+                        "error_code": exc.error_code, "error": str(exc)[:240],
+                    })
                 except Exception as exc:  # noqa: BLE001 - isolate one post
                     if is_post_lock_blocked(exc):
+                        if isinstance(exc, PostLockContention) and not apply_dry_run:
+                            session_budget.skip_locked_post(root, config, post_id)
+                            lock_skips.add(post_id)
                         outcomes.append({
                             "post_id": post_id,
                             "status": "lock_blocked",
@@ -1504,14 +1589,23 @@ def _apply_editorial_batch(
                     client, config, post_id, item["editorial"], root
                 )
             except WordPressError as exc:
+                if wordpress_read_stops_batch(client, exc):
+                    stopped = exc.error_code or "wordpress_preflight_failed"
+                    remaining = [int(row["post_id"]) for row in batch["items"][index:]]
+                    break
                 outcomes.append({
-                    "post_id": post_id,
-                    "status": "preflight_error",
-                    "wordpress_changed": False,
+                    "post_id": post_id, "status": "preflight_error", "wordpress_changed": False,
+                    "error_code": "post_unavailable" if known_wordpress_entity_missing(exc) else exc.error_code,
                     "error": str(exc)[:240],
                 })
                 continue
             if not admissible:
+                if preflight_reason == "post is not eligible (v1_ready_not_eligible)":
+                    outcomes.append({
+                        "post_id": post_id, "status": "noop", "state": "ready",
+                        "wordpress_changed": False, "idempotent": True,
+                    })
+                    continue
                 outcomes.append({
                     "post_id": post_id,
                     "status": "preflight_blocked",
@@ -1601,6 +1695,18 @@ def _apply_editorial_batch(
                 })
             except Exception as exc:  # noqa: BLE001 - isolate one post
                 if is_post_lock_blocked(exc):
+                    if work_started:
+                        stopped = "post_lock_integrity_unverified"
+                        outcomes.append({
+                            "post_id": post_id, "status": "integrity_blocked",
+                            "error_code": stopped, "wordpress_changed": None,
+                            "error": str(exc)[:240],
+                        })
+                        remaining = [int(row["post_id"]) for row in batch["items"][index + 1:]]
+                        break
+                    if isinstance(exc, PostLockContention) and not apply_dry_run:
+                        session_budget.skip_locked_post(root, config, post_id)
+                        lock_skips.add(post_id)
                     outcomes.append(
                         {
                             "post_id": post_id,
@@ -1649,7 +1755,8 @@ def _apply_editorial_batch(
         "needs_rework": sum(
             1 for item in outcomes if item.get("status") == "needs_rework"
         ),
-        "errors": sum(1 for item in outcomes if item.get("status") == "error"),
+        "errors": sum(item.get("status") in {"error", "integrity_blocked"} for item in outcomes),
+        "integrity_blocked": sum(item.get("status") == "integrity_blocked" for item in outcomes),
         "quarantined": sum(1 for item in outcomes if item.get("status") == "quarantined"),
         "stopped": stopped,
         "remaining_post_ids": remaining,

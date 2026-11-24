@@ -468,7 +468,8 @@ class WorkflowTests(unittest.TestCase):
             report = build_cards(client, self.config(False), root, per_page=2)
 
         self.assertEqual(report["count"], 2)
-        self.assertEqual(client.candidate_pages, 26)
+        self.assertEqual(client.candidate_pages, 2)
+        self.assertTrue(report["has_more_pending"])
         self.assertEqual(client.detail_fetches, [1, 2])
         self.assertEqual(report["cards_selection_featured_lookups"], 2)
 

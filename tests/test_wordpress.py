@@ -107,7 +107,8 @@ class WordPressClientTests(unittest.TestCase):
         posts = WordPressClient(self.config).list_pending_card_candidates(per_page=100)
         self.assertEqual(posts[0]["id"], 42)
         query = parse_qs(urlparse(ApiHandler.requests[0][1]).query)
-        self.assertEqual(query["_fields"], ["id,status,date,meta"])
+        # modified_gmt fences durable V1 deferrals to the prepared revision.
+        self.assertEqual(query["_fields"], ["id,status,date,modified_gmt,meta"])
         self.assertEqual(query["per_page"], ["100"])
 
     def test_card_candidate_request_honors_remaining_deadline(self):

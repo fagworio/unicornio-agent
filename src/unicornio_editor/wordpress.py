@@ -145,7 +145,7 @@ class WordPressClient:
             per_page=per_page,
             include=include,
             status=status,
-            fields=("id", "status", "date", "meta"),
+            fields=("id", "status", "date", "modified_gmt", "meta"),
             timeout=timeout,
         )
 

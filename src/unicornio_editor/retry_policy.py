@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable
 
 MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_EDITORIAL_RETRY_SECONDS = 5 * 60
@@ -228,3 +228,112 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+_V1_LANES = ("new", "partial", "recovery")
+
+
+def _v1_rotation_path(root: Path) -> Path:
+    return root / "work" / "v1-editorial-rotation.json"
+
+
+def v1_rotation(root: Path) -> dict[str, dict[str, Any]]:
+    try:
+        state = json.loads(_v1_rotation_path(root).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(state, dict) or any(
+        lane not in _V1_LANES or not isinstance(row, dict)
+        or type(row.get("post_id")) is not int or type(row.get("turn")) is not int
+        for lane, row in state.items()
+    ):
+        raise ValueError("invalid V1 editorial rotation")
+    return state
+
+
+def v1_lane(state: str | None) -> str | None:
+    if state in ("new", "partial"):
+        return state
+    return "recovery" if state in ("blocked", "uncertain") else None
+
+
+def record_v1_prepared(root: Path, lane: str | None, post_id: int, batch_id: str) -> None:
+    if lane is None:
+        return
+    with _editorial_lock(root, ".v1-rotation.lock"):
+        state = v1_rotation(root)
+        previous = state.get(lane, {})
+        if (previous.get("post_id"), previous.get("batch_id")) == (post_id, batch_id):
+            return
+        turn = 1 + max((row["turn"] for row in state.values()), default=0)
+        state[lane] = {"post_id": post_id, "turn": turn, "batch_id": batch_id}
+        _atomic_write_json(_v1_rotation_path(root), state)
+
+
+def _v1_defer_path(root: Path, post_id: int) -> Path:
+    return root / "backups" / str(post_id) / "editorial.defer.json"
+
+
+def _read_v1_defer(root: Path, post_id: int) -> dict[str, Any]:
+    try:
+        row = json.loads(_v1_defer_path(root, post_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(row, dict) or row.get("post_id") != post_id:
+        raise ValueError(f"invalid V1 deferred retry for post {post_id}")
+    try:
+        marked = datetime.fromisoformat(row["recorded_at"])
+        until = datetime.fromisoformat(row["not_before"])
+        delay = (until - marked).total_seconds()
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError(f"invalid V1 deferred retry for post {post_id}") from exc
+    if (
+        marked.tzinfo is None or until.tzinfo is None or not 0 < delay <= 720 * 60
+        or marked > datetime.now(timezone.utc) + timedelta(minutes=5)
+    ):
+        raise ValueError(f"invalid V1 deferred retry boundary for post {post_id}")
+    return row
+
+
+def potential_v1_deferral(root: Path, post: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """A cheap revision hint for discovery; never veto an unhydrated card."""
+    revision = post.get("modified_gmt")
+    if not isinstance(revision, str) or not revision.strip():
+        return {}
+    row = _read_v1_defer(root, int(post["id"]))
+    if not row or revision != row.get("modified_gmt"):
+        return {}
+    until = datetime.fromisoformat(row["not_before"])
+    return row if until > (now or datetime.now(timezone.utc)) else {}
+
+
+def v1_deferral(
+    root: Path, post: dict[str, Any], *, digest: Callable[[dict[str, Any]], str],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    row = potential_v1_deferral(root, post, now=now)
+    return row if row and row.get("signature") == digest(post) else {}
+
+
+def record_v1_deferral(
+    root: Path, post: dict[str, Any], *, batch_id: str, signature: str, reason_code: str,
+    delay_minutes: int, now: datetime | None = None,
+) -> dict[str, Any]:
+    """The caller must hold this post's established lock and verify its revision."""
+    post_id = int(post["id"])
+    previous = _read_v1_defer(root, post_id)
+    if (previous.get("batch_id"), previous.get("signature")) == (batch_id, signature):
+        return previous
+    recorded = now or datetime.now(timezone.utc)
+    available = recorded + timedelta(minutes=max(1, min(720, delay_minutes)))
+    row = {
+        "post_id": post_id, "batch_id": batch_id, "signature": signature,
+        "modified_gmt": post.get("modified_gmt") or "", "reason_code": reason_code,
+        "recorded_at": recorded.isoformat(timespec="seconds"),
+        "not_before": available.isoformat(timespec="seconds"),
+    }
+    path = _v1_defer_path(root, post_id)
+    _atomic_write_json(path, row)
+    if _read_v1_defer(root, post_id) != row:
+        raise ValueError(f"V1 deferred retry readback mismatch for post {post_id}")
+    return row

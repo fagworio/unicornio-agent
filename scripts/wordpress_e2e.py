@@ -94,6 +94,7 @@ POST_FIXTURES = {
     "credit_only_media_ready": ("pending", False),
     "v1_publisher_corrupt_work_state": ("pending", False),
     "v1_publisher_no_ready_state": ("pending", False),
+    "v1_batch_deferred_sibling": ("pending", False),
     "v1_listicle_targets_ready": ("pending", False),
     "media_pipeline_retry": ("pending", False),
     "v1_restoration": ("pending", False),

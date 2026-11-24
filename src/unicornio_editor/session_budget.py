@@ -305,6 +305,7 @@ def _vazio() -> dict[str, Any]:
         "last_activity": "",
         "posts_touched": [],
         "posts_reserved": [],
+        "lock_skips": [],
         "reservation_owners": {},
         "reservation_recovery_history": [],
         "ready": 0,
@@ -382,6 +383,9 @@ def _normalizar(dados: Any) -> dict[str, Any]:
         "last_activity": str(dados.get("last_activity") or ""),
         "posts_touched": touched,
         "posts_reserved": reserved,
+        "lock_skips": [
+            post_id for post_id in dados.get("lock_skips", []) if type(post_id) is int and post_id > 0
+        ],
         "reservation_owners": reservation_owners,
         "reservation_recovery_history": recovery_history[-100:],
         "ready": int(dados.get("ready") or 0),
@@ -430,6 +434,21 @@ def load_session(root: Path | str, config: Config, *, now: float | None = None) 
         return _vazio()
     _record_read("loaded", len(raw.encode("utf-8")))
     return dados
+
+
+def skipped_locked_posts(root: Path, config: Config) -> set[int]:
+    # Do not turn the legacy shared ledger into an unscoped blacklist.
+    return set(load_session(root, config)["lock_skips"]) if _session_id() else set()
+
+
+def skip_locked_post(root: Path, config: Config, post_id: int) -> None:
+    if not _session_id():
+        return
+    with _ledger_lock(root):
+        state = load_session(root, config)
+        if post_id not in state["lock_skips"]:
+            state["lock_skips"] = [*state["lock_skips"], post_id][-200:]
+            _salvar(root, state)
 
 
 def _salvar(root: Path | str, dados: dict[str, Any], *, now: float | None = None) -> None:

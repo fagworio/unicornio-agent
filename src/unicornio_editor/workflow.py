@@ -106,6 +106,7 @@ from .pipeline_v2.quarantine import (
     QuarantinePolicyError,
     assert_post_not_quarantined,
     filter_quarantined_posts,
+    quarantine_for_root,
 )
 from .pipeline_v2.lock import RunSessionLock
 from .pipeline_v2.epoch_protection import EpochProtectionError, load_epoch_protection
@@ -189,6 +190,10 @@ class WorkflowError(RuntimeError):
     """Raised when a post cannot safely enter a workflow step."""
 
 
+class PostLockContention(WorkflowError):
+    """Lock admission refused before adopting ownership or running post work."""
+
+
 def is_post_lock_blocked(exc: BaseException) -> bool:
     """Recognize an item-local post-lock conflict through workflow wrapping."""
     seen: set[int] = set()
@@ -199,6 +204,22 @@ def is_post_lock_blocked(exc: BaseException) -> bool:
         seen.add(id(current))
         current = current.__cause__ or current.__context__
     return False
+
+
+def known_wordpress_entity_missing(exc: WordPressError) -> bool:
+    """Recognize only a WordPress-confirmed missing item, not a broken route."""
+    return exc.status_code in (404, 410) and exc.api_code == "rest_post_invalid_id"
+
+
+def wordpress_read_stops_batch(client: Any, exc: WordPressError) -> bool:
+    if known_wordpress_entity_missing(exc):
+        return False
+    # Standard REST calls provide status/cause; a legacy test/store adapter
+    # can expose an untyped, post-local failure without claiming endpoint health.
+    return bool(
+        isinstance(client, WordPressClient) or exc.status_code is not None
+        or exc.__cause__ is not None or exc.error_code != "wordpress_error"
+    )
 
 
 class CardsSelectionTimeout(WorkflowError):
@@ -232,7 +253,8 @@ def _acquire_post_lock(root: Path, config: Config | None, post_id: int):
             root / "work" / "locks", ttl=int(getattr(config, "lock_ttl", 900))
         ).acquire(post_id)
     except LockError as exc:
-        raise WorkflowError(f"post {post_id} is already being processed") from exc
+        error_type = PostLockContention if exc.blocked_before_acquire else WorkflowError
+        raise error_type(f"post {post_id} is already being processed") from exc
 
 
 class _PostLockGuardedClient:
@@ -1117,16 +1139,21 @@ def _apply_editorial_unlocked(
                     progress=progress,
                     media_results=media_results,
                 )
-                partial_state = _partial_retry(
-                    no_progress,
-                    cooldown_minutes=config.rework_cooldown_minutes,
-                    max_no_progress_attempts=config.max_partial_no_progress_attempts,
-                )["state"]
+                operational_vision = any(
+                    item.get("status") == "deferred" and item.get("reason_code") in {
+                        "vision_provider_error", "vision_budget_exhausted",
+                    }
+                    for item in media_results
+                )
                 partial_retry = _partial_retry(
                     no_progress,
-                    cooldown_minutes=config.rework_cooldown_minutes,
+                    cooldown_minutes=(
+                        max(120, config.rework_cooldown_minutes)
+                        if operational_vision else config.rework_cooldown_minutes
+                    ),
                     max_no_progress_attempts=config.max_partial_no_progress_attempts,
                 )
+                partial_state = partial_retry["state"]
                 manifest = {
                     "state": "partial",
                     "kind": "media",
@@ -6152,6 +6179,7 @@ def build_queue_report(
     estável que o monitor hasheia (token economy: sem LLM no idle).
     """
     from .content_quality import word_count
+    from .retry_policy import v1_deferral
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)
     # A fila editorial não pode parar na primeira página: um backlog com mais
@@ -6204,6 +6232,7 @@ def build_queue_report(
     uncertain_ids: list[int] = []
     uncertain_second_pass_ids: list[int] = []
     skipped_ids: list[int] = []
+    epoch = load_epoch_protection(root)
     for post in posts:
         post_id = post.get("id")
         if not isinstance(post_id, int):
@@ -6225,9 +6254,14 @@ def build_queue_report(
         # Elegibilidade usa o estado RESOLVIDO (legado incluido): blocked sem
         # next_retry_at (ou com ele vencido) volta a agenda do monitor.
         effective_state = {**state_info, "state": state}
+        deferred = (
+            v1_deferral(root, post, digest=_post_write_guard_signature)
+            if not eligibility.is_v2 and eligibility.eligible_for_v1 else {}
+        )
+        epoch_blocked = not eligibility.is_v2 and epoch.is_protected(post_id)
         if state == STATE_UNCERTAIN:
             uncertain_ids.append(post_id)
-            if uncertain_second_pass_eligible(post):
+            if not deferred and not epoch_blocked and uncertain_second_pass_eligible(post):
                 uncertain_second_pass_ids.append(post_id)
         elif state in {STATE_AWAITING_HUMAN, "human_required"} or post.get("_wp_awaiting_human"):
             awaiting_human_ids.append(post_id)
@@ -6237,20 +6271,20 @@ def build_queue_report(
             ready_ids.append(post_id)
         elif state == STATE_BLOCKED:
             blocked_ids.append(post_id)
-            if retry_eligible(effective_state):
+            if not deferred and not epoch_blocked and retry_eligible(effective_state):
                 eligible_rework.append(post_id)
             if _is_recent(post, cutoff):
                 recent_blocked.append(post_id)
         elif state == STATE_PARTIAL:
             partial_ids.append(post_id)
-            if retry_eligible(effective_state):
+            if not deferred and not epoch_blocked and retry_eligible(effective_state):
                 eligible_rework.append(post_id)
         else:  # NEW / PROCESSING / V2 pending / desconhecido
-            if not eligibility.is_v2:
+            if not eligibility.is_v2 and not deferred and not epoch_blocked:
                 unprocessed.append(post_id)
             if eligibility.is_v2 and state == "pending" and eligibility.cooldown_expired:
                 v2_eligible.append(post_id)
-            if not eligibility.is_v2 and _is_recent(post, cutoff):
+            if not eligibility.is_v2 and not deferred and not epoch_blocked and _is_recent(post, cutoff):
                 recent_unprocessed.append(post_id)
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered")
         rows.append(
@@ -6263,7 +6297,7 @@ def build_queue_report(
                 "state_source": eligibility.source,
                 "eligibility_reason": eligibility.reason,
                 "attempts": state_info["attempts"],
-                "next_retry_at": state_info["next_retry_at"],
+                "next_retry_at": deferred.get("not_before") or state_info["next_retry_at"],
                 "last_error": state_info["last_error"][:160],
                 "prepared": (backups_dir / "prepared.json").is_file(),
                 "edited": state == STATE_READY,
@@ -6280,7 +6314,7 @@ def build_queue_report(
                 "no_progress": v2_state.retry.no_progress if v2_state is not None else state_info.get("no_progress_attempts", 0),
                 "eligible": (
                     eligibility.cooldown_expired and state == "pending"
-                    if eligibility.is_v2 else eligibility.eligible_for_v1
+                    if eligibility.is_v2 else eligibility.eligible_for_v1 and not bool(deferred) and not epoch_blocked
                 ),
                 "media": (
                     {
@@ -6403,10 +6437,12 @@ def build_cards(
     quantas válidas existem, quantas faltam, quantas são irrelevantes/não-WebP,
     diagnóstico da featured (existe? relevante? WebP? dimensões? ação) e, para
     posts bloqueados, o plano ``fix`` — o agente sabe o que corrigir SÓ pelo
-    card, sem abrir blocked.json/checklist/logs/source. Rework vem PRIMEIRO
-    (FIFO por id); posts fora da fila (uncertain/awaiting_human/skipped/ready)
-    não geram card.
+    card, sem abrir blocked.json/checklist/logs/source. NEW e rework
+    dividem a fila; a preparação concluída avança a rotação persistida.
+    READY, adiamentos ativos e locks já observados nesta sessão não geram card.
     """
+    from . import session_budget
+    from .retry_policy import potential_v1_deferral, v1_deferral, v1_lane, v1_rotation
     from .content_quality import word_count
     from .html_cleaner import clean_html
     from .media.relevance import extract_entities
@@ -6448,7 +6484,29 @@ def build_cards(
             return candidate_reader(page=page, per_page=per_page, include=include)
         return client.list_pending(page=page, per_page=per_page, include=include)
 
-    rework_ids = _rework_ids(root)
+    skipped = session_budget.skipped_locked_posts(root, config)
+    if os.environ.get("HERMES_SESSION_ID"):
+        skipped.update(session_budget.load_session(root, config)["posts_touched"])
+    rotation = v1_rotation(root)
+    epoch = load_epoch_protection(root)
+    quarantined = quarantine_for_root(root)
+    skipped.update(quarantined)
+    rework_ids = [
+        post_id for post_id in _rework_ids(root)
+        if post_id not in skipped and not epoch.is_protected(post_id)
+    ]
+    # At most one include request, but give both artifact lanes representation
+    # instead of filtering the first 100 IDs from one potentially large lane.
+    included_lanes: dict[str, list[int]] = {"partial": [], "recovery": []}
+    for post_id in rework_ids:
+        lane = ("partial" if (root / "backups" / str(post_id) / "editorial.partial.json").is_file()
+                else "recovery")
+        included_lanes[lane].append(post_id)
+    for lane, lane_ids in included_lanes.items():
+        cursor = rotation.get(lane, {}).get("post_id", 0)
+        lane_ids.sort(key=lambda post_id: (post_id <= cursor, post_id))
+    partial_ids, recovery_ids = included_lanes["partial"], included_lanes["recovery"]
+    rework_ids = (partial_ids[:50] + recovery_ids[:50] + partial_ids[50:] + recovery_ids[50:])[:100]
     posts: list[dict[str, Any]] = []
     if rework_ids:
         # Nem todo id com editorial.blocked.json é rework elegível: posts que
@@ -6492,7 +6550,7 @@ def build_cards(
             pass
         for cand in candidates:
             post_id = cand.get("id")
-            if not isinstance(post_id, int):
+            if not isinstance(post_id, int) or post_id in skipped:
                 continue
             state_info = read_state(cand)
             eligibility = resolve_post_eligibility(cand, root)
@@ -6501,14 +6559,48 @@ def build_cards(
                 continue
             if state in (STATE_BLOCKED, STATE_PARTIAL) and retry_eligible({**state_info, "state": state}):
                 posts.append(cand)
-    remaining = per_page - len(posts)
-    if remaining > 0:
+    provisional = {lane: set() for lane in ("new", "partial", "recovery")}
+    provisional_uncertain: set[int] = set()
+    uncertain_quota = max(0, int(getattr(config, "uncertain_second_pass_limit", 5)))
+
+    def available_rework() -> int:
+        return (len(provisional["partial"]) + len(provisional["recovery"] - provisional_uncertain)
+                + min(len(provisional_uncertain), uncertain_quota))
+
+    def sample(rows):
+        for post in rows:
+            post_id = post.get("id")
+            if type(post_id) is not int or post_id in skipped or epoch.is_protected(post_id):
+                continue
+            eligibility = resolve_post_eligibility(post, root)
+            lane = v1_lane(eligibility.state)
+            if (
+                eligibility.eligible_for_v1 and not eligibility.is_v2 and lane
+                and (eligibility.state != STATE_UNCERTAIN or uncertain_second_pass_eligible(post))
+                # Only used to estimate depth, not to suppress a card.
+                and not (
+                    potential_v1_deferral(root, post) if lightweight_candidates
+                    else v1_deferral(root, post, digest=_post_write_guard_signature)
+                )
+            ):
+                provisional[lane].add(post_id)
+                if eligibility.state == STATE_UNCERTAIN:
+                    provisional_uncertain.add(post_id)
+
+    sample(posts)
+    remaining = max(1, per_page - len(posts))
+    if per_page > 0:
         # Percorre a fila até encontrar candidatos elegíveis. Consultar só a
         # página 1 fazia o monitor acordar o agente para trabalho que cards
         # não conseguia enxergar quando os primeiros pending já eram READY.
         page_size = 100 if lightweight_candidates else max(remaining * 5, 20)
         pending_scan_complete = False
         for page in range(1, 101):
+            if (
+                page > 1 and len(provisional["new"]) + available_rework() >= per_page
+                and time.monotonic() >= selection_started_at + selection_timeout * 0.6
+            ):
+                break  # keep the remaining budget for selected detail + featured reads
             page_timeout = _remaining_timeout("pending_candidates")
             page_started_at = time.monotonic()
             try:
@@ -6544,8 +6636,22 @@ def build_cards(
                 pass
             _remaining_timeout("pending_candidates")
             posts.extend(chunk)
+            sample(chunk)
             if len(chunk) < page_size:
                 pending_scan_complete = True
+                break
+            rework_available = available_rework()
+            available = len(provisional["new"]) + rework_available
+            fresh_goal = max(1, per_page - 2)
+            rework_goal = min(2, max(1, per_page - 1))
+            balanced = (
+                len(provisional["new"]) >= fresh_goal
+                and rework_available >= rework_goal
+            )
+            if (balanced and available >= per_page + 2) or (page >= 2 and available >= per_page):
+                # Prefer two hydration alternatives when discovery is balanced.
+                # Once fallback can fill the batch, two pages of look-ahead
+                # suffice; don't sweep terminal backlog for a better mix.
                 break
     candidate_filter_started_at = time.monotonic()
     posts = filter_quarantined_posts(root, posts)
@@ -6553,9 +6659,17 @@ def build_cards(
     ordered: list[dict[str, Any]] = []
     for post in posts:
         post_id = post.get("id")
-        if not isinstance(post_id, int) or post_id in seen:
+        if (
+            not isinstance(post_id, int) or post_id in seen or post_id in skipped
+            or epoch.is_protected(post_id)
+        ):
             continue
         seen.add(post_id)
+        eligibility = resolve_post_eligibility(post, root)
+        if eligibility.is_v2 or not eligibility.eligible_for_v1:
+            continue
+        if not lightweight_candidates and v1_deferral(root, post, digest=_post_write_guard_signature):
+            continue
         ordered.append(post)
     cards: list[dict[str, Any]] = []
     # Reserve deterministic capacity for UNCERTAIN second passes so NEW cannot
@@ -6568,40 +6682,67 @@ def build_cards(
         if _state_for_card(post) == STATE_UNCERTAIN
         and uncertain_second_pass_eligible(post)
     ]
-    uncertain_quota = max(0, int(getattr(config, "uncertain_second_pass_limit", 5)))
     reserved_uncertain_ids = {
         int(post["id"])
         for post in sorted(eligible_uncertain, key=lambda p: int(p["id"]))[:uncertain_quota]
     }
     _remaining_timeout("uncertain_candidate_selection")
-    def _priority(post: dict[str, Any]) -> tuple[int, int]:
-        state_value = _state_for_card(post)
-        post_id = int(post.get("id") or 0)
-        state_info = read_state(post)
-        partial_kind = _effective_partial_kind(state_info)
-        if state_value == STATE_PARTIAL and partial_kind in {
-            "featured_missing", "featured_vision",
-        } and state_info.get("partial_missing", 0) == 0:
-            return (-1, post_id)
-        if state_value in (STATE_BLOCKED, STATE_PARTIAL):
-            return (0, post_id)
-        if post_id in reserved_uncertain_ids:
-            return (1, post_id)
-        if state_value == STATE_NEW:
-            return (2, post_id)
-        return (3, post_id)
-    ordered.sort(key=_priority)
+    lanes = {lane: [] for lane in ("new", "partial", "recovery")}
+    for post in ordered:
+        state = _state_for_card(post)
+        lane = v1_lane(state)
+        if lane and (state != STATE_UNCERTAIN or post["id"] in reserved_uncertain_ids):
+            lanes[lane].append(post)
+    for lane, rows in lanes.items():
+        cursor = rotation.get(lane, {}).get("post_id", 0)
+        def within(row):
+            value = int(row["id"])
+            info = read_state(row)
+            featured_only = (
+                lane == "partial" and _effective_partial_kind(info) in {"featured_missing", "featured_vision"}
+                and info.get("partial_missing", 0) == 0 and not cursor
+            )
+            return (not featured_only, value <= cursor, value)
+        rows.sort(key=within)
+    rework = sorted(("partial", "recovery"), key=lambda lane: rotation.get(lane, {}).get("turn", 0))
+    if per_page == 1:
+        priority = sorted((*rework, "new"), key=lambda lane: rotation.get(lane, {}).get("turn", 0))
+    else:
+        first_rework = next((lane for lane in rework if lanes[lane]), rework[0])
+        other = next(lane for lane in rework if lane != first_rework)
+        priority = [first_rework, "new", other]
+    candidate_lanes = {lane: iter(rows) for lane, rows in lanes.items()}
+    exhausted: set[str] = set()
+
+    def candidates_by_slot():
+        # Fill a reserved slot from its own lane first, including after a
+        # hydration miss. Transfer only when its sampled candidates run out.
+        requested = priority[:per_page] + ["new"] * max(0, per_page - len(priority))
+        while len(exhausted) < len(priority):
+            for lane in requested:
+                if lane in exhausted:
+                    continue
+                count_before = len(cards)
+                while len(cards) == count_before:
+                    row = next(candidate_lanes[lane], None)
+                    if row is None:
+                        exhausted.add(lane)
+                        break
+                    yield lane, row
+            requested = priority
     _remaining_timeout("candidate_ordering")
     candidate_filter_elapsed_ms = round(
         (time.monotonic() - candidate_filter_started_at) * 1000, 1
     )
     uncertain_retry_mode = bool(reserved_uncertain_ids)
 
-    def _card_gate(candidate: dict[str, Any]):
+    def _card_gate(candidate: dict[str, Any], *, hydrated: bool):
         state_info = read_state(candidate)
         eligibility = resolve_post_eligibility(candidate, root)
         state = eligibility.state
-        if eligibility.is_v2:
+        if eligibility.is_v2 or not eligibility.eligible_for_v1:
+            return None
+        if hydrated and v1_deferral(root, candidate, digest=_post_write_guard_signature):
             return None
         candidate_id = candidate.get("id")
         uncertain_retry_eligible = (
@@ -6620,12 +6761,12 @@ def build_cards(
             return None
         return state_info, eligibility, state, uncertain_retry_eligible, blocked
 
-    for post in ordered:
+    for lane, post in candidates_by_slot():
         _remaining_timeout("candidate_filter")
         post_id = post.get("id")
         if not isinstance(post_id, int):
             continue
-        gate = _card_gate(post)
+        gate = _card_gate(post, hydrated=not lightweight_candidates)
         if gate is None:
             continue
         if lightweight_candidates:
@@ -6652,6 +6793,8 @@ def build_cards(
                     )
                 except Exception:  # noqa: BLE001 - metrics cannot mask provider error
                     pass
+                if known_wordpress_entity_missing(exc):
+                    continue
                 raise
             details_fetched += 1
             try:
@@ -6669,10 +6812,12 @@ def build_cards(
                 raise WorkflowError(f"WordPress returned invalid details for selected post {post_id}")
             if post.get("status") != "pending":
                 continue
-            gate = _card_gate(post)
+            gate = _card_gate(post, hydrated=True)
             if gate is None:
                 continue
         state_info, eligibility, state, uncertain_retry_eligible, blocked = gate
+        if v1_lane(state) != lane:
+            continue  # A changed item must not consume the wrong slot.
         backups_dir = root / "backups" / str(post_id)
         title = (post.get("title") or {}).get("raw") or (post.get("title") or {}).get("rendered") or ""
         raw = (post.get("content") or {}).get("raw") or ""
@@ -6703,7 +6848,7 @@ def build_cards(
         featured_started_at = time.monotonic()
         try:
             wordpress_featured = _featured_diagnosis(
-                client, post, entities, timeout=featured_timeout
+                client, post, entities, timeout=featured_timeout, strict_lookup=True
             )
         except WordPressError as exc:
             try:
@@ -6825,9 +6970,6 @@ def build_cards(
         )
         if len(cards) >= per_page:
             break
-    # Rework first, FIFO por id (os mais antigos primeiro): posts reabertos
-    # pelo publish gate sao corrigidos antes de posts novos — e o lote
-    # rotaciona, em vez de os mesmos 10 blocked monopolizarem o topo.
     selected = cards[:per_page]
     _remaining_timeout("result_assembly")
     elapsed_ms = round((time.monotonic() - selection_started_at) * 1000, 1)
@@ -6883,6 +7025,7 @@ def _featured_diagnosis(
     entities: set[str],
     *,
     timeout: float | None = None,
+    strict_lookup: bool = False,
 ) -> dict[str, Any]:
     """Diagnóstico determinístico da featured atual (Fase 4.2).
 
@@ -6916,6 +7059,8 @@ def _featured_diagnosis(
             if isinstance(client, WordPressClient) and timeout is not None
             else client.get_media(featured_id)
         )
+        if strict_lookup and (not isinstance(media, dict) or ("id" in media and media.get("id") != featured_id)):
+            raise WorkflowError(f"WordPress returned invalid attachment details for {featured_id}")
         details = media.get("media_details") or {}
         width, height = details.get("width"), details.get("height")
         dimensions = f"{width or '?'}x{height or '?'}"
@@ -6935,10 +7080,19 @@ def _featured_diagnosis(
                 alt_text="", credit_text="", source_url=evidence, entities=entities, source_only=True
             )
     except WordPressError as exc:
+        if strict_lookup:
+            if not known_wordpress_entity_missing(exc):
+                raise
+            return {
+                "exists": False, "relevant": None, "webp": None, "dimensions": None,
+                "valid": False, "action": "provide", "diagnostic_error_code": "media_not_found",
+            }
         if exc.error_code == "wordpress_timeout":
             raise
         diagnostic_error_code = exc.error_code
     except Exception:  # noqa: BLE001 - conservador, sem esconder motivo do diagnóstico
+        if strict_lookup:
+            raise
         diagnostic_error_code = "media_lookup_failed"
     valid = bool(relevant and webp and dimensions == "1280x720")
     if valid:

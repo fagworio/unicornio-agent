@@ -15,7 +15,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import session_budget
 from .checklist import required_image_count
+from .eligibility import resolve_post_eligibility
+from .retry_policy import record_v1_prepared, v1_deferral, v1_lane
 from .content_quality import word_count
 from .html_cleaner import remove_empty_paragraphs
 from .language import detect_language, localization_required
@@ -30,8 +33,11 @@ from .media.inserter import (
 from .media.text import sanitize_title, split_game_names
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .state import STATE_PARTIAL, read_state, uncertain_second_pass_eligible
+from .pipeline_v2.epoch_protection import load_epoch_protection
+from .wordpress import WordPressError
 from .workflow import (
     V1PartialResumeError,
+    PostLockContention,
     _acquire_post_lock,
     _featured_diagnosis,
     _images_summary,
@@ -41,6 +47,7 @@ from .workflow import (
     _reconcile_partial_media,
     _retained_partial_candidate,
     is_post_lock_blocked,
+    wordpress_read_stops_batch,
     prepare_post,
     resolve_editorial_defaults,
     verified_v1_partial_resume,
@@ -1282,12 +1289,26 @@ def prepare_batch(
     items: list[dict[str, Any]] = []
     contexts: list[dict[str, Any]] = []
     seen: set[int] = set()
+    lock_skips = session_budget.skipped_locked_posts(root, config)
+    epoch = load_epoch_protection(root)
 
     for post_id in requested:
         if post_id in seen:
             items.append({"post_id": post_id, "status": "error", "error": "post_id duplicado"})
             continue
         seen.add(post_id)
+        if epoch.is_protected(post_id):
+            items.append({
+                "post_id": post_id, "status": "quarantined", "error_code": "epoch_protected_transaction",
+                "wordpress_changed": False,
+            })
+            continue
+        if post_id in lock_skips:
+            items.append({
+                "post_id": post_id, "status": "lock_blocked", "error_code": "post_lock_blocked",
+                "wordpress_changed": False, "session_skipped": True,
+            })
+            continue
         try:
             from .pipeline_v2.quarantine import (
                 PostQuarantinedError,
@@ -1298,6 +1319,21 @@ def prepare_batch(
             assert_post_not_quarantined(root, post_id, operation="prepare_batch")
             with _acquire_post_lock(root, config, post_id) as lock_handle:
                 post = client.get_post(post_id)
+                if post.get("id") != post_id:
+                    raise WordPressError(
+                        f"WordPress returned invalid details for post {post_id}", error_code="wordpress_integrity"
+                    )
+                eligibility = resolve_post_eligibility(post, root)
+                deferred = (
+                    v1_deferral(root, post, digest=_post_write_guard_signature)
+                    if post.get("status") == "pending" and eligibility.eligible_for_v1 else {}
+                )
+                if deferred:
+                    items.append({
+                        "post_id": post_id, "status": "deferred", "not_before": deferred["not_before"],
+                        "error_code": deferred["reason_code"], "wordpress_changed": False,
+                    })
+                    continue
                 prepared = prepare_post(
                     client, root, post_id, config=config, lock_handle=lock_handle
                 )
@@ -1310,10 +1346,16 @@ def prepare_batch(
                     root=root,
                 )
                 context_file = directory / f"post-{post_id}.json"
-                _write_json(context_file, envelope)
+                _write_json(context_file, {
+                    **envelope, "queue_source_signature": _post_write_guard_signature(post),
+                })
                 # Keep the legacy single-post artifact useful when a batch item is
                 # later processed by the existing apply/rework flow.
-                _write_json(root / "backups" / str(post_id) / "prepared.json", prepared)
+                _write_json(root / "backups" / str(post_id) / "prepared.json", {
+                    **prepared, "queue_batch_id": batch_id,
+                })
+                if not config.dry_run:
+                    record_v1_prepared(root, v1_lane(eligibility.state), post_id, batch_id)
                 contexts.append(_model_facing_context(envelope))
                 items.append(
                     {
@@ -1346,10 +1388,20 @@ def prepare_batch(
                 "error_code": exc.error_code, "error_class": "partial_resume",
                 "action": "verifique o rascunho e os anexos retidos; não recrie nem apague automaticamente",
             })
+        except WordPressError as exc:
+            if wordpress_read_stops_batch(client, exc):
+                raise
+            items.append({
+                "post_id": post_id, "status": "error", "error": str(exc)[:240],
+                "error_code": exc.error_code, "error_class": "wordpress",
+            })
         except BatchError as exc:
             items.append({"post_id": post_id, "status": "error", "error": str(exc)[:240], "error_class": "contract"})
         except Exception as exc:  # noqa: BLE001 - isolate one post in a batch
             if is_post_lock_blocked(exc):
+                if isinstance(exc, PostLockContention) and not config.dry_run:
+                    session_budget.skip_locked_post(root, config, post_id)
+                    lock_skips.add(post_id)
                 items.append({
                     "post_id": post_id,
                     "status": "lock_blocked",
