@@ -373,8 +373,9 @@ def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query:
         return None
     allowed_verdicts = {"deterministic_match"}
     if not source_url and media_source_policy == "credit_only":
-        allowed_verdicts.add("credit_only_accepted")
-    # Ambiguous candidates still need a definitive decision before assembly.
+        allowed_verdicts.update({"credit_only_accepted", "vision_pending"})
+    # Only explicit V1 vision_pending may be assembled before approval;
+    # APPLY must evaluate the actual pixels, regardless of manifest claims.
     if verdict and verdict not in allowed_verdicts:
         return None
     alt_suffix = "imagem principal" if featured else "imagem de apoio"

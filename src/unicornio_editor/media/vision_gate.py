@@ -117,6 +117,9 @@ _RELATIONS = ("direct", "contextual", "unrelated", "uncertain")
 _EDITORIAL_FITS = ("suitable", "unsuitable", "uncertain")
 _ROLE_FITS = ("suitable", "unsuitable", "uncertain")
 _ACCEPT_THRESHOLD = 0.85   # MATCH and confidence >= this -> accept
+V1_MATCH_THRESHOLD = 0.60
+V1_FEATURED_VISION_POLICY = "featured-key-art-v1-match60"
+V1_INLINE_VISION_POLICY = "subject-match-v1-match60"
 _REJECT_THRESHOLD = 0.80   # UNRELATED and confidence >= this -> reject
 
 _SYSTEM_PROMPT = (
@@ -144,6 +147,13 @@ _BATCH_SYSTEM_PROMPT = (
     "decision from one candidate to another. relation values: direct, contextual, "
     "unrelated, uncertain. editorial_fit and role_fit values: suitable, unsuitable, uncertain."
 )
+
+
+def v1_vision_context_key(editorial: dict[str, Any], post_id: Any) -> str:
+    """Bind the relaxed V1 cache to the validated WordPress post context."""
+    from .vision_policy import featured_vision_context_key
+
+    return f"{featured_vision_context_key(editorial)}:post:{post_id or 'unbound'}"
 
 
 def _image_data_url_from_bytes(data: bytes) -> str:
@@ -953,7 +963,8 @@ def _registrar_chamada(
 
 
 def _decide_tri(
-    result: dict[str, Any], *, require_key_art: bool = False
+    result: dict[str, Any], *, require_key_art: bool = False,
+    match_threshold: float = _ACCEPT_THRESHOLD,
 ) -> tuple[str, str]:
     """Decisão TRIPLA: ``accept`` | ``reject`` | ``inconclusive``.
 
@@ -974,7 +985,7 @@ def _decide_tri(
         return "reject", f"imagem e banner tipografico/infografico, nao key art {detail}"
     if status == "UNRELATED" and confidence >= _REJECT_THRESHOLD:
         return "reject", f"modelo NEGOU o assunto {detail}"
-    if status == "MATCH" and confidence >= _ACCEPT_THRESHOLD:
+    if status == "MATCH" and confidence >= match_threshold:
         return "accept", f"modelo confirmou o assunto {detail}"
     return "inconclusive", f"inconclusivo (sem rejeicao clara) {detail}"
 
@@ -1003,6 +1014,7 @@ def verify_image_subject_decision(
     detail: str = "low",
     allow_high: bool = False,
     require_key_art: bool = False,
+    match_threshold: float = _ACCEPT_THRESHOLD,
     root: Any = None,
 ) -> dict[str, Any]:
     """Return the normalized provider decision for the exact supplied image input.
@@ -1028,7 +1040,7 @@ def verify_image_subject_decision(
         image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
         model=model, detail=detail, timeout=timeout, root=root,
     )
-    veredito, razao = _decide_tri(result, require_key_art=require_key_art)
+    veredito, razao = _decide_tri(result, require_key_art=require_key_art, match_threshold=match_threshold)
     if veredito == "accept":
         return {**result, "verdict": veredito, "accepted": True, "reason": razao, "detail_used": detail}
     if veredito == "inconclusive" and allow_high:
@@ -1036,7 +1048,7 @@ def verify_image_subject_decision(
             image_url=image_url, prompt=prompt, api_key=api_key, base_url=base_url,
             model=model, detail="high", timeout=timeout, root=root,
         )
-        final, razao_final = _decide_tri(high_result, require_key_art=require_key_art)
+        final, razao_final = _decide_tri(high_result, require_key_art=require_key_art, match_threshold=match_threshold)
         return {
             **high_result,
             "verdict": final,

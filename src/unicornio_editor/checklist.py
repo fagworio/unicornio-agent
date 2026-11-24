@@ -141,6 +141,7 @@ def run_pre_publish_checklist(
     client: WordPressClient | None = None,
     attempts: int = 0,
     media_context: Mapping[str, Any] | None = None,
+    v1_visual_featured: bool = False,
 ) -> dict[str, Any]:
     """Run every policy rule in sequence and report the result per item."""
     if not isinstance(post, Mapping):
@@ -810,7 +811,29 @@ def run_pre_publish_checklist(
             entities=image_entities,
             source_only=True,
         )
-    if featured_source_relevant is None:
+    v1_credit_only_featured = bool(
+        v1_visual_featured and config.media_source_policy == "credit_only" and featured_ok
+    )
+    featured_receipt = (media_context or {}).get("featured") if v1_credit_only_featured else None
+    expected_featured_sha = ""
+    if (
+        isinstance(featured_receipt, Mapping) and featured_receipt.get("media_id") == featured
+        and (receipt_evidence := featured_receipt.get("vision_evidence"))
+        and isinstance(receipt_evidence, Mapping)
+        and receipt_evidence.get("image_role") == "featured"
+        and receipt_evidence.get("verdict") == "accept"
+        and receipt_evidence.get("image_sha256") == featured_receipt.get("sha256")
+    ):
+        expected_featured_sha = str(receipt_evidence["image_sha256"] or "")
+    verify_featured_pixels_for_relevance = v1_credit_only_featured and (
+        bool(expected_featured_sha) or featured_source_relevant is not True
+    )
+    featured_pixels_confirmed = False
+    if verify_featured_pixels_for_relevance:
+        # Do not add an early textual failure: that would skip the actual
+        # attachment read and Vision further down the checklist.
+        pass
+    elif featured_source_relevant is None:
         check("destaque_relevancia", True, "sem destaque para verificar", skipped=True)
     else:
         listed = ", ".join(sorted(image_entities)) or "nenhuma"
@@ -1148,7 +1171,7 @@ def run_pre_publish_checklist(
         )
     elif not vision_ready:
         check("imagens_visao", True, vision_msg, skipped=True)
-    elif prior_failures and not inline_deficit_is_only_failure:
+    elif prior_failures and not inline_deficit_is_only_failure and not expected_featured_sha:
         check(
             "imagens_visao",
             True,
@@ -1157,6 +1180,10 @@ def run_pre_publish_checklist(
         )
     else:
         from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
+        from .media.vision_gate import V1_FEATURED_VISION_POLICY, V1_MATCH_THRESHOLD, v1_vision_context_key
+
+        featured_cache_policy = V1_FEATURED_VISION_POLICY if v1_credit_only_featured else "featured-key-art-v1"
+        featured_match_threshold = V1_MATCH_THRESHOLD if v1_credit_only_featured else 0.85
         from .media.vision_policy import (
             featured_vision_category, featured_vision_context_key, featured_vision_subject,
             resolve_editorial_identity,
@@ -1167,7 +1194,10 @@ def run_pre_publish_checklist(
             **editorial,
             **({"title": str(post_title_value)} if post_title_value else {}),
         }
-        vision_context_key = featured_vision_context_key(vision_editorial)
+        vision_context_key = (
+            v1_vision_context_key(vision_editorial, post.get("id"))
+            if v1_credit_only_featured else featured_vision_context_key(vision_editorial)
+        )
 
         # Root do projeto a partir do snapshot backups/<id>/snapshot.json.
         vision_root = _project_root(backup_path)
@@ -1181,7 +1211,7 @@ def run_pre_publish_checklist(
             url: str, subject: str, *,
             is_featured: bool, context: str = "", category: str = "", context_key: str = "",
         ) -> None:
-            nonlocal calls_low, calls_high, checked
+            nonlocal calls_low, calls_high, checked, featured_pixels_confirmed
             if not url or not subject.strip():
                 return
             # Limites mecanicos de custo por post.
@@ -1193,22 +1223,33 @@ def run_pre_publish_checklist(
                 vision_input = prepare_vision_image_input(
                     url,
                     timeout=float(getattr(config, "vision_timeout", config.http_timeout)),
-                    url_policy=config.remote_url_policy,
+                    url_policy="enforce" if verify_featured_pixels_for_relevance and is_featured else config.remote_url_policy,
                 )
                 image_sha256 = image_input_sha256(vision_input)
+                if is_featured and expected_featured_sha and image_sha256 != expected_featured_sha:
+                    vision_failures.append("destaque: bytes do anexo divergem da imagem aprovada")
+                    return
                 cached = get_cached_decision(
                     vision_root, url, subject, image_sha256=image_sha256,
-                    policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                    policy=featured_cache_policy if is_featured else "subject-match-v1",
                     model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
                     context_key=context_key,
                 )
+                if cached is not None and v1_credit_only_featured and is_featured and (
+                    not image_sha256 or cached.get("image_sha256") != image_sha256
+                    or cached.get("context_key") != context_key
+                    or cached.get("subject") != subject or cached.get("image_role") != "featured"
+                ):
+                    cached = None
                 if cached is not None:
                     checked += 1
                     if (
                         cached.get("status") == "MATCH"
-                        and float(cached.get("confidence") or 0) >= 0.85
+                        and float(cached.get("confidence") or 0) >= (featured_match_threshold if is_featured else 0.85)
                         and (not is_featured or cached.get("visual_type") not in {"text_banner", "infographic"})
                     ):
+                        if is_featured:
+                            featured_pixels_confirmed = bool(image_sha256)
                         return
                     vision_failures.append(f"{url[:60]}: cache nao-confirma ({cached.get('status')})")
                     return
@@ -1226,9 +1267,12 @@ def run_pre_publish_checklist(
                     allow_high=is_featured,  # featured escala low->high; inline nao
                     require_key_art=is_featured,  # key art nao pode ser banner tipografico/infografico
                     root=vision_root,  # uma requisicao HTTP = um evento (com usage)
+                    **({"match_threshold": featured_match_threshold} if v1_credit_only_featured and is_featured else {}),
                 )
                 checked += 1
                 if decision.get("accepted"):
+                    if is_featured:
+                        featured_pixels_confirmed = bool(image_sha256 and decision.get("verdict") == "accept")
                     if image_sha256 and decision.get("status") == "MATCH":
                         cache_decision = {
                             key: decision[key]
@@ -1239,10 +1283,15 @@ def run_pre_publish_checklist(
                             )
                             if key in decision
                         }
+                        if v1_credit_only_featured and is_featured:
+                            cache_decision.update(
+                                image_sha256=image_sha256, context_key=context_key,
+                                subject=subject, image_role="featured",
+                            )
                         set_cached_decision(
                             vision_root, url, subject, cache_decision,
                             image_sha256=image_sha256,
-                            policy="featured-key-art-v1" if is_featured else "subject-match-v1",
+                            policy=featured_cache_policy if is_featured else "subject-match-v1",
                             model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
                             context_key=context_key,
                         )
@@ -1304,6 +1353,14 @@ def run_pre_publish_checklist(
                 True,
                 f"{checked} imagem(ns) confirmadas (low={calls_low}, high={calls_high})",
             )
+
+    if verify_featured_pixels_for_relevance:
+        check(
+            "destaque_relevancia",
+            featured_pixels_confirmed,
+            "assunto confirmado nos pixels do anexo de destaque"
+            if featured_pixels_confirmed else "relevancia visual do anexo de destaque nao confirmada",
+        )
 
     search_completed = bool(
         isinstance(search_progress, Mapping)

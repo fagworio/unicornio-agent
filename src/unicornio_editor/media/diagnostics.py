@@ -24,6 +24,7 @@ _MATCHED_FIELDS = frozenset({
 _SAFE_VERDICTS = frozenset({
     "deterministic_match",
     "credit_only_accepted",
+    "vision_pending",
     "ambiguous",
     "insufficient_source_context",
     "unresolved_source",
@@ -75,6 +76,8 @@ def _verification_category(candidate: dict[str, Any], evidence: dict[str, Any]) 
     if candidate.get("capacity_deferred"):
         return "not_required_capacity"
     if candidate.get("valid") is True:
+        if evidence.get("verdict") == "vision_pending":
+            return "origin_unknown"
         if str(evidence.get("verdict") or "") == "credit_only_accepted":
             return "credit_only_site_policy"
         if str(evidence.get("verdict") or "") in {
@@ -139,7 +142,8 @@ def sanitize_candidate_diagnostic(
     if not isinstance(matched, (list, tuple)):
         matched = ()
     reason = _safe_token(
-        candidate.get("source_verification_reason_code") or evidence.get("reason_code"),
+        evidence.get("reason_code") if evidence.get("verdict") == "vision_pending"
+        else candidate.get("source_verification_reason_code") or evidence.get("reason_code"),
         limit=48,
     )
     query = str(candidate.get("query") or "")
@@ -181,6 +185,8 @@ def sanitize_candidate_diagnostic(
         "source_verified": bool(candidate.get("source_page_verified")) if candidate.get("provenance_mode") == "credit_only" else bool(candidate.get("valid")),
         "official_source": candidate.get("official_source") is True,
     }
+    if candidate.get("observed_origin_domain"):
+        result["observed_origin_domain"] = _safe_token(candidate["observed_origin_domain"], limit=120)
     if candidate.get("provenance_mode") == "credit_only":
         result["provenance_mode"] = "credit_only"
         result["source_page_verified"] = False

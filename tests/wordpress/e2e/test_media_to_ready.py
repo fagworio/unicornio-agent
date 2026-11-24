@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import datetime
 import json
 import random
@@ -25,6 +27,7 @@ from unicornio_editor.batch import (
 from unicornio_editor.cli import (
     _apply_editorial_batch,
     _resolve_media_batch,
+    _resolve_media_batch_dispatch,
     _resolve_media_targets_batch,
 )
 from unicornio_editor.config import Config
@@ -97,13 +100,15 @@ def _webp_artwork(index: int) -> bytes:
 class ControlledSource:
     """Local source and OpenAI-compatible vision endpoint; no external network."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, subject_confidence: float = 0.99) -> None:
         self.images = {
             "hollow-knight-silksong-key-art.png": _artwork(1),
             "hollow-knight-silksong-screenshot-one.png": _artwork(2),
             "hollow-knight-silksong-screenshot-two.png": _artwork(3),
         }
         self.imported_webp = _webp_artwork(4)
+        self.extra_jpegs: dict[str, bytes] = {}
+        self.vision_pixel_hashes: list[str] = []
         self.unavailable_images: set[str] = set()
         self.operations: list[str] = []
         owner = self
@@ -156,6 +161,8 @@ class ControlledSource:
                         return self._send(503, "text/plain", b"controlled transient source failure")
                     if name in owner.images:
                         return self._send(200, "image/png", owner.images[name])
+                    if name in owner.extra_jpegs:
+                        return self._send(200, "image/jpeg", owner.extra_jpegs[name])
                 self._send(404, "text/plain", b"not found")
 
             def do_POST(self) -> None:  # noqa: N802
@@ -170,8 +177,17 @@ class ControlledSource:
                     answer = {"decision": "DIFFERENT", "confidence": 0.99, "reason": "controlled pixel-distinct E2E artwork"}
                 else:
                     owner.operations.append("featured_subject_validation")
+                    for message in messages:
+                        content = message.get("content")
+                        if not isinstance(content, list):
+                            continue
+                        for part in content:
+                            asset = (part.get("image_url") or {}).get("url", "")
+                            if asset.startswith("data:image/webp;base64,"):
+                                data = base64.b64decode(asset.split(",", 1)[1], validate=True)
+                                owner.vision_pixel_hashes.append(hashlib.sha256(data).hexdigest())
                     answer = {
-                        "status": "MATCH", "confidence": 0.99, "visual_type": "key_art",
+                        "status": "MATCH", "confidence": subject_confidence, "visual_type": "key_art",
                         "relation": "direct", "editorial_fit": "suitable", "role_fit": "suitable",
                         "reason": "controlled E2E image represents the stated subject",
                     }
@@ -503,6 +519,7 @@ def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_
 
 def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, monkeypatch):
     import unicornio_editor.media.search as search
+    from unicornio_editor.media import downloader
 
     monkeypatch.setattr(
         "unicornio_editor.workflow.find_game_trailer_with_status",
@@ -510,7 +527,7 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
     )
     case = wordpress_e2e_case
     post_id = case.post_id("credit_only_media_ready")
-    with ControlledSource() as source:
+    with ControlledSource(subject_confidence=0.60) as source:
         source_url = f"{source.base_url}/article"
         editorial = _automatic_pipeline_editorial()
         case.client.update_post(post_id, {
@@ -525,7 +542,32 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         )
         assert prepared["prepared"] == 1, prepared
 
-        names = list(source.images)
+        for index in (1, 2, 3):
+            output = io.BytesIO()
+            with Image.open(io.BytesIO(_artwork(index))) as image:
+                image.save(output, format="JPEG", quality=94)
+            source.extra_jpegs[f"asset-{index:02}.jpg"] = output.getvalue()
+        names = list(source.extra_jpegs)
+        fixture_urls = {f"{source.base_url}/images/{name}" for name in names}
+        enforced_requests: list[str] = []
+        attachment_requests: list[str] = []
+        fixture_attachments: set[str] = set()
+        original_urlopen = downloader.urlopen_remote
+
+        def guarded_fixture_transport(request, *, mode, **kwargs):
+            # Require enforce for unknown-origin input and approved featured
+            # readback. Allow only these exact test-source and WP upload URLs.
+            # All other requests retain the unmodified transport/policy.
+            if request.full_url in fixture_urls:
+                assert mode == "enforce"
+                enforced_requests.append(request.full_url)
+                return original_urlopen(request, mode="off", **kwargs)
+            if request.full_url in fixture_attachments and mode == "enforce":
+                attachment_requests.append(request.full_url)
+                return original_urlopen(request, mode="off", **kwargs)
+            return original_urlopen(request, mode=mode, **kwargs)
+
+        monkeypatch.setattr(downloader, "urlopen_remote", guarded_fixture_transport)
 
         def controlled_direct_search(queries, *, accept=None, **_kwargs):
             rows = []
@@ -565,9 +607,11 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
                 "ratio": "w",
             }],
         }
-        resolved = _resolve_media_batch(
-            case.client, config, case.root, media_input, full=True, allow_reuse=False
+        resolved = _resolve_media_batch_dispatch(
+            case.client, config, case.root, media_input, full=True
         )
+        assert enforced_requests == []
+        assert source.vision_pixel_hashes == []
         manifest_path = case.root / "work" / "batches" / prepared["batch_id"] / "media.manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest_row = next(row for row in manifest["posts"] if int(row["post_id"]) == post_id)
@@ -575,6 +619,8 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         for candidate in manifest_row["candidates"]:
             assert "source_page_url" not in candidate
             assert candidate["provenance_mode"] == "credit_only"
+            assert candidate["verdict"] == "vision_pending"
+            assert candidate["needs_vision"] is True
             assert candidate["source_page_verified"] is False
             assert candidate["rights_verified"] is False
             assert "domínio de hospedagem: 127.0.0.1" in candidate["credit_text"]
@@ -605,10 +651,16 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         upload_count = 0
         original_upload = case.client.upload_media
 
-        def counted_upload(*args, **kwargs):
+        def counted_upload(path, *args, **kwargs):
             nonlocal upload_count
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            assert digest in source.vision_pixel_hashes, "upload did not pass the Vision HTTP boundary"
             upload_count += 1
-            return original_upload(*args, **kwargs)
+            uploaded = original_upload(path, *args, **kwargs)
+            asset_url = uploaded["source_url"]
+            assert asset_url.startswith(f"{case.url}/wp-content/uploads/")
+            fixture_attachments.add(asset_url)
+            return uploaded
 
         monkeypatch.setattr(case.client, "upload_media", counted_upload)
         first_batch = _apply_editorial_batch(
@@ -622,17 +674,38 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         assert all(item.get("source_page_verified") is False for item in media_results)
         assert all(item.get("rights_verified") is False for item in media_results)
         assert upload_count == 3
+        assert set(enforced_requests) == fixture_urls
+        assert len(set(source.vision_pixel_hashes)) == 3
 
         post = case.client.get_post(post_id)
         raw = str(((post.get("content") or {}).get("raw") or ""))
         assert _snapshot(post)["ready_state"] == "ready"
-        assert int(post.get("featured_media") or 0) > 0
+        assert post["status"] == "pending"
+        assert (post.get("meta") or {}).get("_hermes_ready_hash")
+        featured = [item for item in media_results if item.get("featured")]
+        assert len(featured) == 1
+        assert int(post.get("featured_media") or 0) == int(featured[0]["media_id"])
         assert raw.count("<img") == 2
-        assert raw.count("domínio de hospedagem: 127.0.0.1") == 2
+        assert raw.count("Crédito: Imagem ilustrativa.") >= 2
+        assert "domínio de hospedagem: 127.0.0.1" not in raw
         for result in media_results:
             attachment = case.client.get_media(int(result["media_id"]))
+            assert attachment.get("mime_type") == "image/webp"
             caption = str(((attachment.get("caption") or {}).get("rendered") or ""))
-            assert "domínio de hospedagem: 127.0.0.1" in caption
+            assert "Crédito: Imagem ilustrativa." in caption
+            assert "Hollow Knight Silksong" in attachment["alt_text"]
+            evidence = result["vision_evidence"]
+            assert evidence["status"] == "MATCH"
+            assert evidence["confidence"] == 0.60
+            assert evidence["image_sha256"] in source.vision_pixel_hashes
+            asset_url = attachment["source_url"]
+            assert asset_url.startswith(f"{case.url}/wp-content/uploads/")
+            with original_urlopen(asset_url, mode="off") as response:
+                assert hashlib.sha256(response.read()).hexdigest() == evidence["image_sha256"]
+            if result.get("featured"):
+                assert asset_url in attachment_requests
+            else:
+                assert asset_url in raw
 
         second_batch = _apply_editorial_batch(
             case.client, config, case.root, batch, dry_run=False, compact=False
@@ -647,6 +720,12 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             "accepted": len([item for item in media_results if item.get("status") == "accepted"]),
             "uploads": upload_count,
             "inline_readback": raw.count("<img"),
+            "generic_jpeg_fixture_count": len(fixture_urls),
+            "vision_normalized_webp_hashes": sorted(set(source.vision_pixel_hashes)),
+            "vision_fixture_confidence": 0.60,
+            "featured_enforced_readback": bool(attachment_requests),
+            "featured_media_id": int(post["featured_media"]),
+            "media_ids": sorted(int(item["media_id"]) for item in media_results),
             "ready_state": _snapshot(post)["ready_state"],
             "source_page_verified": False,
             "rights_verified": False,

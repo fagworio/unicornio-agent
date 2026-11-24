@@ -47,8 +47,14 @@ final e os fatos preparados, grava `media.input.json` e informa
 `media_input.status`. Se for `required`, execute o caminho retornado por
 `media_input.path`; `needed` já inclui a featured somente quando uma nova featured
 é necessária. Se houver `vision_batch_file` no resultado da busca, execute
-`vision-batch` antes do `apply`. Não estime contagens nem omita a etapa quando o
-arquivo de mídia existir. O monitor continua somente leitura (`queue --monitor`)
+`vision-batch` antes do `apply`. Candidatas `vision_pending` no V1
+(`MEDIA_SOURCE_POLICY=credit_only`) não entram nesse arquivo: o `apply-batch`
+confere os pixels obtidos do arquivo real antes do upload. No V1, MATCH a partir
+de 60% aprova se os demais critérios passarem; UNRELATED a partir de 80%
+rejeita. A visão pode usar o contexto real do artigo e refazer um primeiro
+resultado inconclusivo no detalhe alto, dentro do orçamento. Não trate a
+pendência como aprovação nem exija nova busca ou atribuição por falta de origem.
+Não estime contagens nem omita a etapa quando o arquivo de mídia existir. O monitor continua somente leitura (`queue --monitor`)
 e o Publisher permanece separado e pausado. Esta instalação não executa
 `v2-cycle`, `v2-run`, `start-v2-cycle` ou qualquer supervisor V2.
 

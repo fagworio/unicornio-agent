@@ -1788,6 +1788,7 @@ def _resolve_media_batch(
     excluded_url_hashes: dict[int, set[str]] | None = None,
     excluded_source_page_url_hashes: dict[int, set[str]] | None = None,
     attempt_id: str = "",
+    v1_visual_fallback: bool = False,
 ) -> dict[str, Any]:
     """Resolve media for all posts without another Hermes/LLM turn.
 
@@ -1958,6 +1959,7 @@ def _resolve_media_batch(
             attempt_id=attempt_id,
             role=str(spec.get("role") or ""),
             media_source_policy=media_source_policy,
+            v1_visual_fallback=v1_visual_fallback,
         )
         accepted = [
             candidate for candidate in aprovados
@@ -2017,12 +2019,17 @@ def _resolve_media_batch(
             attempt_id=attempt_id,
             role=str(item.get("role") or ""),
             media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+            v1_visual_fallback=v1_visual_fallback,
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
         compact_candidates = [_media_candidate(candidate) for candidate in aprovados]
         for index, candidate in enumerate(aprovados):
-            if candidate.get("needs_vision") and len(vision_items) < 20:
+            if (
+                candidate.get("needs_vision")
+                and (candidate.get("evidence") or {}).get("verdict") != "vision_pending"
+                and len(vision_items) < 20
+            ):
                 vision_items.append({
                     "candidate_id": f"{post_id}-{index}",
                     "post_id": post_id,
@@ -2044,7 +2051,9 @@ def _resolve_media_batch(
             if candidate_id:
                 candidate_order.setdefault(candidate_id, index)
         decision_by_object = {
-            id(candidate): decision
+            id(candidate): (
+                "deferred" if (candidate.get("evidence") or {}).get("verdict") == "vision_pending" else decision
+            )
             for decision, group in diagnostic_groups
             for candidate in group
         }
@@ -2083,7 +2092,8 @@ def _resolve_media_batch(
         distinct = {
             str(candidate.get("phash") or candidate.get("direct_image_url") or "")
             for candidate in aprovados
-            if candidate.get("phash") or candidate.get("direct_image_url")
+            if (candidate.get("phash") or candidate.get("direct_image_url"))
+            and (candidate.get("evidence") or {}).get("verdict") != "vision_pending"
         }
         search_row = found_row_by_query.get(str(item["query"])) or {}
         engine_reports = search_row.get("engine_reports") or {}
@@ -2351,7 +2361,10 @@ def _resolve_media_batch(
             vision_rejected=0,
             vision_input_unavailable=0,
             distinct=len(distinct),
-            discovery_approved=len(reuso) + len(aprovados),
+            discovery_approved=len(reuso) + sum(
+                (candidate.get("evidence") or {}).get("verdict") != "vision_pending"
+                for candidate in aprovados
+            ),
             deterministic_match=verdicts.count("deterministic_match"),
             ambiguous=verdicts.count("ambiguous"),
             downloaded=0,
@@ -2454,6 +2467,7 @@ def _resolve_media_targets_batch(
     excluded_url_hashes: dict[int, set[str]] | None = None,
     excluded_source_page_url_hashes: dict[int, set[str]] | None = None,
     attempt_id: str = "",
+    v1_visual_fallback: bool = False,
 ) -> dict[str, Any]:
     """Resolve listicle media per item/H2, preserving each target boundary."""
     posts = batch.get("posts") or []
@@ -2485,6 +2499,7 @@ def _resolve_media_targets_batch(
             excluded_url_hashes=excluded_url_hashes,
             excluded_source_page_url_hashes=excluded_source_page_url_hashes,
             attempt_id=attempt_id,
+            v1_visual_fallback=v1_visual_fallback,
         )
         for row in resolved.get("posts") or []:
             if isinstance(row, dict) and isinstance(row.get("post_id"), int):
@@ -2541,6 +2556,7 @@ def _resolve_media_targets_batch(
                 excluded_url_hashes=excluded_url_hashes,
                 excluded_source_page_url_hashes=excluded_source_page_url_hashes,
                 attempt_id=f"{attempt_id}:{target_id}"[:64],
+                v1_visual_fallback=v1_visual_fallback,
             )
             child_economics = resolved.get("economics") or {}
             economics["search_queries"] += int(child_economics.get("search_queries") or 0)
@@ -2670,7 +2686,7 @@ def _resolve_media_batch_dispatch(
         if any(post.get("targets") for post in batch.get("posts") or [])
         else _resolve_media_batch
     )
-    return resolver(client, config, root, batch, full=full)
+    return resolver(client, config, root, batch, full=full, v1_visual_fallback=True)
 
 
 def _canary_preflight(
@@ -3132,6 +3148,7 @@ def _enriquecer_candidatos(
     attempt_id: str = "",
     role: str = "",
     media_source_policy: str = "strict",
+    v1_visual_fallback: bool = False,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Pipeline ÚNICO de mídia: origem -> contexto -> score (Fases 5/10/11).
 
@@ -3193,6 +3210,10 @@ def _enriquecer_candidatos(
             candidate["credit_text"] = credit
             candidate["provenance_mode"] = "credit_only"
             candidate["source_page_verified"] = False
+            if v1_visual_fallback:
+                candidate["observed_origin_domain"] = diagnostic_url_domain(
+                    candidate.get("source_page_url") or candidate.get("source")
+                )
             try:
                 parsed_direct_url = urlsplit(direct_url)
                 parsed_direct_url.port  # reject malformed ports before accepting the candidate
@@ -3479,6 +3500,14 @@ def _enriquecer_candidatos(
             allow_credit_only=media_source_policy == "credit_only",
             credit_text=str(cand.get("credit_text") or ""),
         )
+        if v1_visual_fallback and media_source_policy == "credit_only" and not cand.get("media_library_id"):
+            # URL, credit and source text are not proof of the pixels. Carry
+            # new web assets to APPLY; only validated reuse is already strong.
+            pontos = {
+                **pontos, "verdict": "vision_pending", "gate": "vision",
+                "needs_vision": True, "reason_code": "origin_unknown",
+                "reason": "sem evidência textual suficiente; avaliar pixels",
+            }
         cand["evidence"] = pontos
         cand["evidence_score"] = pontos["score"]
         cand["needs_vision"] = bool(pontos["needs_vision"])
@@ -3517,7 +3546,7 @@ def _enriquecer_candidatos(
             deferidos.append(cand)
         else:
             (aprovados if pontos["verdict"] in (
-                "deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted"
+                "deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted", "vision_pending"
             ) else rejeitados).append(cand)
         _guardar_memo(cand)
 
@@ -3632,7 +3661,7 @@ def _enriquecer_candidatos(
             deferidos.append(cand)
         elif (cand.get("evidence") or {}).get("recoverable"):
             deferidos.append(cand)
-        elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted"):
+        elif verdict in ("deterministic_match", "ambiguous", "insufficient_source_context", "credit_only_accepted", "vision_pending"):
             aprovados.append(cand)
         else:
             rejeitados.append(cand)
@@ -3644,6 +3673,8 @@ def _enriquecer_candidatos(
             from .media.library_index import find_by_source_url, find_similar
 
             for cand in aprovados:
+                if (cand.get("evidence") or {}).get("verdict") == "vision_pending":
+                    continue
                 url_cand = str(cand.get("direct_image_url") or "")
                 ja = find_by_source_url(root, url_cand) or (
                     find_similar(root, str(cand.get("phash") or ""))
@@ -3672,7 +3703,21 @@ def _enriquecer_candidatos(
     # diferentes) contaria como 2 frames distintos.
     from .media.evidence import dedupe_by_phash
 
-    aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados, hashes=hashes_locais)
+    vision_pending_ids = {
+        id(cand) for cand in aprovados
+        if (cand.get("evidence") or {}).get("verdict") == "vision_pending"
+    }
+    if vision_pending_ids:
+        # dedupe_by_phash downloads missing hashes; do not fetch provisionals
+        # here. APPLY's bounded downloader and final pHash check own them.
+        verified, rejeitados = dedupe_by_phash(
+            [cand for cand in aprovados if id(cand) not in vision_pending_ids],
+            rejeitados, hashes=hashes_locais,
+        )
+        retained_ids = vision_pending_ids | {id(cand) for cand in verified}
+        aprovados = [cand for cand in aprovados if id(cand) in retained_ids]
+    else:
+        aprovados, rejeitados = dedupe_by_phash(aprovados, rejeitados, hashes=hashes_locais)
 
     # Funil de yield POR ENGINE (documento, seção 15): o indicador de sucesso não
     # é "quantas imagens o Bing devolveu", e sim quantas atravessaram
@@ -4569,6 +4614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backup_path=backup,
                 config=config,
                 client=client,
+                v1_visual_featured=True,
             )
             result["trailer"] = trailer
             result["trailer_search_status"] = trailer_status
@@ -4656,6 +4702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         emit_terminal=False,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                         media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                        v1_visual_fallback=True,
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return len(_frames_fortes)
@@ -4728,6 +4775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     post_id=post_id_ref,
                     url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                     media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                    v1_visual_fallback=True,
                 )
             if rejeitados:
                 append_telemetry(
@@ -4882,11 +4930,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         enriched_cache=_memo_listicle,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                         media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                        v1_visual_fallback=True,
                     )
                 except Exception:  # noqa: BLE001 - aceite nunca derruba a busca
                     return 0
                 conjunto = _frames_por_item.setdefault(item, set())
                 for aprovado in aprovados_lote:
+                    if (aprovado.get("evidence") or {}).get("verdict") == "vision_pending":
+                        continue
                     conjunto.add(
                         str(aprovado.get("phash") or aprovado.get("direct_image_url") or "")
                     )
@@ -4959,6 +5010,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         emit_terminal=False,
                         url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
                         media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                        v1_visual_fallback=True,
                     )
                     rejeitados_por_query[query] = rejeitados_item
                     deferidos_por_query[query] = deferidos_item
@@ -5137,6 +5189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             post_title = ""
             existing_featured_id = None
+            post_categories = ()
             if args.post_id:
                 post = client.get_post(args.post_id)
                 title_value = post.get("title") or {}
@@ -5144,6 +5197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     title_value.get("raw") or title_value.get("rendered") or ""
                 )
                 existing_featured_id = int(post.get("featured_media") or 0) or None
+                post_categories = post.get("categories") or ()
             result = validate_media_plan(
                 client,
                 payload,
@@ -5152,6 +5206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 post_title=post_title,
                 post_id=int(args.post_id) if args.post_id else None,
                 existing_featured_id=existing_featured_id,
+                v1_visual_fallback=True,
+                post_categories=post_categories,
             )
             # Regra do repo: detalhe completo em arquivo, stdout pequeno.
             audit = _write_audit(
@@ -5980,16 +6036,19 @@ def _compact_media_validate(
         for row in (result.get("rejected") or [])
         if isinstance(row.get("index"), int)
     }
+    pending_indices = set(result.get("vision_pending") or [])
     inline_ok = sum(
         1
         for index, item in enumerate(plano)
-        if index not in rejeitados_idx and not item.get("is_featured")
+        if index not in rejeitados_idx and index not in pending_indices and not item.get("is_featured")
     )
     capacity: dict[str, Any] = {
         "required": required,
         "valid": inline_ok,
         "missing": max(0, required - inline_ok),
     }
+    if pending_indices:
+        capacity["vision_pending"] = sum(not plano[index].get("is_featured") for index in pending_indices)
     visao = result.get("featured_vision") or []
     if visao:
         primeira = visao[0] if isinstance(visao[0], dict) else {}
@@ -5997,6 +6056,8 @@ def _compact_media_validate(
             "status": primeira.get("status"),
             "reason": str(primeira.get("reason") or "")[:200],
         }
+    elif any(plano[index].get("is_featured") for index in result.get("vision_pending") or []):
+        featured = {"status": "pending", "reason": "avaliacao visual durante apply"}
     elif any(item.get("is_featured") for item in plano):
         featured = {"status": "passed", "reason": "featured do plano aceita no preflight"}
     else:
@@ -6016,6 +6077,7 @@ def _compact_media_validate(
         ],
         "capacity": capacity,
         "featured": featured,
+        **({"vision_pending": result["vision_pending"]} if result.get("vision_pending") else {}),
         "audit": audit,
     }
 

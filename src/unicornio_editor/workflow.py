@@ -53,12 +53,17 @@ from .media.source_verify import (
     verification_result,
     verify_downloaded_against_source,
 )
+from .media.url_safety import URLSafetyError
 from .media.vision_cache import get_cached_decision, set_cached_decision, vision_model_identity
 from .media.vision_gate import (
+    V1_FEATURED_VISION_POLICY,
+    V1_INLINE_VISION_POLICY,
+    V1_MATCH_THRESHOLD,
     VisionGateError,
     VisionInputUnavailable,
     prepare_vision_image_input_from_path,
     verify_image_subject_decision,
+    v1_vision_context_key,
     vision_config_ready,
 )
 from .media.vision_policy import (
@@ -857,6 +862,8 @@ def _apply_editorial_unlocked(
         root=root,
         post_title=_post_title(post),
         post_id=post_id,
+        v1_visual_fallback=True,
+        post_categories=post.get("categories") or (),
         existing_featured_id=(
             None
             if partial_featured_rejected
@@ -867,6 +874,8 @@ def _apply_editorial_unlocked(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id,
         post_title=_post_title(post) or "",
         media_fallback_candidates=media_fallback_candidates,
+        v1_visual_fallback=True,
+        post_categories=post.get("categories") or (),
         **({
             "previous_inline_phashes": tuple(str(row["phash"]) for row in prior_media),
             "previous_inline_visual_assets": [dict(row) for row in prior_media],
@@ -967,6 +976,7 @@ def _apply_editorial_unlocked(
         client=client,
         attempts=attempts_before,
         media_context=checklist_media_context,
+        v1_visual_featured=True,
     )
     # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
     # item do checklist com falha impede READY — o apply NUNCA grava um post
@@ -1012,9 +1022,11 @@ def _apply_editorial_unlocked(
                 checklist_featured_failure = next(
                     (
                         item for item in failed_items
-                        if any(token in str(item.get(key) or "").casefold()
-                               for key in ("name", "detail")
-                               for token in ("featured", "imagens_visao", "imagens visão", "vision"))
+                        if (
+                            config.media_source_policy == "credit_only" and item.get("name") == "destaque_relevancia"
+                        ) or any(token in str(item.get(key) or "").casefold()
+                                 for key in ("name", "detail")
+                                 for token in ("featured", "imagens_visao", "imagens visão", "vision"))
                     ),
                     None,
                 )
@@ -1784,7 +1796,9 @@ def _reconcile_partial_media(
 
 
 
-def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) -> str:
+def _expected_subject(
+    item: dict[str, Any], editorial: dict[str, Any] | None, *, v1_categories: bool = False,
+) -> str:
     """Subject ESPERADO da seção do item (P1 da auditoria).
 
     O `subject` do media_plan é dado do AGENTE: um plano inconsistente
@@ -1798,7 +1812,8 @@ def _expected_subject(item: dict[str, Any], editorial: dict[str, Any] | None) ->
     if not html:
         return ""
     numerados = extract_list_items(
-        str((editorial.get("seo") or {}).get("title") or ""), html
+        str((editorial.get("seo") or {}).get("title") or ""), html,
+        (editorial.get("categories") or ()) if v1_categories else (),
     )
     if len(numerados) < 2:
         return ""
@@ -2042,6 +2057,7 @@ def _featured_preflight_evidence_matches(
     config: Config,
     *,
     image_sha256: str,
+    context_key: str = "",
 ) -> bool:
     """Only reuse a featured preflight decision bound to this exact context."""
     evidence = row.get("vision_evidence")
@@ -2052,7 +2068,7 @@ def _featured_preflight_evidence_matches(
         "image_role": "featured",
         "policy_version": VISION_POLICY_VERSION,
         "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
-        "context_key": featured_vision_context_key(editorial),
+        "context_key": context_key or featured_vision_context_key(editorial),
         "subject": featured_vision_subject(editorial),
     }
     return bool(
@@ -2149,6 +2165,28 @@ def _revalidated_origin_page_relevance(
     return scored.get("verdict") == "deterministic_match"
 
 
+def _v1_visual_subject(item: dict[str, Any], editorial: dict[str, Any]) -> str:
+    if not item.get("is_featured"):
+        seo = editorial.get("seo") or {}
+        if detect_list_format(
+            str(editorial.get("title") or seo.get("title") or ""),
+            str(editorial.get("cleaned_html") or ""), editorial.get("categories") or (),
+        ) is not None:
+            return _expected_subject(item, editorial, v1_categories=True)
+    return featured_vision_subject(editorial)
+
+
+def _v1_needs_pixel_evidence(
+    item: dict[str, Any], config: Config | None, enabled: bool,
+) -> bool:
+    # The installed site policy permits unknown origin without fabricating
+    # provenance, but only a trusted visual decision can approve new pixels.
+    return bool(
+        enabled and config is not None and config.media_source_policy == "credit_only"
+        and not item.get("media_library_id")
+    )
+
+
 def _media_item_rejection(
     item: dict[str, Any],
     entities: set[str],
@@ -2159,6 +2197,7 @@ def _media_item_rejection(
     config: Config | None = None,
     source_page_cache: dict[str, list[str] | None] | None = None,
     source_html_cache: dict[str, str] | None = None,
+    v1_visual_fallback: bool = False,
 ) -> str | None:
     """Motivo de rejeicao de um item do media_plan, ou None se valido.
 
@@ -2183,6 +2222,8 @@ def _media_item_rejection(
     )
     if is_noise_image_url(candidate_url):
         return "imagem de avatar/perfil nao e midia editorial; escolha uma imagem da noticia ou da obra"
+    if _v1_needs_pixel_evidence(item, config, v1_visual_fallback):
+        return None  # provisional; only the real APPLY vision result can approve
     if attachment is not None:
         title = str((attachment.get("title") or {}).get("rendered") or "")
         alt = str(attachment.get("alt_text") or "")
@@ -2282,7 +2323,9 @@ def _next_partial_no_progress(
     if any(
         isinstance(item, dict)
         and item.get("status") == "deferred"
-        and item.get("reason_code") == "visual_identity_pending"
+        and item.get("reason_code") in {
+            "visual_identity_pending", "vision_provider_error", "vision_budget_exhausted",
+        }
         for item in media_results
     ):
         return max(0, int(current or 0))
@@ -2324,6 +2367,8 @@ def validate_media_plan(
     post_title: str = "",
     existing_featured_id: int | None = None,
     post_id: int | None = None,
+    v1_visual_fallback: bool = False,
+    post_categories: Any = (),
 ) -> dict[str, Any]:
     """Valida o media_plan de um editorial SEM executar download/upload.
 
@@ -2332,9 +2377,11 @@ def validate_media_plan(
     rejeitados no resultado). Deterministico e somente leitura.
     """
     plan = editorial.get("media_plan") or []
+    v1_feature_policy = bool(v1_visual_fallback and config is not None and config.media_source_policy == "credit_only")
     vision_editorial = {
         **editorial,
         **({"title": post_title} if post_title else {}),
+        **({"categories": post_categories} if v1_visual_fallback and post_categories else {}),
     }
     entities = extract_entities(
         title=str(vision_editorial.get("title") or (editorial.get("seo") or {}).get("title") or ""),
@@ -2346,6 +2393,7 @@ def validate_media_plan(
     valid = 0
     rejected: list[dict[str, Any]] = []
     featured_vision: list[dict[str, Any]] = []
+    vision_pending: list[int] = []
     seen_sources: set[str] = set()
     source_page_cache: dict[str, list[str] | None] = {}
     source_html_cache: dict[str, str] = {}
@@ -2378,18 +2426,28 @@ def validate_media_plan(
             config=config,
             source_page_cache=source_page_cache,
             source_html_cache=source_html_cache,
+            v1_visual_fallback=v1_visual_fallback,
         )
         if reason is None:
             reason = _duplicate_source_reason(plan, index, seen_sources)
-        if reason is None and bool(item.get("is_featured")):
+        needs_pixels = reason is None and _v1_needs_pixel_evidence(
+            item, config, v1_visual_fallback,
+        )
+        if needs_pixels:
+            vision_pending.append(index)
+        if reason is None and not needs_pixels and bool(item.get("is_featured")):
             vision = _validate_featured_candidate_vision(
-                item, vision_editorial, client, cache, config=config, root=root
+                item, vision_editorial, client, cache, config=config, root=root,
+                v1_feature_policy=v1_feature_policy, post_id=post_id,
             )
             vision_row = {
                 "index": index,
                 "subject": featured_vision_subject(vision_editorial),
                 "category": featured_vision_category(vision_editorial),
-                "context_key": featured_vision_context_key(vision_editorial),
+                "context_key": (
+                    v1_vision_context_key(vision_editorial, post_id) if v1_feature_policy
+                    else featured_vision_context_key(vision_editorial)
+                ),
                 "cache_hit": bool(vision.get("cached")),
                 **vision,
             }
@@ -2423,14 +2481,14 @@ def validate_media_plan(
                 reason = str(vision["reason"])
         if reason:
             rejected.append({"index": index, "reason": reason})
-        else:
+        elif not needs_pixels:
             valid += 1
         if root is not None:
             append_telemetry(
                 root,
                 "media_funnel",
                 stage="preflight",
-                status="rejected" if reason else "passed",
+                status="rejected" if reason else "pending" if needs_pixels else "passed",
                 item_index=index,
                 featured=bool(item.get("is_featured")),
                 post_id=post_id,
@@ -2451,7 +2509,8 @@ def validate_media_plan(
             "alt_text": "",
         }
         vision = _validate_featured_candidate_vision(
-            existing_item, vision_editorial, client, cache, config=config, root=root
+            existing_item, vision_editorial, client, cache, config=config, root=root,
+            v1_feature_policy=v1_feature_policy, post_id=post_id,
         )
         featured_vision.append(
             {"index": None, "existing_featured_id": existing_featured_id, **vision}
@@ -2476,16 +2535,18 @@ def validate_media_plan(
                 ).lower(),
                 detail=str(vision.get("reason") or "")[:160],
             )
-    rejected_indexes = {row["index"] for row in rejected}
-    accepted = {index for index in range(len(plan)) if index not in rejected_indexes}
+    not_verified = {row["index"] for row in rejected} | set(vision_pending)
+    accepted = set(range(len(plan))) - not_verified
     listicle = _listicle_media_capacity(
-        editorial, entities, accepted, post_title=post_title
+        vision_editorial, entities, accepted, post_title=post_title,
+        v1_categories=v1_visual_fallback,
     )
     return {
         "valid": valid,
         "rejected": rejected,
         "listicle": listicle,
         "featured_vision": featured_vision,
+        **({"vision_pending": vision_pending} if vision_pending else {}),
     }
 
 
@@ -2497,6 +2558,8 @@ def _validate_featured_candidate_vision(
     *,
     config: Config | None,
     root: Path | None,
+    v1_feature_policy: bool = False,
+    post_id: int | None = None,
 ) -> dict[str, Any]:
     """Validate normalized featured bytes during ``media-validate``.
 
@@ -2508,7 +2571,12 @@ def _validate_featured_candidate_vision(
         return {"status": "skipped", "reason": "configuracao de visao nao fornecida"}
     subject = featured_vision_subject(editorial)
     editorial_context = str(resolve_editorial_identity(editorial).get("news_context") or "")
-    vision_context_key = featured_vision_context_key(editorial)
+    vision_context_key = (
+        v1_vision_context_key(editorial, post_id) if v1_feature_policy
+        else featured_vision_context_key(editorial)
+    )
+    policy = V1_FEATURED_VISION_POLICY if v1_feature_policy else "featured-key-art-v1"
+    threshold = V1_MATCH_THRESHOLD if v1_feature_policy else 0.85
     cache_subject = subject
     media_id = item.get("media_library_id")
     vision_ready, vision_message = vision_config_ready(
@@ -2572,17 +2640,22 @@ def _validate_featured_candidate_vision(
             image_sha256 = hashlib.sha256(Path(normalized).read_bytes()).hexdigest()
             cached = get_cached_decision(
                 cache_root, image_url, cache_subject,
-                image_sha256=image_sha256, policy="featured-key-art-v1",
+                image_sha256=image_sha256, policy=policy,
                 model_identity=vision_model_identity(
                     getattr(config, "vision_base_url", ""),
                     getattr(config, "vision_model", "gpt-4o-mini"),
                 ),
                 context_key=vision_context_key,
             )
+            if cached is not None and v1_feature_policy and (
+                cached.get("image_sha256") != image_sha256 or cached.get("context_key") != vision_context_key
+                or cached.get("subject") != subject or cached.get("image_role") != "featured"
+            ):
+                cached = None
             if cached is not None:
                 ok = (
                     cached.get("status") == "MATCH"
-                    and float(cached.get("confidence") or 0) >= 0.85
+                    and float(cached.get("confidence") or 0) >= threshold
                     and cached.get("visual_type") not in {"text_banner", "infographic"}
                 )
                 return {
@@ -2610,6 +2683,7 @@ def _validate_featured_candidate_vision(
                 allow_high=True,
                 require_key_art=True,
                 root=root,
+                **({"match_threshold": threshold} if v1_feature_policy else {}),
             )
         if decision.get("accepted"):
             cache_decision = {
@@ -2621,13 +2695,18 @@ def _validate_featured_candidate_vision(
                 )
                 if key in decision
             }
+            if v1_feature_policy:
+                cache_decision.update(
+                    image_sha256=image_sha256, context_key=vision_context_key,
+                    image_role="featured", subject=subject,
+                )
             set_cached_decision(
                 cache_root,
                 image_url,
                 cache_subject,
                 cache_decision,
                 image_sha256=image_sha256,
-                policy="featured-key-art-v1",
+                policy=policy,
                 model_identity=vision_model_identity(
                     getattr(config, "vision_base_url", ""),
                     getattr(config, "vision_model", "gpt-4o-mini"),
@@ -2683,6 +2762,7 @@ def _listicle_media_capacity(
     accepted_plan_indexes: set[int] | None = None,
     *,
     post_title: str = "",
+    v1_categories: bool = False,
 ) -> dict[str, Any]:
     """Return the verified inline-image capacity before listicle authoring.
 
@@ -2691,11 +2771,12 @@ def _listicle_media_capacity(
     """
     html = str(editorial.get("cleaned_html") or "")
     title = post_title or str((editorial.get("seo") or {}).get("title") or "")
-    promised = detect_list_format(title, html)
+    categories = (editorial.get("categories") or ()) if v1_categories else ()
+    promised = detect_list_format(title, html, categories)
     if promised is None:
         return {"applicable": False}
 
-    list_items = extract_list_items(title, html)
+    list_items = extract_list_items(title, html, categories)
     covered_slots: set[int] = set()
     covered_items: set[str] = set()
 
@@ -2843,6 +2924,8 @@ def _execute_media_plan(
     visual_comparison_budget: list[int] | None = None,
     on_accepted: Callable[[dict[str, Any]], None] | None = None,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
+    v1_visual_fallback: bool = False,
+    post_categories: Any = (),
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -2856,7 +2939,10 @@ def _execute_media_plan(
     """
     if post_id is not None:
         load_epoch_protection(root).assert_writable(post_id, effect="media_upload")
-    vision_editorial = {**editorial, **({"title": post_title} if post_title else {})}
+    vision_editorial = {
+        **editorial, **({"title": post_title} if post_title else {}),
+        **({"categories": post_categories} if v1_visual_fallback and post_categories else {}),
+    }
     vision_context_key = featured_vision_context_key(vision_editorial)
     plan = editorial.get("media_plan") or []
     if not plan:
@@ -2918,6 +3004,7 @@ def _execute_media_plan(
         item: dict[str, Any],
         position: int,
         detail: str = "",
+        **decision_fields: Any,
     ) -> None:
         source = str(item.get("direct_image_url") or "")
         append_telemetry(
@@ -2940,6 +3027,7 @@ def _execute_media_plan(
             image_domain=diagnostic_url_domain(item.get("direct_image_url")),
             provenance_mode=str(item.get("provenance_mode") or "source_page"),
             detail=detail[:160],
+            **decision_fields,
         )
         if stage == "source_verify":
             normalized_detail = detail.casefold()
@@ -2967,6 +3055,48 @@ def _execute_media_plan(
                 detail=detail[:160],
             )
 
+    v1_decisions: list[dict[str, Any]] = []
+
+    def _record_decision(
+        position: int, item: dict[str, Any], result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not v1_visual_fallback or config.media_source_policy != "credit_only":
+            return result
+        source = str(item.get("direct_image_url") or "").strip()
+        # Audit path only: query parameters can carry CDN access signatures.
+        try:
+            parsed = urlparse(source)
+            observed_url = (
+                f"{parsed.scheme}://{parsed.hostname}{parsed.path}"[:300]
+                if parsed.scheme in {"http", "https"} and parsed.hostname else ""
+            )
+        except ValueError:
+            observed_url = ""
+        evidence = result.get("vision_evidence") or {}
+        stage = str(result.get("failure_stage") or ("upload" if result.get("media_id") else "preflight"))
+        technical = (
+            "failed" if stage in {"download", "conversion"} else
+            "passed" if stage in {"featured_vision", "inline_vision", "upload"} else "not_confirmed"
+        )
+        row = {
+            **result,
+            "candidate_id": str(item.get("candidate_id") or hashlib.sha256(source.encode()).hexdigest()[:20]),
+            "candidate_url": observed_url,
+            "candidate_stage": stage,
+            "technical_status": technical,
+            "vision_attempted": bool(result.get("vision_attempted") or evidence.get("decision_source") == "vision_provider"),
+        }
+        v1_decisions.append(row)
+        _funnel(
+            "candidate_decision", str(row.get("status") or ""), {**item, "candidate_id": row["candidate_id"]},
+            position, str(row.get("detail") or ""),
+            candidate_url=observed_url, candidate_stage=stage, technical_status=technical,
+            reason_code=str(row.get("reason_code") or ("accepted" if row.get("media_id") else "preflight_rejected")),
+            vision_attempted=row["vision_attempted"], vision_status=evidence.get("status"),
+            vision_confidence=evidence.get("confidence"),
+        )
+        return row
+
     def _attachment_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         """Resolve a Media Library attachment referenced by ``media_library_id``.
 
@@ -2984,7 +3114,8 @@ def _execute_media_plan(
 
     def _rejection_reason(item: dict[str, Any]) -> str | None:
         return _media_item_rejection(
-            item, entities, client, attachment_cache, vision_editorial, root=root, config=config
+            item, entities, client, attachment_cache, vision_editorial, root=root, config=config,
+            v1_visual_fallback=v1_visual_fallback,
         )
 
     if config.dry_run:
@@ -3017,6 +3148,9 @@ def _execute_media_plan(
     # attachment_cache e populado aqui (get_media), por isso fica fora do
     # paralelismo.
     pending: list[tuple[int, dict[str, Any]]] = []
+    fallback_vision_remaining = config.vision_max_low if v1_visual_fallback else 0
+    fallback_vision_deadline: float | None = None
+    fallback_vision_counts = {"approved": 0, "rejected": 0, "unavailable": 0}
     preflight_rejections = {
         int(row["index"]): str(row.get("reason") or "media-validate rejeitou o item")
         for row in ((preflight or {}).get("rejected") or [])
@@ -3032,7 +3166,7 @@ def _execute_media_plan(
         if reason is None:
             reason = _duplicate_source_reason(plan, position, seen_sources)
         if reason:
-            outcomes[position] = {
+            outcomes[position] = _record_decision(position, item, {
                 "paragraph_index": item.get("paragraph_index"),
                 "status": "rejected",
                 "detail": reason,
@@ -3042,7 +3176,7 @@ def _execute_media_plan(
                     and isinstance(preflight_vision[position].get("vision_evidence"), dict)
                     else {}
                 ),
-            }
+            })
             continue
         pending.append((position, item))
 
@@ -3089,14 +3223,18 @@ def _execute_media_plan(
                 position, item = pair
                 from .media.text import credit_text_with_source_site
 
-                # The article page is the verified source of this candidate.
+                # The article page, if verified, is the source of this candidate.
                 # Attribute that site, without treating it as an author or
                 # inferring legal permission, before upload and composition.
                 item["credit_text"] = credit_text_with_source_site(
                     str(item.get("credit_text") or ""),
                     str(item.get("source_page_url") or ""),
                 )
+                nonlocal fallback_vision_remaining, fallback_vision_deadline
                 vision_evidence_record: dict[str, Any] | None = None
+                needs_pixels = _v1_needs_pixel_evidence(
+                    item, config, v1_visual_fallback,
+                )
                 evidence = {
                     name: item.get(name)
                     for name in ("source_page_url", "direct_image_url", "alt_text", "credit_text", "provenance_mode")
@@ -3111,19 +3249,23 @@ def _execute_media_plan(
                         str(download_url),
                         tmp / f"source_{position}{suffix}",
                         max_attempts=config.max_source_retries + 1,
-                        url_policy=config.remote_url_policy,
+                        url_policy="enforce" if needs_pixels else config.remote_url_policy,
                         audit=lambda finding: append_telemetry(
                             root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
                         ),
                     )
                 except MediaDownloadError as exc:
-                    _funnel("download", "error", item, position, type(exc).__name__)
+                    unsafe = needs_pixels and isinstance(exc.__cause__, URLSafetyError)
+                    _funnel("download", "error", item, position, "unsafe_url" if unsafe else type(exc).__name__)
                     return position, _structured_media_failure(
                         exc,
                         stage="download",
-                        reason_code="candidate_asset_unavailable",
-                        recoverable=True,
-                    ) | {"paragraph_index": item.get("paragraph_index")}
+                        reason_code="unsafe_url" if unsafe else "candidate_asset_unavailable",
+                        recoverable=not unsafe,
+                    ) | {
+                        "paragraph_index": item.get("paragraph_index"),
+                        **({"failure_kind": "unsafe_url"} if unsafe else {}),
+                    }
                 _funnel("download", "passed", item, position)
                 # Verificacao de conteudo: a imagem baixada deve estar listada
                 # na pagina de origem (fail-closed).
@@ -3174,7 +3316,7 @@ def _execute_media_plan(
                 _funnel("source_verify", source_verify_status, item, position, verify_reason)
                 is_featured = bool(item.get("is_featured"))
                 if (
-                    not is_featured
+                    not is_featured and not needs_pixels
                     and isinstance(item.get("evidence"), dict)
                     and isinstance(item["evidence"].get("vision_decision"), dict)
                 ):
@@ -3317,7 +3459,142 @@ def _execute_media_plan(
                             "failure_kind": "duplicate_frame",
                             "recoverable": False,
                         }
-                if is_featured and config.vision_enabled and config.vision_api_key:
+                if needs_pixels:
+                    subject = _v1_visual_subject(item, vision_editorial)
+                    stage = "featured_vision" if is_featured else "inline_vision"
+                    if not subject:
+                        detail = "posição de mídia sem assunto editorial verificável"
+                        _funnel(stage, "rejected", item, position, detail)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"), "status": "rejected",
+                            "detail": detail, "reason_code": "role_unsuitable",
+                            "failure_stage": stage, "failure_kind": "unbound_subject", "recoverable": False,
+                        }
+                    model_identity = vision_model_identity(config.vision_base_url, config.vision_model)
+                    cache_policy = V1_FEATURED_VISION_POLICY if is_featured else V1_INLINE_VISION_POLICY
+                    cache_context = v1_vision_context_key(vision_editorial, post_id)
+                    cached = get_cached_decision(
+                        root, str(download_url), subject, image_sha256=identity.sha256,
+                        policy=cache_policy, model_identity=model_identity, context_key=cache_context,
+                    )
+                    if (
+                        cached and cached.get("status") == "MATCH"
+                        and cached.get("image_sha256") == identity.sha256
+                        and cached.get("context_key") == cache_context
+                        and cached.get("subject") == subject
+                        and cached.get("image_role") == ("featured" if is_featured else "inline")
+                        and float(cached.get("confidence") or 0) >= V1_MATCH_THRESHOLD
+                        and (not is_featured or cached.get("visual_type") not in {"text_banner", "infographic"})
+                    ):
+                        decision = {**cached, "verdict": "accept", "accepted": True}
+                        decision_source = "cache_same_model_context_bytes"
+                    else:
+                        now = time.monotonic()
+                        budget_seconds = config.media_operation_timeout_seconds
+                        if fallback_vision_deadline is None and budget_seconds > 0:
+                            fallback_vision_deadline = now + budget_seconds
+                        time_left = (fallback_vision_deadline - now) if fallback_vision_deadline is not None else None
+                        if fallback_vision_remaining <= 0 or (time_left is not None and time_left <= 0):
+                            fallback_vision_counts["unavailable"] += 1
+                            _funnel(stage, "deferred", item, position, "vision_budget_exhausted")
+                            return position, {
+                                "paragraph_index": item.get("paragraph_index"), "status": "deferred",
+                                "detail": "limite de avaliações visuais por post atingido",
+                                "reason_code": "vision_budget_exhausted", "failure_stage": stage,
+                                "failure_kind": "vision_budget_exhausted", "recoverable": True,
+                            }
+                        # Existing low-to-high decision path can resolve an
+                        # inconclusive first pass on the same pixels + actual
+                        # article context. Neither ALT nor credit is evidence.
+                        allow_high = config.vision_detail == "low" and fallback_vision_remaining >= 2
+                        reserved_calls = 2 if allow_high else 1
+                        fallback_vision_remaining -= reserved_calls
+                        timeout = float(config.vision_timeout)
+                        if time_left is not None:
+                            timeout = min(timeout, time_left / reserved_calls)
+                        vision_attempted = False
+                        try:
+                            if not config.vision_enabled:
+                                raise VisionGateError("visao desabilitada")
+                            vision_input = prepare_vision_image_input_from_path(webp)
+                            vision_attempted = bool(config.vision_api_key)
+                            decision = verify_image_subject_decision(
+                                image_url=vision_input, subject=subject,
+                                api_key=config.vision_api_key, base_url=config.vision_base_url,
+                                model=config.vision_model, timeout=timeout,
+                                context=str(resolve_editorial_identity(vision_editorial).get("news_context") or ""),
+                                category=featured_vision_category(vision_editorial),
+                                detail=config.vision_detail, allow_high=allow_high,
+                                require_key_art=is_featured, match_threshold=V1_MATCH_THRESHOLD, root=root,
+                            )
+                            if allow_high and "low_status" not in decision:
+                                fallback_vision_remaining += 1
+                            decision_source = "vision_provider"
+                        except (VisionGateError, VisionInputUnavailable) as exc:
+                            fallback_vision_counts["unavailable"] += 1
+                            _funnel(stage, "deferred", item, position, str(exc))
+                            return position, {
+                                "paragraph_index": item.get("paragraph_index"), "status": "deferred",
+                                "detail": str(exc)[:200], "reason_code": "vision_provider_error",
+                                "failure_stage": stage, "failure_kind": "vision_unavailable", "recoverable": True,
+                                "vision_attempted": vision_attempted,
+                            }
+                    vision_evidence_record = {
+                        "status": decision.get("status"), "confidence": decision.get("confidence"),
+                        "visual_type": decision.get("visual_type"), "verdict": decision.get("verdict"),
+                        "image_sha256": identity.sha256, "image_role": "featured" if is_featured else "inline",
+                        "policy_version": VISION_POLICY_VERSION, "model_identity": model_identity,
+                        "context_key": cache_context, "subject": subject,
+                        "decision_source": decision_source,
+                        **{
+                            key: decision[key] for key in ("detail_used", "low_status", "low_confidence")
+                            if key in decision
+                        },
+                    }
+                    # Historical inline verify can return accepted=True on
+                    # inconclusive. With no source evidence that proves nothing.
+                    if decision.get("verdict") != "accept":
+                        fallback_vision_counts["rejected"] += 1
+                        reason = str(decision.get("reason") or "imagem não confirmada visualmente")
+                        code = (
+                            "role_unsuitable"
+                            if is_featured and decision.get("visual_type") in {"text_banner", "infographic"}
+                            else "subject_mismatch" if decision.get("verdict") == "reject"
+                            else "vision_confidence_insufficient" if decision.get("status") == "MATCH"
+                            else "vision_inconclusive"
+                        )
+                        _funnel(stage, "rejected", item, position, reason)
+                        return position, {
+                            "paragraph_index": item.get("paragraph_index"), "status": "rejected",
+                            "detail": reason[:200], "reason_code": code,
+                            "failure_stage": stage, "failure_kind": str(decision.get("verdict") or ""),
+                            "recoverable": False, "vision_evidence": vision_evidence_record,
+                        }
+                    fallback_vision_counts["approved"] += 1
+                    if decision_source == "vision_provider":
+                        set_cached_decision(
+                            root, str(download_url), subject, vision_evidence_record | {"reason": decision.get("reason")},
+                            image_sha256=identity.sha256, policy=cache_policy,
+                            model_identity=model_identity, context_key=cache_context,
+                        )
+                    # Generate accessible, contextual text only after a real
+                    # match. Reproduce no credit/author claim from the plan.
+                    label = {
+                        "gameplay": "Cena de gameplay", "key_art": "Arte", "movie_still": "Cena",
+                        "character": "Personagem", "product": "Produto", "poster": "Pôster",
+                        "photograph": "Foto", "infographic": "Infográfico",
+                    }.get(str(decision.get("visual_type") or ""), "Imagem ilustrativa")
+                    item["alt_text"] = f"{label}: {subject}"[:160]
+                    item["credit_text"] = "Crédito: Imagem ilustrativa."
+                    evidence.update(alt_text=item["alt_text"], credit_text=item["credit_text"])
+                    _funnel(stage, "passed", item, position, "validated_before_upload")
+                elif is_featured and config.vision_enabled and config.vision_api_key:
+                    v1_feature_policy = v1_visual_fallback and config.media_source_policy == "credit_only"
+                    policy = V1_FEATURED_VISION_POLICY if v1_feature_policy else "featured-key-art-v1"
+                    threshold = V1_MATCH_THRESHOLD if v1_feature_policy else 0.85
+                    context_key = (
+                        v1_vision_context_key(vision_editorial, post_id) if v1_feature_policy else vision_context_key
+                    )
                     vision_preflight = preflight_vision.get(position) or {}
                     expected_sha256 = str(vision_preflight.get("image_sha256") or "")
                     decision = None
@@ -3336,7 +3613,7 @@ def _execute_media_plan(
                             vision_preflight,
                             vision_editorial,
                             config,
-                            image_sha256=identity.sha256,
+                            image_sha256=identity.sha256, context_key=context_key,
                         )
                     ):
                         preflight_decision = vision_preflight.get("decision")
@@ -3349,13 +3626,18 @@ def _execute_media_plan(
                         cached = get_cached_decision(
                             root, str(item.get("direct_image_url") or ""),
                             cache_subject, image_sha256=identity.sha256,
-                            policy="featured-key-art-v1",
+                            policy=policy,
                             model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                            context_key=vision_context_key,
+                            context_key=context_key,
                         )
+                        if cached is not None and v1_feature_policy and (
+                            cached.get("image_sha256") != identity.sha256 or cached.get("context_key") != context_key
+                            or cached.get("subject") != subject or cached.get("image_role") != "featured"
+                        ):
+                            cached = None
                         if cached is not None and (
                             cached.get("status") == "MATCH"
-                            and float(cached.get("confidence") or 0) >= 0.85
+                            and float(cached.get("confidence") or 0) >= threshold
                             and cached.get("visual_type") not in {"text_banner", "infographic"}
                         ):
                             decision = {
@@ -3384,6 +3666,7 @@ def _execute_media_plan(
                                     allow_high=True,
                                     require_key_art=True,
                                     root=root,
+                                    **({"match_threshold": threshold} if v1_feature_policy else {}),
                                 )
                                 decision_source = "vision_provider"
                             except (VisionGateError, VisionInputUnavailable) as exc:
@@ -3404,15 +3687,20 @@ def _execute_media_plan(
                                     )
                                     if key in decision
                                 }
+                                if v1_feature_policy:
+                                    cache_decision.update(
+                                        image_sha256=identity.sha256, context_key=context_key,
+                                        subject=subject, image_role="featured",
+                                    )
                                 set_cached_decision(
                                     root,
                                     str(item.get("direct_image_url") or ""),
                                     cache_subject,
                                     cache_decision,
                                     image_sha256=identity.sha256,
-                                    policy="featured-key-art-v1",
+                                    policy=policy,
                                     model_identity=vision_model_identity(config.vision_base_url, config.vision_model),
-                                    context_key=vision_context_key,
+                                    context_key=context_key,
                                 )
                     if decision is not None:
                         vision_evidence_record = {
@@ -3430,7 +3718,7 @@ def _execute_media_plan(
                             "policy_version": VISION_POLICY_VERSION,
                             "decision_source": decision_source,
                             "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
-                            "context_key": vision_context_key,
+                            "context_key": context_key,
                             "subject": featured_vision_subject(vision_editorial),
                         })
                     if not decision.get("accepted"):
@@ -3558,17 +3846,18 @@ def _execute_media_plan(
             for pair in pending:
                 position, item = pair
                 try:
-                    processed.append(_process_item(pair))
+                    _, result = _process_item(pair)
+                    processed.append((position, _record_decision(position, item, result)))
                 except Exception as exc:  # noqa: BLE001 - report one failed item
                     if on_accepted is not None and position in confirmed_uploads:
                         raise
                     _funnel("worker", "error", item, position, type(exc).__name__)
-                    processed.append((position, _structured_media_failure(
+                    processed.append((position, _record_decision(position, item, _structured_media_failure(
                         exc,
                         stage="worker",
                         reason_code="media_processing_error",
                         recoverable=True,
-                    ) | {"paragraph_index": item.get("paragraph_index")}))
+                    ) | {"paragraph_index": item.get("paragraph_index")})))
 
             for position, result in processed:
                 outcomes[position] = result
@@ -3645,6 +3934,10 @@ def _execute_media_plan(
                         reason = _duplicate_source_reason([fallback_item], 0, seen_sources)
                     if reason:
                         _funnel("fallback", "rejected", fallback_item, position, reason)
+                        _record_decision(position, fallback_item, {
+                            "status": "rejected", "failure_stage": "preflight", "detail": reason,
+                            "reason_code": "duplicate_source" if "repetida" in reason else "preflight_rejected",
+                        })
                         continue
 
                     _funnel("fallback", "attempted", fallback_item, position)
@@ -3660,6 +3953,7 @@ def _execute_media_plan(
                             reason_code="media_processing_error",
                             recoverable=True,
                         ) | {"paragraph_index": slot.get("paragraph_index")}
+                    fallback_result = _record_decision(position, fallback_item, fallback_result)
                     if fallback_result.get("status") in {"accepted", "ok"}:
                         fallback_result["fallback_used"] = True
                         fallback_result["fallback_for_candidate_id"] = slot.get("candidate_id")
@@ -3711,10 +4005,26 @@ def _execute_media_plan(
         missing_source_page=sum("origem" in str(result.get("detail") or "").casefold() for result in results if result.get("status") == "rejected"),
         relevance_match=sum(bool((item.get("evidence") or {}).get("verdict") == "deterministic_match") for item in plan),
         relevance_ambiguous=sum(bool((item.get("evidence") or {}).get("verdict") == "ambiguous") for item in plan),
-        relevance_reject=sum(bool(result.get("status") == "rejected") for result in results),
-        vision_approved=sum(bool(row.get("status") == "passed") for row in preflight_vision.values()),
-        vision_rejected=sum(bool(row.get("status") == "rejected") for row in preflight_vision.values()),
-        vision_input_unavailable=sum(bool(row.get("status") == "unavailable") for row in preflight_vision.values()),
+        relevance_reject=(
+            sum(row.get("reason_code") == "subject_mismatch" for row in v1_decisions)
+            if v1_visual_fallback and config.media_source_policy == "credit_only"
+            else sum(result.get("status") == "rejected" for result in results)
+        ),
+        **({
+            "unique_candidates_visually_reviewed": len({
+                (row["candidate_id"], (row.get("vision_evidence") or {}).get("image_sha256"))
+                for row in v1_decisions if (row.get("vision_evidence") or {}).get("status")
+            }),
+        } if v1_visual_fallback and config.media_source_policy == "credit_only" else {}),
+        vision_approved=(
+            sum(row.get("status") == "passed" for row in preflight_vision.values()) + fallback_vision_counts["approved"]
+        ),
+        vision_rejected=(
+            sum(row.get("status") == "rejected" for row in preflight_vision.values()) + fallback_vision_counts["rejected"]
+        ),
+        vision_input_unavailable=(
+            sum(row.get("status") == "unavailable" for row in preflight_vision.values()) + fallback_vision_counts["unavailable"]
+        ),
         duplicate_frame=sum("duplicate" in str(result.get("detail") or "").casefold() for result in results),
         distinct=len({str(result.get("phash") or result.get("media_id") or "") for result in accepted_results}),
         downloaded=sum(result.get("status") not in {"error"} for result in results),
