@@ -1660,6 +1660,123 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(second["state"], "partial")
         self.assertEqual(third["state"], "awaiting_human")
 
+    def test_direct_apply_rejects_unbound_normal_partial_before_effects(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from unicornio_editor import session_budget
+        from unicornio_editor.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            post["meta"]["_hermes_state"] = "partial"
+            client = FakeClient(post)
+            config = self.config(False)
+            payload = editorial_payload()
+            body = "<p>Parágrafo substantivo sobre videogame com detalhes do lançamento e contexto editorial relevante.</p>"
+            payload["cleaned_html"] = body * 8
+            backup = root / "backups" / "42"
+            backup.mkdir(parents=True)
+            target = backup / "editorial.partial.json"
+            target.write_text(json.dumps({
+                "state": "partial", "kind": "media", "required": 2, "completed": 1, "missing": 1,
+                "accepted_media": [{
+                    "media_id": 101, "media_url": "https://wp.test/old-inline.webp",
+                    "paragraph_index": 1, "alt_text": "Videogame",
+                    "credit_text": "Crédito: Fonte.", "width": 800, "height": 450,
+                }],
+                "featured": {"status": "valid", "media_id": 7},
+            }))
+            ledger_before = target.read_bytes()
+            (backup / "editorial.draft.json").write_text(json.dumps(payload))
+            editorial_file = root / "editorial.json"
+            editorial_file.write_text(json.dumps(payload))
+            stderr = io.StringIO()
+            with mock.patch("unicornio_editor.cli.load_config", return_value=config), mock.patch(
+                "unicornio_editor.cli.WordPressClient", return_value=client
+            ), mock.patch("unicornio_editor.cli._carregar_env_do_projeto"), mock.patch(
+                "unicornio_editor.workflow._execute_media_plan", return_value=([], None, "")
+            ) as execute, redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                code = main(["apply", "42", str(editorial_file), "--root", str(root)])
+
+            self.assertEqual(code, 2, stderr.getvalue())
+            self.assertEqual(json.loads(stderr.getvalue())["error_code"], "partial_resume_unbound")
+            execute.assert_not_called()
+            self.assertEqual(client.updated, [])
+            self.assertEqual(session_budget.status(root, config)["posts_touched"], [])
+            self.assertEqual(session_budget.status(root, config)["posts_reserved"], [])
+            self.assertEqual(target.read_bytes(), ledger_before)
+            self.assertEqual(set(path.name for path in backup.iterdir()), {
+                "editorial.partial.json", "editorial.draft.json",
+            })
+
+    def test_category_only_legacy_listicle_resumes_without_flat_binding(self):
+        from unicornio_editor.list_quality import detect_list_format
+        from unicornio_editor.workflow import V1PartialResumeError
+
+        payload = editorial_payload()
+        body = (
+            "<h2>Detalhes do lançamento</h2>"
+            "<h3>Videogame Alfa</h3><p>Videogame Alfa traz detalhes sobre o lançamento importante.</p>"
+            "<h3>Videogame Beta</h3><p>Videogame Beta oferece novidades confirmadas na apresentação.</p>"
+        )
+        payload["cleaned_html"] = body
+        post = self.post()
+        post["title"] = {"raw": payload["seo"]["title"]}
+        post["categories"] = ["Lista de jogos"]
+        post["content"]["raw"] = body
+        self.assertIsNone(detect_list_format(payload["seo"]["title"], body))
+        self.assertEqual(detect_list_format(payload["seo"]["title"], body, post["categories"]), 2)
+        client = FakeClient(post)
+
+        def accepted(slot, media_id, label):
+            return {
+                "media_id": media_id, "media_url": f"https://wp.test/videogame-{label.lower()}.webp",
+                "paragraph_index": slot, "item_title": f"Videogame {label}",
+                "alt_text": f"{payload['seo']['title']}: Videogame {label}",
+                "credit_text": "Crédito: Fonte.",
+                "width": 800, "height": 450,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Emulate an item-scoped ledger produced by the existing media-only
+            # path. Mixed list structure/media failures are a separate contract.
+            with mock.patch("unicornio_editor.workflow._execute_media_plan",
+                            return_value=([accepted(0, 101, "Alfa")], None, "")), mock.patch(
+                "unicornio_editor.workflow.run_pre_publish_checklist",
+                return_value={"items": [{"name": "imagens_no_corpo", "status": "fail", "detail": "1/2"}]},
+            ):
+                first = apply_editorial(client, self.config(False), root, 42, payload)
+
+            self.assertEqual(first["status"], "partial", first.get("blocked_reasons"))
+            partial = _load_partial_manifest(root, 42, required=True)
+            self.assertEqual((partial["completed"], partial["missing"]), (1, 1))
+            self.assertNotIn("resume_binding", partial)
+            client.post["meta"]["_hermes_next_retry_at"] = ""
+
+            before = list(client.updated)
+            with mock.patch("unicornio_editor.workflow._execute_media_plan") as execute:
+                with self.assertRaisesRegex(V1PartialResumeError, "partial_resume_editorial_changed"):
+                    apply_editorial(
+                        client, self.config(False), root, 42,
+                        {**payload, "cleaned_html": "<p>Notícia comum sobre videogame.</p>"},
+                    )
+            execute.assert_not_called()
+            self.assertEqual(client.updated, before)
+
+            with mock.patch("unicornio_editor.workflow._execute_media_plan",
+                            return_value=([accepted(1, 102, "Beta")], None, "")):
+                second = apply_editorial(client, self.config(False), root, 42, payload)
+
+            self.assertEqual(second["status"], "ready", [
+                item for item in second["checklist"]["items"] if item["status"] == "fail"
+            ])
+            final_body = client.post["content"]["raw"]
+            self.assertEqual(final_body.count('src="https://wp.test/videogame-alfa.webp"'), 1)
+            self.assertEqual(final_body.count('src="https://wp.test/videogame-beta.webp"'), 1)
+
     def test_legacy_featured_vision_partial_resumes_without_unbound_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1675,12 +1792,7 @@ class WorkflowTests(unittest.TestCase):
             }
             manifest = {
                 "state": "partial", "kind": "media", "required": 4,
-                "completed": 4, "missing": 0,
-                "accepted_media": [
-                    {"media_id": 100 + i, "media_url": f"https://wp.test/{i}.webp", "paragraph_index": i * 3,
-                     "alt_text": "inline", "credit_text": "Crédito da imagem: Teste.", "width": 800, "height": 450}
-                    for i in range(4)
-                ],
+                "completed": 0, "missing": 4, "accepted_media": [],
                 "featured": {"status": "valid", "media_id": 7, "media_url": "https://wp.test/featured.webp"},
             }
             backup = root / "backups/42"
@@ -1688,7 +1800,8 @@ class WorkflowTests(unittest.TestCase):
             (backup / "editorial.partial.json").write_text(json.dumps(manifest), encoding="utf-8")
             checklist = {"all_passed": False, "failed": [{"name": "imagens_visao", "detail": "featured rejeitada"}], "items": [{"name": "imagens_visao", "status": "fail", "detail": "featured rejeitada"}]}
             payload = editorial_payload()
-            payload["cleaned_html"] = "".join(f"<p>Parágrafo {i} sobre videogame.</p>" for i in range(12))
+            # These images are already present in the editorial body, not
+            # borrowed from an unbound legacy attachment ledger.
             with mock.patch("unicornio_editor.workflow._execute_media_plan", return_value=([], None, "")), \
                  mock.patch("unicornio_editor.workflow.validate_media_plan", return_value={"featured_vision": []}), \
                  mock.patch("unicornio_editor.workflow.run_pre_publish_checklist", return_value=checklist):

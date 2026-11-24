@@ -327,6 +327,14 @@ class V1PartialResumeError(WorkflowError):
         self.error_code = code
 
 
+def _v1_is_listicle(post: dict[str, Any], editorial: dict[str, Any], body: str) -> bool:
+    categories = editorial.get("categories") or post.get("categories") or ()
+    seo = editorial.get("seo")
+    seo_title = str(seo.get("title") or "") if isinstance(seo, dict) else ""
+    titles = (_post_title(post) or "", str(editorial.get("title") or ""), seo_title)
+    return any(detect_list_format(title, body, categories) is not None for title in titles)
+
+
 def _v1_partial_binding(post: dict[str, Any], editorial: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": 1,
@@ -361,16 +369,14 @@ def verified_v1_partial_resume(
         code = "partial_resume_unbound" if binding is None else "partial_resume_draft_unverified"
         raise V1PartialResumeError(code, post_id=post_id) from exc
     body = draft.get("cleaned_html")
-    if binding is None and isinstance(body, str) and detect_list_format(
-        _post_title(post) or str((draft.get("seo") or {}).get("title") or ""), body,
-    ) is not None:
+    if binding is None and isinstance(body, str) and _v1_is_listicle(post, draft, body):
         # Existing item-scoped listicle continuation is not a flat layout.
         return None
     if not isinstance(binding, dict):
         raise V1PartialResumeError("partial_resume_unbound", post_id=post_id)
     if not isinstance(body, str) or not body.strip() or binding != _v1_partial_binding(post, draft):
         raise V1PartialResumeError("partial_resume_source_changed", post_id=post_id)
-    if detect_list_format(_post_title(post) or "", body) is not None:
+    if _v1_is_listicle(post, draft, body):
         raise V1PartialResumeError("partial_resume_listicle_requires_review", post_id=post_id)
     slots: set[int] = set()
     ids: set[int] = set()
@@ -681,7 +687,8 @@ def _apply_editorial_unlocked(
         if partial_path.is_file():
             append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
     partial_resume = None
-    if decision == "process" and partial_manifest.get("resume_binding") is not None:
+    prior_media = _partial_media_records(partial_manifest)
+    if decision == "process" and state_before.get("state") == STATE_PARTIAL:
         partial_resume = verified_v1_partial_resume(client, root, post)
         if partial_resume is not None:
             if editorial.get("cleaned_html") is None:
@@ -690,7 +697,13 @@ def _apply_editorial_unlocked(
                 raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
             if not config.dry_run:
                 _verify_v1_retained_bytes(config, post_id, partial_resume["accepted"])
-    prior_media = _partial_media_records(partial_manifest)
+        elif prior_media:
+            # The only unbound accepted records the verifier permits are legacy
+            # item-scoped lists. Do not move them onto an edited or flat body.
+            saved_body = load_draft(root, post_id)["cleaned_html"]
+            if editorial.get("cleaned_html") not in (None, saved_body):
+                raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
+            editorial = {**editorial, "cleaned_html": saved_body}
     if on_work_started is not None:
         on_work_started()
     attempts_before = eligibility.attempts
@@ -894,12 +907,7 @@ def _apply_editorial_unlocked(
             if result.get("media_url") and not result.get("featured")
         ]
         if plan:
-            is_list = bool(
-                detect_list_format(
-                    _post_title(post) or editorial["seo"]["title"], html
-                )
-            )
-            html = insert_media(html, plan, listicle=is_list)
+            html = insert_media(html, plan, listicle=_v1_is_listicle(post, editorial, html))
     editorial_with_media = {**editorial, "cleaned_html": html}
     content, trailer, trailer_status = compose_final_content(
         editorial_with_media, config, original_link_of(post), root=root
@@ -933,7 +941,11 @@ def _apply_editorial_unlocked(
     if not config.dry_run:
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
     checklist_media_context = _v1_checklist_media_context(
-        {**editorial_with_media, "title": _post_title(post)},
+        {
+            **editorial_with_media,
+            "title": _post_title(post),
+            "categories": editorial.get("categories") or post.get("categories") or (),
+        },
         content,
         [*prior_media, *media_results],
     )
@@ -1113,9 +1125,9 @@ def _apply_editorial_unlocked(
                     "baseline_inline_urls": sorted(baseline_inline_urls),
                     **(
                         {"resume_binding": _v1_partial_binding(post, editorial)}
-                        if accepted and detect_list_format(
-                            _post_title(post) or editorial["seo"]["title"], editorial["cleaned_html"],
-                        ) is None and (not prior_media or partial_resume is not None)
+                        if accepted and not _v1_is_listicle(
+                            post, editorial, editorial["cleaned_html"],
+                        ) and (not prior_media or partial_resume is not None)
                         else {}
                     ),
                     "featured": featured_manifest,

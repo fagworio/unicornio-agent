@@ -78,6 +78,7 @@ def resolve_batch_editorial_defaults(
             post_id = int(item["post_id"])
             post = client.get_post(post_id)
             item["source_post_title"] = _post_title(post)
+            item["source_post_categories"] = post.get("categories") or ()
             if (
                 root is not None
                 and _is_v1_fresh_media_layout_source(post, root, post_id)
@@ -690,7 +691,9 @@ def merge_media_manifest_into_editorial(
                 )
                 fresh_source = item.get("fresh_layout_source_signature")
                 ordinary = bool(fresh_source) and all(
-                    detect_list_format(title, html, editorial.get("categories") or ()) is None
+                    detect_list_format(
+                        title, html, editorial.get("categories") or item.get("source_post_categories") or (),
+                    ) is None
                     for title in titles
                 )
                 try:
@@ -1193,6 +1196,7 @@ def _context_for_post(
            if resume is not None else {}),
         "seo_existing": _seo_snapshot(post),
         "featured_media": post.get("featured_media"),
+        "categories": post.get("categories") or (),
         "entities": sorted(entities),
         "word_count": words,
         "images": images,
