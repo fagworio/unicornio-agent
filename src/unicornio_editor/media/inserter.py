@@ -577,11 +577,32 @@ def _split_paragraph_once(open_tag: str, body: str) -> tuple[str, int] | None:
     return f"{open_tag}{first}</p>{open_tag}{second}</p>", boundary
 
 
+def _v1_safe_paragraph_starts(html: str) -> set[int]:
+    """Locate real paragraph elements, excluding opaque/nested subdocuments."""
+    line_starts = [0, *(match.end() for match in re.finditer("\n", html))]
+    offsets: set[int] = set()
+
+    class ArticleParser(_BalancedMediaHtmlParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "p" and all(parent in {"article", "div", "main", "section"} for parent in self.stack):
+                line, column = self.getpos()
+                offsets.add(line_starts[line - 1] + column)
+            super().handle_starttag(tag, attrs)
+
+    parser = ArticleParser()
+    parser.feed(html)
+    parser.close()
+    if not parser.valid or parser.stack:
+        return set()
+    return offsets
+
+
 def normalize_normal_article_paragraphs(
     html: str,
     *,
     required_paragraphs: int,
     max_words: int = MAX_NORMAL_ARTICLE_NORMALIZATION_WORDS,
+    v1_safe_blocks_only: bool = False,
 ) -> dict[str, Any]:
     """Safely increase paragraph capacity without changing editorial text."""
     if not isinstance(html, str) or required_paragraphs < 1:
@@ -606,6 +627,11 @@ def normalize_normal_article_paragraphs(
         audit["final_paragraphs"] = len(matches)
         return {"html": html, "audit": audit}
 
+    safe_starts = _v1_safe_paragraph_starts(html) if v1_safe_blocks_only else None
+    if safe_starts is not None and any(match.start() not in safe_starts for match in matches):
+        audit["reason"] = "editorial_restructure_required: opaque_paragraph_block"
+        audit["final_paragraphs"] = len(matches)
+        return {"html": html, "audit": audit}
     needed = required_paragraphs - len(matches)
     replacements: dict[int, str] = {}
     candidates: list[tuple[int, int, str, str]] = []

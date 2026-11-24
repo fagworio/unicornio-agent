@@ -20,6 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .config import Config
 from .content_quality import ContentQualityError, minimum_image_count, validate_content_quality, word_count
 from .editorial_schema import EditorialValidationError, validate_editorial
+from .html_cleaner import EMPTY_PARAGRAPH_RE
 from .language import editorial_language_report
 from .list_quality import ListContentError, list_item_media_coverage, validate_list_content
 from .media.vision_gate import (
@@ -37,10 +38,6 @@ _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
 _IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
 _HEADING_RE = re.compile(r"<h([1-4])\b[^>]*>", re.IGNORECASE)
-_EMPTY_PARAGRAPH_RE = re.compile(
-    r"<p\b[^>]*>(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*</p>",
-    re.IGNORECASE,
-)
 
 
 def _canonical_image_url(value: str) -> str:
@@ -76,7 +73,7 @@ def _html_semantics_errors(content: str) -> list[str]:
         if level > previous + 1:
             errors.append(f"salto de H{previous} para H{level}")
         previous = level
-    if _EMPTY_PARAGRAPH_RE.search(str(content or "")):
+    if EMPTY_PARAGRAPH_RE.search(str(content or "")):
         errors.append("parágrafo vazio")
     return errors
 

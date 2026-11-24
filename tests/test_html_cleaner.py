@@ -1,6 +1,6 @@
 import unittest
 
-from unicornio_editor.html_cleaner import clean_html
+from unicornio_editor.html_cleaner import clean_html, remove_empty_paragraphs
 
 
 class HtmlCleanerTests(unittest.TestCase):
@@ -14,6 +14,21 @@ class HtmlCleanerTests(unittest.TestCase):
             '<script>alert(1)</script><iframe src="bad"></iframe>'
         )
         self.assertEqual(result, '<p>Antesdepois</p>')
+
+    def test_removes_only_bare_empty_paragraphs_without_reserializing_html(self):
+        kept = (
+            '<!-- <p></p> -->'
+            '<p id="secao"></p><p><a id="fonte"></a></p>'
+            '<pre><p></p></pre><textarea><p></p></textarea>'
+            '<figure><figcaption>Legenda com &amp; <a href="/fonte">crédito</a></figcaption></figure>'
+        )
+        content = "<P> &nbsp;<BR />&#xA0; </P>\n" + kept + "<p>\n&#160; </p>"
+        self.assertEqual(remove_empty_paragraphs(content), "\n" + kept)
+
+    def test_removes_paragraph_left_empty_after_imported_image_cleanup(self):
+        cleaned = clean_html('<p><img src="legacy.jpg"></p><p>Texto da notícia.</p>')
+        self.assertEqual(cleaned, "<p></p><p>Texto da notícia.</p>")
+        self.assertEqual(remove_empty_paragraphs(cleaned), "<p>Texto da notícia.</p>")
 
     def test_removes_javascript_links_and_event_attributes(self):
         result = clean_html(

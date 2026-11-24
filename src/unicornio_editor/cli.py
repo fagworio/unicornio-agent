@@ -1479,6 +1479,20 @@ def _apply_editorial_batch(
                         "idempotent": True,
                     })
                     continue
+            media_assembly_error = item.get("media_assembly_error")
+            if media_assembly_error:
+                # Detected before apply: do not acquire a post lock, reserve
+                # a session slot, upload media, or write this post.
+                outcomes.append({
+                    "post_id": post_id,
+                    "status": "preflight_blocked",
+                    "wordpress_changed": False,
+                    "error_code": media_assembly_error["error_code"],
+                    "reason": media_assembly_error["reason"],
+                    "action_code": "editorial_restructure_required",
+                    "action": "revise a estrutura editorial deste post sem reduzir a cota ou o espaçamento",
+                })
+                continue
             try:
                 admissible, preflight_reason = preflight_apply_candidate(
                     client, config, post_id, item["editorial"], root
@@ -1547,6 +1561,10 @@ def _apply_editorial_batch(
                     item["editorial"],
                     media_fallback_candidates=item.get("media_fallback_candidates"),
                     on_work_started=on_work_started if not dry_run else None,
+                    **(
+                        {"media_layout_source_signature": item["media_layout_source_signature"]}
+                        if item.get("media_layout_source_signature") else {}
+                    ),
                 )
                 audit = root / "backups" / str(post_id) / "apply.latest.json"
                 _write_audit(audit, {**result, "batch_id": batch_id})
@@ -4487,7 +4505,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
         elif args.command == "apply-batch":
             batch = load_editorial_batch(args.batch_file)
-            batch = resolve_batch_editorial_defaults(client, batch)
+            batch = resolve_batch_editorial_defaults(client, batch, root=args.root)
             media_manifest = getattr(args, "media_manifest", None)
             if media_manifest is None:
                 candidate_manifest = args.batch_file.with_name("media.manifest.json")

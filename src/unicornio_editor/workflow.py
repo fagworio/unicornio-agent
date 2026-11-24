@@ -23,7 +23,7 @@ from .builder import BuilderError, append_canonical_footer
 from .checklist import _canonical_image_url, _required_image_count, run_pre_publish_checklist
 from .config import Config
 from .editorial_schema import validate_editorial
-from .html_cleaner import _repair_orphan_media, clean_html
+from .html_cleaner import _repair_orphan_media, clean_html, remove_empty_paragraphs
 from .language import editorial_language_report
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .locking import LockError, LockManager
@@ -303,6 +303,22 @@ def _partial_manifest_path(root: Path, post_id: int) -> Path:
     return root / "backups" / str(post_id) / "editorial.partial.json"
 
 
+def _is_v1_fresh_media_layout_source(post: dict[str, Any], root: Path, post_id: int) -> bool:
+    resolved = resolve_post_eligibility(post, root)
+    content = post.get("content")
+    raw = content.get("raw") if isinstance(content, dict) else None
+    return (
+        post.get("status") == "pending"
+        and not resolved.is_v2
+        and resolved.eligible_for_v1
+        and resolved.state == STATE_NEW
+        and resolved.attempts == 0
+        and isinstance(raw, str)
+        and not re.search(r"<img\b", raw, re.IGNORECASE)
+        and not _partial_manifest_path(root, post_id).exists()
+    )
+
+
 def _load_partial_manifest(root: Path, post_id: int, *, required: bool = False) -> dict[str, Any]:
     path = _partial_manifest_path(root, post_id)
     try:
@@ -405,6 +421,7 @@ def apply_editorial(
     *,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
     on_work_started: Callable[[], None] | None = None,
+    media_layout_source_signature: str | None = None,
 ) -> dict[str, Any]:
     """Apply an editorial result while exclusively owning the post."""
     assert_post_not_quarantined(root, post_id, operation="apply")
@@ -418,6 +435,7 @@ def apply_editorial(
             payload,
             media_fallback_candidates=media_fallback_candidates,
             on_work_started=on_work_started,
+            media_layout_source_signature=media_layout_source_signature,
         )
 
 
@@ -469,6 +487,7 @@ def _apply_editorial_unlocked(
     *,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
     on_work_started: Callable[[], None] | None = None,
+    media_layout_source_signature: str | None = None,
 ) -> dict[str, Any]:
     """Preflight completo: valida, resolve, executa mídia, monta conteúdo e
     roda o checklist INTEIRO antes de gravar qualquer coisa no WordPress.
@@ -483,6 +502,11 @@ def _apply_editorial_unlocked(
     started_at = time.monotonic()
     post = client.get_post(post_id)
     _require_pending(post)
+    if media_layout_source_signature is not None and (
+        _post_write_guard_signature(post) != media_layout_source_signature
+        or not _is_v1_fresh_media_layout_source(post, root, post_id)
+    ):
+        raise WorkflowError("editorial media layout source changed; prepare the post again")
     resolved = resolve_post_eligibility(post, root)
     if not resolved.is_v2 and resolved.state == STATE_READY:
         # A pending post can legitimately be READY while Publisher is paused.
@@ -737,6 +761,12 @@ def _apply_editorial_unlocked(
         # problema técnico não volta ao modelo. Irrelevantes ficam como estão:
         # o gate relevancia_imagens bloqueia e o agente corrige.
         content, inline_normalization = _normalize_inline_images(client, config, content, image_entities)
+    # Use the same cleaned body for the checklist, manifest, and WordPress write.
+    # Do not remove paragraph boundaries after using positional media plans.
+    # Fresh assembled plans already remove blank spacers before slot selection.
+    if not editorial.get("media_plan") and not prior_media:
+        content = remove_empty_paragraphs(content)
+    if not config.dry_run:
         editorial_with_media = {**editorial_with_media, "cleaned_html": content}
     checklist_media_context = _v1_checklist_media_context(
         {**editorial_with_media, "title": _post_title(post)},

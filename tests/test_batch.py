@@ -1,8 +1,11 @@
 """Batch context contracts: independent envelopes and fail-soft items."""
 
+import io
 import json
+import re
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -22,6 +25,7 @@ from unicornio_editor.locking import LockManager
 from unicornio_editor.cli import (
     _apply_editorial_batch,
     _media_candidate,
+    main,
     preflight_apply_candidate,
 )
 from unicornio_editor.wordpress import WordPressError
@@ -1279,6 +1283,217 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(plan[0]["candidate_id"], "c1")
             self.assertGreaterEqual(plan[2]["paragraph_index"] - plan[1]["paragraph_index"], 3)
             self.assertEqual(report["assembled"], 1)
+
+    def test_apply_batch_isolates_four_inline_images_with_only_three_safe_slots(self):
+        paragraphs = (
+            "<p>Texto editorial substantivo sobre videogame e lançamento importante, com detalhes"
+            " confirmados sobre plataformas, características e o conteúdo da notícia.</p>"
+        )
+        splittable = (
+            "<p>Uma parte substantiva sobre videogame com detalhes confirmados sobre as plataformas "
+            "e todas as novidades apresentadas neste lançamento importante. "
+            "A segunda parte da notícia preserva o texto editorial e apresenta outros detalhes "
+            "sobre as características já confirmadas ao longo da reportagem.</p>"
+        )
+        candidate_post = 116068
+        sibling_post = 116070
+        results = [{
+            "post_id": post_id,
+            "editorial": {
+                "site_relevance": {
+                    "decision": "process",
+                    "confidence": 0.99,
+                    "reason": "Notícia sobre videogame",
+                    "matched_topics": ["games"],
+                },
+                "cleaned_html": body,
+                "media_plan": [],
+                "game_name": None,
+                "needs_trailer": False,
+                "trailer_url": None,
+                "seo": {
+                    "title": "Notícia sobre videogame e lançamento importante",
+                    "meta_description": (
+                        "Uma descrição suficientemente longa sobre o conteúdo de videogame, "
+                        "seus detalhes, plataformas e contexto para o leitor entender a notícia."
+                    ),
+                    "focus_keyword": "videogame",
+                },
+            },
+        } for post_id, body in [(candidate_post, paragraphs * 9), (sibling_post, splittable * 9)]]
+        config = replace(self.config(), dry_run=False, max_posts_touched_per_run=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_path = root / "editorial.json"
+            batch_path.write_text(json.dumps({"batch_id": "slot-isolation", "results": results}))
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "batch_id": "slot-isolation",
+                "posts": [{
+                    "post_id": post_id,
+                    "subject": "Videogame",
+                    "needed": 4,
+                    "featured_required": False,
+                    "candidates": [{
+                        "url": f"https://img.test/{post_id}/{index}.webp",
+                        "source": "https://source.test/article",
+                        "verdict": "deterministic_match",
+                    } for index in range(4)],
+                } for post_id in (candidate_post, sibling_post)],
+            }))
+            client = BatchClient({post_id: _post(post_id, "Videogame")
+                                  for post_id in (candidate_post, sibling_post)})
+            original_blocked_post = json.dumps(client.get_post(candidate_post), sort_keys=True)
+            applied = []
+
+            def apply_one(wp, _config, _root, post_id, editorial, *, on_work_started,
+                          media_layout_source_signature, **_):
+                applied.append(post_id)
+                self.assertTrue(media_layout_source_signature)
+                self.assertEqual(editorial["cleaned_html"].count("<p>"), 11)
+                slots = [row["paragraph_index"] for row in editorial["media_plan"]]
+                self.assertEqual(len(slots), 4)
+                self.assertTrue(all(b - a >= 3 for a, b in zip(slots, slots[1:])))
+                on_work_started()
+                wp.update_post(post_id, {"meta": {"_hermes_state": "ready"}})
+                return {"post_id": post_id, "status": "ready", "wordpress_changed": True}
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch("unicornio_editor.cli.load_config", return_value=config), mock.patch(
+                "unicornio_editor.cli.WordPressClient", return_value=client
+            ), mock.patch("unicornio_editor.cli._carregar_env_do_projeto"), mock.patch(
+                "unicornio_editor.cli.apply_editorial", side_effect=apply_one
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["apply-batch", str(batch_path), "--root", str(root), "--compact"])
+
+            self.assertEqual(exit_code, 0, stderr.getvalue())
+            summary = json.loads(stdout.getvalue())
+            self.assertEqual([row["post_id"] for row in summary["posts"]], [candidate_post, sibling_post])
+            blocked, ready = summary["posts"]
+            self.assertEqual(blocked["status"], "preflight_blocked")
+            self.assertEqual(blocked["error_code"], "insufficient_paragraph_slots")
+            self.assertEqual(blocked["action_code"], "editorial_restructure_required")
+            self.assertIn("requested=4, available=3, minimum_spacing=3", blocked["reason"])
+            self.assertFalse(blocked["wordpress_changed"])
+            self.assertEqual(ready["status"], "ready", ready)
+            self.assertEqual(summary["ready"], 1)
+            self.assertEqual(summary["preflight_blocked"], 1)
+            self.assertEqual(summary["session"]["posts_touched"], [sibling_post])
+            self.assertEqual(summary["session"]["posts_reserved"], [])
+            self.assertEqual(summary["media_plan_assembly"]["layout_blocked"][0]["post_id"], candidate_post)
+            self.assertEqual(summary["media_plan_assembly"]["normalization"][0]["post_id"], sibling_post)
+            self.assertEqual(json.dumps(client.get_post(candidate_post), sort_keys=True), original_blocked_post)
+            self.assertFalse((root / "backups" / str(candidate_post)).exists())
+            self.assertEqual(applied, [sibling_post])
+
+    def test_fresh_flat_article_uses_two_safe_splits_to_place_four_inline_images(self):
+        first = (
+            "Uma parte substantiva sobre videogame com detalhes confirmados sobre as plataformas "
+            "e todas as novidades apresentadas neste lançamento importante."
+        )
+        second = (
+            "A segunda parte da notícia preserva o texto editorial e apresenta outros detalhes "
+            "sobre as características já confirmadas ao longo da reportagem."
+        )
+        anchors = '<p id="secao-fixa">Detalhes <a href="/fonte">da fonte original</a>.</p>'
+        original_body = "".join(f"<p>{first} {second}</p>" for _ in range(8)) + anchors
+        expected_text = " ".join(re.sub(r"<[^>]+>", " ", original_body).split())
+        batch = {
+            "batch_id": "safe-layout-normalization",
+            "items": [{"post_id": 1, "editorial": {"cleaned_html": original_body, "media_plan": []}}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "batch_id": batch["batch_id"],
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Videogame",
+                    "needed": 4,
+                    "featured_required": False,
+                    "candidates": [{
+                        "url": f"https://img.test/inline-{index}.webp",
+                        "source": "https://source.test/article",
+                        "verdict": "deterministic_match",
+                    } for index in range(4)],
+                }],
+            }))
+            for name in ("fresh", "partial-marker", "partial-artifact", "existing-image", "listicle",
+                         "opaque-paragraph"):
+                with self.subTest(name=name):
+                    post = _post(1, "Videogame")
+                    partial_file = root / "backups" / "1" / "editorial.partial.json"
+                    if name == "partial-marker":
+                        post["meta"]["_hermes_state"] = "partial"
+                    if name == "partial-artifact":
+                        partial_file.parent.mkdir(parents=True)
+                        partial_file.write_text("{}")
+                    if name == "existing-image":
+                        post["content"]["raw"] += '<img src="https://img.test/existing.webp">'
+                    body = original_body
+                    if name == "listicle":
+                        body = "<h2>1. Parte um</h2>" + body + "<h2>2. Parte dois</h2>"
+                    if name == "opaque-paragraph":
+                        body = "<!-- " + body + " -->"
+                    batch["items"][0]["editorial"]["cleaned_html"] = body
+                    resolved = resolve_batch_editorial_defaults(BatchClient({1: post}), batch, root=root)
+                    merged, report = merge_media_manifest_into_editorial(resolved, manifest)
+                    item = merged["items"][0]
+                    if name == "partial-artifact":
+                        partial_file.unlink()
+                    if name != "fresh":
+                        self.assertTrue(report["layout_blocked"], name)
+                        self.assertFalse(report["normalization"])
+                        self.assertEqual(item["editorial"]["cleaned_html"], body)
+                        self.assertNotIn("media_layout_source_signature", item)
+                        continue
+                    result_body = item["editorial"]["cleaned_html"]
+                    self.assertEqual(" ".join(re.sub(r"<[^>]+>", " ", result_body).split()), expected_text)
+                    self.assertIn(anchors, result_body)
+                    self.assertNotEqual(result_body, original_body)
+                    plan = item["editorial"]["media_plan"]
+                    slots = [row["paragraph_index"] for row in plan]
+                    self.assertEqual(len(slots), 4)
+                    self.assertTrue(all(b - a >= 3 for a, b in zip(slots, slots[1:])))
+                    audit = report["normalization"][0]
+                    self.assertEqual((audit["original_paragraphs"], audit["final_paragraphs"]), (9, 11))
+                    self.assertEqual(audit["original_words"], audit["final_words"])
+                    self.assertEqual(len(audit["splits"]), 2)
+                    self.assertEqual(item["media_layout_source_signature"], item["fresh_layout_source_signature"])
+
+    def test_media_manifest_still_rejects_other_unsafe_layout_errors(self):
+        batch = {
+            "batch_id": "invalid-layout",
+            "items": [
+                {
+                    "post_id": 1,
+                    "editorial": {"cleaned_html": "<p>Texto sem lead suficiente.</p>", "media_plan": []},
+                },
+                {"post_id": 2, "editorial": {"media_plan": [{"candidate_id": "unchanged"}]}},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "batch_id": "invalid-layout",
+                "posts": [{
+                    "post_id": 1,
+                    "subject": "Videogame",
+                    "needed": 1,
+                    "featured_required": False,
+                    "candidates": [{
+                        "url": "https://img.test/one.webp",
+                        "source": "https://source.test/article",
+                        "verdict": "deterministic_match",
+                    }],
+                }],
+            }))
+
+            with self.assertRaisesRegex(BatchError, "two substantive paragraphs") as caught:
+                merge_media_manifest_into_editorial(batch, manifest)
+        self.assertEqual(caught.exception.__cause__.code, "insufficient_substantive_paragraphs")
 
     def test_inline_only_media_manifest_never_promotes_first_inline_to_featured(self):
         with tempfile.TemporaryDirectory() as directory:

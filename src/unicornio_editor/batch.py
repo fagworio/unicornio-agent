@@ -17,9 +17,16 @@ from typing import Any, Iterable
 
 from .checklist import required_image_count
 from .content_quality import word_count
+from .html_cleaner import remove_empty_paragraphs
 from .language import detect_language, localization_required
 from .media.relevance import extract_entities
-from .media.inserter import plan_normal_media_insertions
+from .media.inserter import (
+    MediaInsertionError,
+    minimum_normal_article_paragraphs,
+    normal_media_slot_capacity,
+    normalize_normal_article_paragraphs,
+    plan_normal_media_insertions,
+)
 from .media.text import sanitize_title, split_game_names
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
 from .state import read_state, uncertain_second_pass_eligible
@@ -27,6 +34,9 @@ from .workflow import (
     _acquire_post_lock,
     _featured_diagnosis,
     _images_summary,
+    _is_v1_fresh_media_layout_source,
+    _post_title,
+    _post_write_guard_signature,
     is_post_lock_blocked,
     prepare_post,
     resolve_editorial_defaults,
@@ -47,7 +57,9 @@ class BatchError(ValueError):
     """Raised when a batch envelope cannot be safely created or read."""
 
 
-def resolve_batch_editorial_defaults(client: Any, batch: dict[str, Any]) -> dict[str, Any]:
+def resolve_batch_editorial_defaults(
+    client: Any, batch: dict[str, Any], *, root: Path | None = None,
+) -> dict[str, Any]:
     """Fill omitted editorial fields from the current WordPress snapshot.
 
     Hermes may return ``cleaned_html: null`` when no rewrite is needed.  The
@@ -61,6 +73,12 @@ def resolve_batch_editorial_defaults(client: Any, batch: dict[str, Any]) -> dict
         if str(item.get("status") or "ok") == "ok":
             post_id = int(item["post_id"])
             post = client.get_post(post_id)
+            item["source_post_title"] = _post_title(post)
+            if (
+                root is not None
+                and _is_v1_fresh_media_layout_source(post, root, post_id)
+            ):
+                item["fresh_layout_source_signature"] = _post_write_guard_signature(post)
             item["editorial"] = resolve_editorial_defaults(
                 dict(item.get("editorial") or {}), post
             )
@@ -361,6 +379,47 @@ def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query:
     return item
 
 
+def _plan_v1_normal_inline(
+    html: str, inline: list[dict[str, Any]], *, allow_restructure: bool,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
+    # Blank spacers must not earn slots that final HTML cleanup will remove.
+    if re.search(r"<img\b", html, re.IGNORECASE):
+        allow_restructure = False
+    if allow_restructure:
+        html = remove_empty_paragraphs(html)
+    try:
+        return html, plan_normal_media_insertions(html, inline), None
+    except MediaInsertionError as original:
+        if not allow_restructure or original.code != "insufficient_paragraph_slots":
+            raise
+        layout = normal_media_slot_capacity(html)
+        if not layout["verified"]:
+            raise
+        # WordPress shortcodes can wrap otherwise top-level HTML while
+        # still treating that block as opaque. Leave those articles alone.
+        if re.search(r"\[/?[a-z][\w-]*(?=[\s/\]])", html, re.IGNORECASE):
+            raise
+        normalized = normalize_normal_article_paragraphs(
+            html,
+            required_paragraphs=minimum_normal_article_paragraphs(
+                len(inline), allow_after_body=bool(layout["body_end_available"]),
+            ),
+            v1_safe_blocks_only=True,
+        )
+        audit = normalized["audit"]
+        if not audit["changed"]:
+            raise
+        repaired = normalized["html"]
+        try:
+            replanned = plan_normal_media_insertions(repaired, inline)
+        except MediaInsertionError as retry:
+            if retry.code == original.code:
+                # Discard an incomplete rewrite and report the original layout.
+                raise original from retry
+            raise
+        return repaired, replanned, audit
+
+
 def merge_media_manifest_into_editorial(
     batch: dict[str, Any],
     manifest_path: Path | str,
@@ -373,7 +432,8 @@ def merge_media_manifest_into_editorial(
     joins by ``post_id`` with the sibling ``media.manifest.json`` produced by
     ``media-resolve-batch``.  It writes no WordPress state and does not replace
     an explicitly supplied plan; an empty/invalid manifest stays empty and is
-    reported for the normal media gate to classify.
+    reported for the normal media gate to classify. Insufficient safe slots
+    for a single post are a per-item preflight block, not an invalid envelope.
     """
     source = Path(manifest_path)
     try:
@@ -402,6 +462,8 @@ def merge_media_manifest_into_editorial(
         "fallback_candidates": 0,
         "missing_candidates": [],
         "rejected_candidates": 0,
+        "layout_blocked": [],
+        "normalization": [],
     }
     for raw_item in batch.get("items") or []:
         item = dict(raw_item)
@@ -543,9 +605,39 @@ def merge_media_manifest_into_editorial(
                 html = str(editorial.get("cleaned_html") or "")
                 if not html:
                     raise BatchError(f"post {post_id} precisa de cleaned_html para montar o media_plan")
+                seo = editorial.get("seo") if isinstance(editorial.get("seo"), dict) else {}
+                titles = (
+                    str(item.get("source_post_title") or ""),
+                    str(seo.get("title") or editorial.get("title") or ""),
+                )
+                fresh_source = item.get("fresh_layout_source_signature")
+                ordinary = bool(fresh_source) and all(
+                    detect_list_format(title, html, editorial.get("categories") or ()) is None
+                    for title in titles
+                )
                 try:
-                    inline = plan_normal_media_insertions(html, inline)
+                    planned_html, inline, normalization = _plan_v1_normal_inline(
+                        html, inline, allow_restructure=ordinary,
+                    )
+                    if planned_html != html:
+                        item["media_layout_source_signature"] = fresh_source
+                    editorial["cleaned_html"] = planned_html
+                    if normalization is not None:
+                        report["normalization"].append({"post_id": post_id, **normalization})
                 except Exception as exc:
+                    if (
+                        isinstance(exc, MediaInsertionError)
+                        and exc.code == "insufficient_paragraph_slots"
+                        and str(item.get("status") or "ok") == "ok"
+                    ):
+                        blocked = {
+                            "error_code": exc.code,
+                            "reason": str(exc),
+                        }
+                        item["media_assembly_error"] = blocked
+                        report["layout_blocked"].append({"post_id": post_id, **blocked})
+                        merged_items.append(item)
+                        continue
                     raise BatchError(f"post {post_id} sem slots seguros para media_plan: {exc}") from exc
             editorial["media_plan"] = [*featured_rows, *inline]
             item["editorial"] = editorial

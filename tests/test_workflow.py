@@ -1327,6 +1327,7 @@ class WorkflowTests(unittest.TestCase):
     def test_apply_does_not_waive_trailer_when_search_failed(self):
         payload = editorial_payload()
         payload["game_name"] = "Jogo sem trailer"
+        payload["cleaned_html"] = "<p>&nbsp;<br /></p>" + payload["cleaned_html"]
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "unicornio_editor.workflow.find_game_trailer_with_status",
             return_value=(None, "search_failed"),
@@ -1336,6 +1337,7 @@ class WorkflowTests(unittest.TestCase):
             )
         self.assertEqual(report["status"], "needs_rework")
         self.assertIn("trailer_youtube", report["blocked_reasons"])
+        self.assertNotIn("html_semantics", report["blocked_reasons"])
         self.assertEqual(report["trailer_search_status"], "search_failed")
 
     def test_apply_dry_run_reports_trailer_in_preview(self):
@@ -2408,6 +2410,93 @@ class WorkflowTests(unittest.TestCase):
             queue = build_queue_report(client, root)
             self.assertEqual(queue["edited"], 1)
             self.assertEqual(queue["ready_ids"], [42])
+
+    def test_apply_cleans_empty_paragraphs_before_ready_manifest(self):
+        payload = editorial_payload()
+        original = payload["cleaned_html"]
+        payload["cleaned_html"] = (
+            "<p></p><p>&nbsp;<br />&#160;&#xA0;</p>"
+            + original.replace(
+                "videogame e lançamento.",
+                'videogame <a id="fonte-original" href="https://source.test/referencia">e lançamento</a>.',
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            report = apply_editorial(client, self.config(False), root, 42, payload)
+            self.assertEqual(report["status"], "ready")
+            content = client.post["content"]["raw"]
+            self.assertNotIn("<p></p>", content)
+            self.assertNotIn("&nbsp;", content)
+            self.assertIn('id="fonte-original"', content)
+            self.assertEqual(content.count("<figure>"), 2)
+            self.assertEqual(content.count("<figcaption>"), 2)
+            meta = client.post["meta"]
+            manifest = parse_manifest(meta["_hermes_ready_manifest"])
+            self.assertTrue(manifest_matches(
+                client.post,
+                manifest,
+                meta["_hermes_ready_hash"],
+                policy_version=self.config(False).policy_version,
+            ))
+
+    def test_layout_source_change_under_lock_does_not_touch_wordpress(self):
+        from unicornio_editor.workflow import _post_write_guard_signature
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            post = self.post()
+            source = _post_write_guard_signature(post)
+            post["content"]["raw"] = "<p>Alteração humana após o planejamento.</p>"
+            client = FakeClient(post)
+            work_started = mock.Mock()
+            with self.assertRaisesRegex(WorkflowError, "media layout source changed"):
+                apply_editorial(
+                    client, self.config(False), root, 42, editorial_payload(),
+                    media_layout_source_signature=source,
+                    on_work_started=work_started,
+                )
+            self.assertEqual(client.updated, [])
+            work_started.assert_not_called()
+            self.assertFalse((root / "backups" / "42").exists())
+
+    def test_v1_batch_manifest_cannot_authorize_inline_waiver(self):
+        from unicornio_editor.batch import merge_media_manifest_into_editorial
+        from unicornio_editor.cli import _apply_editorial_batch
+
+        payload = editorial_payload()
+        payload["cleaned_html"] = payload["cleaned_html"].split("</figure>")[0] + "</figure>"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "media.manifest.json"
+            manifest.write_text(json.dumps({
+                "batch_id": "forged-waiver",
+                "posts": [{
+                    "post_id": 42,
+                    "featured_required": False,
+                    "candidates": [],
+                    "search": {
+                        "completed": True, "exhausted": True,
+                        "completion_reason": "EXHAUSTED_VERIFIED",
+                    },
+                    "waiver": {"applied": True},
+                }],
+            }))
+            batch, _ = merge_media_manifest_into_editorial({
+                "schema_version": 1, "batch_id": "forged-waiver",
+                "items": [{"post_id": 42, "editorial": payload}],
+            }, manifest)
+            report = _apply_editorial_batch(
+                FakeClient(self.post()), self.config(False), root, batch,
+                compact=False,
+            )
+            result = report["posts"][0]
+            self.assertEqual(result["status"], "partial")
+            self.assertFalse(result["wordpress_changed"])
+            self.assertEqual(report["ready"], 0)
+            self.assertTrue(any(row["name"] == "imagens_no_corpo" and row["status"] == "fail"
+                                for row in result["checklist"]["items"]))
 
     def test_apply_work_started_callback_runs_after_lock_before_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

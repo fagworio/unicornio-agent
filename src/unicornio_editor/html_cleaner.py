@@ -11,6 +11,73 @@ from typing import Union
 from urllib.parse import urlparse
 
 
+EMPTY_PARAGRAPH_RE = re.compile(
+    r"<p\b[^>]*>(?:(?:\s|&nbsp;|&#0*160;|&#x0*a0;)|<br\s*/?>)*</p>",
+    re.IGNORECASE,
+)
+
+
+class _EmptyParagraphFinder(HTMLParser):
+    """Locate removable paragraphs without reserializing surrounding HTML."""
+
+    _PRESERVE = {"code", "figcaption", "pre", "script", "style", "template", "textarea"}
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.html = html
+        self.line_starts = [0, *(match.end() for match in re.finditer("\n", html))]
+        self.protected: list[str] = []
+        self.paragraph_start: int | None = None
+        self.ranges: list[tuple[int, int]] = []
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self.line_starts[line - 1] + column
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._PRESERVE:
+            self.protected.append(tag)
+        elif tag == "p":
+            # An attributed paragraph may itself be a deep-link destination.
+            self.paragraph_start = None if attrs or self.protected else self._offset()
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # A self-closing start tag does not open a paragraph or protected scope.
+        pass
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.protected and self.protected[-1] == tag:
+            self.protected.pop()
+        elif tag == "p":
+            start = self.paragraph_start
+            self.paragraph_start = None
+            if start is not None and not self.protected:
+                end = self.html.find(">", self._offset()) + 1
+                if EMPTY_PARAGRAPH_RE.fullmatch(self.html, start, end):
+                    self.ranges.append((start, end))
+
+
+def remove_empty_paragraphs(html: str) -> str:
+    """Drop only bare empty paragraphs, retaining markup and text byte-for-byte otherwise."""
+    if not EMPTY_PARAGRAPH_RE.search(html):
+        return html
+    finder = _EmptyParagraphFinder(html)
+    try:
+        finder.feed(html)
+        finder.close()
+    except AssertionError:
+        # HTMLParser can reject malformed declarations. Let the unchanged
+        # checklist assess the original HTML rather than guessing at offsets.
+        return html
+    parts: list[str] = []
+    cursor = 0
+    for start, end in finder.ranges:
+        parts.append(html[cursor:start])
+        cursor = end
+    parts.append(html[cursor:])
+    return "".join(parts)
+
+
 Text = str
 
 
