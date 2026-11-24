@@ -67,6 +67,67 @@ class HermesAssetsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Publicacao desabilitada", result.stderr)
 
+    def test_publish_cron_reports_no_ready_with_178_epoch_protected_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hermes").mkdir()
+            script = root / "hermes" / "publish-cron.sh"
+            shutil.copy2(ROOT / "hermes" / "publish-cron.sh", script)
+            (root / "hermes" / "relatorio_publicacao.py").write_text("import sys; sys.stdin.read()\n")
+            (root / ".env").write_text("PUBLISH_ENABLED=true\n")
+            quarantine = root / "config" / "v2-quarantine.json"
+            quarantine.parent.mkdir(exist_ok=True)
+            quarantine.write_text(json.dumps({"version": 1, "posts": [], "release_history": []}))
+            epoch = root / "work" / "v2-epochs" / "active" / "epoch.json"
+            epoch.parent.mkdir(parents=True)
+            protected_ids = list(range(115000, 115178))
+            epoch.write_text(json.dumps({
+                "schema_version": 1, "epoch_id": "test", "protected_transaction_ids": protected_ids,
+            }))
+
+            # Run the unchanged real shell wrapper, CLI report, queue and
+            # Publisher code. Replace only the external WordPress transport.
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            editor = bin_dir / "unicornio-editor"
+            editor.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "from unicornio_editor import cli\n"
+                "from unicornio_editor.config import Config\n"
+                "class Client:\n"
+                "    def __init__(self, *_args, **_kwargs): pass\n"
+                "    def list_pending(self, *, page=1, per_page=100, status='pending'):\n"
+                "        if status != 'pending': return []\n"
+                f"        ids = {protected_ids!r}\n"
+                "        return [{'id': i, 'status': 'pending', 'meta': {'_hermes_state': 'new'}}\n"
+                "                for i in ids[(page-1)*per_page:page*per_page]]\n"
+                "    def __getattr__(self, action): raise AssertionError(action)\n"
+                "cli.WordPressClient = Client\n"
+                "cli.load_config = lambda: Config('wordpress', 'http://wp.test', '/wp-json/wp/v2', publish_enabled=True)\n"
+                "cli._carregar_env_do_projeto = lambda *_args: None\n"
+                "with Path('publish-calls.log').open('a') as f: f.write('invoked\\n')\n"
+                "raise SystemExit(cli.main(sys.argv[1:] + ['--root', str(Path.cwd())]))\n"
+            )
+            editor.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(script)], cwd=root,
+                env={**os.environ, "UNICORNIO_AGENT_ROOT": str(root), "PYTHONPATH": str(ROOT / "src")},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((root / "work" / "publish-window.log").read_text())
+            self.assertEqual((root / "publish-calls.log").read_text().splitlines(), ["invoked"])
+            self.assertEqual(report["ready_post_ids"], [])
+            self.assertTrue(report["ready_snapshot_available"])
+            self.assertEqual(report["pending_current"], 178)
+            self.assertEqual(report["published"], 0)
+            self.assertEqual(report["zero_publication_reason"], "NO_READY")
+            self.assertEqual(report["final_classification"], "NO_READY")
+            self.assertEqual([item["post_id"] for item in report["blocked_posts"]], protected_ids)
+            self.assertEqual(report["cli_exit_code"], 0)
+
     def test_publish_cron_reports_partial_success_without_replaying_publish_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

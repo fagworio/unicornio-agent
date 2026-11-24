@@ -5555,11 +5555,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             queue_snapshot_error = None
             try:
                 queue_before = build_queue_report(client, args.root)
+                ready_ids = queue_before["ready_ids"]
+                if not isinstance(ready_ids, list) or any(type(post_id) is not int for post_id in ready_ids):
+                    raise ValueError("invalid READY snapshot")
+                ready_at_window = list(ready_ids)
             except Exception as exc:
                 queue_before = {}
                 queue_snapshot_available = False
                 queue_snapshot_error = type(exc).__name__
-            ready_at_window = list(queue_before.get("ready_ids") or []) if queue_snapshot_available else None
+                ready_at_window = None
             outcomes = publish_ready_posts(client, config, args.root, limit=config.publish_limit)
             published = [o for o in outcomes if o.get("wordpress_changed")]
             published_reconciled = [
@@ -5647,12 +5651,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not published:
                 if errors or retryable:
                     zero_reason = "PUBLISHER_INTERNAL_ERROR"
-                elif blocked:
-                    zero_reason = "READY_BLOCKED_BY_VALIDATION"
-                elif not queue_snapshot_available:
+                elif ready_at_window is None:
                     zero_reason = "INSUFFICIENT_EVIDENCE"
                 elif not ready_at_window:
                     zero_reason = "NO_READY"
+                else:
+                    observed_ready = set(ready_at_window)
+                    # Operator gates, epoch fences and unrelated legacy blocks
+                    # stay visible but do not prove a READY validation failure.
+                    ready_blocked = config.publish_enabled and any(
+                        type(outcome.get("post_id")) is int
+                        and outcome["post_id"] in observed_ready
+                        and not outcome.get("epoch_protected")
+                        for outcome in blocked
+                    )
+                    zero_reason = "READY_BLOCKED_BY_VALIDATION" if ready_blocked else "INSUFFICIENT_EVIDENCE"
             result.update({
                 "window_id": os.environ.get("PUBLISH_WINDOW_ID") or window_started_at.isoformat(),
                 "window_started_at": window_started_at.isoformat(),

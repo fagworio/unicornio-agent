@@ -1064,21 +1064,84 @@ class CompactOutputTests(unittest.TestCase):
         from unicornio_editor import cli
         from unicornio_editor.config import Config
 
-        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2")
-        outcomes = [{"post_id": 115700, "status": "blocked", "wordpress_changed": False}]
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = io.StringIO()
-            with mock.patch.object(cli, "_carregar_env_do_projeto"), \
-                    mock.patch.object(cli, "load_config", return_value=config), \
-                    mock.patch.object(cli, "WordPressClient"), \
-                    mock.patch.object(cli, "build_queue_report", return_value={"pending": 1, "ready_ids": [115700]}), \
-                    mock.patch.object(cli, "publish_ready_posts", return_value=outcomes), \
-                    redirect_stdout(output):
-                cli.main(["publish-ready", "--root", str(root)])
-        report = json.loads(output.getvalue())
-        self.assertEqual(report["ready_at_window"], 1)
-        self.assertEqual(report["zero_publication_reason"], "READY_BLOCKED_BY_VALIDATION")
+        cases = (
+            (True, "checklist pre-publicacao com falhas", "READY_BLOCKED_BY_VALIDATION"),
+            (False, "PUBLISH_ENABLED=false (gate de publicacao desligado)", "INSUFFICIENT_EVIDENCE"),
+        )
+        for enabled, blocker, expected in cases:
+            with self.subTest(publish_enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = io.StringIO()
+                config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=enabled)
+                outcomes = [{
+                    "post_id": 115700, "status": "blocked",
+                    "reason": blocker, "wordpress_changed": False,
+                }]
+                with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                        mock.patch.object(cli, "load_config", return_value=config), \
+                        mock.patch.object(cli, "WordPressClient"), \
+                        mock.patch.object(cli, "build_queue_report", return_value={"pending": 1, "ready_ids": [115700]}), \
+                        mock.patch.object(cli, "publish_ready_posts", return_value=outcomes), \
+                        redirect_stdout(output):
+                    self.assertEqual(cli.main(["publish-ready", "--root", str(root)]), 0)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["ready_at_window"], 1)
+                self.assertEqual(report["zero_publication_reason"], expected)
+                self.assertEqual(report["blocked_posts"][0]["reason"], blocker)
+
+    def test_publish_ready_zero_reason_correlates_ready_snapshot_and_outcomes(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        protected = {
+            "post_id": 115700, "status": "blocked", "reason": "epoch_protected_transaction",
+            "epoch_protected": True, "wordpress_changed": False,
+        }
+        failed_ready = {
+            "post_id": 115701, "status": "blocked", "reason": "checklist",
+            "checklist": {"items": [{"name": "imagens_no_corpo", "status": "fail"}]},
+            "wordpress_changed": False,
+        }
+        cases = (
+            ("empty READY with protected and legacy blockers", [], [protected, failed_ready], "NO_READY", 0),
+            ("snapshot unavailable", RuntimeError("REST unavailable"), [protected, failed_ready], "INSUFFICIENT_EVIDENCE", 0),
+            ("snapshot incomplete", {}, [protected], "INSUFFICIENT_EVIDENCE", 0),
+            ("snapshot malformed ids", ["115700"], [protected], "INSUFFICIENT_EVIDENCE", 0),
+            ("observed validation blocker", [115701], [protected, failed_ready], "READY_BLOCKED_BY_VALIDATION", 0),
+            ("READY no longer present", [115702], [protected], "INSUFFICIENT_EVIDENCE", 0),
+            ("observed READY but epoch protected", [115700], [protected], "INSUFFICIENT_EVIDENCE", 0),
+            ("error outranks empty READY", [], [protected, {"status": "error", "post_id": 115702}], "PUBLISHER_INTERNAL_ERROR", 75),
+            ("retry outranks missing snapshot", RuntimeError("REST unavailable"),
+             [failed_ready, {"status": "retry", "post_id": 115702}], "PUBLISHER_INTERNAL_ERROR", 75),
+        )
+
+        config = Config("wordpress", "http://wp.test", "/wp-json/wp/v2", publish_enabled=True)
+        for label, snapshot, outcomes, reason, exit_code in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = io.StringIO()
+                queue = mock.Mock(
+                    side_effect=snapshot if isinstance(snapshot, Exception) else None,
+                    return_value={"pending": 178, "ready_ids": snapshot} if isinstance(snapshot, list) else snapshot,
+                )
+                with mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                        mock.patch.object(cli, "load_config", return_value=config), \
+                        mock.patch.object(cli, "WordPressClient"), \
+                        mock.patch.object(cli, "build_queue_report", queue), \
+                        mock.patch.object(cli, "publish_ready_posts", return_value=outcomes) as publish, \
+                        redirect_stdout(output):
+                    code = cli.main(["publish-ready", "--root", str(root)])
+
+                publish.assert_called_once()
+                report = json.loads(output.getvalue())
+                self.assertEqual(code, exit_code)
+                self.assertEqual(report["cli_exit_code"], exit_code)
+                self.assertEqual(report["zero_publication_reason"], reason)
+                self.assertEqual(report["published"], 0)
+                self.assertEqual(
+                    [row["post_id"] for row in report["blocked_posts"]],
+                    [row["post_id"] for row in outcomes if row["status"] == "blocked"],
+                )
 
     def test_publish_ready_report_separates_new_and_reconciled_publications(self):
         from unicornio_editor import cli
