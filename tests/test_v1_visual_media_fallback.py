@@ -6,7 +6,7 @@ from io import BytesIO
 import pytest
 from PIL import Image, ImageDraw
 
-from unicornio_editor.cli import _resolve_media_batch_dispatch
+from unicornio_editor.cli import _apply_editorial_batch, _resolve_media_batch_dispatch
 from unicornio_editor.config import Config
 from unicornio_editor.media import downloader, search, vision_gate, visual_hash
 from unicornio_editor.workflow import apply_editorial
@@ -326,13 +326,22 @@ def test_pending_candidates_require_enforced_url_policy(tmp_path, monkeypatch, m
     assert not rows[0]["vision_attempted"]
 
 
-@pytest.mark.parametrize(("mutate_readback", "inline_deficit"), [
-    (False, False), (True, False), (False, True), (True, True),
+@pytest.mark.parametrize(("mutate_readback", "inline_deficit", "retry_readback"), [
+    (False, False, ""), (True, False, ""), (True, True, ""),
+    (False, True, "same"), (False, True, "changed"), (False, True, "unavailable"),
+    (False, True, "wrong_id"), (False, True, "legacy"), (False, True, "context_changed"),
+    (False, True, "small_legacy"), (False, True, "url_drift"), (False, True, "media_rest_timeout"),
+    (False, True, "unavailable_full_inline"), (False, True, "media_deleted"),
+    (False, True, "mixed_human_unavailable"), (False, True, "dry_deleted"),
 ])
 def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
-    tmp_path, monkeypatch, media_case, mutate_readback, inline_deficit,
+    tmp_path, monkeypatch, media_case, mutate_readback, inline_deficit, retry_readback,
 ):
+    from dataclasses import replace
     from pathlib import Path
+
+    from unicornio_editor.batch import build_media_resolve_batch_input, prepare_batch
+    from unicornio_editor.wordpress import WordPressError
 
     config, calls = media_case
     if not mutate_readback:
@@ -340,23 +349,50 @@ def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
         monkeypatch.setattr(vision_gate, "_call_vision", lambda **kwargs: original_call(**kwargs) | {"confidence": 0.60})
     real_assets = downloader.urlopen_remote
     wp_url = "https://wp.test/image-90.webp"
+    original_cover_url = "https://wp.test/wrong-original-cover.webp"
     uploaded = []
     readback_requests = []
+    original_cover_reads = []
+    retrying = False
 
     class Client(workflow_fixture.FakeClient):
         def get_media(self, media_id):
-            assert media_id == 90
+            assert media_id in (7, 90)
+            if media_id == 90 and retrying:
+                if retry_readback == "media_rest_timeout":
+                    raise TimeoutError("controlled attachment metadata timeout")
+                if retry_readback in {"media_deleted", "dry_deleted"}:
+                    raise WordPressError("missing", status_code=404, api_code="rest_post_invalid_id")
             return {
-                "id": 90, "source_url": wp_url,
+                "id": 91 if media_id == 90 and retrying and retry_readback == "wrong_id" else media_id,
+                "source_url": (
+                    "https://wp.test/changed-cover-90.webp"
+                    if media_id == 90 and retrying and retry_readback == "url_drift"
+                    else wp_url if media_id == 90 else original_cover_url
+                ),
                 "title": {"rendered": "Imagem 90"}, "alt_text": "Imagem ilustrativa",
                 "mime_type": "image/webp", "media_details": {"width": 1280, "height": 720},
             }
 
+        def move_to_status(self, post_id, status):
+            result = super().move_to_status(post_id, status)
+            self.post["status"] = status
+            return result
+
     def assets(request, *, mode, **kwargs):
+        if request.full_url == original_cover_url:
+            original_cover_reads.append(mode)
         if request.full_url == wp_url:
             readback_requests.append(mode)
+            if retrying and retry_readback in {"unavailable", "unavailable_full_inline", "mixed_human_unavailable"}:
+                raise TimeoutError("controlled retained attachment readback timeout")
             if not mutate_readback:
                 result = BytesIO(uploaded[0])
+                if retrying and retry_readback in {"changed", "small_legacy"}:
+                    result = BytesIO()
+                    size = (640, 360) if retry_readback == "small_legacy" else (1280, 720)
+                    Image.new("RGB", size, "#6865a5").save(result, format="WEBP")
+                    result.seek(0)
                 result.headers = Message()
                 result.headers["Content-Type"] = "image/webp"
                 return result
@@ -376,9 +412,18 @@ def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
     if inline_deficit:
         editorial["cleaned_html"] = "<p>Texto revisado sobre videogame e lançamento.</p>"
     post = workflow_fixture.WorkflowTests().post()
-    post["featured_media"] = 0
+    post["featured_media"] = 7 if retry_readback else 0
     client = Client(post)
-    result = apply_editorial(client, config, tmp_path, 42, editorial)
+    original_content = post["content"]["raw"]
+
+    def apply_in_session(cycle):
+        monkeypatch.setenv("HERMES_SESSION_ID", f"featured-readback-{cycle}")
+        return _apply_editorial_batch(client, config, tmp_path, {
+            "batch_id": f"featured-readback-{cycle}", "schema_version": 1,
+            "items": [{"post_id": 42, "editorial": editorial}],
+        }, compact=False)["posts"][0]
+
+    result = apply_in_session(1)
     assert readback_requests == ["enforce"]
     assert len(calls) == 1, "identical approved bytes reuse the exact cache, changed bytes cannot inherit it"
     if inline_deficit:
@@ -386,8 +431,148 @@ def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
 
         assert result["status"] == "partial", result
         partial = json.loads((tmp_path / "backups/42/editorial.partial.json").read_text())
-        assert partial["featured"]["status"] == ("vision_rejected" if mutate_readback else "valid")
+        expected_featured_status = "vision_rejected" if mutate_readback else "valid"
+        assert partial["featured"]["status"] == expected_featured_status
+        assert partial["completed"] == 0 and partial["missing"] == 2
+        assert partial["no_progress_attempts"] == (1 if mutate_readback else 0)
+        assert client.post["meta"]["_hermes_no_progress_attempts"] == str(partial["no_progress_attempts"])
         assert not client.post["meta"].get("_hermes_ready_hash")
+
+        if mutate_readback:
+            # Emulate the next cron session after the saved cooldown expires.
+            client.post["meta"]["_hermes_next_retry_at"] = "2000-01-01T00:00:00+00:00"
+            second = apply_in_session(2)
+            assert second["status"] == "awaiting_human", second
+            assert second["partial"]["processing_passes"] == 2
+            assert second["partial"]["no_progress_attempts"] == 2
+            assert second["partial"]["featured"]["status"] == "vision_rejected"
+            assert client.post["meta"]["_hermes_no_progress_attempts"] == "2"
+            assert client.post["meta"]["_hermes_state"] == "awaiting_human"
+            assert client.post["status"] == "awaiting_human"
+            assert client.post["content"]["raw"] == original_content
+            assert not client.post["meta"].get("_hermes_ready_hash")
+            assert len(uploaded) == 2
+            assert readback_requests == ["enforce", "enforce"]
+        else:
+            if retry_readback in {"legacy", "small_legacy"}:
+                # Existing deployed PARTIAL rows have the attachment ID but
+                # do not retain the byte receipt. The current bytes must be read.
+                for key in ("sha256", "vision_evidence"):
+                    partial["featured"].pop(key, None)
+                (tmp_path / "backups/42/editorial.partial.json").write_text(json.dumps(partial))
+            retrying = True
+            client.post["meta"]["_hermes_next_retry_at"] = "2000-01-01T00:00:00+00:00"
+            prepared = prepare_batch(client, config, tmp_path, [42], batch_id="featured-plan-retry")
+            assert prepared["prepared"] == 1, prepared
+            request = build_media_resolve_batch_input({
+                "batch_id": "featured-plan-retry",
+                "results": [{
+                    "post_id": 42, "status": "ok",
+                    "editorial": {**editorial, "title": editorial["seo"]["title"]},
+                }],
+            }, tmp_path)["posts"][0]
+            assert request["featured_required"] is False
+            assert request["needed"] == 2
+            context_requests = []
+            if retry_readback == "context_changed":
+                client.post["title"] = {"raw": "Nova análise sobre videogame e atualização da campanha"}
+
+                def unavailable_provider(**kwargs):
+                    context_requests.append(kwargs["prompt"])
+                    raise vision_gate.VisionGateError("controlled fresh-context failure")
+
+                monkeypatch.setattr(vision_gate, "_call_vision", unavailable_provider)
+            if retry_readback == "unavailable_full_inline":
+                editorial["cleaned_html"] = workflow_fixture.editorial_payload()["cleaned_html"]
+            if retry_readback == "mixed_human_unavailable":
+                editorial["cleaned_html"] = "<h4>Novidades no videogame</h4>" + editorial["cleaned_html"]
+                client.post["meta"]["_hermes_attempts"] = str(config.max_rework_attempts - 1)
+            if retry_readback == "dry_deleted":
+                config = replace(config, dry_run=True)
+            writes_before_retry = list(client.updated)
+            receipt_path = tmp_path / "backups/42/editorial.partial.json"
+            before_retry = receipt_path.read_bytes()
+            second = apply_in_session(2)
+            if retry_readback == "mixed_human_unavailable":
+                assert second["state"] == "awaiting_human", second
+                assert any(
+                    row["name"] == "html_semantics" and row["status"] == "fail"
+                    for row in second["checklist"]["items"]
+                )
+                assert client.post["featured_media"] == 7
+                assert not any("featured_media" in row for _, row in client.updated[len(writes_before_retry):])
+                assert len(uploaded) == 1
+                assert not client.post["meta"].get("_hermes_ready_hash")
+                return
+            if retry_readback in {"wrong_id", "media_rest_timeout", "media_deleted", "dry_deleted"}:
+                assert second["status"] == "error", second
+                error = {
+                    "wrong_id": "featured_retained_identity_unverified",
+                    "media_rest_timeout": "featured_retained_recheck_pending",
+                    "media_deleted": "featured_retained_attachment_missing",
+                    "dry_deleted": "featured_retained_attachment_missing",
+                }[retry_readback]
+                assert error in second["error"]
+                assert client.updated == writes_before_retry
+                if retry_readback == "media_deleted":
+                    assert json.loads(receipt_path.read_bytes())["featured"]["status"] == "vision_rejected"
+                    # Even if the old original looks valid, it is not the
+                    # deleted working attachment; ask for a real replacement.
+                    retry_id = "featured-plan-replace"
+                    further = prepare_batch(client, config, tmp_path, [42], batch_id=retry_id)
+                    assert further["prepared"] == 1, further
+                    replacement = build_media_resolve_batch_input({
+                        "batch_id": retry_id, "results": [{
+                            "post_id": 42, "status": "ok",
+                            "editorial": {**editorial, "title": editorial["seo"]["title"]},
+                        }],
+                    }, tmp_path)["posts"][0]
+                    assert replacement["featured_required"] is True
+                else:
+                    assert receipt_path.read_bytes() == before_retry
+                assert len(uploaded) == 1 and len(calls) == 1
+                assert not client.post["meta"].get("_hermes_ready_hash")
+                return
+            assert second["status"] == "partial", second
+            featured = second["partial"]["featured"]
+            expected = {
+                "same": "valid", "legacy": "valid", "changed": "vision_rejected",
+                "small_legacy": "vision_rejected", "url_drift": "vision_rejected",
+                "unavailable": "verification_pending", "unavailable_full_inline": "verification_pending",
+                "context_changed": "verification_pending",
+            }[retry_readback]
+            assert featured["status"] == expected, second["checklist"]["items"]
+            inline_completed = retry_readback == "unavailable_full_inline"
+            assert second["partial"]["completed"] == (2 if inline_completed else 0)
+            assert second["partial"]["missing"] == (0 if inline_completed else 2)
+            assert len(uploaded) == 1
+            assert len(calls) == 1
+            assert len(context_requests) == (1 if retry_readback == "context_changed" else 0)
+            assert original_cover_reads == []
+            attempts = {"url_drift": 1, "unavailable": 4, "unavailable_full_inline": 4}.get(retry_readback, 2)
+            assert readback_requests == ["enforce"] * attempts
+            if retry_readback == "legacy":
+                assert featured["media_url"] == wp_url and featured["sha256"]
+                assert featured["vision_evidence"]["image_sha256"] == featured["sha256"]
+            if retry_readback == "small_legacy":
+                assert any("WebP 1280x720" in row["detail"] for row in second["checklist"]["items"])
+            if retry_readback == "url_drift":
+                assert any("URL do anexo retido diverge" in row["detail"] for row in second["checklist"]["items"])
+            if retry_readback == "changed":
+                assert any("bytes do anexo divergem" in row["detail"] for row in second["checklist"]["items"])
+            if retry_readback == "unavailable":
+                assert second["partial"]["no_progress_attempts"] == 0
+                assert featured["media_id"] == 90
+                retry_readback = "same"
+                client.post["meta"]["_hermes_next_retry_at"] = "2000-01-01T00:00:00+00:00"
+                recovered = apply_in_session(3)
+                assert recovered["partial"]["featured"]["status"] == "valid", recovered
+                assert "reason" not in recovered["partial"]["featured"]
+                assert recovered["partial"]["no_progress_attempts"] == 1
+                assert len(uploaded) == 1 and len(calls) == 1
+            assert client.post["featured_media"] == 7
+            assert client.post["content"]["raw"] == original_content
+            assert not client.post["meta"].get("_hermes_ready_hash")
     elif mutate_readback:
         assert result["status"] != "ready"
         assert not client.post["meta"].get("_hermes_ready_hash")

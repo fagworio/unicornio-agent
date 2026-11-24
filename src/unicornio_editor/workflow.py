@@ -861,10 +861,41 @@ def _apply_editorial_unlocked(
         partial_manifest = {**partial_manifest, "featured": partial_featured}
     partial_featured_valid = partial_featured.get("status") == "valid"
     partial_featured_rejected = partial_featured.get("status") == "vision_rejected"
+    retain_credit_featured = (
+        config.media_source_policy == "credit_only"
+        and partial_featured.get("status") in {"valid", "verification_pending"}
+    )
+    retained_featured = None
+    if retain_credit_featured:
+        retained_id = partial_featured.get("media_id")
+        if type(retained_id) is not int or retained_id <= 0:
+            raise WorkflowError(f"featured_retained_identity_unverified: post {post_id}")
+        # Check the authoritative attachment before any normalizer/upload.
+        # One stable metadata snapshot is then used by every checklist gate.
+        try:
+            attachment = client.get_media(retained_id)
+        except WordPressError as exc:
+            if not known_wordpress_entity_missing(exc):
+                raise WorkflowError(f"featured_retained_recheck_pending: post {post_id}") from exc
+            partial_featured = {
+                **partial_featured, "status": "vision_rejected",
+                "reason": "anexo retido não existe mais no WordPress",
+            }
+            partial_manifest = {**partial_manifest, "featured": partial_featured}
+            if not config.dry_run:
+                _save_partial_manifest(root, post_id, partial_manifest)
+            raise WorkflowError(f"featured_retained_attachment_missing: post {post_id}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise WorkflowError(f"featured_retained_recheck_pending: post {post_id}") from exc
+        if not isinstance(attachment, dict) or attachment.get("id") != retained_id:
+            raise WorkflowError(f"featured_retained_identity_unverified: post {post_id}")
+        retained_featured = {
+            **partial_featured, "featured": True, "retained": True, "attachment": attachment,
+        }
     if partial_manifest:
         remaining_plan = []
         for item in (editorial.get("media_plan") or []):
-            if isinstance(item, dict) and item.get("is_featured") and partial_featured_valid:
+            if isinstance(item, dict) and item.get("is_featured") and (partial_featured_valid or retain_credit_featured):
                 continue
             if isinstance(item, dict) and (
                 (not item.get("is_featured") and item.get("paragraph_index") in partial_slots)
@@ -890,6 +921,7 @@ def _apply_editorial_unlocked(
         existing_featured_id=(
             None
             if partial_featured_rejected
+            or retain_credit_featured
             else int(post.get("featured_media") or 0) or None
         ),
     )
@@ -908,7 +940,10 @@ def _apply_editorial_unlocked(
         item for item in media_results
         if item.get("media_url") and not item.get("featured")
     ]
-    if featured_id is None and partial_featured_valid:
+    if featured_id is None and retained_featured:
+        featured_id = retained_featured["media_id"]
+        featured_credit = str(retained_featured.get("credit_text") or "") or None
+    elif featured_id is None and partial_featured_valid:
         featured_id, featured_credit = _recover_partial_featured(
             client, post_id, partial_manifest
         )
@@ -979,7 +1014,7 @@ def _apply_editorial_unlocked(
             "categories": editorial.get("categories") or post.get("categories") or (),
         },
         content,
-        [*prior_media, *media_results],
+        ([retained_featured] if retained_featured else []) + [*prior_media, *media_results],
     )
     # Tentativas anteriores (antes desta): base do teto deterministico de
     # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
@@ -1046,7 +1081,8 @@ def _apply_editorial_unlocked(
                     (
                         item for item in failed_items
                         if (
-                            config.media_source_policy == "credit_only" and item.get("name") == "destaque_relevancia"
+                            config.media_source_policy == "credit_only"
+                            and item.get("name") in {"destaque_relevancia", "destaque_1280x720"}
                         ) or any(token in str(item.get(key) or "").casefold()
                                  for key in ("name", "detail")
                                  for token in ("featured", "imagens_visao", "imagens visão", "vision"))
@@ -1058,7 +1094,17 @@ def _apply_editorial_unlocked(
                         "reason": str(checklist_featured_failure.get("detail") or checklist_featured_failure.get("name") or "featured vision rejected"),
                         "index": None,
                     }
-                if featured_vision_failure:
+                retained_featured_needs_recheck = bool(
+                    retained_featured
+                    and any(row["name"] == "destaque_relevancia" and row.get("retryable") for row in failed_items)
+                    and not any(row["name"] in {"destaque_1280x720", "imagem_destaque"} for row in failed_items)
+                )
+                if retained_featured_needs_recheck:
+                    featured_manifest.update(
+                        status="verification_pending",
+                        reason="revalidação do anexo de destaque retido pendente",
+                    )
+                elif featured_vision_failure:
                     failed_index = featured_vision_failure.get("index")
                     candidate = (
                         (editorial.get("media_plan") or [])[failed_index]
@@ -1073,7 +1119,9 @@ def _apply_editorial_unlocked(
                         or featured_manifest.get("media_url")
                         or ""
                     )
-                    if isinstance(rejected_id, int) and rejected_id > 0:
+                    if retained_featured and retained_featured["media_id"] == rejected_id:
+                        rejected_url = str(retained_featured["attachment"].get("source_url") or rejected_url)
+                    elif isinstance(rejected_id, int) and rejected_id > 0:
                         try:
                             rejected_url = str(client.get_media(rejected_id).get("source_url") or rejected_url)
                         except Exception:  # noqa: BLE001 - preserve the candidate evidence
@@ -1093,9 +1141,16 @@ def _apply_editorial_unlocked(
                     # valid only after the checklist has been evaluated and no
                     # featured vision gate failed.
                     featured_manifest["status"] = "valid"
+                    featured_manifest.pop("reason", None)
                     featured_manifest["media_id"] = featured_id
                     featured_manifest["media_url"] = (current_featured or {}).get("media_url") or featured_manifest.get("media_url", "")
                     featured_manifest["credit_text"] = featured_credit or featured_manifest.get("credit_text", "")
+                    if config.media_source_policy == "credit_only" and current_featured:
+                        featured_manifest.pop("sha256", None)
+                        featured_manifest.pop("vision_evidence", None)
+                    visual_receipt = checklist.get("confirmed_v1_featured")
+                    if isinstance(visual_receipt, dict) and visual_receipt.get("media_id") == featured_id:
+                        featured_manifest.update(visual_receipt)
                 images_summary, media_drift = _reconcile_partial_media(
                     editorial["cleaned_html"],
                     _post_title(post) or editorial["seo"]["title"],
@@ -1117,7 +1172,7 @@ def _apply_editorial_unlocked(
                     partial_kind = "mixed_media"
                 elif missing:
                     partial_kind = "inline_missing"
-                elif featured_status in {"rejected", "vision", "failed", "vision_rejected"}:
+                elif featured_status in {"rejected", "vision", "failed", "vision_rejected", "verification_pending"}:
                     partial_kind = "featured_vision"
                 elif featured_status != "valid":
                     partial_kind = "featured_missing"
@@ -1128,18 +1183,20 @@ def _apply_editorial_unlocked(
                     required, len(baseline_inline_urls | _partial_accepted_urls(prior_media))
                 )
                 featured_before_valid = (
-                    (partial_manifest.get("featured") or {}).get("status") == "valid"
+                    (partial_manifest.get("featured") or {}).get("status") in {"valid", "verification_pending"}
                 )
-                featured_progress = bool(featured_id) and not featured_before_valid
+                featured_progress = bool(featured_id and featured_status == "valid" and not featured_before_valid)
                 progress = completed > previous_completed or featured_progress
                 state_info = read_state(post)
                 passes = state_info.get("processing_passes", 0) + 1
-                no_progress = _next_partial_no_progress(
-                    state_info.get("no_progress_attempts", 0),
-                    progress=progress,
-                    media_results=media_results,
+                no_progress_before = state_info.get("no_progress_attempts", 0)
+                no_progress = (
+                    no_progress_before if retained_featured_needs_recheck and not progress
+                    else _next_partial_no_progress(
+                        no_progress_before, progress=progress, media_results=media_results,
+                    )
                 )
-                operational_vision = any(
+                operational_vision = retained_featured_needs_recheck or any(
                     item.get("status") == "deferred" and item.get("reason_code") in {
                         "vision_provider_error", "vision_budget_exhausted",
                     }
@@ -1283,9 +1340,21 @@ def _apply_editorial_unlocked(
                 # Se a featured era irrelevante ao editorial, ainda assim
                 # convertemos a imagem existente para WebP: a revisão humana
                 # decide depois se ela permanece ou é substituída.
-                awaiting_featured_id = featured_id or _normalize_existing_featured(
-                    client, config, post, root=root
-                )
+                if retained_featured:
+                    # Human routing may proceed, but unconfirmed retained bytes
+                    # must not be associated with the WordPress post as a cover.
+                    cover_receipt = checklist.get("confirmed_v1_featured") or {}
+                    awaiting_featured_id = featured_id if (
+                        cover_receipt.get("media_id") == featured_id
+                        and not any(row["name"] in {
+                            "imagem_destaque", "destaque_1280x720", "destaque_relevancia",
+                            "imagens_visao", "imagens_webp", "featured_inline_position",
+                        } for row in failed_items)
+                    ) else None
+                else:
+                    awaiting_featured_id = featured_id or _normalize_existing_featured(
+                        client, config, post, root=root
+                    )
                 if (
                     isinstance(awaiting_featured_id, int)
                     and awaiting_featured_id > 0
@@ -7137,6 +7206,12 @@ def _working_featured_diagnosis(
             "action": "ok",
             "media_id": featured.get("media_id"),
             "source": "partial_manifest",
+        }
+    if status == "verification_pending":
+        return {
+            "exists": True, "relevant": None, "webp": None, "dimensions": None,
+            "valid": False, "action": "recheck", "media_id": featured.get("media_id"),
+            "reason": featured.get("reason"), "source": "partial_manifest",
         }
     if status in {"vision_rejected", "rejected", "vision"}:
         return {

@@ -677,6 +677,67 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             return uploaded
 
         monkeypatch.setattr(case.client, "upload_media", counted_upload)
+        target = batch["items"][0]
+        cover_plan = [item for item in plan if item.get("is_featured")]
+        inline_plan = [item for item in plan if not item.get("is_featured")]
+        assert len(cover_plan) == 1 and len(inline_plan) == 2
+        post_before = case.client.get_post(post_id)
+        monkeypatch.setenv("HERMES_SESSION_ID", "wp-e2e-credit-cover-pass")
+        cover_batch = {
+            **batch,
+            "batch_id": "batch-credit-cover-only-e2e",
+            "items": [{
+                **target,
+                "editorial": {**target["editorial"], "media_plan": cover_plan},
+            }],
+        }
+        cover_pass = _apply_editorial_batch(
+            case.client, config, case.root, cover_batch, dry_run=False, compact=False,
+        )["posts"][0]
+        assert cover_pass["status"] == "partial", cover_pass
+        assert cover_pass["partial"]["completed"] == 0
+        assert cover_pass["partial"]["missing"] == 2
+        cover_results = cover_pass["media_plan_results"]
+        assert len(cover_results) == 1 and cover_results[0]["status"] == "accepted"
+        retained = cover_pass["partial"]["featured"]
+        assert retained["status"] == "valid"
+        assert retained["media_id"] == cover_results[0]["media_id"]
+        assert retained["sha256"] == cover_results[0]["vision_evidence"]["image_sha256"]
+        retained_url = case.client.get_media(retained["media_id"])["source_url"]
+        with original_urlopen(retained_url, mode="off") as response:
+            assert hashlib.sha256(response.read()).hexdigest() == retained["sha256"]
+        first_cover_readbacks = attachment_requests.count(retained_url)
+        assert first_cover_readbacks
+        cover_source = cover_plan[0]["direct_image_url"]
+        assert enforced_requests == [cover_source]
+        assert upload_count == 1
+        partial_readback = case.client.get_post(post_id)
+        assert partial_readback["status"] == "pending"
+        assert partial_readback["meta"]["_hermes_state"] == "partial"
+        assert not partial_readback["meta"]["_hermes_ready_hash"]
+        assert partial_readback["content"] == post_before["content"]
+        assert partial_readback["featured_media"] == post_before["featured_media"]
+
+        # Expire only this synthetic post's cooldown in local WordPress.
+        case.client.update_post(post_id, {"meta": {"_hermes_next_retry_at": "2000-01-01T00:00:00+00:00"}})
+        monkeypatch.setenv("HERMES_SESSION_ID", "wp-e2e-credit-inline-resume")
+        resume_id = "batch-credit-inline-resume-e2e"
+        resume_prepared = prepare_batch(
+            case.client, config, case.root, [retry_id, post_id], batch_id=resume_id,
+        )
+        assert resume_prepared["prepared"] == 2, resume_prepared
+        resume_editorial = {
+            **target["editorial"], "title": target["editorial"]["seo"]["title"],
+            "media_plan": inline_plan,
+        }
+        resume_request = build_media_resolve_batch_input({
+            "batch_id": resume_id,
+            "results": [{"post_id": post_id, "status": "ok", "editorial": resume_editorial}],
+        }, case.root)["posts"][0]
+        assert resume_request["featured_required"] is False
+        assert resume_request["needed"] == 2
+        batch["batch_id"] = resume_id
+        target["editorial"] = resume_editorial
         batch["items"].insert(0, {
             "post_id": retry_id,
             "status": "needs_retry",
@@ -694,7 +755,13 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         deferred_receipt = case.root / "backups" / str(retry_id) / "editorial.defer.json"
         deferred_receipt_bytes = deferred_receipt.read_bytes()
         assert first["status"] == "ready", first
-        media_results = first["media_plan_results"]
+        inline_results = first["media_plan_results"]
+        assert len(inline_results) == 2
+        assert not any(item.get("featured") for item in inline_results)
+        assert enforced_requests.count(cover_source) == 1
+        assert attachment_requests.count(retained_url) > first_cover_readbacks
+        assert source.vision_pixel_hashes.count(retained["sha256"]) == 1
+        media_results = [*cover_results, *inline_results]
         assert len([item for item in media_results if item.get("status") == "accepted"]) == 3
         assert all(item.get("provenance_mode") == "credit_only" for item in media_results)
         assert all(item.get("source_page_verified") is False for item in media_results)
@@ -884,6 +951,13 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             "deferred_sibling_not_before": deferred["not_before"],
             "deferred_sibling_post_mutations": len(post_mutations(retry_id)),
             "same_batch_ready_reads_back_unchanged": True,
+            "first_cycle_state": partial_readback["meta"]["_hermes_state"],
+            "first_cycle_inline_missing": cover_pass["partial"]["missing"],
+            "first_cycle_cover_id": retained["media_id"],
+            "retained_cover_sha256": retained["sha256"],
+            "retained_cover_source_fetches": enforced_requests.count(cover_source),
+            "retained_cover_rechecked": attachment_requests.count(retained_url) > first_cover_readbacks,
+            "resume_requested_replacement_cover": resume_request["featured_required"],
             "publisher_empty_work_state": post["meta"]["_hermes_work_state"],
             "publisher_readback": positive_after["status"],
             "publisher_cli_first_window_new": first_window["published_new"],

@@ -42,6 +42,8 @@ from .workflow import (
     _featured_diagnosis,
     _images_summary,
     _is_v1_fresh_media_layout_source,
+    _effective_partial_kind,
+    _load_partial_manifest,
     _post_title,
     _post_write_guard_signature,
     _reconcile_partial_media,
@@ -209,7 +211,7 @@ def build_media_resolve_batch_input(
         featured_action = str(
             featured.get("action") if isinstance(featured, dict) else "provide"
         ).strip().casefold()
-        featured_required = featured_action not in {"ok", "normalize"}
+        featured_required = featured_action not in {"ok", "normalize", "recheck"}
         categories = editorial.get("categories") or context.get("categories") or ()
         promised_items = detect_list_format(title, cleaned_html, categories)
         list_items = extract_list_items(title, cleaned_html, categories)
@@ -1140,7 +1142,27 @@ def _context_for_post(
         _reconcile_partial_media(cleaned_html, title, entities, resume["accepted"])[0]
         if resume is not None else _images_summary(cleaned_html, title, entities)
     )
-    featured = _featured_diagnosis(client, post, entities)
+    media_policy = str(getattr(config, "media_source_policy", "strict"))
+    retained_featured = (
+        _load_partial_manifest(root, post["id"]).get("featured")
+        if media_policy == "credit_only" and state.get("state") == STATE_PARTIAL else None
+    )
+    if (
+        isinstance(retained_featured, dict) and retained_featured.get("status") in {"valid", "verification_pending"}
+        and type(retained_featured.get("media_id")) is int and retained_featured["media_id"] > 0
+        and not (retained_featured["status"] == "valid" and _effective_partial_kind(state) == "featured_vision")
+    ):
+        featured = {
+            "exists": True, "valid": False, "action": "recheck",
+            "media_id": retained_featured["media_id"], "source": "partial_manifest",
+        }
+    elif isinstance(retained_featured, dict) and (
+        retained_featured.get("status") == "vision_rejected"
+        or (retained_featured.get("status") == "valid" and _effective_partial_kind(state) == "featured_vision")
+    ):
+        featured = {"exists": True, "valid": False, "action": "replace", "source": "partial_manifest"}
+    else:
+        featured = _featured_diagnosis(client, post, entities)
     source_language = detect_language(f"{title}\n{source_content}")
     needs_localization = localization_required(source_language)
     localization = {
@@ -1155,7 +1177,6 @@ def _context_for_post(
     previous_relevance_reason = (
         state.get("last_error") or "" if retry_mode else ""
     )
-    media_policy = str(getattr(config, "media_source_policy", "strict"))
     requirements = {
         "internal_links_enabled": bool(config.internal_links_enabled),
         # A imagem direta e o crédito são o contrato persistido. A página-fonte
@@ -1168,7 +1189,7 @@ def _context_for_post(
             "required_inline_images": required_image_count(
                 words, title=title, content=cleaned_html
             ),
-            "featured_required": True,
+            "featured_required": featured["action"] != "recheck",
             "source_page_required_for_new_media": media_policy != "credit_only",
             "credit_required": True,
             "credit_generation": (

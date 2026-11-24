@@ -745,11 +745,26 @@ def run_pre_publish_checklist(
         f"featured_media={featured_raw or 'vazio'} — obrigatoria para publicar",
     )
 
+    v1_credit_only_featured = bool(
+        v1_visual_featured and config.media_source_policy == "credit_only" and featured_ok
+    )
+    featured_receipt = (media_context or {}).get("featured") if v1_credit_only_featured else None
+    retained_featured = bool(
+        isinstance(featured_receipt, Mapping) and featured_receipt.get("media_id") == featured
+        and featured_receipt.get("retained") is True
+    )
+    attachment_snapshot = featured_receipt.get("attachment") if retained_featured else None
+
+    def read_featured_attachment():
+        if isinstance(attachment_snapshot, Mapping):
+            return attachment_snapshot
+        return client.get_media(featured)
+
     # 7b. Featured image must obey the portal ratio: exactly 1280x720.
     featured_details: dict[str, Any] = {}
     if featured_ok and client is not None:
         try:
-            media = client.get_media(featured)
+            media = read_featured_attachment()
             details = media.get("media_details") or {}
             if isinstance(details, dict):
                 featured_details = details
@@ -785,7 +800,7 @@ def run_pre_publish_checklist(
     featured_source_relevant: bool | None = None
     if featured_ok and client is not None:
         try:
-            media = client.get_media(featured)
+            media = read_featured_attachment()
             mtitle = str((media.get("title") or {}).get("rendered") or "")
             malt = str(media.get("alt_text") or "")
             murl = str(media.get("source_url") or "")
@@ -811,10 +826,6 @@ def run_pre_publish_checklist(
             entities=image_entities,
             source_only=True,
         )
-    v1_credit_only_featured = bool(
-        v1_visual_featured and config.media_source_policy == "credit_only" and featured_ok
-    )
-    featured_receipt = (media_context or {}).get("featured") if v1_credit_only_featured else None
     expected_featured_sha = ""
     if (
         isinstance(featured_receipt, Mapping) and featured_receipt.get("media_id") == featured
@@ -826,9 +837,10 @@ def run_pre_publish_checklist(
     ):
         expected_featured_sha = str(receipt_evidence["image_sha256"] or "")
     verify_featured_pixels_for_relevance = v1_credit_only_featured and (
-        bool(expected_featured_sha) or featured_source_relevant is not True
+        bool(expected_featured_sha) or retained_featured or featured_source_relevant is not True
     )
     featured_pixels_confirmed = False
+    confirmed_v1_featured = None
     if verify_featured_pixels_for_relevance:
         # Do not add an early textual failure: that would skip the actual
         # attachment read and Vision further down the checklist.
@@ -856,7 +868,7 @@ def run_pre_publish_checklist(
     featured_url = ""
     if featured_ok and client is not None:
         try:
-            featured_url = str((client.get_media(featured).get("source_url") or "")).strip()
+            featured_url = str((read_featured_attachment().get("source_url") or "")).strip()
         except Exception:
             featured_url = ""
     if visual_identity_policy >= 4 and isinstance(media_context, Mapping):
@@ -997,7 +1009,7 @@ def run_pre_publish_checklist(
     image_urls = list(inline_images)
     if featured_ok and client is not None:
         try:
-            media = client.get_media(featured)
+            media = read_featured_attachment()
             source_url = (media.get("source_url") or "").strip()
             if source_url:
                 image_urls.append(source_url)
@@ -1155,10 +1167,11 @@ def run_pre_publish_checklist(
     # implicit approval. This condition only decides whether to spend the
     # optional vision call; it does not authorize the waiver.
     inline_deficit_is_only_failure = bool(
-        search_exhaustion_candidate
+        (search_exhaustion_candidate or retained_featured)
         and prior_failures
         and all(item.get("name") == "imagens_no_corpo" for item in prior_failures)
     )
+    retained_featured_recheck_pending = retained_featured and not vision_ready
     if config.vision_enabled and not vision_ready:
         check(
             "imagens_visao",
@@ -1172,6 +1185,7 @@ def run_pre_publish_checklist(
     elif not vision_ready:
         check("imagens_visao", True, vision_msg, skipped=True)
     elif prior_failures and not inline_deficit_is_only_failure and not expected_featured_sha:
+        retained_featured_recheck_pending = retained_featured
         check(
             "imagens_visao",
             True,
@@ -1211,11 +1225,12 @@ def run_pre_publish_checklist(
             url: str, subject: str, *,
             is_featured: bool, context: str = "", category: str = "", context_key: str = "",
         ) -> None:
-            nonlocal calls_low, calls_high, checked, featured_pixels_confirmed
+            nonlocal calls_low, calls_high, checked, retained_featured_recheck_pending
             if not url or not subject.strip():
                 return
             # Limites mecanicos de custo por post.
             if calls_low >= config.vision_max_low:
+                retained_featured_recheck_pending = retained_featured and is_featured
                 vision_failures.append(f"{url[:60]}: limite de chamadas low atingido")
                 return
             calls_low += 1
@@ -1226,9 +1241,32 @@ def run_pre_publish_checklist(
                     url_policy="enforce" if verify_featured_pixels_for_relevance and is_featured else config.remote_url_policy,
                 )
                 image_sha256 = image_input_sha256(vision_input)
+                if is_featured and retained_featured and not expected_featured_sha:
+                    # No exact normalized bytes are proved by a legacy receipt.
+                    from io import BytesIO
+                    from PIL import Image
+                    from .media.vision_gate import _data_url_bytes
+
+                    with Image.open(BytesIO(_data_url_bytes(vision_input) or b"")) as actual:
+                        if actual.format != "WEBP" or actual.size != (1280, 720):
+                            vision_failures.append("destaque: bytes do anexo retido não são WebP 1280x720")
+                            return
                 if is_featured and expected_featured_sha and image_sha256 != expected_featured_sha:
                     vision_failures.append("destaque: bytes do anexo divergem da imagem aprovada")
                     return
+                def record_featured_pixels() -> None:
+                    nonlocal featured_pixels_confirmed, confirmed_v1_featured
+                    featured_pixels_confirmed = bool(image_sha256)
+                    if v1_credit_only_featured and featured_pixels_confirmed and media.get("id") == featured:
+                        confirmed_v1_featured = {
+                            "media_id": featured, "media_url": url, "sha256": image_sha256,
+                            "vision_evidence": {
+                                "image_sha256": image_sha256, "image_role": "featured",
+                                "verdict": "accept", "subject": subject, "context_key": context_key,
+                                "model_identity": vision_model_identity(config.vision_base_url, config.vision_model),
+                            },
+                        }
+
                 cached = get_cached_decision(
                     vision_root, url, subject, image_sha256=image_sha256,
                     policy=featured_cache_policy if is_featured else "subject-match-v1",
@@ -1249,7 +1287,7 @@ def run_pre_publish_checklist(
                         and (not is_featured or cached.get("visual_type") not in {"text_banner", "infographic"})
                     ):
                         if is_featured:
-                            featured_pixels_confirmed = bool(image_sha256)
+                            record_featured_pixels()
                         return
                     vision_failures.append(f"{url[:60]}: cache nao-confirma ({cached.get('status')})")
                     return
@@ -1271,8 +1309,8 @@ def run_pre_publish_checklist(
                 )
                 checked += 1
                 if decision.get("accepted"):
-                    if is_featured:
-                        featured_pixels_confirmed = bool(image_sha256 and decision.get("verdict") == "accept")
+                    if is_featured and decision.get("verdict") == "accept":
+                        record_featured_pixels()
                     if image_sha256 and decision.get("status") == "MATCH":
                         cache_decision = {
                             key: decision[key]
@@ -1302,11 +1340,14 @@ def run_pre_publish_checklist(
                     calls_high += 1
                 vision_failures.append(f"{url[:60]}: {reason}")
             except VisionInputUnavailable as exc:
+                retained_featured_recheck_pending = retained_featured and is_featured
                 vision_failures.append(f"{url[:60]}: vision_input_unavailable ({exc})")
             except VisionGateError as exc:
+                retained_featured_recheck_pending = retained_featured and is_featured
                 vision_provider_errors.append(str(exc))
                 vision_failures.append(f"{url[:60]}: {exc}")
             except Exception as exc:  # noqa: BLE001 - report, keep gate
+                retained_featured_recheck_pending = retained_featured and is_featured
                 vision_provider_errors.append(str(exc))
                 vision_failures.append(f"{url[:60]}: {exc}")
 
@@ -1316,13 +1357,17 @@ def run_pre_publish_checklist(
         # imagem nova).
         if featured_ok and client is not None:
             try:
-                media = client.get_media(featured)
+                media = read_featured_attachment()
                 featured_url = str(media.get("source_url") or "").strip()
                 featured_subject = featured_vision_subject(vision_editorial)
                 editorial_context = str(
                     resolve_editorial_identity(vision_editorial).get("news_context") or ""
                 )
-                if featured_url and featured_subject:
+                if retained_featured and media.get("id") != featured:
+                    vision_failures.append("destaque: identidade do anexo retido não confirmada")
+                elif retained_featured and expected_featured_sha and featured_receipt.get("media_url") != featured_url:
+                    vision_failures.append("destaque: URL do anexo retido diverge da registrada")
+                elif featured_url and featured_subject:
                     _verify(
                         featured_url, featured_subject,
                         is_featured=True,
@@ -1334,9 +1379,11 @@ def run_pre_publish_checklist(
                         context_key=vision_context_key,
                     )
             except VisionGateError as exc:
+                retained_featured_recheck_pending = retained_featured
                 vision_provider_errors.append(str(exc))
                 vision_failures.append(f"destaque: {exc}")
             except Exception as exc:  # noqa: BLE001 - report, keep gate
+                retained_featured_recheck_pending = retained_featured
                 vision_provider_errors.append(str(exc))
                 vision_failures.append(f"destaque: {exc}")
         if vision_failures:
@@ -1358,8 +1405,10 @@ def run_pre_publish_checklist(
         check(
             "destaque_relevancia",
             featured_pixels_confirmed,
-            "assunto confirmado nos pixels do anexo de destaque"
-            if featured_pixels_confirmed else "relevancia visual do anexo de destaque nao confirmada",
+            "assunto confirmado nos pixels do anexo de destaque" if featured_pixels_confirmed
+            else "revalidação do anexo de destaque retido pendente" if retained_featured_recheck_pending
+            else "relevancia visual do anexo de destaque nao confirmada",
+            retryable=retained_featured_recheck_pending,
         )
 
     search_completed = bool(
@@ -1527,6 +1576,7 @@ def run_pre_publish_checklist(
         "skipped": skipped,
         "failed": failed,
         "all_passed": failed == 0,
+        **({"confirmed_v1_featured": confirmed_v1_featured} if confirmed_v1_featured else {}),
         "language": language_report,
         "media_decision": {
             "required": required,
