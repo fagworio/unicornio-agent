@@ -517,9 +517,13 @@ def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_
         })
 
 
-def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, monkeypatch):
+def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, monkeypatch, capsys):
+    from dataclasses import replace
+
     import unicornio_editor.media.search as search
+    from unicornio_editor.manifest import manifest_hash, manifest_matches, parse_manifest, serialize_manifest
     from unicornio_editor.media import downloader
+    from unicornio_editor.cli import main as run_cli
 
     monkeypatch.setattr(
         "unicornio_editor.workflow.find_game_trailer_with_status",
@@ -712,6 +716,120 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         )
         assert second_batch["posts"][0]["status"] == "noop", second_batch
         assert upload_count == 3
+
+        # On real WordPress this registered meta is exposed as "", even though
+        # the V1 writer never sets it. Do not manufacture that value in Python.
+        assert post["meta"]["_hermes_work_state"] == ""
+        ready_manifest = parse_manifest(post["meta"]["_hermes_ready_manifest"])
+        assert ready_manifest is not None
+        assert manifest_matches(
+            post, ready_manifest, post["meta"]["_hermes_ready_hash"],
+            policy_version=config.policy_version,
+        )
+
+        # Both negative fixtures have a valid per-ID manifest. The malformed
+        # state fixture is explicitly READY; the other is a legacy row whose
+        # two registered REST state fields are empty without ever setting them.
+        malformed_id = case.post_id("v1_publisher_corrupt_work_state")
+        legacy_id = case.post_id("v1_publisher_no_ready_state")
+        malformed_work_state = "not valid work-state JSON"
+        state_meta = {
+            malformed_id: {"_hermes_state": "ready", "_hermes_work_state": malformed_work_state},
+            legacy_id: {},
+        }
+        negative_before = {}
+        for negative_id, state in state_meta.items():
+            negative_manifest = {**ready_manifest, "post_id": negative_id}
+            negative_meta = {
+                key: post["meta"][key] for key in (
+                    "original_link", "rank_math_title", "rank_math_description", "rank_math_focus_keyword"
+                )
+            }
+            case.client.update_post(negative_id, {
+                "title": post["title"]["raw"],
+                "content": {"raw": raw},
+                "featured_media": int(post["featured_media"]),
+                "meta": {
+                    **negative_meta,
+                    **state,
+                    "_hermes_ready_manifest": serialize_manifest(negative_manifest),
+                    "_hermes_ready_hash": manifest_hash(negative_manifest),
+                },
+            })
+            readback = case.client.get_post(negative_id)
+            assert readback["status"] == "pending"
+            assert readback["meta"]["_hermes_state"] == state.get("_hermes_state", "")
+            assert readback["meta"]["_hermes_work_state"] == state.get("_hermes_work_state", "")
+            assert manifest_matches(
+                readback, negative_manifest, readback["meta"]["_hermes_ready_hash"],
+                policy_version=config.policy_version,
+            )
+            negative_before[negative_id] = readback
+
+        # Invoke the actual CLI entrypoint with a loopback WordPress config.
+        # Its authenticated list queries remain real REST, narrowed to fixtures.
+        assert urlparse(case.url).hostname == "127.0.0.1"
+        allowed_ids = {post_id, malformed_id, legacy_id}
+        client_type = type(case.client)
+        original_list = client_type.list_pending
+
+        def scoped_list_pending(real_client, **kwargs):
+            assert real_client.config.wordpress_url.rstrip("/") == case.url
+            rows = original_list(real_client, **{**kwargs, "include": sorted(allowed_ids)})
+            assert {row["id"] for row in rows} <= allowed_ids
+            return rows
+
+        def writes_for(test_post_id):
+            audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={test_post_id}")
+            return [
+                row for row in audit["events"]
+                if row.get("phase") == "request" and row.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
+            ]
+
+        assert {row["id"] for row in scoped_list_pending(case.client, page=1, per_page=100)} == allowed_ids
+        monkeypatch.setattr(client_type, "list_pending", scoped_list_pending)
+        prior_writes = {fixture_id: writes_for(fixture_id) for fixture_id in allowed_ids}
+        assert all(prior_writes.values())
+        publish_config = replace(config, publish_enabled=True, publish_limit=3)
+        monkeypatch.setattr("unicornio_editor.cli.load_config", lambda: publish_config)
+        cli_args = ["publish-ready", "--root", str(case.root)]
+        capsys.readouterr()
+        assert run_cli(cli_args) == 0
+        first_window = json.loads(capsys.readouterr().out)
+        assert first_window["published_new"] == 1
+        assert first_window["published_reconciled"] == 0
+        assert [row["post_id"] for row in first_window["posts"]] == [post_id]
+        assert post_id in first_window["ready_post_ids"]
+        positive_after = case.client.get_post(post_id)
+        assert positive_after["status"] == "publish"
+        assert positive_after["meta"]["_hermes_state"] == "published"
+        assert positive_after["meta"]["_hermes_work_state"] == ""
+        assert not (case.root / "work" / "v2-publication-uncertain" / f"{post_id}.json").exists()
+        assert positive_after["meta"]["_hermes_ready_hash"] == post["meta"]["_hermes_ready_hash"]
+        assert positive_after["meta"]["_hermes_ready_manifest"] == post["meta"]["_hermes_ready_manifest"]
+        assert positive_after["meta"]["_ai_editor_published_at"]
+        operation_id = positive_after["meta"]["_ai_editor_publish_operation_id"]
+        assert isinstance(operation_id, str) and len(operation_id) == 32
+        assert positive_after["content"]["raw"] == raw
+        assert positive_after["featured_media"] == post["featured_media"]
+        positive_writes = writes_for(post_id)
+        assert len(positive_writes) == len(prior_writes[post_id]) + 1
+        assert positive_writes[:-1] == prior_writes[post_id]
+        assert positive_writes[-1]["requested_status"] == "publish"
+        assert all(writes_for(fixture_id) == prior_writes[fixture_id] for fixture_id in negative_before)
+
+        assert run_cli(cli_args) == 0
+        second_window = json.loads(capsys.readouterr().out)
+        assert second_window["published"] == 0
+        assert writes_for(post_id) == positive_writes
+        assert all(writes_for(fixture_id) == prior_writes[fixture_id] for fixture_id in negative_before)
+        for fixture_id, fixture_before in negative_before.items():
+            readback = case.client.get_post(fixture_id)
+            for key in ("status", "content", "featured_media", "meta"):
+                assert readback[key] == fixture_before[key], (fixture_id, key)
+        replay_readback = case.client.get_post(post_id)
+        assert replay_readback["status"] == "publish"
+        assert replay_readback["meta"]["_ai_editor_publish_operation_id"] == operation_id
         case.observations.append({
             "scenario": "credit_only_media_ready",
             "post_id": post_id,
@@ -730,6 +848,16 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             "source_page_verified": False,
             "rights_verified": False,
             "second_apply": second_batch["posts"][0]["status"],
+            "publisher_empty_work_state": post["meta"]["_hermes_work_state"],
+            "publisher_readback": positive_after["status"],
+            "publisher_cli_first_window_new": first_window["published_new"],
+            "publisher_cli_second_window_published": second_window["published"],
+            "publisher_operation_readback_confirmed": True,
+            "publisher_first_window_writes": len(positive_writes) - len(prior_writes[post_id]),
+            "publisher_second_window_writes": 0,
+            "publisher_negative_fixture_ids": sorted(negative_before),
+            "publisher_negative_fixtures_stayed_pending": True,
+            "publisher_negative_fixture_writes": 0,
         })
 
 

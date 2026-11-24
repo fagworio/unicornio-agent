@@ -3236,6 +3236,79 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(client.post["meta"]["_hermes_state"], "blocked")
             self.assertTrue((root / "backups/42/editorial.blocked.json").is_file())
 
+    def test_publisher_and_queue_agree_on_empty_v2_meta_without_accepting_corruption(self):
+        class PendingClient(FakeClient):
+            def list_pending(self, **kwargs):
+                return [self.post] if self.post["status"] == "pending" else []
+
+        missing = object()
+        cases = (
+            ("missing", missing, True),
+            ("null", None, True),
+            ("registered WordPress empty default", "", True),
+            ("whitespace", " ", False),
+            ("broken JSON", "{broken", False),
+            ("non-dict JSON", "[]", False),
+            ("valid V2 pending", json.dumps(WorkState().to_dict()), False),
+        )
+        for description, marker, eligible in cases:
+            with self.subTest(marker=description), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                client = PendingClient(self.post())
+                applied = apply_editorial(client, self.config(False), root, 42, editorial_payload())
+                self.assertEqual(applied["status"], "ready")
+                self.assertTrue(client.post["meta"]["_hermes_ready_hash"])
+                if marker is not missing:
+                    client.post["meta"]["_hermes_work_state"] = marker
+                config = Config(
+                    "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                    dry_run=False, publish_enabled=True,
+                )
+                self.assertEqual(build_queue_report(client, root)["ready_ids"], [42] if eligible else [])
+                prior_writes = len(client.updated)
+                outcomes = publish_ready_posts(client, config, root, limit=1)
+                self.assertEqual([row["status"] for row in outcomes], ["published"] if eligible else [])
+                self.assertEqual(client.post["status"], "publish" if eligible else "pending")
+                if eligible:
+                    writes = [row for _, row in client.updated[prior_writes:] if row.get("status") == "publish"]
+                    self.assertEqual(len(writes), 1)
+                    after_publish = len(client.updated)
+                    self.assertEqual(publish_ready_posts(client, config, root, limit=1), [])
+                    self.assertEqual(len(client.updated), after_publish)
+                else:
+                    self.assertEqual(len(client.updated), prior_writes)
+
+    def test_publisher_does_not_open_legacy_for_empty_v2_and_no_explicit_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.checklist_pass_post())
+            client.post["meta"].pop("_hermes_state", None)
+            client.post["meta"]["_hermes_work_state"] = ""
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            self.assertEqual(publish_ready_posts(client, config, root, limit=1), [])
+            self.assertEqual(publish_post(client, config, root, 42)["status"], "skipped")
+            self.assertEqual(client.updated, [])
+
+    def test_publisher_stale_ready_with_empty_v2_still_requires_checklist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient(self.post())
+            applied = apply_editorial(client, self.config(False), root, 42, editorial_payload())
+            self.assertEqual(applied["status"], "ready")
+            client.post["meta"]["_hermes_work_state"] = ""
+            client.post["content"]["raw"] = "<p>Conteúdo inadequado alterado externamente.</p>"
+            config = Config(
+                "wordpress", "http://wp.test", "/wp-json/wp/v2",
+                dry_run=False, publish_enabled=True,
+            )
+            outcomes = publish_ready_posts(client, config, root, limit=1)
+            self.assertEqual([row["status"] for row in outcomes], ["blocked"])
+            self.assertEqual(client.post["status"], "pending")
+            self.assertFalse(any(row.get("status") == "publish" for _, row in client.updated))
+
     def test_publish_ready_only_processes_ready_or_legacy(self):
         # Fase 10: blocked/uncertain/awaiting_human nao entram no publish —
         # sem checklist caro para quem pertence a fila de rework.

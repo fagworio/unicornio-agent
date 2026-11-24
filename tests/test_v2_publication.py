@@ -24,6 +24,7 @@ from unicornio_editor.pipeline_v2.publication import (
 )
 from unicornio_editor.workflow import (
     META_PUBLISH_OPERATION_ID,
+    WorkflowError,
     _publish_now,
     _publish_post_unlocked,
     _guard_post_client,
@@ -565,10 +566,19 @@ def test_uncertain_legacy_marker_cannot_attribute_published_status_without_opera
     assert marker.exists()
 
 
-def test_persisted_uncertain_publish_reconciles_ready_projection_with_matching_identity(tmp_path):
+@pytest.mark.parametrize(
+    ("work_state", "v1_intent", "can_reconcile"),
+    [("v2", False, True), ("", True, True), ("", False, False), ("{malformed", False, False)],
+)
+@pytest.mark.parametrize("projection", ["ready", "published"])
+def test_persisted_uncertain_publish_reconciles_ready_projection_with_matching_identity(
+    tmp_path, work_state, v1_intent, can_reconcile, projection,
+):
     post = _pending_ready_post()
     post["status"] = "publish"
-    post["meta"]["_hermes_state"] = "ready"
+    post["meta"]["_hermes_state"] = projection
+    if work_state != "v2":
+        post["meta"]["_hermes_work_state"] = work_state
     operation_id = "publish-op-114840-1"
     post["meta"][META_PUBLISH_OPERATION_ID] = operation_id
     client = FakePublicationClient(post)
@@ -581,6 +591,7 @@ def test_persisted_uncertain_publish_reconciles_ready_projection_with_matching_i
         "publication_operation_id": operation_id,
         "ready_hash": post["meta"]["_hermes_ready_hash"],
         "ready_manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+        **({"rest_empty_v1": True} if v1_intent else {}),
     }), encoding="utf-8")
 
     result = _reconcile_uncertain_publication(
@@ -593,11 +604,109 @@ def test_persisted_uncertain_publish_reconciles_ready_projection_with_matching_i
         ready_manifest=manifest,
     )
 
+    if not can_reconcile:
+        assert result["status"] == "retry"
+        assert marker.exists()
+        assert not client.updates
+        return
+
     assert result["status"] == "published"
     assert result["reconciled"] is True
     assert client.post["meta"]["_hermes_state"] == "published"
-    assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "published"
+    if work_state == "v2":
+        assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "published"
+    else:
+        assert client.post["meta"]["_hermes_work_state"] == ""
+    assert client.publish_calls == []
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("replacement", ["", None, "{malformed", "absent"])
+def test_v2_publication_losing_work_state_does_not_reconcile_as_v1(tmp_path, replacement):
+    class BlankAfterPublishClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            result = super().publish(post_id, **kwargs)
+            if replacement == "absent":
+                self.post["meta"].pop("_hermes_work_state")
+            else:
+                self.post["meta"]["_hermes_work_state"] = replacement
+            return result
+
+    post = _pending_ready_post()
+    client = BlankAfterPublishClient(post)
+    with pytest.raises(WorkflowError, match="V2 publish reconciliation requires"):
+        _publish_now(
+            client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+        )
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    saved = json.loads(marker.read_text())
+    assert saved["rest_empty_v1"] is False
+    assert saved["publication_operation_id"] == client.post["meta"][META_PUBLISH_OPERATION_ID]
+    assert client.post["status"] == "publish"  # remote transaction already committed
+    assert len(client.publish_calls) == 1
+    assert publish_ready_posts(client, _config(), tmp_path, limit=1)[0]["status"] == "retry"
+    assert marker.exists()
+    assert len(client.publish_calls) == 1
+    assert client.updates == []
+
+
+def test_v2_publish_cannot_confirm_if_final_readback_loses_the_marker(tmp_path):
+    class LateBlankClient(FakePublicationClient):
+        def update_post(self, post_id, payload):
+            result = super().update_post(post_id, payload)
+            if "_hermes_work_state" in payload.get("meta", {}):
+                self.post["meta"].pop("_hermes_work_state")
+            return result
+
+    post = _pending_ready_post()
+    client = LateBlankClient(post)
+    with pytest.raises(WorkflowError, match="V2 publish reconciliation requires"):
+        _publish_now(
+            client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+        )
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    assert json.loads(marker.read_text())["rest_empty_v1"] is False
+    assert len(client.publish_calls) == 1
+    assert len(client.updates) == 1  # the initial authorized V2 sync, nothing synthetic afterward
+    assert publish_ready_posts(client, _config(), tmp_path, limit=1)[0]["status"] == "retry"
+    assert len(client.updates) == 1
+    assert len(client.publish_calls) == 1
+
+
+@pytest.mark.parametrize("drift", ["corrupt", "v2", "ready_manifest"])
+def test_proven_v1_blank_intent_cannot_sync_a_changed_remote_identity(tmp_path, drift):
+    genuine_v2 = _pending_ready_post()["meta"]["_hermes_work_state"]
+
+    class DriftAfterPublishClient(FakePublicationClient):
+        def publish(self, post_id, **kwargs):
+            result = super().publish(post_id, **kwargs)
+            self.post["meta"]["_hermes_state"] = "ready"
+            if drift == "ready_manifest":
+                self.post["meta"]["_hermes_ready_manifest"] = "{}"
+            else:
+                self.post["meta"]["_hermes_work_state"] = genuine_v2 if drift == "v2" else "{malformed"
+            return result
+
+    post = _pending_ready_post()
+    post["meta"]["_hermes_work_state"] = ""
+    client = DriftAfterPublishClient(post)
+    with pytest.raises(WorkflowError, match="(V1 work state changed|ready manifest read-back mismatch)"):
+        _publish_now(
+            client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+        )
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    assert json.loads(marker.read_text())["rest_empty_v1"] is True
+    assert len(client.publish_calls) == 1
+    assert client.updates == []
+    assert publish_ready_posts(client, _config(), tmp_path, limit=1)[0]["status"] == "retry"
+    assert client.updates == []
+    assert len(client.publish_calls) == 1
 
 
 def test_uncertain_publication_does_not_claim_manual_publish_without_operation_id(tmp_path):

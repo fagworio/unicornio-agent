@@ -88,6 +88,7 @@ from .state import (
     STATE_SKIPPED,
     STATE_UNCERTAIN,
     META_READY_HASH,
+    META_STATE,
     build_state_markers,
     cooldown_expired,
     read_state,
@@ -4416,12 +4417,24 @@ def publish_post(
         return _publish_post_unlocked(guarded_client, config, root, post_id)
 
 
-def _read_v2_work_state(post: dict[str, Any]) -> dict[str, Any] | None:
+def _rest_empty_v1_work_state(post: dict[str, Any]) -> bool:
+    """WordPress exposes unset string meta as empty, even on explicit V1 posts."""
+    meta = post.get("meta")
+    return (
+        isinstance(meta, dict)
+        and meta.get("_hermes_work_state") == ""
+        and meta.get(META_STATE) in (STATE_READY, STATE_PUBLISHED)
+    )
+
+
+def _read_v2_work_state(
+    post: dict[str, Any], *, allow_rest_empty_v1: bool | None = None,
+) -> dict[str, Any] | None:
     meta = post.get("meta")
     if not isinstance(meta, dict):
         meta = {}
     raw = meta.get("_hermes_work_state")
-    if raw is None:
+    if raw is None or (allow_rest_empty_v1 and _rest_empty_v1_work_state(post)):
         return None
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
@@ -4628,6 +4641,7 @@ def _persist_publish_intent(
     ready_hash: str,
     ready_manifest: str | None,
     publication_operation_id: str,
+    rest_empty_v1: bool | None = None,
 ) -> None:
     """Durably fence a publication before sending its remote write."""
     path = _uncertain_publication_path(root, post_id)
@@ -4643,6 +4657,7 @@ def _persist_publish_intent(
             ready_manifest.encode("utf-8")
         ).hexdigest() if ready_manifest is not None else "",
         "publication_operation_id": str(publication_operation_id),
+        **({"rest_empty_v1": rest_empty_v1} if rest_empty_v1 is not None else {}),
     }
     atomic_write_text(
         path, json.dumps(payload, ensure_ascii=False, indent=2)
@@ -4673,6 +4688,7 @@ def _mark_uncertain_publication(
     ready_hash: str = "",
     ready_manifest: str | None = None,
     publication_operation_id: str = "",
+    rest_empty_v1: bool | None = None,
 ) -> None:
     """Persist a local fence after a publish request with unknown outcome.
 
@@ -4695,6 +4711,7 @@ def _mark_uncertain_publication(
                         ready_manifest.encode("utf-8")
                     ).hexdigest() if ready_manifest is not None else "",
                     "publication_operation_id": str(publication_operation_id or ""),
+                    **({"rest_empty_v1": rest_empty_v1} if rest_empty_v1 is not None else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -4732,12 +4749,28 @@ def _sync_published_readback(
     ready_hash: str,
     ready_manifest: str | None,
     expected_operation_id: str = "",
+    rest_empty_v1: bool | None = None,
 ) -> dict[str, Any]:
     """Synchronize V2 state and verify an already-published WordPress post."""
     from dataclasses import replace as _replace
-    from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase
+    from .pipeline_v2.model import LifecycleState as _LifecycleState, Phase as _Phase, WorkState
     from .pipeline_v2.operational import WordPressStateBackend as _V2Backend
     from .pipeline_v2.state_store import StateStore as _V2Store
+
+    def observed_v2(post: dict[str, Any]) -> WorkState | None:
+        meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+        if rest_empty_v1 is True:
+            if not _rest_empty_v1_work_state(post):
+                raise WorkflowError("V1 work state changed during publish read-back")
+            return None
+        if rest_empty_v1 is not False and meta.get("_hermes_work_state") is None:
+            return None
+        # Never load through StateStore's legacy fallback: corrupt, removed
+        # or blank V2 metadata is not the authorized V2 READY transaction.
+        raw = _read_v2_work_state(post)
+        if not raw or raw.get("state") not in {"ready", "published"}:
+            raise WorkflowError("V2 publish reconciliation requires READY or PUBLISHED state")
+        return WorkState.from_dict(raw)
 
     v2_post = client.get_post(post_id)
     if v2_post.get("status") != "publish":
@@ -4745,6 +4778,12 @@ def _sync_published_readback(
     initial_meta = v2_post.get("meta") if isinstance(v2_post.get("meta"), dict) else {}
     if expected_operation_id and initial_meta.get(META_PUBLISH_OPERATION_ID) != expected_operation_id:
         raise WorkflowError("publication operation identity read-back mismatch")
+    v2_current = observed_v2(v2_post)
+    if rest_empty_v1 is not None:
+        if ready_hash and initial_meta.get(META_READY_HASH) != ready_hash:
+            raise WorkflowError("ready hash read-back mismatch after publish")
+        if ready_manifest is not None and initial_meta.get(META_READY_MANIFEST) != ready_manifest:
+            raise WorkflowError("ready manifest read-back mismatch after publish")
     legacy_state = read_state(v2_post).get("state")
     if legacy_state != STATE_PUBLISHED:
         # A publish request can commit the WordPress status while the legacy
@@ -4760,23 +4799,23 @@ def _sync_published_readback(
             or read_state(v2_post).get("state") != STATE_PUBLISHED
         ):
             raise WorkflowError("legacy publish state reconciliation read-back mismatch")
-    v2_meta = v2_post.get("meta", {}) if isinstance(v2_post, dict) else {}
-    if "_hermes_work_state" in v2_meta:
-        v2_store = _V2Store(_V2Backend(client))
-        v2_current = v2_store.load(post_id)
-        if v2_current.state not in {_LifecycleState.READY, _LifecycleState.PUBLISHED}:
-            raise WorkflowError("V2 publish reconciliation requires READY or PUBLISHED state")
-        v2_store.mark_published(
+        v2_current = observed_v2(v2_post)
+    if v2_current is not None:
+        _V2Store(_V2Backend(client)).mark_published(
             post_id,
             _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None),
         )
-        v2_verified = v2_store.load(post_id)
-        if v2_verified.state is not _LifecycleState.PUBLISHED or v2_verified.phase is not _Phase.PUBLISH:
-            raise WorkflowError("V2 state read-back mismatch after publish")
     verified_post = client.get_post(post_id)
     verified_meta = verified_post.get("meta", {}) if isinstance(verified_post, dict) else {}
     if verified_post.get("status") != "publish" or read_state(verified_post).get("state") != STATE_PUBLISHED:
         raise WorkflowError("publication read-back mismatch")
+    v2_verified = observed_v2(verified_post)
+    if v2_current is not None and (
+        v2_verified is None
+        or v2_verified.state is not _LifecycleState.PUBLISHED
+        or v2_verified.phase is not _Phase.PUBLISH
+    ):
+        raise WorkflowError("V2 state read-back mismatch after publish")
     if ready_hash and verified_meta.get(META_READY_HASH) != ready_hash:
         raise WorkflowError("ready hash read-back mismatch after publish")
     if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
@@ -4830,7 +4869,9 @@ def _reconcile_uncertain_publication(
         }
     legacy_state = read_state(post).get("state")
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
-    v2_state = _read_v2_work_state(post)
+    raw_mode = marker_data.get("rest_empty_v1")
+    rest_empty_v1 = raw_mode if type(raw_mode) is bool else None
+    v2_state = _read_v2_work_state(post, allow_rest_empty_v1=rest_empty_v1 is True)
     marker_has_identity = bool(
         marker_data.get("ready_hash") or marker_data.get("ready_manifest_sha256")
     )
@@ -4854,7 +4895,11 @@ def _reconcile_uncertain_publication(
         == hashlib.sha256(ready_manifest.encode("utf-8")).hexdigest()
         and meta.get(META_READY_HASH) == ready_hash
         and meta.get(META_READY_MANIFEST) == ready_manifest
-        and (v2_state is None or v2_state.get("state") in {"ready", "published"})
+        and (
+            v2_state is not None and v2_state.get("state") in {"ready", "published"}
+            if rest_empty_v1 is False
+            else v2_state is None or v2_state.get("state") in {"ready", "published"}
+        )
     )
     # Legacy markers without identity retain the previous strict contract:
     # only an already-confirmed PUBLISHED projection is accepted. New markers
@@ -4904,11 +4949,13 @@ def _reconcile_uncertain_publication(
             ready_hash=ready_hash,
             ready_manifest=ready_manifest,
             expected_operation_id=publication_operation_id,
+            rest_empty_v1=rest_empty_v1,
         )
     except Exception as exc:  # noqa: BLE001 - preserve the no-blind-retry fence
         _mark_uncertain_publication(
             root, post_id, exc, ready_hash=ready_hash, ready_manifest=ready_manifest,
             publication_operation_id=publication_operation_id,
+            rest_empty_v1=rest_empty_v1,
         )
         return {
             "post_id": post_id,
@@ -5100,7 +5147,7 @@ def _publish_post_unlocked(
             "status": "skipped",
             "reason": f"post status is {post.get('status')}, expected pending",
         }
-    v2_state = _read_v2_work_state(post)
+    v2_state = _read_v2_work_state(post, allow_rest_empty_v1=True)
     if v2_state is not None:
         if v2_state.get("state") != "ready":
             return {"post_id": post_id, "wordpress_changed": False, "status": "skipped", "reason": f"estado V2 {v2_state.get('state')} fora da fila de publicacao", "state": v2_state.get("state")}
@@ -5452,6 +5499,14 @@ def _publish_now(
                 "retryable": True,
                 "state": STATE_READY,
             }
+    # The same operation fence records one of three modes: exact V1 empty
+    # sentinel (true), actual V2 READY (false), or neither / legacy (absent).
+    rest_empty_v1: bool | None = None
+    if expected_post is not None:
+        if _rest_empty_v1_work_state(expected_post) and read_state(expected_post).get("state") == STATE_READY:
+            rest_empty_v1 = True
+        elif (_read_v2_work_state(expected_post) or {}).get("state") == "ready":
+            rest_empty_v1 = False
     published_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     publication_operation_id = uuid.uuid4().hex
     publish_meta = {
@@ -5471,6 +5526,7 @@ def _publish_now(
             ready_hash=ready_hash,
             ready_manifest=ready_manifest,
             publication_operation_id=publication_operation_id,
+            rest_empty_v1=rest_empty_v1,
         )
     except OSError as exc:
         return {
@@ -5505,6 +5561,7 @@ def _publish_now(
                 root or Path("."), post_id, exc,
                 ready_hash=ready_hash, ready_manifest=ready_manifest,
                 publication_operation_id=publication_operation_id,
+                rest_empty_v1=rest_empty_v1,
             )
             _append_publish_telemetry(
                 root or Path("."),
@@ -5542,12 +5599,14 @@ def _publish_now(
                 ready_hash=ready_hash,
                 ready_manifest=ready_manifest,
                 expected_operation_id=publication_operation_id,
+                rest_empty_v1=rest_empty_v1,
             )
         except Exception as sync_exc:  # noqa: BLE001 - do not retry blindly
             _mark_uncertain_publication(
                 root or Path("."), post_id, sync_exc,
                 ready_hash=ready_hash, ready_manifest=ready_manifest,
                 publication_operation_id=publication_operation_id,
+                rest_empty_v1=rest_empty_v1,
             )
             _append_publish_telemetry(
                 root or Path("."),
@@ -5591,12 +5650,14 @@ def _publish_now(
             client, config, post_id, root=root,
             ready_hash=ready_hash, ready_manifest=ready_manifest,
             expected_operation_id=publication_operation_id,
+            rest_empty_v1=rest_empty_v1,
         )
     except Exception as exc:
         _mark_uncertain_publication(
             root or Path("."), post_id, exc,
             ready_hash=ready_hash, ready_manifest=ready_manifest,
             publication_operation_id=publication_operation_id,
+            rest_empty_v1=rest_empty_v1,
         )
         try:
             _append_publish_telemetry(
@@ -5665,7 +5726,7 @@ def publish_ready_posts(
         if protection.is_protected(candidate_id):
             outcomes.append({"post_id": candidate_id, "wordpress_changed": False, "status": "blocked", "reason": "epoch_protected_transaction", "epoch_protected": True})
             continue
-        v2_state = _read_v2_work_state(candidate)
+        v2_state = _read_v2_work_state(candidate, allow_rest_empty_v1=True)
         if v2_state is not None:
             if v2_state.get("state") != "ready":
                 continue
