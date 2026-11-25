@@ -1578,7 +1578,7 @@ def _apply_editorial_batch(
                     **({
                         "action_code": "verify_partial_resume",
                         "action": "verifique o rascunho e os anexos retidos; não recrie nem apague automaticamente",
-                    } if media_assembly_error["error_code"].startswith("partial_") else {
+                    } if media_assembly_error["error_code"].startswith(("partial_", "retained_media_")) else {
                         "action_code": "editorial_restructure_required",
                         "action": "revise a estrutura editorial deste post sem reduzir a cota ou o espaçamento",
                     }),
@@ -1601,6 +1601,19 @@ def _apply_editorial_batch(
                 continue
             if not admissible:
                 if preflight_reason == "post is not eligible (v1_ready_not_eligible)":
+                    marker = root / "backups" / str(post_id) / "editorial.partial.json"
+                    if marker.is_file():
+                        try:
+                            confirmed = apply_editorial(client, config, root, post_id, item["editorial"])
+                        except (V1PartialResumeError, WordPressError, PostLockContention) as exc:
+                            outcomes.append({
+                                "post_id": post_id, "status": "retry",
+                                "error_code": getattr(exc, "error_code", "post_lock_blocked"),
+                                "wordpress_changed": False, "reason": str(exc)[:240],
+                            })
+                            continue
+                        outcomes.append(confirmed)
+                        continue
                     outcomes.append({
                         "post_id": post_id, "status": "noop", "state": "ready",
                         "wordpress_changed": False, "idempotent": True,
@@ -1689,7 +1702,10 @@ def _apply_editorial_batch(
                 break
             except V1PartialResumeError as exc:
                 outcomes.append({
-                    "post_id": post_id, "status": "preflight_blocked", "wordpress_changed": False,
+                    "post_id": post_id, "status": "preflight_blocked",
+                    "wordpress_changed": None if exc.error_code in {
+                        "ready_readback_mismatch", "retained_media_upload_uncertain",
+                    } else False,
                     "error_code": exc.error_code, "reason": str(exc),
                     "action_code": "verify_partial_resume",
                 })
@@ -4703,7 +4719,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     os.environ["UNICORNIO_BATCH_STAGE"] = previous_stage
         elif args.command == "apply-batch":
             batch = load_editorial_batch(args.batch_file)
-            batch = resolve_batch_editorial_defaults(client, batch, root=args.root)
+            batch = resolve_batch_editorial_defaults(client, batch, root=args.root, config=config)
             media_manifest = getattr(args, "media_manifest", None)
             if media_manifest is None:
                 candidate_manifest = args.batch_file.with_name("media.manifest.json")

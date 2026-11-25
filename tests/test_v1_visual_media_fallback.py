@@ -53,6 +53,9 @@ def media_case(monkeypatch):
         assert evidence["credit_text"]
         return {"id": 90, "source_url": "https://wp.test/videogame-90.webp"}
 
+    # This fixture asserts the Vision/readback gates independently of the
+    # media checkpoint's real authenticated GET, which has a separate E2E.
+    monkeypatch.setattr("unicornio_editor.workflow._verified_v1_progress_asset", lambda *_args: True)
     monkeypatch.setattr(downloader, "urlopen_remote", assets)
     monkeypatch.setattr(vision_gate, "_call_vision", provider)
     monkeypatch.setattr("unicornio_editor.workflow.upload_image", upload)

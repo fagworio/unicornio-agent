@@ -195,7 +195,11 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def setUp(self):
-        pass
+        # These tests stub the upload transport without serving the converted
+        # bytes; readback itself is exercised by the dedicated V1 and REST E2E tests.
+        media_readback = mock.patch("unicornio_editor.workflow._verified_v1_progress_asset", return_value=True)
+        media_readback.start()
+        self.addCleanup(media_readback.stop)
 
     def config(self, dry_run):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=dry_run)

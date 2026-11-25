@@ -45,7 +45,9 @@ from .media.converter import (
 )
 from .media.downloader import MediaDownloadError, download_image
 from .media.diagnostics import diagnostic_url_domain
-from .media.inserter import append_featured_credit, insert_media
+from .media.inserter import (
+    MediaInsertionError, append_featured_credit, insert_media, plan_normal_media_insertions,
+)
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
 from .media.text import sanitize_title, split_game_names
@@ -101,7 +103,7 @@ from .trailer import (
     find_cached_game_trailer_with_status, find_game_trailer_with_status,
     trailer_search_query,
 )
-from .wordpress import WordPressClient, WordPressError
+from .wordpress import SafetyError, WordPressClient, WordPressError
 from .pipeline_v2.quarantine import (
     QuarantinePolicyError,
     assert_post_not_quarantined,
@@ -443,13 +445,361 @@ def verified_v1_partial_resume(
     return {"binding": binding, "body": body, "accepted": accepted, "manifest": manifest}
 
 
+def _v1_media_subject(editorial: dict[str, Any]) -> tuple[str, str]:
+    identity = resolve_editorial_identity(editorial)
+    return (
+        " ".join(str(identity.get("primary_subject") or "").casefold().split()),
+        str(identity.get("subject_type") or ""),
+    )
+
+
+def _v1_progress_source(post: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
+        [post["id"], _original_link(post)],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _v1_content_digest(html: str) -> str:
+    return hashlib.sha256(html.encode()).hexdigest()
+
+
+def _v1_progress_record_valid(row: Any) -> bool:
+    return (
+        isinstance(row, dict) and row.get("status") == "accepted"
+        and type(row.get("media_id")) is int and row["media_id"] > 0
+        and isinstance(row.get("media_url"), str) and _is_webp_attachment_url(row["media_url"])
+        and all(type(row.get(key)) is int and row[key] > 0 for key in ("width", "height"))
+        and isinstance(row.get("alt_text"), str) and isinstance(row.get("credit_text"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256") or "")))
+        and bool(re.fullmatch(r"[0-9a-f]{16}", str(row.get("phash") or "")))
+        and isinstance(row.get("visual_verification"), dict)
+    )
+
+
+def _verified_v1_progress_asset(
+    client: Any, config: Config, post_id: int, row: dict[str, Any],
+) -> bool:
+    """Use positive proof for reuse; a transient read never becomes a new deficit."""
+    try:
+        asset = client.get_media(row["media_id"])
+    except WordPressError as exc:
+        if known_wordpress_entity_missing(exc):
+            return False
+        if exc.status_code in {401, 403}:
+            raise
+        raise V1PartialResumeError("retained_media_read_unavailable", post_id=post_id) from exc
+    if not isinstance(asset, dict) or not isinstance(asset.get("media_details"), dict):
+        raise V1PartialResumeError("retained_media_read_incomplete", post_id=post_id)
+    details = asset["media_details"]
+    if (
+        type(asset.get("id")) is not int or not asset.get("source_url") or not asset.get("mime_type")
+        or type(details.get("width")) is not int or type(details.get("height")) is not int
+    ):
+        raise V1PartialResumeError("retained_media_read_incomplete", post_id=post_id)
+    if (
+        asset.get("id") != row["media_id"] or asset.get("source_url") != row["media_url"]
+        or asset.get("mime_type") != "image/webp"
+        or (details.get("width"), details.get("height")) != (row["width"], row["height"])
+    ):
+        return False
+    try:
+        _verify_v1_retained_bytes(
+            config, post_id, [row],
+            url_policy="enforce" if config.media_source_policy == "credit_only" else None,
+        )
+    except V1PartialResumeError as exc:
+        if exc.error_code == "partial_attachment_bytes_changed":
+            return False
+        raise
+    return True
+
+
+def verified_v1_media_progress(
+    client: Any, config: Config, root: Path, post: dict[str, Any], *, reconcile_uploads: bool = False,
+) -> dict[str, Any] | None:
+    """Read V1 progress independent of editorial disposition, not a READY decision."""
+    if post.get("status") != "pending" or read_state(post).get("state") not in {None, STATE_NEW, STATE_PARTIAL, STATE_BLOCKED}:
+        return None
+    post_id = int(post["id"])
+    path = _partial_manifest_path(root, post_id)
+    if not path.is_file() or resolve_post_eligibility(post, root).is_v2:
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise V1PartialResumeError("partial_resume_manifest_invalid", post_id=post_id) from exc
+    if not isinstance(manifest, dict):
+        raise V1PartialResumeError("partial_resume_manifest_invalid", post_id=post_id)
+    if "v1_media_progress" not in manifest:
+        return None
+    saved = manifest["v1_media_progress"]
+    if (
+        not isinstance(saved, dict) or saved.get("version") != 1
+        or saved.get("post_id") != post_id
+        or not isinstance(saved.get("source"), str)
+        or not isinstance(saved.get("bodies"), list)
+        or not isinstance(saved.get("rows"), list)
+        or not isinstance(saved.get("subject"), list) or len(saved["subject"]) != 2
+        or not all(isinstance(key, str) for key in saved["subject"])
+        or not isinstance(saved.get("intents", {}), dict)
+    ):
+        raise V1PartialResumeError("retained_media_manifest_invalid", post_id=post_id)
+    final_manifest = saved.get("ready_manifest") if saved.get("ready_staged") else None
+    if (
+        isinstance(final_manifest, dict) and saved["source"] == _v1_progress_source(post)
+        and saved.get("source_title") == _post_title(post) and not saved.get("intents")
+        and manifest_matches(post, final_manifest, manifest_hash(final_manifest), policy_version=config.policy_version)
+    ):
+        return {**saved, "finalization_pending": True}
+    if (
+        saved["source"] != _v1_progress_source(post)
+        or _v1_content_digest(_raw_content(post)) not in saved["bodies"]
+        or saved.get("policy") != [config.media_source_policy, config.policy_version, VISION_POLICY_VERSION]
+    ):
+        if saved.get("intents"):
+            raise V1PartialResumeError("retained_media_upload_context_changed", post_id=post_id)
+        return None
+    if saved.get("intents"):
+        if saved.get("source_title") != _post_title(post):
+            raise V1PartialResumeError("retained_media_upload_context_changed", post_id=post_id)
+        saved = _reconcile_v1_uploads(
+            client, config, root, post_id, manifest, saved,
+            persist=reconcile_uploads and not config.dry_run,
+        )
+    accepted: list[dict[str, Any]] = []
+    for row in saved["rows"]:
+        if not _v1_progress_record_valid(row):
+            continue
+        if any(
+            row[key] == other[key] for other in accepted for key in ("media_id", "media_url", "sha256", "phash")
+        ):
+            continue
+        if _verified_v1_progress_asset(client, config, post_id, row):
+            accepted.append(row)
+    return {**saved, "rows": accepted}
+
+
+def place_v1_retained_media(
+    progress: dict[str, Any], editorial: dict[str, Any], *, title: str, categories: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Preserve proof independently of the old paragraph positions."""
+    if not progress.get("subject", [""])[0] or tuple(progress["subject"]) != _v1_media_subject(editorial):
+        return [], None
+    body = str(editorial.get("cleaned_html") or "")
+    seo = editorial.get("seo") or {}
+    title = next((value for value in (title, str(editorial.get("title") or ""), str(seo.get("title") or ""))
+                  if detect_list_format(value, body, categories) is not None), title)
+    is_list = detect_list_format(title, body, categories) is not None
+    items = {item.identity: item for item in extract_list_items(title, body, categories)} if is_list else {}
+    raw_urls = {_canonical_image_url(row["src"]) for row in iter_content_images(body) if row.get("src")}
+    existing_items = {
+        row.get("item_identity") for row in list_item_media_assets(title, body, categories)
+    } if is_list else set()
+    retained = []
+    featured = None
+    for row in progress["rows"]:
+        if row.get("featured"):
+            featured = row
+            continue
+        if _canonical_image_url(row["media_url"]) in raw_urls:
+            continue
+        key = row.get("item_identity")
+        if is_list:
+            item = items.get(key)
+            if item is None or key in existing_items:
+                continue
+            if " ".join(str(row.get("subject") or "").casefold().split()) != " ".join(item.heading.casefold().split()):
+                continue
+            retained.append({
+                **row, "paragraph_index": item.paragraph_index, "section_slot": item.paragraph_index,
+                "html_position": item.html_position, "section_heading": item.heading,
+            })
+            # Multiple distinct roles within the same list item can be retained;
+            # the list planner still checks that every position stays in that item.
+        elif not key:
+            retained.append({**row, "placement": None})
+    if retained and not is_list:
+        entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
+        required = _images_summary(body, title, entities)["missing"]
+        retained = retained[:required]
+        # Reserve the current edition's full quota if its layout allows it so
+        # retained assets do not occupy slots required by new candidates.
+        try:
+            return plan_normal_media_insertions(
+                body, retained + [{}] * (required - len(retained))
+            )[:len(retained)], featured
+        except MediaInsertionError:
+            try:
+                return plan_normal_media_insertions(body, retained), featured
+            except MediaInsertionError as exc:
+                raise V1PartialResumeError(exc.code, post_id=progress["post_id"]) from exc
+    return retained, featured
+
+
+class _V1MediaProgress:
+    """Checkpoint writes while the caller still owns the existing post lock."""
+
+    def __init__(self, client: Any, config: Config, root: Path, post: dict[str, Any],
+                 editorial: dict[str, Any], prior: dict[str, Any] | None) -> None:
+        self.client, self.config, self.root = client, config, root
+        self.post_id = int(post["id"])
+        subject = list(_v1_media_subject(editorial))
+        self.record = dict(prior) if prior and prior["subject"] == subject else {
+            "version": 1, "post_id": self.post_id, "source": _v1_progress_source(post),
+            "subject": subject, "rows": [], "intents": {},
+            "policy": [config.media_source_policy, config.policy_version, VISION_POLICY_VERSION],
+        }
+        self.record.pop("ready_manifest", None)
+        self.record.pop("ready_staged", None)
+        self.record["source_title"] = _post_title(post)
+        self.record["bodies"] = sorted({
+            _v1_content_digest(_raw_content(post)),
+            _v1_content_digest(_baseline_content(post, config)),
+        })
+
+    def save(self) -> None:
+        existing = _load_partial_manifest(self.root, self.post_id)
+        _save_partial_manifest(self.root, self.post_id, {**existing, "v1_media_progress": self.record})
+
+    def begin(self, row: dict[str, Any]) -> str:
+        token = "unicornio-" + uuid.uuid4().hex
+        self.record["intents"][token] = row.copy()
+        self.save()
+        return token
+
+    def no_write(self, token: str) -> None:
+        del self.record["intents"][token]
+        self.save()
+
+    def accepted(self, row: dict[str, Any]) -> None:
+        token = row.get("upload_token")
+        if token not in self.record["intents"]:
+            return
+        self.record["intents"][token] = row
+        self.save()
+        self.remember(row)
+
+    def remember(self, row: dict[str, Any]) -> None:
+        if not _v1_progress_record_valid(row):
+            raise V1PartialResumeError("retained_media_upload_uncertain", post_id=self.post_id)
+        if not _verified_v1_progress_asset(
+            self.client, self.config, self.post_id, row,
+        ):
+            raise V1PartialResumeError("retained_media_upload_uncertain", post_id=self.post_id)
+        self.record["rows"] = [
+            previous for previous in self.record["rows"]
+            if previous["media_id"] != row["media_id"]
+        ] + [row]
+        self.record["intents"].pop(row.get("upload_token"), None)
+        self.save()
+
+
+def _reconcile_v1_uploads(
+    client: Any, config: Config, root: Path, post_id: int, manifest: dict[str, Any],
+    progress: dict[str, Any], *, persist: bool,
+) -> dict[str, Any]:
+    """Adopt only a unique positive match; absence is not a safe retry signal."""
+    updated = {**progress, "rows": list(progress["rows"]), "intents": dict(progress["intents"])}
+    for token, intent in progress["intents"].items():
+        if not isinstance(token, str) or not re.fullmatch(r"unicornio-[0-9a-f]{32}", token) or not isinstance(intent, dict):
+            raise V1PartialResumeError("retained_media_manifest_invalid", post_id=post_id)
+        row = intent
+        if not row.get("media_id"):
+            if not callable(getattr(client, "search_media", None)):
+                raise V1PartialResumeError("retained_media_upload_uncertain", post_id=post_id)
+            matches = [
+                media for media in client.search_media(token)
+                if isinstance(media, dict) and type(media.get("id")) is int
+                and isinstance(media.get("title"), dict)
+                and str(media["title"].get("rendered") or "").endswith(f" [{token}]")
+            ]
+            if len(matches) != 1:
+                raise V1PartialResumeError("retained_media_upload_uncertain", post_id=post_id)
+            row = {**intent, "media_id": matches[0]["id"], "media_url": matches[0].get("source_url"),
+                   "upload_token": token}
+        if not _v1_progress_record_valid(row) or not _verified_v1_progress_asset(client, config, post_id, row):
+            raise V1PartialResumeError("retained_media_upload_uncertain", post_id=post_id)
+        updated["rows"] = [r for r in updated["rows"] if not isinstance(r, dict)
+                           or r.get("media_id") != row["media_id"]] + [row]
+        del updated["intents"][token]
+    if persist:
+        _save_partial_manifest(root, post_id, {**manifest, "v1_media_progress": updated})
+    return updated
+
+
+def _confirmed_v1_ready(post: dict[str, Any], manifest: dict[str, Any], config: Config) -> bool:
+    meta = post.get("meta") or {}
+    digest = manifest_hash(manifest)
+    return (
+        post.get("status") == "pending"
+        and meta.get(META_STATE) == STATE_READY
+        and meta.get(META_READY_HASH) == digest
+        and parse_manifest(meta.get(META_READY_MANIFEST)) == manifest
+        and manifest_matches(post, manifest, digest, policy_version=config.policy_version)
+    )
+
+
+def _finish_v1_ready(
+    client: Any, config: Config, root: Path, post: dict[str, Any], manifest: dict[str, Any],
+) -> dict[str, Any]:
+    post_id = int(post["id"])
+    digest = manifest_hash(manifest)
+    if post.get("status") != "pending" or not manifest_matches(
+        post, manifest, digest, policy_version=config.policy_version,
+    ):
+        raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+    client.update_post(post_id, {"meta": {
+        **build_state_markers(STATE_READY, ready_hash=digest,
+                              policy_version=config.policy_version, media_search_attempts=0),
+        META_READY_MANIFEST: serialize_manifest(manifest),
+    }})
+    readback = client.get_post(post_id)
+    if not _confirmed_v1_ready(readback, manifest, config):
+        raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+    _clear_processing_markers(root, post_id)
+    return readback
+
+
+def _resume_v1_final_write(
+    client: Any, config: Config, root: Path, post: dict[str, Any],
+) -> dict[str, Any] | None:
+    post_id = int(post["id"])
+    saved = _load_partial_manifest(root, post_id).get("v1_media_progress")
+    if not isinstance(saved, dict) or not saved.get("ready_staged"):
+        return None
+    manifest = saved.get("ready_manifest")
+    if (
+        saved.get("post_id") != post_id or saved.get("source") != _v1_progress_source(post)
+        or saved.get("source_title") != _post_title(post) or not isinstance(manifest, dict)
+        or saved.get("intents")
+    ):
+        raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+    if manifest_matches(post, manifest, manifest_hash(manifest), policy_version=config.policy_version):
+        rows = saved.get("rows")
+        if not isinstance(rows, list) or not all(
+            _v1_progress_record_valid(row) and _verified_v1_progress_asset(client, config, post_id, row)
+            for row in rows
+        ):
+            raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+        _finish_v1_ready(client, config, root, post, manifest)
+        return {
+            "post_id": post_id, "status": "ready", "state": STATE_READY,
+            "wordpress_changed": True, "ready_hash": manifest_hash(manifest),
+            "final_write_reconciled": True,
+        }
+    if _v1_content_digest(_raw_content(post)) not in (saved.get("bodies") or []):
+        raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+    return None  # original pending body is intact; normal guarded replay is safe
+
+
 def _is_webp_attachment_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and parsed.path.lower().endswith(".webp")
 
 
 def _verify_v1_retained_bytes(
-    config: Config, post_id: int, retained: list[dict[str, Any]],
+    config: Config, post_id: int, retained: list[dict[str, Any]], *, url_policy: str | None = None,
 ) -> None:
     # Media endpoint metadata can stay unchanged when an attachment's file is
     # replaced in place. Compare the bytes before committing budget or writing.
@@ -458,7 +808,7 @@ def _verify_v1_retained_bytes(
             try:
                 downloaded = download_image(
                     row["media_url"], Path(directory) / f"{row['media_id']}.webp",
-                    max_attempts=1, url_policy=config.remote_url_policy,
+                    max_attempts=1, url_policy=url_policy or config.remote_url_policy,
                 )
                 digest = hashlib.sha256(Path(downloaded).read_bytes()).hexdigest()
             except (MediaDownloadError, OSError) as exc:
@@ -685,6 +1035,15 @@ def _apply_editorial_unlocked(
         raise WorkflowError("editorial media layout source changed; prepare the post again")
     resolved = resolve_post_eligibility(post, root)
     if not resolved.is_v2 and resolved.state == STATE_READY:
+        saved = _load_partial_manifest(root, post_id).get("v1_media_progress")
+        if isinstance(saved, dict):
+            expected = saved.get("ready_manifest")
+            if not isinstance(expected, dict) or saved.get("intents") or not _confirmed_v1_ready(
+                post, expected, config,
+            ):
+                raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
+            if not config.dry_run:
+                _clear_processing_markers(root, post_id)
         # A pending post can legitimately be READY while Publisher is paused.
         # Reapplying the same editorial would spend provider budget and could
         # duplicate uploads; the durable READY marker is already the result.
@@ -699,6 +1058,10 @@ def _apply_editorial_unlocked(
         eligibility = assert_v1_mutation_allowed(post, root, operation="apply")
     except RuntimeError as exc:
         raise WorkflowError(str(exc)) from exc
+    if not config.dry_run:
+        resumed = _resume_v1_final_write(client, config, root, post)
+        if resumed is not None:
+            return resumed
     editorial = validate_editorial(
         payload,
         min_confidence=config.min_relevance_confidence,
@@ -712,11 +1075,15 @@ def _apply_editorial_unlocked(
         partial_manifest = _load_partial_manifest(root, post_id, required=True)
     else:
         partial_manifest = {}
-        if partial_path.is_file():
-            append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
     partial_resume = None
     prior_media = _partial_media_records(partial_manifest)
-    if decision == "process" and state_before.get("state") == STATE_PARTIAL:
+    media_progress = (
+        verified_v1_media_progress(client, config, root, post, reconcile_uploads=True)
+        if decision == "process" else None
+    )
+    if media_progress is None and not partial_manifest and partial_path.is_file():
+        append_telemetry(root, "partial_manifest_orphaned", post_id=post_id)
+    if media_progress is None and decision == "process" and state_before.get("state") == STATE_PARTIAL:
         partial_resume = verified_v1_partial_resume(client, root, post)
         if partial_resume is not None:
             if editorial.get("cleaned_html") is None:
@@ -835,6 +1202,17 @@ def _apply_editorial_unlocked(
             "backup": str(backup),
         }
 
+    progress_writes = None
+    progress_featured = None
+    if media_progress is not None:
+        prior_media, progress_featured = place_v1_retained_media(
+            media_progress, editorial, title=_post_title(post),
+            categories=editorial.get("categories") or post.get("categories") or (),
+        )
+        partial_manifest = {}
+    if not config.dry_run:
+        progress_writes = _V1MediaProgress(client, config, root, post, editorial, media_progress)
+
     # Draft persistido ANTES da execução pesada: mesmo que download/upload/
     # checklist falhem, o trabalho editorial fica salvo e o rework corrige
     # somente o componente com problema (nunca reescreve o texto nem re-gera
@@ -847,7 +1225,10 @@ def _apply_editorial_unlocked(
         if isinstance(item.get("paragraph_index"), int)
     }
     effective_kind = _effective_partial_kind(state_before)
-    partial_featured = partial_manifest.get("featured") or {}
+    partial_featured = (
+        {**progress_featured, "status": "valid"} if progress_featured
+        else partial_manifest.get("featured") or {}
+    )
     legacy_featured_vision = (
         effective_kind == "featured_vision"
         and partial_featured.get("status") == "valid"
@@ -865,8 +1246,10 @@ def _apply_editorial_unlocked(
         config.media_source_policy == "credit_only"
         and partial_featured.get("status") in {"valid", "verification_pending"}
     )
-    retained_featured = None
-    if retain_credit_featured:
+    retained_featured = ({**progress_featured, "retained": True, "attachment": client.get_media(
+        progress_featured["media_id"],
+    )} if progress_featured else None)
+    if retain_credit_featured and not progress_featured:
         retained_id = partial_featured.get("media_id")
         if type(retained_id) is not int or retained_id <= 0:
             raise WorkflowError(f"featured_retained_identity_unverified: post {post_id}")
@@ -892,22 +1275,24 @@ def _apply_editorial_unlocked(
         retained_featured = {
             **partial_featured, "featured": True, "retained": True, "attachment": attachment,
         }
-    if partial_manifest:
+    proven_assets = prior_media + ([progress_featured] if progress_featured else [])
+    if partial_manifest or media_progress is not None:
         remaining_plan = []
         for item in (editorial.get("media_plan") or []):
             if isinstance(item, dict) and item.get("is_featured") and (partial_featured_valid or retain_credit_featured):
                 continue
             if isinstance(item, dict) and (
-                (not item.get("is_featured") and item.get("paragraph_index") in partial_slots)
-                or (partial_resume is not None and _retained_partial_candidate(item, prior_media))
+                (not item.get("is_featured") and item.get("paragraph_index") in partial_slots
+                 and not item.get("item_identity"))
+                or ((partial_resume is not None or media_progress is not None) and _retained_partial_candidate(item, proven_assets))
             ):
                 continue
             remaining_plan.append(item)
         editorial = {**editorial, "media_plan": remaining_plan}
-    if partial_resume is not None:
+    if partial_resume is not None or media_progress is not None:
         media_fallback_candidates = [
             item for item in (media_fallback_candidates or [])
-            if not _retained_partial_candidate(item, prior_media)
+            if not _retained_partial_candidate(item, proven_assets)
         ]
     v1_vision_deadline = (
         time.monotonic() + config.media_operation_timeout_seconds
@@ -928,6 +1313,7 @@ def _apply_editorial_unlocked(
             None
             if partial_featured_rejected
             or retain_credit_featured
+            or progress_featured
             else int(post.get("featured_media") or 0) or None
         ),
     )
@@ -938,11 +1324,21 @@ def _apply_editorial_unlocked(
         media_fallback_candidates=media_fallback_candidates,
         v1_visual_fallback=True,
         post_categories=post.get("categories") or (),
+        **({"before_upload": progress_writes.begin, "on_accepted": progress_writes.accepted,
+            "upload_rejected": progress_writes.no_write}
+           if progress_writes is not None else {}),
+        **({"featured_visual_asset": progress_featured} if progress_featured else {}),
         **({
             "previous_inline_phashes": tuple(str(row["phash"]) for row in prior_media),
             "previous_inline_visual_assets": [dict(row) for row in prior_media],
-        } if partial_resume is not None else {}),
+        } if partial_resume is not None or media_progress is not None else {}),
     )
+    if progress_writes is not None and progress_writes.record["intents"]:
+        return {
+            "post_id": post_id, "status": "retry", "retryable": True,
+            "wordpress_changed": False, "error_code": "retained_media_upload_uncertain",
+            "media_plan_results": media_results,
+        }
     combined_media_results = prior_media + [
         item for item in media_results
         if item.get("media_url") and not item.get("featured")
@@ -966,6 +1362,7 @@ def _apply_editorial_unlocked(
             if approved_sha:
                 featured_id = _normalize_existing_featured(
                     client, config, post, editorial, root=root, approved_sha=approved_sha,
+                    progress=progress_writes,
                 )
                 if featured_id:
                     original_cover_receipt = {
@@ -1264,6 +1661,11 @@ def _apply_editorial_unlocked(
                     "processing_passes": passes,
                     "no_progress_attempts": no_progress,
                 }
+                # Ordinary PARTIAL keeps its established stricter contract.
+                # Once a mixed rework is active, carry the independent journal
+                # over when that post has only media blockers left.
+                if media_progress is not None and progress_writes is not None and progress_writes.record["rows"]:
+                    manifest["v1_media_progress"] = progress_writes.record
                 _save_partial_manifest(root, post_id, manifest)
                 next_retry = partial_retry["next_retry_at"]
                 if not _write_state_markers(
@@ -1331,11 +1733,29 @@ def _apply_editorial_unlocked(
                     "next_retry_at": "",
                 }
             else:
+                rework_attempt = attempts
+                if progress_writes is not None and progress_writes.record["rows"]:
+                    # Preserve the existing rate limits; only durable new assets
+                    # or a formerly failed gate now passing count as progress.
+                    previous_ids = {row["media_id"] for row in (media_progress or {}).get("rows", [])}
+                    new_assets = any(row["media_id"] not in previous_ids for row in progress_writes.record["rows"])
+                    previous_failures = set((media_progress or {}).get("failed_gates", []))
+                    passed = {item["name"] for item in checklist["items"] if item.get("status") == "pass"}
+                    repaired = (previous_failures & passed) - set((media_progress or {}).get("repaired_gates", []))
+                    progress_writes.record["failed_gates"] = sorted({item["name"] for item in failed_items})
+                    progress_writes.record["repaired_gates"] = sorted(
+                        set((media_progress or {}).get("repaired_gates", [])) | repaired
+                    )
+                    no_progress = 0 if new_assets or repaired else state_info["no_progress_attempts"] + 1
+                    progress_writes.record["no_progress"] = no_progress
+                    progress_writes.save()
+                    rework_attempt = max(1, no_progress)
                 backoff = rework_backoff(
-                    attempts,
+                    rework_attempt,
                     cooldown_minutes=config.rework_cooldown_minutes,
                     max_attempts=config.max_rework_attempts,
                 )
+                backoff["attempts"] = attempts
             last_error = "; ".join(
                 f"{item['name']}: {str(item.get('detail') or '')[:120]}"
                 for item in failed_items[:5]
@@ -1354,6 +1774,9 @@ def _apply_editorial_unlocked(
                 next_retry_at=backoff["next_retry_at"],
                 last_error=last_error,
                 media_search_attempts=media_search_attempts,
+                no_progress_attempts=(
+                    progress_writes.record.get("no_progress") if progress_writes is not None else None
+                ),
             )
             if not _state_ok and backoff["state"] in (STATE_AWAITING_HUMAN, STATE_UNCERTAIN):
                 raise WorkflowError(
@@ -1524,7 +1947,29 @@ def _apply_editorial_unlocked(
     }
     if featured_id:
         update_payload["featured_media"] = featured_id
-    result = client.update_post(post_id, update_payload)
+    final_readback = progress_writes is not None and bool(progress_writes.record["rows"])
+    if final_readback:
+        assert progress_writes is not None
+        progress_writes.record.update(ready_manifest=manifest, ready_staged=media_progress is not None)
+        progress_writes.save()
+    if final_readback and media_progress is not None:
+        staged_payload = {
+            **update_payload,
+            "meta": {**build_meta(editorial["seo"]), **build_processing_markers(
+                editorial["site_relevance"]["decision"],
+                editorial["site_relevance"]["confidence"],
+            )},
+        }
+        # Do not expose READY to the Publisher until the new HTML and its
+        # manifest inputs have been confirmed in WordPress.
+        client.update_post(post_id, staged_payload)
+        result = _finish_v1_ready(client, config, root, client.get_post(post_id), manifest)
+    else:
+        result = client.update_post(post_id, update_payload)
+        if final_readback:
+            result = client.get_post(post_id)
+            if not _confirmed_v1_ready(result, manifest, config):
+                raise V1PartialResumeError("ready_readback_mismatch", post_id=post_id)
     # O post saiu do estado de rework: limpa os marcadores para o queue nao
     # continuar listando blocked/uncertain (senao o monitor acordaria o agente
     # em loop para "corrigir" um post ja corrigido).
@@ -3159,6 +3604,8 @@ def _execute_media_plan(
     featured_visual_asset: dict[str, Any] | None = None,
     visual_comparison_budget: list[int] | None = None,
     on_accepted: Callable[[dict[str, Any]], None] | None = None,
+    before_upload: Callable[[dict[str, Any]], str] | None = None,
+    upload_rejected: Callable[[str], None] | None = None,
     media_fallback_candidates: list[dict[str, Any]] | None = None,
     v1_visual_fallback: bool = False,
     post_categories: Any = (),
@@ -4005,9 +4452,43 @@ def _execute_media_plan(
                         "featured_vision_final_bytes", "passed", item, position,
                         "same_sha256_as_preflight" if expected_sha256 == identity.sha256 else "validated_before_upload",
                     )
+                visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
+                accepted_result = {
+                    "status": "accepted",
+                    "paragraph_index": item["paragraph_index"],
+                    "placement": item.get("placement"),
+                    "candidate_id": item.get("candidate_id"),
+                    "target_id": item.get("target_id"),
+                    "direct_image_url": item.get("direct_image_url"),
+                    "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
+                    "subject": item.get("subject"),
+                    "item_identity": item.get("item_identity"),
+                    "item_title": item.get("item_title") or item.get("subject"),
+                    "item_group": item.get("item_group"),
+                    "item_number": item.get("item_number"),
+                    "section_heading": item.get("section_heading"),
+                    "section_slot": item.get("section_slot"),
+                    "html_position": item.get("html_position"),
+                    "featured": is_featured, "width": width, "height": height,
+                    "provenance_mode": str(item.get("provenance_mode") or "source_page"),
+                    "source_page_verified": source_verify_status == "passed",
+                    "rights_verified": False if str(item.get("provenance_mode") or "") == "credit_only" else None,
+                    "transparency": transparency, "phash": final_phash or identity.phash,
+                    "sha256": identity.sha256, "visual_group_id": identity.visual_group_id,
+                    "visual_verification": visual_record,
+                    **({"vision_evidence": vision_evidence_record} if vision_evidence_record else {}),
+                }
+                token = before_upload(accepted_result) if before_upload is not None else None
                 try:
-                    media = upload_image(client, webp, evidence)
+                    media = upload_image(client, webp, {**evidence, "_v1_upload_token": token} if token else evidence)
                 except Exception as exc:  # noqa: BLE001 - upload failure is candidate-scoped
+                    if token and upload_rejected is not None and (
+                        isinstance(exc, SafetyError)
+                        or isinstance(exc, WordPressError) and exc.api_code in {
+                            "rest_cannot_create", "rest_upload_no_data", "rest_invalid_param",
+                        }
+                    ):
+                        upload_rejected(token)
                     _funnel("upload", "error", item, position, type(exc).__name__)
                     return position, _structured_media_failure(
                         exc,
@@ -4027,33 +4508,10 @@ def _execute_media_plan(
                         "recoverable": True,
                         "detail": "upload returned incomplete media identity",
                     }
-                visual_record = {"decision": visual.decision, "reason": visual.reason, "comparisons": list(visual.comparisons)}
-                accepted_result = {
-                    "status": "accepted",
-                    "paragraph_index": item["paragraph_index"],
-                    "placement": item.get("placement"),
-                    "candidate_id": item.get("candidate_id"),
-                    "target_id": item.get("target_id"),
-                    "media_id": media_id, "media_url": media_url,
-                    "direct_image_url": item.get("direct_image_url"),
-                    "alt_text": item["alt_text"], "credit_text": item.get("credit_text") or "",
-                    "subject": item.get("subject"),
-                    "item_identity": item.get("item_identity"),
-                    "item_title": item.get("item_title") or item.get("subject"),
-                    "item_group": item.get("item_group"),
-                    "item_number": item.get("item_number"),
-                    "section_heading": item.get("section_heading"),
-                    "section_slot": item.get("section_slot"),
-                    "html_position": item.get("html_position"),
-                    "featured": is_featured, "width": width, "height": height,
-                    "provenance_mode": str(item.get("provenance_mode") or "source_page"),
-                    "source_page_verified": source_verify_status == "passed",
-                    "rights_verified": False if str(item.get("provenance_mode") or "") == "credit_only" else None,
-                    "transparency": transparency, "phash": final_phash,
-                    "sha256": identity.sha256, "visual_group_id": identity.visual_group_id,
-                    "visual_verification": visual_record,
-                    **({"vision_evidence": vision_evidence_record} if vision_evidence_record else {}),
-                }
+                accepted_result.update(media_id=media_id, media_url=media_url)
+                if token:
+                    accepted_result["upload_token"] = token
+
                 confirmed_uploads.add(position)
                 # Commit verified work before index/cache/telemetry can fail.
                 if on_accepted is not None:
@@ -4311,6 +4769,7 @@ def _normalize_existing_featured(
     *,
     root: Path | None = None,
     approved_sha: str | None = None,
+    progress: _V1MediaProgress | None = None,
 ) -> int | None:
     """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
@@ -4441,26 +4900,53 @@ def _normalize_existing_featured(
         except Exception as exc:
             report("featured_conversion_failed", "convert", outcome="rejected", exc=exc)
             return None
+        retained_row = None
         if approved_sha:
             if hashlib.sha256(webp.read_bytes()).hexdigest() != approved_sha:
                 report("approved_bytes_changed", "vision_readback", outcome="rejected")
                 return None
+            if progress is not None:
+                from .media.visual_hash import phash_from_path
+
+                phash = phash_from_path(str(webp))
+                if phash:
+                    retained_row = {
+                        "status": "accepted", "featured": True, "width": 1280, "height": 720,
+                        "alt_text": alt, "credit_text": caption, "sha256": approved_sha, "phash": phash,
+                        "direct_image_url": source_url,
+                        "visual_verification": {"decision": "INITIAL", "reason": "approved original cover"},
+                        "vision_evidence": {"image_role": "featured", "verdict": "accept", "image_sha256": approved_sha},
+                    }
             if already_normalized and webp == source:
+                if retained_row and progress and media.get("mime_type") == "image/webp":
+                    progress.remember({
+                        **retained_row, "media_id": featured, "media_url": source_url,
+                    })
                 return featured
             if webp == source:
                 destination.write_bytes(source.read_bytes())
                 webp = destination
+        token = progress.begin(retained_row) if retained_row and progress else None
         try:
             new_media = client.upload_media(
                 str(webp),
                 filename=filename,
                 alt_text=alt,
-                title=title,
+                title=f"{title} [{token}]" if token else title,
                 caption=caption,
             )
         except Exception as exc:
             report("wordpress_upload_failed", "upload", outcome="retryable_failure", exc=exc)
+            if token:
+                raise V1PartialResumeError("retained_media_upload_uncertain", post_id=int(post["id"])) from exc
             return None
+        if token and retained_row and progress:
+            if not isinstance(new_media, dict):
+                raise V1PartialResumeError("retained_media_upload_uncertain", post_id=int(post["id"]))
+            progress.accepted({
+                **retained_row, "upload_token": token,
+                "media_id": new_media.get("id"), "media_url": new_media.get("source_url"),
+            })
     if not isinstance(new_media, dict):
         report("wordpress_upload_missing_media_id", "upload", outcome="retryable_failure")
         return None

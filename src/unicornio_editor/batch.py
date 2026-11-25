@@ -52,6 +52,8 @@ from .workflow import (
     wordpress_read_stops_batch,
     prepare_post,
     resolve_editorial_defaults,
+    place_v1_retained_media,
+    verified_v1_media_progress,
     verified_v1_partial_resume,
 )
 
@@ -71,7 +73,7 @@ class BatchError(ValueError):
 
 
 def resolve_batch_editorial_defaults(
-    client: Any, batch: dict[str, Any], *, root: Path | None = None,
+    client: Any, batch: dict[str, Any], *, root: Path | None = None, config: Any = None,
 ) -> dict[str, Any]:
     """Fill omitted editorial fields from the current WordPress snapshot.
 
@@ -97,8 +99,16 @@ def resolve_batch_editorial_defaults(
             relevance = editorial.get("site_relevance") or {}
             if root is not None and isinstance(relevance, dict) and relevance.get("decision") == "process":
                 try:
-                    resume = verified_v1_partial_resume(client, root, post)
-                    if resume is not None:
+                    progress = verified_v1_media_progress(client, config, root, post) if config is not None else None
+                    resume = verified_v1_partial_resume(client, root, post) if progress is None else None
+                    if progress is not None:
+                        editorial = resolve_editorial_defaults(editorial, post)
+                        retained, cover = place_v1_retained_media(
+                            progress, editorial, title=_post_title(post),
+                            categories=editorial.get("categories") or post.get("categories") or (),
+                        )
+                        item.update(partial_resume=retained, retained_cover=bool(cover), reflowed_progress=True)
+                    elif resume is not None:
                         _bind_partial_editorial(editorial, resume, post_id)
                         item["partial_resume"] = resume["accepted"]
                 except V1PartialResumeError as exc:
@@ -193,6 +203,19 @@ def build_media_resolve_batch_input(
         cleaned_html = editorial.get("cleaned_html")
         if not isinstance(cleaned_html, str) or not cleaned_html.strip():
             cleaned_html = str(context.get("cleaned_html") or "")
+        progress = context.get("v1_media_progress")
+        retained_cover = None
+        if isinstance(progress, dict):
+            if progress.get("finalization_pending"):
+                continue
+            try:
+                retained, retained_cover = place_v1_retained_media(
+                    progress, {**editorial, "cleaned_html": cleaned_html}, title=str(context.get("title") or title),
+                    categories=editorial.get("categories") or context.get("categories") or (),
+                )
+            except V1PartialResumeError as exc:
+                partial_blocked.append({"post_id": post_id, "error_code": exc.error_code, "reason": str(exc)})
+                continue
         entities = {
             str(value).strip()
             for value in (context.get("entities") or [])
@@ -211,7 +234,7 @@ def build_media_resolve_batch_input(
         featured_action = str(
             featured.get("action") if isinstance(featured, dict) else "provide"
         ).strip().casefold()
-        featured_required = featured_action not in {"ok", "normalize", "recheck"}
+        featured_required = not retained_cover and featured_action not in {"ok", "normalize", "recheck"}
         categories = editorial.get("categories") or context.get("categories") or ()
         promised_items = detect_list_format(title, cleaned_html, categories)
         list_items = extract_list_items(title, cleaned_html, categories)
@@ -227,6 +250,7 @@ def build_media_resolve_batch_input(
                 for asset in existing_assets
                 if asset.get("item_identity")
             }
+            covered.update(row["item_identity"] for row in retained if row.get("item_identity"))
             missing_items = [item for item in list_items if item.identity not in covered]
             inline_target_count = max(inline_deficit, len(missing_items))
             if inline_target_count > MEDIA_BATCH_MAX_INLINE_TARGETS:
@@ -306,6 +330,7 @@ def build_media_resolve_batch_input(
         subject = title if len(game_names) > 1 else game_name or title
         if not subject:
             raise BatchError(f"subject vazio ao montar mídia para post {post_id}")
+        retained_assets = retained + ([retained_cover] if retained_cover else [])
         requests.append({
             "post_id": post_id,
             "subject": subject,
@@ -317,13 +342,13 @@ def build_media_resolve_batch_input(
             "featured_required": featured_required,
             "replacement_reserve": 0 if targets is not None else MEDIA_BATCH_REPLACEMENT_RESERVE,
             **({
-                "existing_media_ids": [row["media_id"] for row in retained],
-                "existing_media_urls": [row["media_url"] for row in retained],
-                "existing_media_phashes": {row["media_url"]: row["phash"] for row in retained},
+                "existing_media_ids": [row["media_id"] for row in retained_assets],
+                "existing_media_urls": [row["media_url"] for row in retained_assets],
+                "existing_media_phashes": {row["media_url"]: row["phash"] for row in retained_assets},
                 "excluded_direct_image_urls": list(dict.fromkeys(
-                    row["direct_image_url"] for row in retained if row.get("direct_image_url")
+                    row["direct_image_url"] for row in retained_assets if row.get("direct_image_url")
                 )),
-            } if retained else {}),
+            } if retained_assets else {}),
             **({"targets": targets} if targets is not None else {}),
         })
     if len(requests) > 2:
@@ -549,10 +574,12 @@ def merge_media_manifest_into_editorial(
         featured_required = media_row.get(
             "featured_required", str(media_row.get("role") or "").strip().lower() != "inline"
         )
+        if item.get("retained_cover"):
+            featured_required = False
         if not isinstance(featured_required, bool):
             raise BatchError(f"featured_required inválido em post {post_id}")
         target_rows = media_row.get("targets")
-        if retained and target_rows is not None:
+        if retained and target_rows is not None and not item.get("reflowed_progress"):
             item["media_assembly_error"] = {
                 "error_code": "partial_resume_target_layout_changed",
                 "reason": "targets de lista não podem substituir a colocação retida deste artigo",
@@ -1130,10 +1157,8 @@ def _context_for_post(
     source_content = _post_content(post)
     cleaned_html = str(prepared.get("cleaned_html") or "")
     state = read_state(post)
-    resume = (
-        verified_v1_partial_resume(client, root, post) if state.get("state") == STATE_PARTIAL
-        else None
-    )
+    progress = verified_v1_media_progress(client, config, root, post)
+    resume = verified_v1_partial_resume(client, root, post) if progress is None else None
     if resume is not None:
         cleaned_html = resume["body"]
     entities = extract_entities(title=title, content_html=cleaned_html)
@@ -1145,7 +1170,7 @@ def _context_for_post(
     media_policy = str(getattr(config, "media_source_policy", "strict"))
     retained_featured = (
         _load_partial_manifest(root, post["id"]).get("featured")
-        if media_policy == "credit_only" and state.get("state") == STATE_PARTIAL else None
+        if progress is None and media_policy == "credit_only" and state.get("state") == STATE_PARTIAL else None
     )
     if (
         isinstance(retained_featured, dict) and retained_featured.get("status") in {"valid", "verification_pending"}
@@ -1228,6 +1253,7 @@ def _context_for_post(
         "cleaned_html": cleaned_html,
         **({"partial_resume": {key: resume[key] for key in ("body", "binding", "accepted")}}
            if resume is not None else {}),
+        **({"v1_media_progress": progress} if progress is not None else {}),
         "seo_existing": _seo_snapshot(post),
         "featured_media": post.get("featured_media"),
         "categories": post.get("categories") or (),

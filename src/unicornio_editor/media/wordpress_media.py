@@ -60,10 +60,14 @@ def upload_image(
 
     credit = plain_text(evidence.get("credit_text") or "")
     alt = plain_text(evidence.get("alt_text") or "")
+    token = str(evidence.get("_v1_upload_token") or "")
+    title = alt or "Imagem editorial"
+    if re.fullmatch(r"unicornio-[0-9a-f]{32}", token):
+        title = f"{title} [{token}]"
     return client.upload_media(
         path,
         filename=friendly_media_filename(path, evidence),
         alt_text=alt,
-        title=alt or "Imagem editorial",
+        title=title,
         caption=credit,
     )

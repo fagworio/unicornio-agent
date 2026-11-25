@@ -1937,3 +1937,173 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
             "writer_result": writer_result,
             "journal": case._journal_summary(post_id),
         })
+
+
+def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wordpress_e2e_case, monkeypatch):
+    """Real WP writes and readback; local deterministic image and video evidence."""
+    from dataclasses import replace
+
+    import unicornio_editor.workflow as workflow
+    from unicornio_editor.media import downloader
+    from unicornio_editor.media.inserter import plan_normal_media_insertions
+    from unicornio_editor.media.relevance import iter_content_images
+
+    case = wordpress_e2e_case
+    first_id = case.post_id("v1_mixed_progress_first")
+    sibling_id = case.post_id("v1_mixed_progress_sibling")
+    with ControlledSource(subject_confidence=0.92) as source:
+        config = replace(
+            _automatic_pipeline_config(case, source, first_id, media_source_policy="credit_only"),
+            visual_comparison_max_calls=32,  # sufficient for six inline assets plus the retained cover
+        )
+        original_transport = downloader.urlopen_remote
+        source_downloads = []
+
+        def locally_controlled_transport(request, *, mode, **kwargs):
+            url = request.full_url if hasattr(request, "full_url") else str(request)
+            if url.startswith(source.base_url + "/images/"):
+                source_downloads.append(url)
+            if url.startswith((source.base_url + "/", case.url + "/wp-content/uploads/")):
+                mode = "off"  # isolated integration fixtures only
+            return original_transport(request, mode=mode, **kwargs)
+
+        monkeypatch.setattr(downloader, "urlopen_remote", locally_controlled_transport)
+        monkeypatch.setattr(workflow, "find_game_trailer_with_status",
+                            lambda *_args, **_kwargs: (None, "official_not_found"))
+        first = _automatic_pipeline_editorial()
+        sibling = _automatic_pipeline_editorial()
+        _persist_audited_trailer_absence(case.root, first)
+        _persist_audited_trailer_absence(case.root, sibling)
+        first["cleaned_html"] = "".join(
+            f"<p>Em Pharloom, Hollow Knight Silksong apresenta a região {number}, "
+            "onde a exploração de corredores verticais exige ferramentas diferentes para atravessar "
+            "armadilhas, abrir caminhos alternativos e entender como os inimigos protegem cada passagem.</p>"
+            for number in range(1, 37)
+        )
+        for post_id, editorial in [(first_id, first), (sibling_id, sibling)]:
+            case.client.update_post(post_id, {
+                "title": editorial["seo"]["title"],
+                "content": {"raw": editorial["cleaned_html"]},
+                "meta": {"original_link": f"{source.base_url}/article", "_hermes_state": "new"},
+            })
+
+        for index in range(10, 20):
+            source.images[f"controlled-{index}.png"] = _artwork(index)
+
+        def plan(index, featured=False):
+            return {
+                "paragraph_index": 0, "is_featured": featured,
+                "direct_image_url": f"{source.base_url}/images/controlled-{index}.png",
+                "alt_text": "Hollow Knight Silksong e o mundo de Pharloom",
+                "subject": "Hollow Knight Silksong",
+                "credit_text": "Crédito: E2E Artist.",
+            }
+
+        def batch(batch_id, *items):
+            monkeypatch.setenv("HERMES_SESSION_ID", batch_id)
+            return _apply_editorial_batch(case.client, config, case.root, {
+                "batch_id": batch_id, "schema_version": 1,
+                "items": [{"post_id": i, "editorial": editorial} for i, editorial in items],
+            }, dry_run=False, compact=False)["posts"]
+
+        uploads = []
+        original_upload = case.client.upload_media
+
+        def count_upload(*args, **kwargs):
+            uploaded = original_upload(*args, **kwargs)
+            uploads.append(uploaded["id"])
+            return uploaded
+
+        monkeypatch.setattr(case.client, "upload_media", count_upload)
+        original_check = workflow.run_pre_publish_checklist
+
+        def first_pass_with_trailer_hold(**kwargs):
+            checklist = original_check(**kwargs)
+            if kwargs["post"]["id"] == first_id:
+                items = [row for row in checklist["items"] if row["name"] != "trailer_youtube"]
+                items.append({"name": "trailer_youtube", "status": "fail", "detail": "trailer not proven yet"})
+                return {**checklist, "items": items}
+            return checklist
+
+        monkeypatch.setattr(workflow, "run_pre_publish_checklist", first_pass_with_trailer_hold)
+        first_result, sibling_result = batch(
+            "mixed-first",
+            (first_id, {**first, "media_plan": plan_normal_media_insertions(
+                first["cleaned_html"], [plan(i) for i in (10, 11, 12)]
+            ) + [plan(13, True)]}),
+            (sibling_id, {**sibling, "media_plan": plan_normal_media_insertions(
+                sibling["cleaned_html"], [plan(17), plan(18)]
+            ) + [plan(19, True)]}),
+        )
+        assert first_result["status"] == "needs_rework", first_result
+        assert sibling_result["status"] == "ready", sibling_result
+        wp_first = case.client.get_post(first_id)
+        assert wp_first["meta"]["_hermes_state"] == "blocked"
+        assert not list(iter_content_images(wp_first["content"]["raw"]))
+        receipt_path = case.root / "backups" / str(first_id) / "editorial.partial.json"
+        saved = json.loads(receipt_path.read_text())["v1_media_progress"]
+        assert len([row for row in saved["rows"] if not row["featured"]]) == 3
+        assert len([row for row in saved["rows"] if row["featured"]]) == 1
+        retained = {row["media_id"]: row["sha256"] for row in saved["rows"]}
+        prior_calls = {digest: source.vision_pixel_hashes.count(digest) for digest in retained.values()}
+        uploads_before = len(uploads)
+        old_downloads = {url: source_downloads.count(url) for url in {
+            row["direct_image_url"] for row in saved["rows"]
+        }}
+
+        monkeypatch.setattr(workflow, "run_pre_publish_checklist", original_check)
+        case.client.update_post(first_id, {"meta": {"_hermes_next_retry_at": "2000-01-01T00:00:00+00:00"}})
+        revised = {**first, "cleaned_html": "<p>Uma rota revisada pelo reino de Pharloom.</p>" + first["cleaned_html"]}
+        prepared = prepare_batch(case.client, config, case.root, [first_id], batch_id="mixed-resume")
+        assert prepared["prepared"] == 1, prepared
+        request = build_media_resolve_batch_input({
+            "batch_id": "mixed-resume",
+            "results": [{"post_id": first_id, "status": "ok", "editorial": revised}],
+        }, case.root)["posts"][0]
+        assert request["inline_deficit"] == request["needed"] == 3, request
+        assert not request["featured_required"]
+        assert set(request["existing_media_ids"]) == set(retained)
+
+        progress = workflow.verified_v1_media_progress(case.client, config, case.root, case.client.get_post(first_id))
+        kept, cover = workflow.place_v1_retained_media(progress, revised, title=first["seo"]["title"], categories=())
+        assert cover["media_id"] in retained
+        manifests = case.root / "work" / "batches" / "mixed-resume"
+        manifest_path = manifests / "media.manifest.json"
+        manifest_path.write_text(json.dumps({
+            "schema_version": 1, "batch_id": "mixed-resume",
+            "posts": [{
+                **request, "candidates": [
+                    {**plan(i), "verdict": "vision_pending"} for i in (14, 15, 16)
+                ],
+            }],
+        }))
+        rebound = resolve_batch_editorial_defaults(case.client, {
+            "batch_id": "mixed-resume", "schema_version": 1,
+            "items": [{"post_id": first_id, "editorial": revised}],
+        }, root=case.root, config=config)
+        resolved, assembly = merge_media_manifest_into_editorial(
+            rebound, manifest_path, media_source_policy="credit_only",
+        )
+        assert assembly["assembled"] == 1, assembly
+        assert len(resolved["items"][0]["editorial"]["media_plan"]) == 3
+        revised = resolved["items"][0]["editorial"]
+        second = batch("mixed-resume", (first_id, revised))[0]
+        assert second["status"] == "ready", second
+        assert len(uploads) - uploads_before == 3
+        assert {url: source_downloads.count(url) for url in old_downloads} == old_downloads
+        assert {digest: source.vision_pixel_hashes.count(digest) for digest in retained.values()} == prior_calls
+        final = case.client.get_post(first_id)
+        urls = [row["src"] for row in iter_content_images(final["content"]["raw"])]
+        assert len(urls) == len(set(urls)) == 6
+        assert final["featured_media"] == cover["media_id"]
+        assert final["status"] == "pending" and final["meta"]["_hermes_state"] == "ready"
+        assert not receipt_path.exists()
+        calls_before = len(source.operations)
+        replay = batch("mixed-resume", (first_id, revised))[0]
+        assert replay["status"] == "noop"
+        assert len(source.operations) == calls_before and len(uploads) - uploads_before == 3
+        case.observations.append({
+            "scenario": "v1_mixed_media_progress", "post_id": first_id, "sibling_id": sibling_id,
+            "retained": retained, "first": first_result["status"], "sibling": sibling_result["status"],
+            "needed": request["needed"], "uploads_in_retry": 3, "ready": True, "replay": replay["status"],
+        })

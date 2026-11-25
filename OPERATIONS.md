@@ -27,6 +27,25 @@ Edite `.env` e comece com:
 EDITOR_DRY_RUN=true
 ```
 
+## Retomada de mídia em bloqueios mistos do V1
+
+O mesmo `backups/<post_id>/editorial.partial.json` registra evidência de
+anexos por post, independentemente de PARTIAL ou BLOCKED. Uma revisão do
+rascunho pode reaproveitar anexos do mesmo contexto sem usar as antigas
+posições. A identidade do anexo, MIME, dimensões e SHA-256 são verificadas
+antes de o retry reduzir o déficit. A capa não ocupa a cota inline.
+
+Resultado incerto de upload conserva a intenção sem repetir o POST. A
+reconciliação adota somente uma correspondência única com identificador
+da tentativa e bytes idênticos. Sem prova positiva, exige revisão desse
+post, sem apagar o anexo nem travar os irmãos do lote. O cron de limpeza
+do projeto não apaga o manifesto nem opera sobre a biblioteca WordPress.
+
+READY continua sujeito a todo o checklist. Uma retomada com progresso de
+mídia só é encerrada depois de confirmação REST do manifesto, hash, status
+e conteúdo. Um upload histórico sem registro transacional não se torna
+aprovado por estar na biblioteca.
+
 ## Seleção de cards e diagnóstico de timeout
 
 `cards` percorre a fila em páginas leves (até 100 itens por consulta) e só

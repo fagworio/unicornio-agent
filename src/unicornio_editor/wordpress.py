@@ -296,7 +296,16 @@ class WordPressClient:
             self._assert_write_guard()
             with urlopen(request, timeout=self.config.http_timeout) as response:
                 value = json.loads(response.read())
-        except (UrlHTTPError, URLError, json.JSONDecodeError) as exc:
+        except UrlHTTPError as exc:
+            try:
+                error = json.loads(exc.read(512))
+                code = str(error.get("code") or "") if isinstance(error, dict) else ""
+            except (ValueError, OSError):
+                code = ""
+            raise WordPressError(
+                "WordPress media upload failed", status_code=int(exc.code), api_code=code,
+            ) from exc
+        except (URLError, json.JSONDecodeError) as exc:
             raise WordPressError("WordPress media upload failed") from exc
         return self._expect_object(value)
 
