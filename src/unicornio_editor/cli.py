@@ -1934,12 +1934,18 @@ def _resolve_media_batch(
     excluded_source_page_url_hashes = excluded_source_page_url_hashes or {}
     media_source_policy = str(getattr(config, "media_source_policy", "strict"))
     reuse_by_post: dict[int, list[dict]] = {}
+    pending_reuse_by_post: dict[int, list[dict]] = {}
     needed_web_by_post: dict[int, int] = {}
     candidate_capacity_by_post: dict[int, int] = {}
     searchable = []
     for item in posts:
         post_id = int(item["post_id"])
-        reuse = _reuse_from_library(client, root, str(item["subject"]), limit=int(item["needed"])) if allow_reuse else []
+        reuse_options = {"visual_before_relevance": True} if (
+            v1_visual_fallback and media_source_policy == "credit_only"
+        ) else {}
+        reuse = _reuse_from_library(
+            client, root, str(item["subject"]), limit=int(item["needed"]), **reuse_options,
+        ) if allow_reuse else []
         blocked_urls = excluded_urls.get(post_id, set()) | set(item.get("excluded_direct_image_urls") or [])
         blocked_source_page_urls = excluded_source_page_urls.get(post_id, set())
         blocked_fingerprints = excluded_fingerprints.get(post_id, set())
@@ -1992,8 +1998,13 @@ def _resolve_media_batch(
             url_policy=str(getattr(config, "remote_url_policy", "audit") or "audit"),
             attempt_id=attempt_id,
             role=str(item.get("role") or ""),
-            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+            media_source_policy=media_source_policy,
+            v1_visual_fallback=v1_visual_fallback,
         )
+        pending_reuse_by_post[post_id] = [
+            candidate for candidate in reuse_accepted
+            if (candidate.get("evidence") or {}).get("verdict") == "vision_pending"
+        ]
         reuse = [
             candidate for candidate in reuse_accepted
             if candidate.get("valid") is True
@@ -2130,7 +2141,16 @@ def _resolve_media_batch(
         )
         total_candidates += len(candidates)
         total_rejected += len(rejeitados)
-        compact_candidates = [_media_candidate(candidate) for candidate in aprovados]
+        pending_reuse = pending_reuse_by_post[post_id]
+        # A library lookup returned real candidates, not verified capacity.
+        # Prefer bounded local candidates without suppressing web discovery.
+        if pending_reuse:
+            projected: dict[str, dict] = {}
+            for candidate in [*pending_reuse, *aprovados]:
+                projected.setdefault(str(candidate.get("direct_image_url") or ""), candidate)
+            compact_candidates = [_media_candidate(candidate) for candidate in projected.values()]
+        else:
+            compact_candidates = [_media_candidate(candidate) for candidate in aprovados]
         for index, candidate in enumerate(aprovados):
             if (
                 candidate.get("needs_vision")
@@ -2146,9 +2166,9 @@ def _resolve_media_batch(
                 })
         # Relatório por post: a contagem deixa explícito em qual gate o funil
         # perdeu candidatos, sem expor bytes ou o payload completo da imagem.
-        all_examined = aprovados + rejeitados + deferidos
+        all_examined = pending_reuse + aprovados + rejeitados + deferidos
         diagnostic_groups = (
-            ("accepted", aprovados),
+            ("accepted", pending_reuse + aprovados),
             ("rejected", rejeitados),
             ("deferred", deferidos),
         )
@@ -2498,7 +2518,7 @@ def _resolve_media_batch(
             "rejected": len(rejeitados),
             "candidate_diagnostics": candidate_diagnostics[:20],
             "candidate_diagnostic_summary": candidate_diagnostic_summary,
-            "audit_candidates": aprovados + rejeitados + deferidos,
+            "audit_candidates": all_examined,
             "search": search_progress,
         })
     result = {
@@ -3332,9 +3352,12 @@ def _enriquecer_candidatos(
                 )
             except ValueError:
                 valid_direct_url = False
-            candidate["usable"] = valid_direct_url and bool(credit)
+            from .media.page_assets import is_noise_image_url
+
+            prohibited = v1_visual_fallback and is_noise_image_url(direct_url)
+            candidate["usable"] = valid_direct_url and bool(credit) and not prohibited
             if not candidate["usable"]:
-                candidate["rejected_reason"] = "invalid_direct_image_url_or_credit"
+                candidate["rejected_reason"] = "noise_domain" if prohibited else "invalid_direct_image_url_or_credit"
             # The direct asset URL and credit are the persisted attribution
             # contract; a result-page URL is neither required nor asserted.
             candidate.pop("source_page_url", None)
@@ -3518,10 +3541,12 @@ def _enriquecer_candidatos(
             _guardar_memo(cand)
             return
         if not cand.get("usable"):
-            # Gate A: sem origem nao existe ACCEPT possivel.
+            # A known avatar host is prohibited by role, not by subjective relevance.
+            prohibited = cand.get("rejected_reason") == "noise_domain" and v1_visual_fallback and media_source_policy == "credit_only"
             cand["evidence"] = {
-                "subject": subject, "score": 0, "verdict": "unresolved_source",
-                "gate": "provenance", "matched": [], "needs_vision": False,
+                "subject": subject, "score": 0,
+                "verdict": "noise_domain" if prohibited else "unresolved_source",
+                "gate": "policy" if prohibited else "provenance", "matched": [], "needs_vision": False,
                 "reason": cand.get("rejected_reason") or "candidato sem origem",
             }
             cand["evidence_score"] = 0
@@ -3607,9 +3632,9 @@ def _enriquecer_candidatos(
             allow_credit_only=media_source_policy == "credit_only",
             credit_text=str(cand.get("credit_text") or ""),
         )
-        if v1_visual_fallback and media_source_policy == "credit_only" and not cand.get("media_library_id"):
-            # URL, credit and source text are not proof of the pixels. Carry
-            # new web assets to APPLY; only validated reuse is already strong.
+        if v1_visual_fallback and media_source_policy == "credit_only":
+            # URL, credit and source text are not proof of the pixels.
+            # Carry both discovered and library assets to actual APPLY vision.
             pontos = {
                 **pontos, "verdict": "vision_pending", "gate": "vision",
                 "needs_vision": True, "reason_code": "origin_unknown",
@@ -5925,6 +5950,8 @@ def _media_candidate(cand: dict) -> dict:
             ],
             "fields": origin_fields,
         }
+    if result["verdict"] == "vision_pending" and cand.get("media_library_id"):
+        result["media_library_id"] = cand["media_library_id"]
     if result["provenance_mode"] == "credit_only":
         result["source_page_verified"] = False
         result["rights_verified"] = False
@@ -6209,7 +6236,7 @@ def _audit_key(query: str, post_id: int = 0) -> str:
 
 
 def _reuse_from_library(
-    client, root, subject: str, *, limit: int
+    client, root, subject: str, *, limit: int, visual_before_relevance: bool = False,
 ) -> list[dict]:
     """Media Library + indice local ANTES da busca web (P1 da auditoria).
 
@@ -6231,18 +6258,26 @@ def _reuse_from_library(
     reuso: list[dict] = []
     vistos: set[str] = set()
 
-    def _adicionar(entrada: dict) -> None:
+    def _adicionar(entrada: dict, attachment: dict | None = None) -> None:
         if len(reuso) >= max(1, limit):
             return
-        url = str(entrada.get("source_url") or "")
+        if visual_before_relevance and (
+            not attachment or type(attachment.get("id")) is not int
+            or attachment["id"] <= 0 or attachment["id"] != entrada.get("media_id")
+        ):
+            return
+        url = str(
+            (attachment.get("source_url") or "") if visual_before_relevance and attachment
+            else entrada.get("source_url") or ""
+        )
         pagina = str(entrada.get("source_page") or "")
         entry_subject = " ".join(str(entrada.get("subject") or "").split()).casefold()
         requested_subject = " ".join(str(subject or "").split()).casefold()
-        if not entry_subject or entry_subject != requested_subject:
+        if not visual_before_relevance and (not entry_subject or entry_subject != requested_subject):
             return
-        # Sem origem registrada o reuso NAO e utilizavel: o apply exige a URL
-        # listada na pagina original.
-        if not (url and pagina) or url in vistos:
+        # Strict still requires indexed origin. V1 credit-only only plans a
+        # candidate from WordPress; its current bytes must pass Vision in APPLY.
+        if not url or (not visual_before_relevance and not pagina) or url in vistos:
             return
         vistos.add(url)
         reuso.append(
@@ -6264,12 +6299,13 @@ def _reuse_from_library(
 
         for entrada in find_by_subject(root, subject):
             media_id = entrada.get("media_id")
+            attachment = None
             if media_id:
                 try:
-                    client.get_media(int(media_id))
+                    attachment = client.get_media(int(media_id))
                 except Exception:  # noqa: BLE001 - attachment removido
                     continue
-            _adicionar(entrada)
+            _adicionar(entrada, attachment)
     except Exception:  # noqa: BLE001 - indice e otimizacao
         pass
 
@@ -6288,7 +6324,9 @@ def _reuse_from_library(
                     continue
                 entrada = find_by_media_id(root, media_id)
                 if entrada:
-                    _adicionar(entrada)
+                    _adicionar(entrada, item)
+                elif visual_before_relevance:
+                    _adicionar({"media_id": media_id}, item)
         except Exception:  # noqa: BLE001 - Media Library e otimizacao
             pass
     return reuso

@@ -909,9 +909,15 @@ def _apply_editorial_unlocked(
             item for item in (media_fallback_candidates or [])
             if not _retained_partial_candidate(item, prior_media)
         ]
+    v1_vision_deadline = (
+        time.monotonic() + config.media_operation_timeout_seconds
+        if config.media_source_policy == "credit_only" and config.media_operation_timeout_seconds > 0
+        else None
+    )
     media_preflight = validate_media_plan(
         client,
         editorial,
+        v1_vision_deadline=v1_vision_deadline,
         config=config,
         root=root,
         post_title=_post_title(post),
@@ -927,6 +933,7 @@ def _apply_editorial_unlocked(
     )
     media_results, featured_id, featured_credit = _execute_media_plan(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id,
+        v1_vision_deadline=v1_vision_deadline,
         post_title=_post_title(post) or "",
         media_fallback_candidates=media_fallback_candidates,
         v1_visual_fallback=True,
@@ -947,8 +954,28 @@ def _apply_editorial_unlocked(
         featured_id, featured_credit = _recover_partial_featured(
             client, post_id, partial_manifest
         )
+    v1_original_cover = config.media_source_policy == "credit_only" and bool(post.get("featured_media"))
+    original_cover_receipt = None
+    original_cover_check = next((
+        row for row in media_preflight.get("featured_vision", [])
+        if v1_original_cover and row.get("existing_featured_id") == post["featured_media"]
+    ), {})
     if featured_id is None and not config.dry_run and not partial_featured_rejected:
-        featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
+        if v1_original_cover:
+            approved_sha = original_cover_check.get("image_sha256") if original_cover_check.get("status") == "passed" else None
+            if approved_sha:
+                featured_id = _normalize_existing_featured(
+                    client, config, post, editorial, root=root, approved_sha=approved_sha,
+                )
+                if featured_id:
+                    original_cover_receipt = {
+                        "featured": True, "media_id": featured_id, "sha256": approved_sha,
+                        "vision_evidence": {
+                            "image_role": "featured", "verdict": "accept", "image_sha256": approved_sha,
+                        },
+                    }
+        else:
+            featured_id = _normalize_existing_featured(client, config, post, editorial, root=root)
     html = editorial["cleaned_html"]
     if combined_media_results and not config.dry_run:
         plan = [
@@ -1014,7 +1041,8 @@ def _apply_editorial_unlocked(
             "categories": editorial.get("categories") or post.get("categories") or (),
         },
         content,
-        ([retained_featured] if retained_featured else []) + [*prior_media, *media_results],
+        [row for row in (retained_featured, original_cover_receipt) if row]
+        + [*prior_media, *media_results],
     )
     # Tentativas anteriores (antes desta): base do teto deterministico de
     # buscas de imagem. Cada apply falho = 1 busca completa esgotada.
@@ -1024,7 +1052,7 @@ def _apply_editorial_unlocked(
             "featured_media": (
                 featured_id
                 if featured_id is not None
-                else (None if partial_featured_rejected else post.get("featured_media"))
+                else (None if partial_featured_rejected or v1_original_cover else post.get("featured_media"))
             ),
         },
         editorial=editorial_with_media,
@@ -1099,7 +1127,10 @@ def _apply_editorial_unlocked(
                     and any(row["name"] == "destaque_relevancia" and row.get("retryable") for row in failed_items)
                     and not any(row["name"] in {"destaque_1280x720", "imagem_destaque"} for row in failed_items)
                 )
-                if retained_featured_needs_recheck:
+                original_cover_pending = original_cover_check.get("status") == "deferred"
+                if original_cover_pending:
+                    featured_manifest = {"status": "missing", "reason": original_cover_check["reason"]}
+                elif retained_featured_needs_recheck:
                     featured_manifest.update(
                         status="verification_pending",
                         reason="revalidação do anexo de destaque retido pendente",
@@ -1112,7 +1143,9 @@ def _apply_editorial_unlocked(
                         and 0 <= failed_index < len(editorial.get("media_plan") or [])
                         else {}
                     )
-                    rejected_id = candidate.get("media_library_id") or featured_id or featured_manifest.get("media_id")
+                    rejected_id = (candidate.get("media_library_id") or featured_id
+                                   or featured_vision_failure.get("existing_featured_id")
+                                   or featured_manifest.get("media_id"))
                     rejected_url = str(
                         candidate.get("direct_image_url")
                         or (current_featured or {}).get("media_url")
@@ -1191,12 +1224,12 @@ def _apply_editorial_unlocked(
                 passes = state_info.get("processing_passes", 0) + 1
                 no_progress_before = state_info.get("no_progress_attempts", 0)
                 no_progress = (
-                    no_progress_before if retained_featured_needs_recheck and not progress
+                    no_progress_before if (retained_featured_needs_recheck or original_cover_pending) and not progress
                     else _next_partial_no_progress(
                         no_progress_before, progress=progress, media_results=media_results,
                     )
                 )
-                operational_vision = retained_featured_needs_recheck or any(
+                operational_vision = original_cover_pending or retained_featured_needs_recheck or any(
                     item.get("status") == "deferred" and item.get("reason_code") in {
                         "vision_provider_error", "vision_budget_exhausted",
                     }
@@ -1340,8 +1373,8 @@ def _apply_editorial_unlocked(
                 # Se a featured era irrelevante ao editorial, ainda assim
                 # convertemos a imagem existente para WebP: a revisão humana
                 # decide depois se ela permanece ou é substituída.
-                if retained_featured:
-                    # Human routing may proceed, but unconfirmed retained bytes
+                if retained_featured or v1_original_cover:
+                    # Human routing may proceed, but unconfirmed cover bytes
                     # must not be associated with the WordPress post as a cover.
                     cover_receipt = checklist.get("confirmed_v1_featured") or {}
                     awaiting_featured_id = featured_id if (
@@ -2277,11 +2310,9 @@ def _v1_needs_pixel_evidence(
     item: dict[str, Any], config: Config | None, enabled: bool,
 ) -> bool:
     # The installed site policy permits unknown origin without fabricating
-    # provenance, but only a trusted visual decision can approve new pixels.
-    return bool(
-        enabled and config is not None and config.media_source_policy == "credit_only"
-        and not item.get("media_library_id")
-    )
+    # provenance, but only a trusted visual decision can approve pixels for
+    # this editorial use, even when they already exist in the Media Library.
+    return bool(enabled and config is not None and config.media_source_policy == "credit_only")
 
 
 def _media_item_rejection(
@@ -2306,6 +2337,10 @@ def _media_item_rejection(
     """
     is_featured = bool(item.get("is_featured"))
     media_id = item.get("media_library_id")
+    needs_pixels = _v1_needs_pixel_evidence(item, config, v1_visual_fallback)
+    if needs_pixels and media_id:
+        # Only fetch authoritative REST metadata inside the bounded candidate worker.
+        return None
     attachment = None
     if media_id:
         if media_id not in attachment_cache:
@@ -2319,7 +2354,7 @@ def _media_item_rejection(
     )
     if is_noise_image_url(candidate_url):
         return "imagem de avatar/perfil nao e midia editorial; escolha uma imagem da noticia ou da obra"
-    if _v1_needs_pixel_evidence(item, config, v1_visual_fallback):
+    if needs_pixels:
         return None  # provisional; only the real APPLY vision result can approve
     if attachment is not None:
         title = str((attachment.get("title") or {}).get("rendered") or "")
@@ -2466,6 +2501,7 @@ def validate_media_plan(
     post_id: int | None = None,
     v1_visual_fallback: bool = False,
     post_categories: Any = (),
+    v1_vision_deadline: float | None = None,
 ) -> dict[str, Any]:
     """Valida o media_plan de um editorial SEM executar download/upload.
 
@@ -2607,7 +2643,7 @@ def validate_media_plan(
         }
         vision = _validate_featured_candidate_vision(
             existing_item, vision_editorial, client, cache, config=config, root=root,
-            v1_feature_policy=v1_feature_policy, post_id=post_id,
+            v1_feature_policy=v1_feature_policy, post_id=post_id, v1_vision_deadline=v1_vision_deadline,
         )
         featured_vision.append(
             {"index": None, "existing_featured_id": existing_featured_id, **vision}
@@ -2647,6 +2683,15 @@ def validate_media_plan(
     }
 
 
+def _existing_v1_featured_pixels(source: Path, destination: Path) -> Path:
+    from PIL import Image
+
+    with Image.open(source) as image:
+        if image.format == "WEBP" and image.size == (1280, 720):
+            return source
+    return prepare_featured_webp(source, destination)
+
+
 def _validate_featured_candidate_vision(
     item: dict[str, Any],
     editorial: dict[str, Any],
@@ -2657,6 +2702,7 @@ def _validate_featured_candidate_vision(
     root: Path | None,
     v1_feature_policy: bool = False,
     post_id: int | None = None,
+    v1_vision_deadline: float | None = None,
 ) -> dict[str, Any]:
     """Validate normalized featured bytes during ``media-validate``.
 
@@ -2686,14 +2732,31 @@ def _validate_featured_candidate_vision(
     # validate it. This keeps disabled-vision planning independent of the
     # client interface while preserving mandatory validation when enabled.
     if media_id and not vision_ready:
-        return {"status": "skipped", "reason": vision_message}
+        return {"status": "deferred", "reason": vision_message, "reason_code": "vision_provider_error"} if v1_feature_policy else {"status": "skipped", "reason": vision_message}
+    if v1_feature_policy and config.vision_max_low <= 0:
+        return {"status": "deferred", "reason": "orçamento visual esgotado", "reason_code": "vision_budget_exhausted"}
+    vision_calls = 0
     attachment: dict[str, Any] | None = None
     if media_id:
         attachment = attachment_cache.get(media_id)
         if attachment is None:
-            attachment = client.get_media(media_id)
+            try:
+                attachment = client.get_media(media_id)
+            except (WordPressError, TimeoutError, OSError) as exc:
+                if not v1_feature_policy or isinstance(exc, WordPressError) and exc.status_code in {401, 403}:
+                    raise
+                if isinstance(exc, WordPressError) and known_wordpress_entity_missing(exc):
+                    return {"status": "rejected", "reason": "anexo do destaque não existe mais", "reason_code": "media_not_found"}
+                return {"status": "deferred", "reason": "rechecagem do attachment pendente", "reason_code": "vision_provider_error"}
+            if v1_feature_policy and not isinstance(attachment, dict):
+                return {"status": "rejected", "reason": "identidade do attachment não confirmada"}
             attachment_cache[media_id] = attachment
         image_url = str(attachment.get("source_url") or "").strip()
+        if v1_feature_policy:
+            from .media.page_assets import is_noise_image_url
+
+            if attachment.get("id") != media_id or is_noise_image_url(image_url):
+                return {"status": "rejected", "reason": "attachment incorreto ou não editorial"}
     else:
         image_url = str(item.get("direct_image_url") or "").strip()
     if not image_url or not subject:
@@ -2731,9 +2794,13 @@ def _validate_featured_candidate_vision(
                 image_url,
                 Path(directory) / "featured-source.img",
                 max_attempts=config.max_source_retries + 1,
-                url_policy=config.remote_url_policy,
+                url_policy="enforce" if v1_feature_policy else config.remote_url_policy,
             )
-            normalized = prepare_featured_webp(source, Path(directory) / "featured-final.webp")
+            destination = Path(directory) / "featured-final.webp"
+            normalized = (
+                _existing_v1_featured_pixels(source, destination)
+                if v1_feature_policy and media_id else prepare_featured_webp(source, destination)
+            )
             image_sha256 = hashlib.sha256(Path(normalized).read_bytes()).hexdigest()
             cached = get_cached_decision(
                 cache_root, image_url, cache_subject,
@@ -2763,13 +2830,23 @@ def _validate_featured_candidate_vision(
                     "decision": dict(cached),
                 }
             vision_input = prepare_vision_image_input_from_path(normalized)
+            allow_high = not v1_feature_policy or (config.vision_detail == "low" and config.vision_max_low >= 2)
+            timeout = float(config.vision_timeout)
+            if v1_feature_policy:
+                reserved = 2 if allow_high else 1
+                if v1_vision_deadline is not None:
+                    remaining = v1_vision_deadline - time.monotonic()
+                    if remaining <= 0:
+                        return {"status": "deferred", "reason": "orçamento visual esgotado", "reason_code": "vision_budget_exhausted"}
+                    timeout = min(timeout, remaining / reserved)
+                vision_calls = reserved
             decision = verify_image_subject_decision(
                 image_url=vision_input,
                 subject=subject,
                 api_key=str(getattr(config, "vision_api_key", "")),
                 base_url=str(getattr(config, "vision_base_url", "")),
                 model=str(getattr(config, "vision_model", "gpt-4o-mini")),
-                timeout=float(getattr(config, "vision_timeout", getattr(config, "http_timeout", 30))),
+                timeout=timeout,
                 context=(
                     f"{editorial_context} | preflight da imagem de destaque"
                     if editorial_context else "preflight da imagem de destaque do artigo"
@@ -2777,11 +2854,13 @@ def _validate_featured_candidate_vision(
                 category=featured_vision_category(editorial),
                 alt=str(item.get("alt_text") or subject),
                 detail=str(getattr(config, "vision_detail", "low")),
-                allow_high=True,
+                allow_high=allow_high,
                 require_key_art=True,
                 root=root,
                 **({"match_threshold": threshold} if v1_feature_policy else {}),
             )
+        if v1_feature_policy:
+            vision_calls = 2 if allow_high and "low_status" in decision else 1
         if decision.get("accepted"):
             cache_decision = {
                 key: decision[key]
@@ -2816,6 +2895,7 @@ def _validate_featured_candidate_vision(
             "cached": False,
             "image_sha256": image_sha256,
             "decision": decision,
+            **({"vision_calls": vision_calls} if v1_feature_policy else {}),
         }
     except (VisionGateError, VisionInputUnavailable) as exc:
         result = _structured_media_failure(
@@ -2829,6 +2909,8 @@ def _validate_featured_candidate_vision(
             recoverable=True,
         )
         result.update({"technical": True, "reason": result["detail"], "cached": False})
+        if v1_feature_policy:
+            result.update(status="deferred", vision_calls=vision_calls, reason_code="vision_provider_error")
         return result
     except MediaConversionError as exc:
         # A portrait/invalid source is a deterministic candidate rejection,
@@ -2850,6 +2932,8 @@ def _validate_featured_candidate_vision(
             recoverable=True,
         )
         result.update({"technical": True, "reason": result["detail"], "cached": False})
+        if v1_feature_policy:
+            result.update(status="deferred", vision_calls=vision_calls)
         return result
 
 
@@ -3023,6 +3107,7 @@ def _execute_media_plan(
     media_fallback_candidates: list[dict[str, Any]] | None = None,
     v1_visual_fallback: bool = False,
     post_categories: Any = (),
+    v1_vision_deadline: float | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -3246,7 +3331,11 @@ def _execute_media_plan(
     # paralelismo.
     pending: list[tuple[int, dict[str, Any]]] = []
     fallback_vision_remaining = config.vision_max_low if v1_visual_fallback else 0
-    fallback_vision_deadline: float | None = None
+    fallback_vision_deadline = v1_vision_deadline
+    if v1_visual_fallback and config.media_source_policy == "credit_only":
+        fallback_vision_remaining -= sum(
+            int(row.get("vision_calls") or 0) for row in (preflight or {}).get("featured_vision", [])
+        )
     fallback_vision_counts = {"approved": 0, "rejected": 0, "unavailable": 0}
     preflight_rejections = {
         int(row["index"]): str(row.get("reason") or "media-validate rejeitou o item")
@@ -3337,7 +3426,25 @@ def _execute_media_plan(
                     for name in ("source_page_url", "direct_image_url", "alt_text", "credit_text", "provenance_mode")
                 }
                 suffix = Path(item["direct_image_url"].split("?", 1)[0]).suffix or ".jpg"
-                attachment = _attachment_evidence(item)
+                try:
+                    attachment = _attachment_evidence(item)
+                except (WordPressError, TimeoutError, OSError) as exc:
+                    if not needs_pixels or isinstance(exc, WordPressError) and exc.status_code in {401, 403}:
+                        raise
+                    missing = isinstance(exc, WordPressError) and known_wordpress_entity_missing(exc)
+                    return position, {
+                        "paragraph_index": item.get("paragraph_index"),
+                        "status": "rejected" if missing else "deferred",
+                        "reason_code": "media_not_found" if missing else "vision_provider_error",
+                        "detail": "anexo da biblioteca indisponível",
+                    }
+                if needs_pixels and item.get("media_library_id"):
+                    from .media.page_assets import is_noise_image_url
+
+                    if not isinstance(attachment, dict) or attachment.get("id") != item["media_library_id"]:
+                        return position, {"status": "rejected", "detail": "identidade do attachment não confirmada"}
+                    if is_noise_image_url(str(attachment.get("source_url") or "")):
+                        return position, {"status": "rejected", "reason_code": "noise_domain", "detail": "imagem de avatar/profil não é mídia editorial"}
                 download_url = (
                     attachment.get("source_url") if attachment is not None else item["direct_image_url"]
                 )
@@ -3946,7 +4053,10 @@ def _execute_media_plan(
                     _, result = _process_item(pair)
                     processed.append((position, _record_decision(position, item, result)))
                 except Exception as exc:  # noqa: BLE001 - report one failed item
-                    if on_accepted is not None and position in confirmed_uploads:
+                    if (on_accepted is not None and position in confirmed_uploads) or (
+                        v1_visual_fallback and config.media_source_policy == "credit_only"
+                        and isinstance(exc, WordPressError) and exc.status_code in {401, 403}
+                    ):
                         raise
                     _funnel("worker", "error", item, position, type(exc).__name__)
                     processed.append((position, _record_decision(position, item, _structured_media_failure(
@@ -4018,6 +4128,8 @@ def _execute_media_plan(
                     for name in asset_fields:
                         if name in candidate:
                             fallback_item[name] = candidate[name]
+                        elif v1_visual_fallback and config.media_source_policy == "credit_only":
+                            fallback_item.pop(name, None)
                     fallback_item["paragraph_index"] = slot.get("paragraph_index")
                     fallback_item["placement"] = slot.get("placement")
                     fallback_item["is_featured"] = bool(slot.get("is_featured"))
@@ -4041,7 +4153,10 @@ def _execute_media_plan(
                     try:
                         _, fallback_result = _process_item((position, fallback_item))
                     except Exception as exc:  # noqa: BLE001 - candidate-scoped fallback
-                        if on_accepted is not None and position in confirmed_uploads:
+                        if (on_accepted is not None and position in confirmed_uploads) or (
+                            v1_visual_fallback and config.media_source_policy == "credit_only"
+                            and isinstance(exc, WordPressError) and exc.status_code in {401, 403}
+                        ):
                             raise
                         _funnel("fallback", "error", fallback_item, position, type(exc).__name__)
                         fallback_result = _structured_media_failure(
@@ -4140,6 +4255,7 @@ def _normalize_existing_featured(
     editorial: dict[str, Any] | None = None,
     *,
     root: Path | None = None,
+    approved_sha: str | None = None,
 ) -> int | None:
     """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
@@ -4187,10 +4303,19 @@ def _normalize_existing_featured(
     except Exception as exc:
         report("wordpress_read_failed", "read_attachment", outcome="retryable_failure", exc=exc)
         return None
+    if approved_sha and not isinstance(media, dict):
+        report("attachment_identity_changed", "read_attachment", outcome="rejected")
+        return None
     details = media.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
     source_url = (media.get("source_url") or "").strip()
-    if editorial is not None:
+    if approved_sha:
+        from .media.page_assets import is_noise_image_url
+
+        if media.get("id") != featured or is_noise_image_url(source_url):
+            report("attachment_identity_changed", "read_attachment", outcome="rejected")
+            return None
+    if editorial is not None and not approved_sha:
         entities = extract_entities(
             title=str((editorial.get("seo") or {}).get("title") or ""),
             content_html=str(editorial.get("cleaned_html") or ""),
@@ -4216,7 +4341,8 @@ def _normalize_existing_featured(
             ):
                 report("existing_featured_not_relevant", "source_relevance", outcome="rejected")
                 return None
-    if width == 1280 and height == 720 and source_url.lower().endswith(".webp"):
+    already_normalized = width == 1280 and height == 720 and source_url.lower().endswith(".webp")
+    if already_normalized and not approved_sha:
         report("already_normalized", "complete", outcome="reused")
         return featured
     if not source_url:
@@ -4230,6 +4356,10 @@ def _normalize_existing_featured(
     alt = plain_text(str(media.get("alt_text") or ""))
     caption = plain_text(str((media.get("caption") or {}).get("rendered") or ""))
     filename = _featured_filename_from_source(source_url)
+    if approved_sha and editorial is not None:
+        title = "Imagem ilustrativa"
+        alt = f"Imagem ilustrativa: {featured_vision_subject(editorial)}"[:160]
+        caption = "Crédito: Imagem ilustrativa."
     with tempfile.TemporaryDirectory(prefix="unicornio-featured-") as directory:
         tmp = Path(directory)
         try:
@@ -4237,7 +4367,7 @@ def _normalize_existing_featured(
                 source_url,
                 tmp / "featured_source.jpg",
                 max_attempts=config.max_source_retries + 1,
-                url_policy=config.remote_url_policy,
+                url_policy="enforce" if approved_sha else config.remote_url_policy,
                 audit=(
                     lambda finding: append_telemetry(
                         root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
@@ -4250,10 +4380,21 @@ def _normalize_existing_featured(
             report("source_download_failed", "download", outcome="retryable_failure", exc=exc)
             return None
         try:
-            webp = prepare_featured_webp(source, tmp / "featured_1280x720.webp")
+            destination = tmp / "featured_1280x720.webp"
+            webp = (_existing_v1_featured_pixels(source, destination) if approved_sha
+                    else prepare_featured_webp(source, destination))
         except Exception as exc:
             report("featured_conversion_failed", "convert", outcome="rejected", exc=exc)
             return None
+        if approved_sha:
+            if hashlib.sha256(webp.read_bytes()).hexdigest() != approved_sha:
+                report("approved_bytes_changed", "vision_readback", outcome="rejected")
+                return None
+            if already_normalized and webp == source:
+                return featured
+            if webp == source:
+                destination.write_bytes(source.read_bytes())
+                webp = destination
         try:
             new_media = client.upload_media(
                 str(webp),

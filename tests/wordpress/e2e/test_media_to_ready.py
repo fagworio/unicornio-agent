@@ -561,8 +561,22 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             with Image.open(io.BytesIO(_artwork(index))) as image:
                 image.save(output, format="JPEG", quality=94)
             source.extra_jpegs[f"asset-{index:02}.jpg"] = output.getvalue()
+        from unicornio_editor.media.library_index import register
+
+        # Real generic Library attachment: the index only discovers the ID,
+        # and neither WP metadata nor the index supplies original-page proof.
+        seed_path = case.root / "asset-01.webp"
+        with Image.open(io.BytesIO(source.extra_jpegs.pop("asset-01.jpg"))) as image:
+            image.save(seed_path, format="WEBP")
+        seed = case.client.upload_media(
+            str(seed_path), filename=seed_path.name, title="Image", alt_text="",
+        )
+        seed_id, seed_url = seed["id"], seed["source_url"]
+        seed_before = case.client.get_media(seed_id)
+        assert seed_before["title"]["rendered"] == "Image" and seed_before["alt_text"] == ""
+        register(case.root, source_url=seed_url, media_id=seed_id, subject="Hollow Knight Silksong")
         names = list(source.extra_jpegs)
-        fixture_urls = {f"{source.base_url}/images/{name}" for name in names}
+        fixture_urls = {seed_url, *(f"{source.base_url}/images/{name}" for name in names)}
         enforced_requests: list[str] = []
         attachment_requests: list[str] = []
         fixture_attachments: set[str] = set()
@@ -630,6 +644,7 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest_row = next(row for row in manifest["posts"] if int(row["post_id"]) == post_id)
         assert len(manifest_row["candidates"]) == 3, resolved
+        assert manifest_row["candidates"][0]["media_library_id"] == seed_id
         for candidate in manifest_row["candidates"]:
             assert "source_page_url" not in candidate
             assert candidate["provenance_mode"] == "credit_only"
@@ -681,6 +696,7 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         cover_plan = [item for item in plan if item.get("is_featured")]
         inline_plan = [item for item in plan if not item.get("is_featured")]
         assert len(cover_plan) == 1 and len(inline_plan) == 2
+        assert cover_plan[0]["media_library_id"] == seed_id
         post_before = case.client.get_post(post_id)
         monkeypatch.setenv("HERMES_SESSION_ID", "wp-e2e-credit-cover-pass")
         cover_batch = {
@@ -709,8 +725,9 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         first_cover_readbacks = attachment_requests.count(retained_url)
         assert first_cover_readbacks
         cover_source = cover_plan[0]["direct_image_url"]
-        assert enforced_requests == [cover_source]
+        assert cover_source == seed_url and enforced_requests == [seed_url]
         assert upload_count == 1
+        assert case.client.get_media(seed_id) == seed_before
         partial_readback = case.client.get_post(post_id)
         assert partial_readback["status"] == "pending"
         assert partial_readback["meta"]["_hermes_state"] == "partial"

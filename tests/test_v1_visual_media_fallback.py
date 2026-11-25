@@ -59,6 +59,18 @@ def media_case(monkeypatch):
     return config, calls
 
 
+def _cover_webp_response(asset_transport, request, **kwargs):
+    """Convert fixture bytes for a WordPress attachment declared as a WebP."""
+    raw = asset_transport(request, **kwargs)
+    output = BytesIO()
+    with Image.open(raw) as original:
+        original.transpose(Image.Transpose.FLIP_LEFT_RIGHT).save(output, format="WEBP")
+    output.seek(0)
+    output.headers = Message()
+    output.headers["Content-Type"] = "image/webp"
+    return output
+
+
 @pytest.mark.parametrize("source_page", [None, "https://third-party.example/page/42"])
 def test_v1_batch_keeps_generic_candidate_pending_vision(tmp_path, monkeypatch, media_case, source_page):
     config, calls = media_case
@@ -238,6 +250,14 @@ def test_v1_batch_assembles_then_accepts_pending_candidate_and_reaches_ready(tmp
     from unicornio_editor.batch import merge_media_manifest_into_editorial
 
     config, calls = media_case
+    original_assets = downloader.urlopen_remote
+
+    def cover_aware_assets(request, **kwargs):
+        if request.full_url.startswith("https://wp.test/uploads/"):
+            return _cover_webp_response(original_assets, request, **kwargs)
+        return original_assets(request, **kwargs)
+
+    monkeypatch.setattr(downloader, "urlopen_remote", cover_aware_assets)
     monkeypatch.setattr(visual_hash, "image_hashes", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         search, "search_web_images_batch",
@@ -643,6 +663,8 @@ def test_existing_or_reused_featured_uses_v1_cutoff_even_with_inline_deficit(tmp
             response.headers = Message()
             response.headers["Content-Type"] = "image/webp"
             return response
+        if not reused and request.full_url.startswith("https://wp.test/uploads/"):
+            return _cover_webp_response(real_assets, request, **kwargs)
         return real_assets(request, **kwargs)
 
     class Client(workflow_fixture.FakeClient):
@@ -672,8 +694,309 @@ def test_existing_or_reused_featured_uses_v1_cutoff_even_with_inline_deficit(tmp
     assert report["status"] == "partial", report
     assert calls  # a real decoding/provider decision path, not textual proof
     manifest = json.loads((tmp_path / "backups/42/editorial.partial.json").read_text())
-    assert manifest["featured"]["status"] != "vision_rejected"
+    assert manifest["featured"]["status"] == "valid"
+    if not reused:
+        assert not uploaded
     if reused:
         assert manifest["featured"]["status"] == "valid"
         assert manifest["featured"]["media_id"] == 90
         assert len(calls) == 1  # same normalized attachment + role reuses exact decision
+
+
+@pytest.mark.parametrize("featured", [False, True])
+@pytest.mark.parametrize("decision", ["MATCH", "UNRELATED", "unavailable", "prohibited", "corrupt", "duplicate"])
+def test_v1_apply_batch_reviews_generic_library_pixels_before_relevance(tmp_path, monkeypatch, media_case, featured, decision):
+    from pathlib import Path
+
+    config, calls = media_case
+    real_assets = downloader.urlopen_remote
+    uploaded = []
+    attempts = []
+
+    class Client(workflow_fixture.FakeClient):
+        def get_media(self, media_id):
+            return {
+                "id": media_id,
+                "source_url": (
+                    "https://secure.gravatar.com/avatar/example" if decision == "prohibited"
+                    else f"https://wp.test/assets/{media_id}.{'webp' if media_id == 90 else 'jpg'}"
+                ),
+                "title": {"rendered": "Image"}, "alt_text": "",
+                "media_details": {"width": 1280, "height": 720},
+            }
+
+    def assets(request, *, mode, **kwargs):
+        assert mode == "enforce"
+        if request.full_url.endswith("/90.webp"):
+            result = BytesIO(uploaded[0])
+            result.headers = Message()
+            result.headers["Content-Type"] = "image/webp"
+            return result
+        assert request.full_url.endswith("/7.jpg")
+        if decision == "corrupt":
+            result = BytesIO(b"invalid image bytes")
+            result.headers = Message()
+            result.headers["Content-Type"] = "image/jpeg"
+            return result
+        return real_assets(request, mode=mode, **kwargs)
+
+    real_vision = vision_gate._call_vision
+
+    def provider(**kwargs):
+        attempts.append(kwargs["image_url"])
+        if decision == "unavailable":
+            raise vision_gate.VisionGateError("test temporary outage")
+        return real_vision(**kwargs) | {"status": "MATCH" if decision == "duplicate" else decision}
+
+    def upload(_client, path, evidence):
+        assert calls and decision in {"MATCH", "duplicate"}
+        uploaded.append(Path(path).read_bytes())
+        assert uploaded[0] == base64.b64decode(calls[0].partition(",")[2])
+        assert evidence["credit_text"] == "Crédito: Imagem ilustrativa."
+        return {"id": 90, "source_url": "https://wp.test/assets/90.webp"}
+
+    monkeypatch.setattr(downloader, "urlopen_remote", assets)
+    monkeypatch.setattr(vision_gate, "_call_vision", provider)
+    monkeypatch.setattr("unicornio_editor.workflow.upload_image", upload)
+    monkeypatch.setattr(visual_hash, "image_hashes", lambda *_a, **_kw: {})
+    editorial = _generic_editorial(featured=featured)
+    editorial["media_plan"][0].update({
+        "media_library_id": 7, "direct_image_url": "https://index.example/generic.jpg",
+        "alt_text": "Imagem", "credit_text": "",
+    })
+    if decision == "duplicate":
+        editorial["media_plan"].append({**editorial["media_plan"][0], "paragraph_index": 1, "is_featured": False})
+    post = workflow_fixture.WorkflowTests().post()
+    post["featured_media"] = 0
+    client = Client(post)
+    row = _apply_editorial_batch(client, config, tmp_path, {
+        "batch_id": "generic-reuse", "schema_version": 1, "items": [{"post_id": 42, "editorial": editorial}],
+    }, compact=False)["posts"][0]
+    assert len(attempts) == int(decision not in {"prohibited", "corrupt"}), row
+    assert len(uploaded) == int(decision in {"MATCH", "duplicate"})
+    candidate = row["media_plan_results"][0]
+    assert candidate["status"] == {
+        "MATCH": "accepted", "UNRELATED": "rejected", "unavailable": "deferred",
+        "prohibited": "rejected", "corrupt": "error", "duplicate": "accepted",
+    }[decision]
+    if decision == "duplicate":
+        assert row["media_plan_results"][1]["status"] == "rejected"
+        assert not row["media_plan_results"][1]["vision_attempted"]
+    assert not client.post["meta"].get("_hermes_ready_hash")
+
+
+def test_v1_resolve_batch_keeps_library_candidate_provisional_without_suppressing_web_search(tmp_path, monkeypatch, media_case):
+    config, calls = media_case
+    queries = []
+    class Client:
+        def search_media(self, subject, *, per_page):
+            assert subject == "videogame" and per_page > 0
+            return [{"id": 7, "title": {"rendered": "Image"}, "alt_text": "",
+                     "source_url": "https://wp.test/assets/7.jpg"}]
+
+    def search_web(values, **_kw):
+        queries.extend(values)
+        return [{"query": value, "candidates": []} for value in values]
+
+    monkeypatch.setattr(search, "search_web_images_batch", search_web)
+    outcome = _resolve_media_batch_dispatch(Client(), config, tmp_path, {
+        "batch_id": "library-pending", "schema_version": 1,
+        "posts": [{"post_id": 42, "subject": "videogame", "query": "videogame",
+                   "needed": 1, "limit": 5, "role": "inline"}],
+    }, full=True)["posts"][0]
+    assert queries == ["videogame"]
+    assert outcome["needed_web"] == 1
+    assert outcome["reuse"] == []
+    assert len(outcome["candidates"]) == 1
+    candidate = outcome["candidates"][0]
+    assert candidate["media_library_id"] == 7 and candidate["verdict"] == "vision_pending"
+    assert candidate["needs_vision"] is True
+    assert not calls
+
+
+@pytest.mark.parametrize("mode", ["approved", "changed_after_vision", "disabled", "provider_error"])
+def test_v1_apply_batch_normalizes_existing_generic_cover_when_exact_pixels_were_approved(tmp_path, monkeypatch, media_case, mode):
+    from dataclasses import replace
+    from pathlib import Path
+
+    config, calls = media_case
+    real_assets = downloader.urlopen_remote
+    uploaded = []
+    source_reads = []
+    if mode == "disabled":
+        config = replace(config, vision_enabled=False)
+    if mode == "provider_error":
+        def failed_vision(**_kwargs):
+            raise vision_gate.VisionGateError("test temporary outage")
+
+        monkeypatch.setattr(vision_gate, "_call_vision", failed_vision)
+
+    class Client(workflow_fixture.FakeClient):
+        def get_media(self, media_id):
+            return {
+                "id": media_id,
+                "source_url": f"https://wp.test/assets/{media_id}.{'webp' if media_id == 90 else 'jpg'}",
+                "title": {"rendered": "Image"}, "alt_text": "",
+                "media_details": {"width": 1280, "height": 720} if media_id == 90 else {"width": 1024, "height": 576},
+            }
+
+        def upload_media(self, path, **kwargs):
+            uploaded.append(Path(path).read_bytes())
+            assert uploaded[0] == base64.b64decode(calls[0].partition(",")[2])
+            return {"id": 90, "source_url": "https://wp.test/assets/90.webp"}
+
+    def assets(request, **kwargs):
+        if request.full_url.endswith("/90.webp"):
+            result = BytesIO(uploaded[0])
+            result.headers = Message()
+            result.headers["Content-Type"] = "image/webp"
+            return result
+        assert request.full_url.endswith("/7.jpg")
+        assert kwargs["mode"] == "enforce"
+        source_reads.append(request.full_url)
+        if mode == "changed_after_vision" and len(source_reads) > 1:
+            return _cover_webp_response(real_assets, request, **kwargs)
+        return real_assets(request, **kwargs)
+
+    monkeypatch.setattr(downloader, "urlopen_remote", assets)
+    monkeypatch.setattr(visual_hash, "image_hashes", lambda *_a, **_kw: {})
+    client = Client(workflow_fixture.WorkflowTests().post())
+    result = _apply_editorial_batch(client, config, tmp_path, {
+        "batch_id": "generic-existing-normalize", "schema_version": 1,
+        "items": [{"post_id": 42, "editorial": workflow_fixture.editorial_payload()}],
+    }, compact=False)["posts"][0]
+    if mode == "approved":
+        assert len(calls) == 1 and len(uploaded) == 1, result
+        assert result["status"] == "ready", result
+        assert client.post["featured_media"] == 90
+    else:
+        assert result["status"] != "ready", result
+        assert not uploaded
+        assert client.post["featured_media"] == 7
+        assert not client.post["meta"].get("_hermes_ready_hash")
+    assert client.post["status"] == "pending"
+
+
+@pytest.mark.parametrize("library_outcome", ["unrelated", "deleted"])
+def test_v1_library_rejection_can_use_web_reserve_without_inheriting_attachment(
+    tmp_path, monkeypatch, media_case, library_outcome,
+):
+    from unicornio_editor.wordpress import WordPressError
+
+    config, calls = media_case
+    fetches = []
+    downloads = []
+    old_download = downloader.urlopen_remote
+    old_provider = vision_gate._call_vision
+
+    class Client:
+        def get_media(self, media_id):
+            fetches.append(media_id)
+            if library_outcome == "deleted":
+                raise WordPressError("WordPress HTTP 404", status_code=404, api_code="rest_post_invalid_id")
+            return {"id": media_id, "source_url": "https://wp.test/library.jpg"}
+
+    def download(request, **kwargs):
+        downloads.append(request.full_url)
+        assert kwargs["mode"] == "enforce"
+        return old_download(request, **kwargs)
+
+    def provider(**kwargs):
+        result = old_provider(**kwargs)
+        if library_outcome == "unrelated" and len(calls) == 1:
+            return {**result, "status": "UNRELATED", "confidence": 0.95}
+        return result
+
+    monkeypatch.setattr(downloader, "urlopen_remote", download)
+    monkeypatch.setattr(vision_gate, "_call_vision", provider)
+    editorial = _generic_editorial()
+    primary = editorial["media_plan"][0]
+    primary["media_library_id"] = 7
+    reserve = {
+        "candidate_id": "independent-web", "direct_image_url": "https://cdn.example/reserve.jpg",
+        "provenance_mode": "credit_only", "credit_text": "Crédito: Imagem ilustrativa.",
+    }
+    from unicornio_editor.workflow import _execute_media_plan
+    rows, _, _ = _execute_media_plan(
+        editorial, config, Client(), tmp_path, v1_visual_fallback=True, media_fallback_candidates=[reserve],
+    )
+    assert fetches == [7]
+    assert downloads == (["https://wp.test/library.jpg"] if library_outcome == "unrelated" else []) + [reserve["direct_image_url"]]
+    assert rows[-1]["status"] == "accepted" and rows[-1]["candidate_id"] == "independent-web"
+
+
+@pytest.mark.parametrize("outcome", ["visual_cap", "rest_429", "visual_unrelated"])
+def test_automatic_v1_existing_cover_goes_through_pixels_and_shared_budget(tmp_path, monkeypatch, media_case, outcome):
+    from dataclasses import replace
+    from unicornio_editor.batch import (
+        build_media_resolve_batch_input, load_media_resolve_batch,
+        merge_media_manifest_into_editorial, prepare_batch,
+    )
+    from unicornio_editor.wordpress import WordPressError
+
+    config, calls = media_case
+    config = replace(config, vision_max_low=1)
+    post = workflow_fixture.WorkflowTests().post()
+    real_provider = vision_gate._call_vision
+
+    class Client(workflow_fixture.FakeClient):
+        def get_media(self, media_id):
+            if outcome == "rest_429" and media_id == 7:
+                raise WordPressError("WordPress HTTP 429", status_code=429)
+            return {"id": media_id, "source_url": f"https://wp.test/assets/{media_id}.jpg",
+                    "title": {"rendered": "Image"}, "alt_text": ""}
+
+    def provider(**kwargs):
+        result = real_provider(**kwargs)
+        if outcome == "visual_cap":
+            return {**result, "status": "UNCERTAIN", "confidence": 0.35}
+        if outcome == "visual_unrelated":
+            return {**result, "status": "UNRELATED", "confidence": 0.97}
+        return result
+
+    monkeypatch.setattr(vision_gate, "_call_vision", provider)
+    client = Client(post)
+    batch_id = "real-prepare-cover"
+    prepared = prepare_batch(client, config, tmp_path, [42], batch_id=batch_id)
+    assert prepared["prepared"] == 1 and not calls
+    editorial = workflow_fixture.editorial_payload()
+    editorial["title"] = editorial["seo"]["title"]
+    editorial["cleaned_html"] = (
+        "<p>O videogame ganhou novidades importantes no lançamento, segundo a equipe responsável pelo desenvolvimento e seu comunicado.</p>" * 8
+    )
+    request = build_media_resolve_batch_input({
+        "batch_id": batch_id,
+        "results": [{"post_id": 42, "status": "ok", "editorial": editorial}],
+    }, tmp_path)
+    assert request["posts"][0]["featured_required"] is False
+    assert request["posts"][0]["needed"] == 2
+    assert not calls
+    monkeypatch.setattr(visual_hash, "image_hashes", lambda *_a, **_kw: {})
+    monkeypatch.setattr(search, "search_web_images_batch", lambda queries, **_kw: [{
+        "query": q, "candidates": [{"direct_image_url": "https://cdn.example/body.jpg", "engine": "yandex"}],
+    } for q in queries])
+    resolved = _resolve_media_batch_dispatch(client, config, tmp_path, load_media_resolve_batch(request["path"]))
+    batch, assembly = merge_media_manifest_into_editorial({
+        "schema_version": 1, "batch_id": batch_id,
+        "items": [{"post_id": 42, "status": "ok", "editorial": editorial}],
+    }, resolved["audit"], media_source_policy="credit_only")
+    assert assembly["assembled"] == 1
+    items = batch["items"][0]["editorial"]["media_plan"]
+    assert len(items) == 1 and not items[0]["is_featured"], items
+    row = _apply_editorial_batch(client, config, tmp_path, batch, compact=False)["posts"][0]
+    assert row["status"] == "partial", row
+    assert len(calls) == 1
+    assert not client.post["meta"].get("_hermes_ready_hash")
+    if outcome == "rest_429":
+        assert row["media_plan_results"][0]["status"] == "accepted", row
+        assert row["partial"]["featured"]["status"] == "missing"
+    else:
+        assert row["media_plan_results"][0]["reason_code"] == "vision_budget_exhausted"
+        if outcome == "visual_unrelated":
+            assert row["partial"]["featured"]["status"] == "vision_rejected"
+            assert row["partial"]["featured"]["media_id"] == 7
+            from unicornio_editor.batch import _context_for_post
+            ctx = _context_for_post(post=client.post, prepared=editorial, batch_id="replacement",
+                                    config=config, client=client, root=tmp_path)
+            assert ctx["featured"]["action"] == "replace"
+    assert not any(payload.get("featured_media") for _, payload in client.updated)

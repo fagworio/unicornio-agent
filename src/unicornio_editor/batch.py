@@ -1161,6 +1161,11 @@ def _context_for_post(
         or (retained_featured.get("status") == "valid" and _effective_partial_kind(state) == "featured_vision")
     ):
         featured = {"exists": True, "valid": False, "action": "replace", "source": "partial_manifest"}
+    elif media_policy == "credit_only" and type(post.get("featured_media")) is int and post["featured_media"] > 0:
+        featured = {
+            "exists": True, "valid": False, "action": "recheck",
+            "media_id": post["featured_media"], "source": "wordpress_attachment",
+        }
     else:
         featured = _featured_diagnosis(client, post, entities)
     source_language = detect_language(f"{title}\n{source_content}")
