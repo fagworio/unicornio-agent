@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from .backup import SnapshotStore
 from .ai_provider import hermes_command_available
 from .batch import (
+    BatchAlreadyInitializedError,
     batch_directory,
     load_editorial_batch,
     load_media_resolve_batch,
@@ -449,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_batch_parser.add_argument(
         "--batch-id",
         default="",
-        help="id auditavel opcional (se omitido, o comando gera um novo)",
+        help="id novo opcional (se omitido, o comando gera e reserva um novo)",
     )
 
     apply_parser = subparsers.add_parser("apply", help="valida e aplica JSON editorial")
@@ -5844,6 +5845,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             # for bounded backoff; quality blocks and clean skips are normal.
             return 75
         return 0
+    except BatchAlreadyInitializedError as exc:
+        print(
+            json.dumps({
+                "error": str(exc),
+                "error_code": exc.error_code,
+                "batch_id": exc.batch_id,
+                "retryable": False,
+                "action": "se houver retomada HTTP 429, use a entrada original; "
+                          "para trabalho novo, execute prepare-batch sem --batch-id",
+            }, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        return 2
     except SessionBudgetError as exc:
         payload = {"error": str(exc), "error_code": exc.error_code}
         wait_ms = getattr(exc, "wait_ms", None)

@@ -18,11 +18,11 @@ O primeiro passo para reduzir turnos do modelo é preparar dois posts em uma
 mesma run e manter os dados completos fora do stdout:
 
 ```bash
-unicornio-editor prepare-batch POST_A POST_B --batch-id BATCH_ID
+unicornio-editor prepare-batch POST_A POST_B
 ```
 
-O resultado é um manifesto em `work/batches/BATCH_ID/manifest.json` e um
-envelope independente por post. O modelo pode devolver um único arquivo com
+O resultado informa o `batch_id` gerado, o caminho do manifesto e
+`editorial_input`, além de criar um envelope independente por post. O modelo pode devolver um único arquivo com
 `items[{post_id, editorial}]`, validado inteiro antes da execução:
 
 ```bash

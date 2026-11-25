@@ -72,6 +72,16 @@ class BatchError(ValueError):
     """Raised when a batch envelope cannot be safely created or read."""
 
 
+class BatchAlreadyInitializedError(BatchError):
+    """The ID is reserved, even if the original preparation was interrupted."""
+
+    error_code = "batch_already_initialized"
+
+    def __init__(self, batch_id: str):
+        self.batch_id = batch_id
+        super().__init__(f"batch_id já reservado: {batch_id}")
+
+
 def resolve_batch_editorial_defaults(
     client: Any, batch: dict[str, Any], *, root: Path | None = None, config: Any = None,
 ) -> dict[str, Any]:
@@ -1334,10 +1344,16 @@ def prepare_batch(
     is intentionally compact so it can be consumed by a stateless model run.
     """
     batch_id = validate_batch_id(batch_id or new_batch_id())
-    directory = batch_directory(root, batch_id)
     requested = [int(post_id) for post_id in post_ids]
     if not requested or len(requested) > 2:
         raise BatchError("prepare-batch aceita de 1 a 2 posts")
+    directory = batch_directory(root, batch_id)
+    try:
+        # mkdir reserves the name across processes. Never roll it back: an
+        # interrupted preparation can have already produced per-post effects.
+        directory.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise BatchAlreadyInitializedError(batch_id) from exc
     items: list[dict[str, Any]] = []
     contexts: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -1512,6 +1528,7 @@ def prepare_batch(
 
 __all__ = [
     "BATCH_SCHEMA_VERSION",
+    "BatchAlreadyInitializedError",
     "BatchError",
     "wordpress_text",
     "batch_directory",

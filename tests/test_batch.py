@@ -5,12 +5,15 @@ import json
 import re
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from unittest import mock
 
 from unicornio_editor.batch import (
+    BatchAlreadyInitializedError,
     BatchError,
     build_media_resolve_batch_input,
     load_media_resolve_batch,
@@ -67,6 +70,107 @@ def _post(post_id, title):
 class BatchContextTests(unittest.TestCase):
     def config(self):
         return Config("wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True)
+
+    def test_prepare_batch_collision_preserves_all_existing_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = BatchClient({1: _post(1, "Post um")})
+            first = prepare_batch(client, self.config(), root, [1], batch_id="batch-fixed")
+            batch_dir = Path(first["manifest"]).parent
+            (batch_dir / "editorial.output.json").write_bytes(b"sentinel output")
+            before = {path.name: path.read_bytes() for path in batch_dir.iterdir()}
+            with mock.patch.object(client, "get_post") as get_post, \
+                    mock.patch("unicornio_editor.batch.session_budget.skipped_locked_posts") as ledger:
+                for ids in ([1], [2]):
+                    with self.assertRaises(BatchAlreadyInitializedError) as conflict:
+                        prepare_batch(client, self.config(), root, ids, batch_id="batch-fixed")
+                    self.assertEqual(conflict.exception.batch_id, "batch-fixed")
+                with mock.patch("unicornio_editor.batch.new_batch_id", return_value="batch-fixed"), \
+                        self.assertRaises(BatchAlreadyInitializedError):
+                    prepare_batch(client, self.config(), root, [2])
+            get_post.assert_not_called()
+            ledger.assert_not_called()
+            self.assertEqual({path.name: path.read_bytes() for path in batch_dir.iterdir()}, before)
+            self.assertFalse((root / "backups" / "2").exists())
+
+    def test_prepare_batch_refuses_empty_or_incomplete_reservations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = mock.Mock()
+            batches = root / "work" / "batches"
+            empty = batches / "empty"
+            empty.mkdir(parents=True)
+            partial = batches / "partial"
+            partial.mkdir()
+            (partial / "post-1.json").write_bytes(b"sentinel incomplete")
+            for batch_id in ("empty", "partial"):
+                with self.subTest(batch_id=batch_id), self.assertRaises(BatchAlreadyInitializedError):
+                    prepare_batch(client, self.config(), root, [2], batch_id=batch_id)
+            self.assertEqual(list(empty.iterdir()), [])
+            self.assertEqual((partial / "post-1.json").read_bytes(), b"sentinel incomplete")
+            self.assertFalse((partial / "editorial.input.json").exists())
+            self.assertEqual(client.mock_calls, [])
+
+    def test_prepare_batch_reserves_before_wordpress_so_parallel_attempt_cannot_enter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entered = Event()
+            release = Event()
+
+            class WaitingClient(BatchClient):
+                def get_post(self, post_id):
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("test did not release the first preparation")
+                    return super().get_post(post_id)
+
+            primary = WaitingClient({1: _post(1, "Post um")})
+            competing = mock.Mock()
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                first = workers.submit(prepare_batch, primary, self.config(), root, [1], batch_id="shared")
+                try:
+                    self.assertTrue(entered.wait(5))
+                    self.assertTrue((root / "work" / "batches" / "shared").is_dir())
+                    with self.assertRaises(BatchAlreadyInitializedError):
+                        prepare_batch(competing, self.config(), root, [2], batch_id="shared")
+                    self.assertEqual(competing.mock_calls, [])
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=5)["prepared"], 1)
+            batch_dir = root / "work" / "batches" / "shared"
+            self.assertEqual(json.loads((batch_dir / "manifest.json").read_text())["requested_ids"], [1])
+            self.assertFalse((batch_dir / "post-2.json").exists())
+
+    def test_prepare_batch_cli_generates_distinct_ids_and_reports_local_conflict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = BatchClient({1: _post(1, "Post um")})
+            args = ["prepare-batch", "1", "--root", str(root)]
+            runs = []
+            with mock.patch("unicornio_editor.cli.load_config", return_value=self.config()), \
+                    mock.patch("unicornio_editor.cli.WordPressClient", return_value=client):
+                for _ in range(2):
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        self.assertEqual(main(args), 0)
+                    runs.append(json.loads(stdout.getvalue()))
+                before = Path(runs[0]["editorial_input"]).read_bytes()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.object(client, "get_post") as get_post, \
+                        redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(main(args + ["--batch-id", runs[0]["batch_id"]]), 2)
+                get_post.assert_not_called()
+            self.assertNotEqual(runs[0]["batch_id"], runs[1]["batch_id"])
+            for run in runs:
+                self.assertRegex(run["batch_id"], r"^batch-\d{8}T\d{6}Z-[0-9a-f]{8}$")
+                self.assertEqual(Path(run["editorial_input"]).parent.name, run["batch_id"])
+            self.assertEqual(stdout.getvalue(), "")
+            error = json.loads(stderr.getvalue())
+            self.assertEqual(error["error_code"], "batch_already_initialized")
+            self.assertEqual(error["batch_id"], runs[0]["batch_id"])
+            self.assertFalse(error["retryable"])
+            self.assertNotIn("resume_batch_id", error)
+            self.assertEqual(Path(runs[0]["editorial_input"]).read_bytes(), before)
 
     def test_post_locks_allow_distinct_posts_to_progress_independently(self):
         with tempfile.TemporaryDirectory() as directory:

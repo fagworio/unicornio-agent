@@ -2639,7 +2639,9 @@ class WorkflowTests(unittest.TestCase):
                         return data
 
                     with mock.patch.object(client, "get_media", side_effect=probe):
-                        rejected = prepare_batch(client, config, root, [42], batch_id="negative-resume")
+                        rejected = prepare_batch(
+                            client, config, root, [42], batch_id=f"negative-resume-{code}"
+                        )
                     self.assertEqual(rejected["items"][0]["error_code"], code)
                     self.assertEqual(client.updated, before)
                     self.assertEqual(ledger_path.read_text(), old_ledger)

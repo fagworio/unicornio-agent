@@ -4,8 +4,9 @@ import socket
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
-from io import BytesIO
+from io import BytesIO, StringIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -242,6 +243,67 @@ class EditorialProviderTests(unittest.TestCase):
         provider.assert_not_called()
         self.assertEqual(raised.exception.failure_class, "batch_resume_required")
         self.assertEqual(raised.exception.resume_batch_id, "prior-batch")
+
+    def test_cli_collision_cannot_replace_canonical_input_for_provider_429_resume(self):
+        from unicornio_editor import cli
+        from unicornio_editor.config import Config
+
+        config = Config(
+            "wordpress", "http://wp.test", "/wp-json/wp/v2", dry_run=True,
+            editorial_provider="openai", editorial_api_key="test-key",
+            editorial_base_url=self.base, editorial_model="editorial-test",
+        )
+        client = mock.Mock()
+        client.get_post.side_effect = lambda post_id: {
+            "id": post_id, "status": "pending", "title": {"raw": f"Videogame número {post_id}"},
+            "content": {"raw": "<p>Texto original sobre videogame.</p>"},
+            "meta": {"original_link": "https://source.test/news"}, "featured_media": 0,
+        }
+        headers = Message()
+        headers["Retry-After"] = "0"
+        rate_limited = HTTPError(self.base, 429, "Too Many Requests", headers, BytesIO(b""))
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cli, "_carregar_env_do_projeto"), \
+                mock.patch.object(cli, "load_config", return_value=config), \
+                mock.patch.object(cli, "WordPressClient", return_value=client):
+            root = Path(directory)
+
+            def invoke(*args):
+                output, error = StringIO(), StringIO()
+                with redirect_stdout(output), redirect_stderr(error):
+                    code = cli.main([*args, "--root", str(root)])
+                return code, json.loads((output if code == 0 else error).getvalue())
+
+            code, prepared = invoke("prepare-batch", "1", "2", "--batch-id", "editorial-test")
+            self.assertEqual(code, 0, prepared)
+            source = Path(prepared["editorial_input"])
+            original = source.read_bytes()
+            with mock.patch("unicornio_editor.editorial_provider.urlopen", side_effect=rate_limited) as provider:
+                code, limited = invoke("editorial-generate-batch", str(source))
+                provider.assert_called_once()
+            self.assertEqual((code, limited["error_code"], limited["resume_batch_id"]),
+                             (2, "rate_limited", prepared["batch_id"]))
+            self.assertEqual(editorial_backoff_status(root)["status"], "expired")
+            wp_reads = client.get_post.call_count
+            marker = root / "work" / "editorial-provider-backoff.json"
+            marker_before = marker.read_bytes()
+            code, conflict = invoke("prepare-batch", "3", "--batch-id", limited["resume_batch_id"])
+            self.assertEqual((code, conflict["error_code"]), (2, "batch_already_initialized"))
+            self.assertEqual(client.get_post.call_count, wp_reads)
+            self.assertEqual(marker.read_bytes(), marker_before)
+            self.assertEqual(source.read_bytes(), original)
+
+            code, resumed = invoke("editorial-generate-batch", str(source))
+            self.assertEqual(code, 0, resumed)
+            self.assertEqual(resumed["provider_requests"], 1)
+            saved = json.loads(Path(resumed["output"]).read_bytes())
+            self.assertEqual(saved["source_input_sha256"], hashlib.sha256(original).hexdigest())
+            self.assertEqual([row["post_id"] for row in saved["results"]], [1, 2])
+            self.assertEqual(editorial_backoff_status(root)["status"], "none")
+            code, reused = invoke("editorial-generate-batch", str(source))
+            self.assertEqual(code, 0, reused)
+            self.assertEqual(reused["provider_requests"], 0)
+            self.assertEqual(len(EditorialHandler.calls), 1)
 
     def test_matching_cached_output_does_not_bypass_active_backoff(self):
         with tempfile.TemporaryDirectory() as directory:

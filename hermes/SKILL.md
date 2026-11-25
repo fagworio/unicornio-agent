@@ -32,9 +32,9 @@ O cron editorial restaura o fluxo V1 por comandos explícitos e idempotentes:
 
 ```bash
 unicornio-editor cards --compact --root .
-unicornio-editor prepare-batch POST_ID --batch-id BATCH_ID --root .
-unicornio-editor editorial-generate-batch \
-  work/batches/BATCH_ID/editorial.input.json --root .
+unicornio-editor prepare-batch POST_ID --root .
+# Use batch_id e editorial_input retornados pelo prepare-batch.
+unicornio-editor editorial-generate-batch "$EDITORIAL_INPUT" --root .
 # Somente se a resposta indicar media_input.status=required:
 unicornio-editor media-resolve-batch \
   work/batches/BATCH_ID/media.input.json --compact --root .
@@ -92,13 +92,18 @@ migração administrativa explícita somente quando houver evidência segura.
 
 ### Cooldown e retomada do provider editorial (HTTP 429)
 
+- Para trabalho novo, deixe `prepare-batch` gerar o ID. Se receber
+  `batch_already_initialized`, não reutilize nem remova o diretório: para
+  trabalho novo sem uma retomada 429 pendente, rode `prepare-batch` sem
+  `--batch-id`. Essa colisão local não é um rate limit.
 - `error_code=rate_limited` inclui `retry_after_seconds`, `retry_at` e
   `resume_batch_id`; o cooldown é persistido em
   `work/editorial-provider-backoff.json` e o monitor mantém assinatura estável
   até o vencimento. Não faça retry em loop nem remova o marcador manualmente.
 - Depois do vencimento, retome o mesmo batch usando
-  `work/batches/<resume_batch_id>/editorial.input.json`; não prepare um batch
-  substituto enquanto o anterior não for resolvido. Outro batch recebe
+  `work/batches/<resume_batch_id>/editorial.input.json` diretamente com
+  `editorial-generate-batch`; não rode `prepare-batch` de novo enquanto a
+  retomada estiver pendente. Outro batch recebe
   `batch_resume_required`.
 - A saída editorial existente só é reutilizada quando seu hash de entrada,
   `batch_id` e IDs de posts correspondem. Se a entrada mudou, pare em
@@ -158,26 +163,26 @@ Quando houver dois posts novos elegíveis, a antiga estratégia de microbatch er
 2. Prepare os posts em envelopes independentes:
 
    ```bash
-   unicornio-editor prepare-batch 114463 114465 --batch-id batch-YYYYMMDD-01 --root .
+   unicornio-editor prepare-batch 114463 114465 --root .
    ```
 
    O comando grava `work/batches/<batch_id>/manifest.json`, um
    `post-<id>.json` completo por post e `editorial.input.json`, o envelope único
-   da inferência editorial. O stdout é somente o resumo.
+   da inferência editorial. O resumo retorna `batch_id` e `editorial_input`;
+   use esses valores nas próximas etapas.
 3. Leia `editorial.input.json` uma vez e produza o arquivo editorial sem chamar
    ferramentas entre a entrada e a saída. Preferencialmente deixe o Python
    fazer a chamada com `editorial-generate-batch editorial.input.json`; o Hermes
    não deve iniciar um loop de tools para escrever o editorial:
 
    ```bash
-   unicornio-editor editorial-generate-batch \
-     work/batches/batch-YYYYMMDD-01/editorial.input.json --root .
+   unicornio-editor editorial-generate-batch "$EDITORIAL_INPUT" --root .
    ```
 
    ```json
    {
      "schema_version": 1,
-     "batch_id": "batch-YYYYMMDD-01",
+     "batch_id": "BATCH_ID_RETORNADO",
      "results": [
        {"post_id": 114463, "status": "ok", "editorial": {"site_relevance": {}, "media_plan": []}},
        {"post_id": 114465, "status": "ok", "editorial": {"site_relevance": {}, "media_plan": []}}
@@ -204,7 +209,7 @@ Quando houver dois posts novos elegíveis, a antiga estratégia de microbatch er
 
    ```json
    {
-     "batch_id": "batch-YYYYMMDD-01",
+     "batch_id": "BATCH_ID_RETORNADO",
      "posts": [
        {"post_id": 114463, "subject": "Obra A", "needed": 2, "query": "Obra A"},
        {"post_id": 114465, "subject": "Obra B", "needed": 2, "query": "Obra B"}

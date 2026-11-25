@@ -65,6 +65,12 @@ sem conteúdo de post ou identificadores de owner.
 
 ## Limite de taxa e retomada editorial
 
+Para trabalho novo, rode `prepare-batch` sem `--batch-id` e use o
+`editorial_input` retornado. Um ID explícito só é aceito se ainda não
+estiver reservado. `batch_already_initialized` é uma colisão local, não
+HTTP 429: preserve o diretório, mesmo vazio ou incompleto, e use um ID
+gerado para trabalho novo apenas se não houver retomada 429 pendente.
+
 HTTP 429 do provider editorial é devolvido como erro JSON com `error_code`,
 `status_code`, `retry_after_seconds`, `retry_at` e `resume_batch_id`. O cabeçalho
 `Retry-After` aceita delay-seconds ou HTTP-date, é limitado a sete dias e não
@@ -76,7 +82,8 @@ serializadas entre processos; uma segunda execução do mesmo batch reutiliza a
 saída validada em vez de duplicar a chamada.
 
 Após o vencimento, retome exatamente
-`work/batches/<resume_batch_id>/editorial.input.json`. Enquanto esse batch não
+`work/batches/<resume_batch_id>/editorial.input.json` com
+`editorial-generate-batch`, sem repetir `prepare-batch`. Enquanto esse batch não
 for resolvido, outro batch recebe `batch_resume_required`. Uma saída editorial
 existente só é reutilizada quando o hash da entrada, o `batch_id` e os IDs
 coincidem e o sidecar `editorial.output.json.integrity.json` confirma o hash dos

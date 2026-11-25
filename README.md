@@ -222,15 +222,16 @@ Teste:
 ```bash
 unicornio-editor list-pending
 unicornio-editor prepare 12345
-unicornio-editor prepare-batch 12345 12346 --batch-id batch-local-01
-unicornio-editor editorial-generate-batch work/batches/batch-local-01/editorial.input.json --root .
+unicornio-editor prepare-batch 12345 12346 --root .
+# Use os valores retornados em batch_id (BATCH_ID) e editorial_input (EDITORIAL_INPUT).
+unicornio-editor editorial-generate-batch "$EDITORIAL_INPUT" --root .
 unicornio-editor maintenance-report posts.json
 # Medir gasto de contexto por run (telemetria):
 unicornio-editor telemetry --root .
 # Preflight somente leitura do canary: auth, dois pending e Media Library:
 unicornio-editor canary-preflight 12345 12346 --root .
 # Filtrar a telemetria de um microbatch específico:
-unicornio-editor telemetry --batch-id batch-local-01 --root .
+unicornio-editor telemetry --batch-id "$BATCH_ID" --root .
 # Descoberta de imagens via Google Images com filtro do editor
 # (imgsz=xga = 1024x768, imgar=w = proporção larga, udm=2):
 unicornio-editor media-search-web "redfall xbox series" --size xga --ratio w --limit 5
@@ -253,7 +254,8 @@ unicornio-editor media-resolve-batch media-batch.json --compact
 
 `prepare-batch` grava um envelope completo por post em
 `work/batches/<batch_id>/`, além de snapshots individuais e
-`editorial.input.json`, pronto para uma única inferência. O arquivo editorial
+`editorial.input.json`, pronto para uma única inferência. O comando gera um ID
+por padrão e recusa qualquer ID já reservado, sem sobrescrever o batch. O arquivo editorial
 de microbatch usa `{schema_version: 1, batch_id, results: [{post_id, status, editorial}]}`;
 um item pode ser `needs_retry` sem invalidar o outro.
 `editorial-generate-batch` faz diretamente uma única chamada estruturada ao
