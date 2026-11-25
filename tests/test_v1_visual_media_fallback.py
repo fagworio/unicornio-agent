@@ -925,7 +925,7 @@ def test_v1_library_rejection_can_use_web_reserve_without_inheriting_attachment(
     assert rows[-1]["status"] == "accepted" and rows[-1]["candidate_id"] == "independent-web"
 
 
-@pytest.mark.parametrize("outcome", ["visual_cap", "rest_429", "visual_unrelated"])
+@pytest.mark.parametrize("outcome", ["visual_cap", "rest_429", "visual_unrelated", "corrupt", "unsafe_url", "asset_dns"])
 def test_automatic_v1_existing_cover_goes_through_pixels_and_shared_budget(tmp_path, monkeypatch, media_case, outcome):
     from dataclasses import replace
     from unicornio_editor.batch import (
@@ -935,16 +935,47 @@ def test_automatic_v1_existing_cover_goes_through_pixels_and_shared_budget(tmp_p
     from unicornio_editor.wordpress import WordPressError
 
     config, calls = media_case
-    config = replace(config, vision_max_low=1)
+    config = replace(config, vision_max_low=1, max_source_retries=0)
     post = workflow_fixture.WorkflowTests().post()
     real_provider = vision_gate._call_vision
+    fixture_transport = downloader.urlopen_remote
+    from unicornio_editor.media.url_safety import URLSafetyError, enforce_remote_url
+
+    def assets(request, *, mode, **kwargs):
+        assert mode == "enforce"
+        if request.full_url == "http://127.0.0.1:1/asset.jpg":
+            # Real safety gate raises before trying the prohibited destination.
+            enforce_remote_url(request.full_url, mode=mode)
+            pytest.fail("private address passed enforced validation")
+        if request.full_url.endswith("/7.jpg") and outcome == "asset_dns":
+            raise URLSafetyError("DNS não resolveu o host")
+        if request.full_url.endswith("/7.jpg") and outcome == "corrupt":
+            result = BytesIO(b"invalid asset bytes")
+            result.headers = Message()
+            result.headers["Content-Type"] = "image/jpeg"
+            return result
+        return fixture_transport(request, mode=mode, **kwargs)
+
+    monkeypatch.setattr(downloader, "urlopen_remote", assets)
 
     class Client(workflow_fixture.FakeClient):
         def get_media(self, media_id):
             if outcome == "rest_429" and media_id == 7:
                 raise WordPressError("WordPress HTTP 429", status_code=429)
-            return {"id": media_id, "source_url": f"https://wp.test/assets/{media_id}.jpg",
-                    "title": {"rendered": "Image"}, "alt_text": ""}
+            if media_id == 90:
+                return {"id": media_id, "source_url": "https://wp.test/videogame-90.webp",
+                        "mime_type": "image/webp", "media_details": {"width": 1280, "height": 720}}
+            return {
+                "id": media_id,
+                "source_url": (
+                    "http://127.0.0.1:1/asset.jpg" if media_id == 7 and outcome == "unsafe_url"
+                    else f"https://wp.test/assets/{media_id}.jpg"
+                ),
+                "title": {"rendered": "Image"}, "alt_text": "",
+            }
+
+        def upload_media(self, *args, **kwargs):
+            pytest.fail("unapproved imported cover was normalized/uploaded")
 
     def provider(**kwargs):
         result = real_provider(**kwargs)
@@ -987,16 +1018,52 @@ def test_automatic_v1_existing_cover_goes_through_pixels_and_shared_budget(tmp_p
     assert row["status"] == "partial", row
     assert len(calls) == 1
     assert not client.post["meta"].get("_hermes_ready_hash")
-    if outcome == "rest_429":
+    if outcome in {"visual_cap", "visual_unrelated"}:
+        assert row["media_plan_results"][0]["reason_code"] == "vision_budget_exhausted"
+    else:
         assert row["media_plan_results"][0]["status"] == "accepted", row
+    if outcome in {"rest_429", "asset_dns"}:
         assert row["partial"]["featured"]["status"] == "missing"
     else:
-        assert row["media_plan_results"][0]["reason_code"] == "vision_budget_exhausted"
-        if outcome == "visual_unrelated":
-            assert row["partial"]["featured"]["status"] == "vision_rejected"
-            assert row["partial"]["featured"]["media_id"] == 7
-            from unicornio_editor.batch import _context_for_post
-            ctx = _context_for_post(post=client.post, prepared=editorial, batch_id="replacement",
-                                    config=config, client=client, root=tmp_path)
-            assert ctx["featured"]["action"] == "replace"
+        assert row["partial"]["featured"]["status"] == "vision_rejected"
+        assert row["partial"]["featured"]["media_id"] == 7
+        from unicornio_editor.batch import _context_for_post
+        ctx = _context_for_post(post=client.post, prepared=editorial, batch_id="replacement",
+                                config=config, client=client, root=tmp_path)
+        assert ctx["featured"]["action"] == "replace"
     assert not any(payload.get("featured_media") for _, payload in client.updated)
+
+
+def test_v1_plan_preserves_generic_indexed_library_and_web_in_bounded_mix(tmp_path, monkeypatch, media_case):
+    from unicornio_editor.media.library_index import register
+
+    config, calls = media_case
+    generic = {"id": 7, "source_url": "https://wp.test/assets/asset.jpg", "title": {"rendered": "Image"}}
+    register(tmp_path, source_url=generic["source_url"], media_id=7, subject="videogame")
+
+    class Client:
+        def get_media(self, media_id):
+            assert media_id == 7
+            return generic
+
+        def search_media(self, subject, *, per_page):
+            return [
+                {"id": 8, "source_url": "https://wp.test/assets/videogame-sequel.jpg"},
+                {"id": 9, "source_url": "https://wp.test/assets/videogame-cover.jpg"},
+            ]
+
+    web_urls = ["https://cdn.example/web1.jpg", "https://cdn.example/web2.jpg"]
+    monkeypatch.setattr(search, "search_web_images_batch", lambda queries, **_kw: [
+        {"query": q, "candidates": [{"direct_image_url": u, "engine": "yandex"} for u in web_urls]}
+        for q in queries
+    ])
+    outcome = _resolve_media_batch_dispatch(Client(), config, tmp_path, {
+        "batch_id": "library-web-mix", "schema_version": 1,
+        "posts": [{"post_id": 42, "subject": "videogame", "query": "videogame",
+                   "needed": 3, "limit": 3, "role": "inline"}],
+    }, full=True)["posts"][0]
+    assert outcome["reuse"] == [] and outcome["needed_web"] == 3
+    assert outcome["candidates"][0]["media_library_id"] == 7
+    assert {c["url"] for c in outcome["candidates"][1:]} == set(web_urls)
+    assert all(c["verdict"] == "vision_pending" for c in outcome["candidates"])
+    assert not calls

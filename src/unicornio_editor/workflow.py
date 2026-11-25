@@ -2667,6 +2667,12 @@ def validate_media_plan(
                     urlparse(str(attachment.get("source_url") or "")).hostname or ""
                 ).lower(),
                 detail=str(vision.get("reason") or "")[:160],
+                **({
+                    "reason_code": str(vision.get("reason_code") or ""),
+                    "vision_attempted": bool(vision.get("vision_calls")),
+                    "vision_status": (vision.get("decision") or {}).get("status"),
+                    "vision_confidence": (vision.get("decision") or {}).get("confidence"),
+                } if v1_feature_policy else {}),
             )
     not_verified = {row["index"] for row in rejected} | set(vision_pending)
     accepted = set(range(len(plan))) - not_verified
@@ -2684,11 +2690,25 @@ def validate_media_plan(
 
 
 def _existing_v1_featured_pixels(source: Path, destination: Path) -> Path:
-    from PIL import Image
+    from PIL import Image, UnidentifiedImageError
 
-    with Image.open(source) as image:
-        if image.format == "WEBP" and image.size == (1280, 720):
-            return source
+    try:
+        with Image.open(source) as image:
+            if image.format == "WEBP" and image.size == (1280, 720):
+                image.load()
+                return source
+    except (UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        raise MediaConversionError(
+            "featured image bytes are not usable", reason_code="invalid_image_format",
+            failure_kind="decode_error",
+        ) from exc
+    except OSError as exc:
+        if exc.errno is not None:  # real I/O failure, not a decoder failure
+            raise
+        raise MediaConversionError(
+            "featured image bytes could not be decoded", reason_code="image_decode_failed",
+            failure_kind="decode_error",
+        ) from exc
     return prepare_featured_webp(source, destination)
 
 
@@ -2859,9 +2879,13 @@ def _validate_featured_candidate_vision(
                 root=root,
                 **({"match_threshold": threshold} if v1_feature_policy else {}),
             )
+        accepted = bool(decision.get("accepted"))
         if v1_feature_policy:
             vision_calls = 2 if allow_high and "low_status" in decision else 1
-        if decision.get("accepted"):
+            # The backward-compatible decision helper can say accepted=True
+            # for an inconclusive low pass when no high budget is available.
+            accepted = decision.get("verdict") == "accept"
+        if accepted:
             cache_decision = {
                 key: decision[key]
                 for key in (
@@ -2889,14 +2913,41 @@ def _validate_featured_candidate_vision(
                 ),
                 context_key=vision_context_key,
             )
+        v1_reason = (
+            "accepted" if accepted else
+            "role_unsuitable" if decision.get("visual_type") in {"text_banner", "infographic"} else
+            "subject_mismatch" if decision.get("verdict") == "reject" else "vision_inconclusive"
+        )
         return {
-            "status": "passed" if decision.get("accepted") else "rejected",
+            "status": "passed" if accepted else "rejected",
             "reason": str(decision.get("reason") or "decisao visual sem motivo"),
             "cached": False,
             "image_sha256": image_sha256,
-            "decision": decision,
-            **({"vision_calls": vision_calls} if v1_feature_policy else {}),
+            "decision": decision | ({"accepted": accepted} if v1_feature_policy else {}),
+            **({"vision_calls": vision_calls, "reason_code": v1_reason} if v1_feature_policy else {}),
         }
+    except MediaDownloadError as exc:
+        if not v1_feature_policy:
+            result = _structured_media_failure(
+                exc, stage="featured_vision", reason_code="vision_provider_error", recoverable=True,
+            )
+            return {**result, "technical": True, "reason": result["detail"], "cached": False}
+        cause = exc.__cause__
+        # A DNS outage does not prove that the URL violates the policy.
+        unsafe = isinstance(cause, URLSafetyError) and str(cause) != "DNS não resolveu o host"
+        invalid = unsafe or getattr(cause, "code", None) in {404, 410} or (
+            cause is None and str(exc) in {
+                "image URL must use HTTP(S)", "remote resource is not an image",
+                "remote image exceeds size limit", "remote image was empty",
+            }
+        )
+        result = _structured_media_failure(
+            exc, stage="featured_download",
+            reason_code="unsafe_url" if unsafe else ("candidate_asset_invalid" if invalid else "vision_provider_error"),
+            recoverable=not invalid,
+        )
+        return {**result, "status": "rejected" if invalid else "deferred",
+                "technical": True, "reason": result["detail"], "cached": False}
     except (VisionGateError, VisionInputUnavailable) as exc:
         result = _structured_media_failure(
             exc,
@@ -2922,7 +2973,11 @@ def _validate_featured_candidate_vision(
             reason_code="media_conversion_error",
             recoverable=False,
         )
-        result.update({"status": "rejected", "technical": False, "reason": result["detail"], "cached": False})
+        if v1_feature_policy and exc.recoverable:
+            result.update(status="deferred", technical=True, reason_code="vision_provider_error")
+        else:
+            result.update(status="rejected", technical=False)
+        result.update(reason=result["detail"], cached=False)
         return result
     except Exception as exc:  # noqa: BLE001 - fail closed
         result = _structured_media_failure(

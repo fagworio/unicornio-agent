@@ -2001,9 +2001,15 @@ def _resolve_media_batch(
             media_source_policy=media_source_policy,
             v1_visual_fallback=v1_visual_fallback,
         )
-        pending_reuse_by_post[post_id] = [
-            candidate for candidate in reuse_accepted
+        pending_by_id = {
+            candidate["candidate_id"]: candidate for candidate in reuse_accepted
             if (candidate.get("evidence") or {}).get("verdict") == "vision_pending"
+        }
+        # Keep the original index-first lookup order. Text score is not a
+        # suitable priority for provisionals that have not been seen by Vision.
+        pending_reuse_by_post[post_id] = [
+            pending_by_id[candidate["candidate_id"]] for candidate in reuse_candidates
+            if candidate["candidate_id"] in pending_by_id
         ]
         reuse = [
             candidate for candidate in reuse_accepted
@@ -2146,7 +2152,9 @@ def _resolve_media_batch(
         # Prefer bounded local candidates without suppressing web discovery.
         if pending_reuse:
             projected: dict[str, dict] = {}
-            for candidate in [*pending_reuse, *aprovados]:
+            # Give the archive its first opportunity without crowding all
+            # the bounded primary/reserve capacity with unassessed WP results.
+            for candidate in [*pending_reuse[:1], *aprovados, *pending_reuse[1:]]:
                 projected.setdefault(str(candidate.get("direct_image_url") or ""), candidate)
             compact_candidates = [_media_candidate(candidate) for candidate in projected.values()]
         else:
