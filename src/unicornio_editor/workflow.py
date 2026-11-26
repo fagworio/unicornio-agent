@@ -4175,8 +4175,11 @@ def _execute_media_plan(
                 from .media.visual_hash import phash_from_path
 
                 final_phash = phash_from_path(str(webp)) or str(item.get("phash") or "")
-                # Featured "so texto" nao e key art: rejeita.
-                if is_featured and image_is_mostly_flat(webp):
+                # V1 credit-only requires an exact-byte, role-aware Vision
+                # decision below. Low edge density cannot distinguish a real
+                # stylized artwork from a text-only banner. Keep the legacy
+                # filter only where that mandatory pixel decision is absent.
+                if is_featured and not needs_pixels and image_is_mostly_flat(webp):
                     _funnel("conversion", "rejected", item, position, "featured plana")
                     return position, {
                         "paragraph_index": item.get("paragraph_index"),

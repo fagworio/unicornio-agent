@@ -14,18 +14,17 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 
-# Profile/avatar infrastructure is never editorial media. Keep this narrow:
-# provenance and relevance still decide ordinary image CDNs.
-_NOISE_IMAGE_HOST_SUFFIXES = ("gravatar.com",)
-
-
 def is_noise_image_url(url: str) -> bool:
-    """Return whether ``url`` belongs to a known non-editorial image host."""
+    """Recognize explicit profile-image endpoints, not inferred art style."""
     try:
-        host = (urlparse(str(url or "")).hostname or "").casefold().rstrip(".")
+        parsed = urlparse(str(url or ""))
+        host = (parsed.hostname or "").casefold().rstrip(".")
     except ValueError:
         return False
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in _NOISE_IMAGE_HOST_SUFFIXES)
+    if host != "gravatar.com" and not host.endswith(".gravatar.com"):
+        return False
+    endpoint = unquote(parsed.path).lstrip("/").partition("/")[0].casefold()
+    return endpoint in {"avatar", "userimage"}
 
 
 @dataclass(frozen=True)

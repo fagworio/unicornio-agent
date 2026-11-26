@@ -2688,8 +2688,10 @@ def _resolve_media_targets_batch(
                 "role": target_role,
                 "featured_required": target_role == "featured",
                 "replacement_reserve": target_reserve,
+                "existing_media_ids": post.get("existing_media_ids") or [],
                 "existing_media_urls": post.get("existing_media_urls") or [],
                 "existing_media_phashes": post.get("existing_media_phashes") or {},
+                "excluded_direct_image_urls": post.get("excluded_direct_image_urls") or [],
             }
             resolved = _resolve_media_batch(
                 client,

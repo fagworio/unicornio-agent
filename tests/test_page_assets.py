@@ -56,6 +56,11 @@ class PageAssetTests(unittest.TestCase):
 
     def test_marks_gravatar_as_non_editorial_before_media_processing(self):
         assert is_noise_image_url("https://secure.gravatar.com/avatar/abc?s=512")
+        assert is_noise_image_url("https://gravatar.com/userimage/123/a.png")
+        assert is_noise_image_url("https://secure.gravatar.com./%61vatar%2Fabc")
+        assert not is_noise_image_url("https://gravatar.com/blog/key-art.jpg")
+        assert not is_noise_image_url("https://gravatar.com/blog/avatar-guide.jpg")
+        assert not is_noise_image_url("https://gravatar.com.example/avatar/article-art.webp")
         assert not is_noise_image_url("https://images.nintendolife.com/news/star-fox.jpg")
 
     def test_preserves_duplicate_url_occurrences_with_distinct_context(self):

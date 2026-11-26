@@ -186,6 +186,152 @@ def test_genuine_visual_decision_controls_upload(tmp_path, monkeypatch, media_ca
         assert len(calls) == 1, "explicit unrelated result must never take contextual fallback"
 
 
+def _low_edge_cover_transport():
+    cover = Image.new("RGB", (1280, 720), "#182535")
+    draw = ImageDraw.Draw(cover)
+    draw.ellipse((278, 170, 733, 567), fill="#d69d60")
+    draw.polygon([(408, 563), (912, 121), (1125, 563)], fill="#5e999d")
+    image = BytesIO()
+    cover.save(image, format="PNG")
+    content = image.getvalue()
+
+    def transport(_request, **_kwargs):
+        response = BytesIO(content)
+        response.headers = Message()
+        response.headers["Content-Type"] = "image/png"
+        return response
+
+    return transport
+
+
+@pytest.mark.parametrize("kind,legacy", [
+    ("key_art", False), ("text_banner", False), ("key_art", True),
+])
+def test_normalized_low_edge_cover_uses_role_vision_only_in_v1_credit_lane(
+    tmp_path, monkeypatch, media_case, kind, legacy,
+):
+    from dataclasses import replace
+
+    from unicornio_editor.media.converter import image_is_mostly_flat, prepare_featured_webp
+    from unicornio_editor.workflow import _execute_media_plan
+
+    config, calls = media_case
+    source = _low_edge_cover_transport()
+    original = tmp_path / "original.png"
+    original.write_bytes(source(None).getvalue())
+    webp = prepare_featured_webp(original, tmp_path / "normalized.webp")
+    assert image_is_mostly_flat(webp)  # exercise real old veto, not a mocked threshold
+    uploads = []
+
+    def upload(_client, path, evidence):
+        assert evidence["credit_text"] == "Crédito: Imagem ilustrativa."
+        uploads.append(path.read_bytes())
+        return {"id": 90, "source_url": "https://wp.test/videogame-90.webp"}
+
+    def provider(**kwargs):
+        calls.append(base64.b64decode(kwargs["image_url"].partition(",")[2]))
+        assert calls[-1] == webp.read_bytes()
+        return {"status": "MATCH", "confidence": 0.95, "visual_type": kind}
+
+    monkeypatch.setattr(downloader, "urlopen_remote", source)
+    monkeypatch.setattr(vision_gate, "_call_vision", provider)
+    monkeypatch.setattr("unicornio_editor.workflow.upload_image", upload)
+    editorial = _generic_editorial(featured=True)
+    editorial["media_plan"][0]["direct_image_url"] = "https://gravatar.com/blog/videogame-cover.png"
+    if legacy:
+        config = replace(config, vision_enabled=False, vision_api_key="")
+        # Isolate the legacy conversion guard after its unrelated textual
+        # preflight has admitted a cover and Vision is not required.
+        monkeypatch.setattr("unicornio_editor.workflow._media_item_rejection", lambda *_a, **_kw: None)
+    rows, _, _ = _execute_media_plan(
+        editorial, config, object(), tmp_path, v1_visual_fallback=not legacy,
+    )
+    row = rows[0]
+    if legacy:
+        assert not calls and not uploads
+        assert row["failure_kind"] == "featured_flat_art", row
+    elif kind == "text_banner":
+        assert len(calls) == 1 and not uploads
+        assert row["reason_code"] == "role_unsuitable", row
+        assert row["failure_stage"] == "featured_vision", row
+    else:
+        assert len(calls) == 1 and uploads == calls
+        assert row["status"] == "accepted", row
+        assert row["vision_evidence"]["visual_type"] == "key_art"
+        assert row["rights_verified"] is False
+
+
+def test_media_resolve_cli_filters_retained_targets_before_candidate_download(
+    tmp_path, monkeypatch, media_case, capsys,
+):
+    import json
+
+    from unicornio_editor import cli
+
+    config, calls = media_case
+    retained_id = 73
+    original = "https://cdn.example/retained-original.jpg"
+    # Discovery can expose both the old external original and an opaque
+    # Media Library alias. Neither can fill a different target on retry.
+    library_alias = "https://wp.test/opaque-alias.jpg"
+    replacement = "https://cdn.example/replacement.jpg"
+    queries = []
+    downloads = []
+
+    class Client:
+        def search_media(self, _subject, *, per_page):
+            return [{"id": retained_id, "source_url": library_alias}]
+
+    def candidates(values, *, accept, **_kwargs):
+        queries.extend(values)
+        rows = []
+        for query in values:
+            discovered = [
+                {"candidate_id": "retained", "direct_image_url": original, "engine": "yandex"},
+                {"candidate_id": "replacement", "direct_image_url": replacement, "engine": "yandex"},
+            ]
+            assert accept(discovered, query) == 0  # V1 provisionals do not prove capacity
+            rows.append({"query": query, "candidates": discovered})
+        return rows
+
+    def no_download(request, **_kwargs):
+        downloads.append(request.full_url)
+        pytest.fail("Discovery downloaded candidate pixels prematurely")
+
+    monkeypatch.setattr(cli, "_carregar_env_do_projeto", lambda *_args: None)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "WordPressClient", lambda *_args: Client())
+    monkeypatch.setattr(search, "search_web_images_batch", candidates)
+    monkeypatch.setattr(downloader, "urlopen_remote", no_download)
+    path = tmp_path / "media.input.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "batch_id": "targeted-retained", "posts": [{
+            "post_id": 42, "subject": "Games", "needed": 2, "featured_required": False,
+            "existing_media_ids": [retained_id], "excluded_direct_image_urls": [original],
+            "targets": [
+                {
+                    "target_id": f"root:number-{i}", "role": "inline", "subject": subject,
+                    "query": subject, "paragraph_index": i, "item_identity": f"root:number-{i}",
+                    "item_title": subject, "section_heading": subject,
+                }
+                for i, subject in enumerate(("Videogame A", "Videogame B"), start=1)
+            ],
+        }],
+    }))
+    assert cli.main(["media-resolve-batch", str(path), "--root", str(tmp_path), "--full"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert queries == ["Videogame A", "Videogame B"]
+    for target in result["posts"][0]["targets"]:
+        assert target["reuse"] == []
+        assert [row["url"] for row in target["candidates"]] == [replacement]
+        assert target["candidates"][0]["verdict"] == "vision_pending"
+        assert any(
+            row["candidate_id"] == "retained" and row["verdict"] == "previously_rejected_candidate"
+            for row in target["candidate_diagnostics"]
+        )
+    assert not calls and not downloads
+
+
 def test_invalid_image_cannot_reach_vision(tmp_path, monkeypatch, media_case):
     from unicornio_editor.workflow import _execute_media_plan
 
@@ -351,7 +497,8 @@ def test_pending_candidates_require_enforced_url_policy(tmp_path, monkeypatch, m
 
 @pytest.mark.parametrize(("mutate_readback", "inline_deficit", "retry_readback"), [
     (False, False, ""), (True, False, ""), (True, True, ""),
-    (False, True, "same"), (False, True, "changed"), (False, True, "unavailable"),
+    (False, True, "same"), (False, True, "flat_same"),
+    (False, True, "changed"), (False, True, "unavailable"),
     (False, True, "wrong_id"), (False, True, "legacy"), (False, True, "context_changed"),
     (False, True, "small_legacy"), (False, True, "url_drift"), (False, True, "media_rest_timeout"),
     (False, True, "unavailable_full_inline"), (False, True, "media_deleted"),
@@ -370,7 +517,7 @@ def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
     if not mutate_readback:
         original_call = vision_gate._call_vision
         monkeypatch.setattr(vision_gate, "_call_vision", lambda **kwargs: original_call(**kwargs) | {"confidence": 0.60})
-    real_assets = downloader.urlopen_remote
+    real_assets = _low_edge_cover_transport() if retry_readback == "flat_same" else downloader.urlopen_remote
     wp_url = "https://wp.test/image-90.webp"
     original_cover_url = "https://wp.test/wrong-original-cover.webp"
     uploaded = []
@@ -559,7 +706,7 @@ def test_generic_featured_ready_requires_actual_wordpress_attachment_bytes(
             assert second["status"] == "partial", second
             featured = second["partial"]["featured"]
             expected = {
-                "same": "valid", "legacy": "valid", "changed": "vision_rejected",
+                "same": "valid", "flat_same": "valid", "legacy": "valid", "changed": "vision_rejected",
                 "small_legacy": "vision_rejected", "url_drift": "vision_rejected",
                 "unavailable": "verification_pending", "unavailable_full_inline": "verification_pending",
                 "context_changed": "verification_pending",
