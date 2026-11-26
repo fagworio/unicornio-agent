@@ -1940,6 +1940,20 @@ def test_rejected_media_candidate_is_replaced_before_ready_readback(wordpress_e2
 
 
 def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wordpress_e2e_case, monkeypatch):
+    _v1_mixed_rework_resume(
+        wordpress_e2e_case, monkeypatch, fixture_prefix="v1_mixed_progress",
+        required=6, retained_inline=3, paragraphs=36, observation="v1_mixed_media_progress",
+    )
+
+
+def test_v1_mixed_rework_retains_two_attachments_and_sibling_reaches_ready(wordpress_e2e_case, monkeypatch):
+    _v1_mixed_rework_resume(
+        wordpress_e2e_case, monkeypatch, fixture_prefix="v1_mixed_progress_four",
+        required=4, retained_inline=2, paragraphs=24, observation="v1_mixed_media_progress_four",
+    )
+
+
+def _v1_mixed_rework_resume(case, monkeypatch, *, fixture_prefix, required, retained_inline, paragraphs, observation):
     """Real WP writes and readback; local deterministic image and video evidence."""
     from dataclasses import replace
 
@@ -1948,9 +1962,8 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
     from unicornio_editor.media.inserter import plan_normal_media_insertions
     from unicornio_editor.media.relevance import iter_content_images
 
-    case = wordpress_e2e_case
-    first_id = case.post_id("v1_mixed_progress_first")
-    sibling_id = case.post_id("v1_mixed_progress_sibling")
+    first_id = case.post_id(f"{fixture_prefix}_first")
+    sibling_id = case.post_id(f"{fixture_prefix}_sibling")
     with ControlledSource(subject_confidence=0.92) as source:
         config = replace(
             _automatic_pipeline_config(case, source, first_id, media_source_policy="credit_only"),
@@ -1978,8 +1991,12 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
             f"<p>Em Pharloom, Hollow Knight Silksong apresenta a região {number}, "
             "onde a exploração de corredores verticais exige ferramentas diferentes para atravessar "
             "armadilhas, abrir caminhos alternativos e entender como os inimigos protegem cada passagem.</p>"
-            for number in range(1, 37)
+            for number in range(1, paragraphs + 1)
         )
+        from unicornio_editor.content_quality import minimum_image_count, word_count
+
+        assert minimum_image_count(word_count(first["cleaned_html"])) == required
+        deficit = required - retained_inline
         for post_id, editorial in [(first_id, first), (sibling_id, sibling)]:
             case.client.update_post(post_id, {
                 "title": editorial["seo"]["title"],
@@ -2029,7 +2046,7 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
         first_result, sibling_result = batch(
             "mixed-first",
             (first_id, {**first, "media_plan": plan_normal_media_insertions(
-                first["cleaned_html"], [plan(i) for i in (10, 11, 12)]
+                first["cleaned_html"], [plan(i) for i in range(10, 10 + retained_inline)]
             ) + [plan(13, True)]}),
             (sibling_id, {**sibling, "media_plan": plan_normal_media_insertions(
                 sibling["cleaned_html"], [plan(17), plan(18)]
@@ -2042,7 +2059,7 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
         assert not list(iter_content_images(wp_first["content"]["raw"]))
         receipt_path = case.root / "backups" / str(first_id) / "editorial.partial.json"
         saved = json.loads(receipt_path.read_text())["v1_media_progress"]
-        assert len([row for row in saved["rows"] if not row["featured"]]) == 3
+        assert len([row for row in saved["rows"] if not row["featured"]]) == retained_inline
         assert len([row for row in saved["rows"] if row["featured"]]) == 1
         retained = {row["media_id"]: row["sha256"] for row in saved["rows"]}
         prior_calls = {digest: source.vision_pixel_hashes.count(digest) for digest in retained.values()}
@@ -2060,7 +2077,7 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
             "batch_id": "mixed-resume",
             "results": [{"post_id": first_id, "status": "ok", "editorial": revised}],
         }, case.root)["posts"][0]
-        assert request["inline_deficit"] == request["needed"] == 3, request
+        assert request["inline_deficit"] == request["needed"] == deficit, request
         assert not request["featured_required"]
         assert set(request["existing_media_ids"]) == set(retained)
 
@@ -2073,7 +2090,7 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
             "schema_version": 1, "batch_id": "mixed-resume",
             "posts": [{
                 **request, "candidates": [
-                    {**plan(i), "verdict": "vision_pending"} for i in (14, 15, 16)
+                    {**plan(i), "verdict": "vision_pending"} for i in range(14, 14 + deficit)
                 ],
             }],
         }))
@@ -2085,25 +2102,25 @@ def test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready(wor
             rebound, manifest_path, media_source_policy="credit_only",
         )
         assert assembly["assembled"] == 1, assembly
-        assert len(resolved["items"][0]["editorial"]["media_plan"]) == 3
+        assert len(resolved["items"][0]["editorial"]["media_plan"]) == deficit
         revised = resolved["items"][0]["editorial"]
         second = batch("mixed-resume", (first_id, revised))[0]
         assert second["status"] == "ready", second
-        assert len(uploads) - uploads_before == 3
+        assert len(uploads) - uploads_before == deficit
         assert {url: source_downloads.count(url) for url in old_downloads} == old_downloads
         assert {digest: source.vision_pixel_hashes.count(digest) for digest in retained.values()} == prior_calls
         final = case.client.get_post(first_id)
         urls = [row["src"] for row in iter_content_images(final["content"]["raw"])]
-        assert len(urls) == len(set(urls)) == 6
+        assert len(urls) == len(set(urls)) == required
         assert final["featured_media"] == cover["media_id"]
         assert final["status"] == "pending" and final["meta"]["_hermes_state"] == "ready"
         assert not receipt_path.exists()
         calls_before = len(source.operations)
         replay = batch("mixed-resume", (first_id, revised))[0]
         assert replay["status"] == "noop"
-        assert len(source.operations) == calls_before and len(uploads) - uploads_before == 3
+        assert len(source.operations) == calls_before and len(uploads) - uploads_before == deficit
         case.observations.append({
-            "scenario": "v1_mixed_media_progress", "post_id": first_id, "sibling_id": sibling_id,
+            "scenario": observation, "post_id": first_id, "sibling_id": sibling_id,
             "retained": retained, "first": first_result["status"], "sibling": sibling_result["status"],
-            "needed": request["needed"], "uploads_in_retry": 3, "ready": True, "replay": replay["status"],
+            "needed": request["needed"], "uploads_in_retry": deficit, "inline_final": required, "ready": True, "replay": replay["status"],
         })

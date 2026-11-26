@@ -51,6 +51,7 @@ SCENARIOS = (
     "test_started_media_registry_checkpoint_recovers_with_real_wordpress_readbacks",
     "test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks",
     "test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready",
+    "test_v1_mixed_rework_retains_two_attachments_and_sibling_reaches_ready",
 )
 SCENARIO_OPERATIONS = {
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
@@ -77,6 +78,7 @@ SCENARIO_OPERATIONS = {
         "started_media_registry_checkpoint_recovery",
     ],
     "v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready": ["v1_mixed_media_progress"],
+    "v1_mixed_rework_retains_two_attachments_and_sibling_reaches_ready": ["v1_mixed_media_progress_four"],
     "v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks": [
         "v1_five_card_queue",
     ],
@@ -84,6 +86,8 @@ SCENARIO_OPERATIONS = {
 POST_FIXTURES = {
     "v1_mixed_progress_first": ("pending", False),
     "v1_mixed_progress_sibling": ("pending", False),
+    "v1_mixed_progress_four_first": ("pending", False),
+    "v1_mixed_progress_four_sibling": ("pending", False),
     "pending_transition": ("pending", False),
     "noop": ("awaiting_human", True),
     "metadata_divergence": ("awaiting_human", False),

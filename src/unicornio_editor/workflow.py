@@ -3801,6 +3801,7 @@ def _execute_media_plan(
             role=str(item.get("role") or ("featured" if item.get("is_featured") else "inline")),
             engine=_diagnostic_media_engine(item),
             candidate_id=str(item.get("candidate_id") or ""),
+            target_id=str(item.get("target_id") or ""),
             source_domain=(
                 diagnostic_url_domain(item.get("source_page_url"))
                 if str(item.get("provenance_mode") or "") != "credit_only" else ""
@@ -3835,6 +3836,19 @@ def _execute_media_plan(
                 source_domain=diagnostic_url_domain(source),
                 detail=detail[:160],
             )
+
+    def _vision_funnel_fields(evidence: dict[str, Any]) -> dict[str, Any]:
+        # Select only structured fields; never log the input data URL or prompt.
+        return {
+            "vision_status": evidence.get("status"),
+            "vision_confidence": evidence.get("confidence"),
+            "vision_verdict": evidence.get("verdict"),
+            "vision_detail_used": evidence.get("detail_used"),
+            "vision_decision_source": evidence.get("decision_source"),
+            "vision_image_sha256": evidence.get("image_sha256"),
+            "vision_subject": evidence.get("subject"),
+            "vision_model_identity": evidence.get("model_identity"),
+        }
 
     v1_decisions: list[dict[str, Any]] = []
 
@@ -3873,8 +3887,9 @@ def _execute_media_plan(
             position, str(row.get("detail") or ""),
             candidate_url=observed_url, candidate_stage=stage, technical_status=technical,
             reason_code=str(row.get("reason_code") or ("accepted" if row.get("media_id") else "preflight_rejected")),
-            vision_attempted=row["vision_attempted"], vision_status=evidence.get("status"),
-            vision_confidence=evidence.get("confidence"),
+            failure_kind=str(row.get("failure_kind") or ""),
+            media_id=row.get("media_id"),
+            vision_attempted=row["vision_attempted"], **_vision_funnel_fields(evidence),
         )
         return row
 
@@ -4369,7 +4384,10 @@ def _execute_media_plan(
                             else "vision_confidence_insufficient" if decision.get("status") == "MATCH"
                             else "vision_inconclusive"
                         )
-                        _funnel(stage, "rejected", item, position, reason)
+                        _funnel(
+                            stage, "rejected", item, position, reason,
+                            reason_code=code, **_vision_funnel_fields(vision_evidence_record),
+                        )
                         return position, {
                             "paragraph_index": item.get("paragraph_index"), "status": "rejected",
                             "detail": reason[:200], "reason_code": code,
@@ -4393,7 +4411,10 @@ def _execute_media_plan(
                     item["alt_text"] = f"{label}: {subject}"[:160]
                     item["credit_text"] = "Crédito: Imagem ilustrativa."
                     evidence.update(alt_text=item["alt_text"], credit_text=item["credit_text"])
-                    _funnel(stage, "passed", item, position, "validated_before_upload")
+                    _funnel(
+                        stage, "passed", item, position, "validated_before_upload",
+                        **_vision_funnel_fields(vision_evidence_record),
+                    )
                 elif is_featured and config.vision_enabled and config.vision_api_key:
                     v1_feature_policy = v1_visual_fallback and config.media_source_policy == "credit_only"
                     policy = V1_FEATURED_VISION_POLICY if v1_feature_policy else "featured-key-art-v1"

@@ -46,8 +46,9 @@ unicornio-editor apply-batch work/batches/BATCH_ID/editorial.output.json \
 final e os fatos preparados, grava `media.input.json` e informa
 `media_input.status`. Se for `required`, execute o caminho retornado por
 `media_input.path`; `needed` já inclui a featured somente quando uma nova featured
-é necessária. `media_input.blocked_posts` indica falta de alvos editoriais
-seguros só para os posts listados. Se `media_input.status=blocked`, não rode
+é necessária. `media_input.blocked_posts` indica uma falha local de layout,
+como divergência na contagem de itens ou falta de alvos seguros. Os outros posts
+seguem normalmente. Se `media_input.status=blocked`, não rode
 busca de mídia; aplique o output original com `apply-batch` para registrar
 o bloqueio individual e deixar os demais seguirem. Não reescreva a entrada
 ou invente títulos de seção para forçar a busca. Em `credit_only`, matérias

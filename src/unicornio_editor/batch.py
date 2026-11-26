@@ -34,7 +34,7 @@ from .media.inserter import (
     select_game_media_slots,
 )
 from .media.text import sanitize_title, split_game_names
-from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
+from .list_quality import ListItem, detect_list_format, extract_list_items, list_item_media_assets
 from .state import STATE_PARTIAL, read_state, uncertain_second_pass_eligible
 from .pipeline_v2.epoch_protection import load_epoch_protection
 from .wordpress import WordPressError
@@ -133,27 +133,41 @@ def resolve_batch_editorial_defaults(
                     continue
             item["editorial"] = editorial = resolve_editorial_defaults(editorial, post)
             game_names = split_game_names(editorial.get("game_name"))
-            if (len(game_names) > 1 and isinstance(relevance, dict) and relevance.get("decision") == "process"
-                    and post.get("status") == "pending"
+            if (isinstance(relevance, dict) and relevance.get("decision") == "process"
+                    and post.get("id") == post_id and post.get("status") == "pending"
+                    and isinstance(editorial.get("cleaned_html"), str)
                     and resolve_post_eligibility(post, root).eligible_for_v1):
                 body = editorial["cleaned_html"]
                 title = sanitize_title(editorial.get("title") or _post_title(post))
                 categories = editorial.get("categories") or post.get("categories") or ()
                 promised_items = detect_list_format(title, body, categories)
-                retained = item.get("partial_resume") or []
-                entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
-                coverage, _ = _reconcile_partial_media(body, title, entities, retained)
-                featured_required = not (item.get("retained_cover") or post.get("featured_media"))
-                if promised_items is not None or coverage["missing"] or featured_required or editorial.get("media_plan"):
+                if promised_items is not None or len(game_names) > 1:
+                    retained = item.get("partial_resume") or []
+                    entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
+                    coverage = (
+                        _reconcile_partial_media(body, title, entities, retained)[0]
+                        if retained or len(game_names) > 1 else _images_summary(body, title, entities)
+                    )
+                    featured_required = not (item.get("retained_cover") or post.get("featured_media"))
+                    list_items = extract_list_items(title, body, categories)
                     try:
-                        _multi_game_media_targets(
-                            game_names, html=body, title=title,
-                            source_text=f"{_post_title(post)} {_post_content(post)}",
-                            list_items=extract_list_items(title, body, categories), promised_items=promised_items,
-                            categories=categories, retained=retained,
-                            inline_deficit=coverage["missing"], featured_required=featured_required,
-                            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
-                        )
+                        if len(game_names) > 1 and (
+                            promised_items is not None or coverage["missing"]
+                            or featured_required or editorial.get("media_plan")
+                        ):
+                            _multi_game_media_targets(
+                                game_names, html=body, title=title,
+                                source_text=f"{_post_title(post)} {_post_content(post)}",
+                                list_items=list_items, promised_items=promised_items,
+                                categories=categories, retained=retained,
+                                inline_deficit=coverage["missing"], featured_required=featured_required,
+                                media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                            )
+                        elif promised_items is not None:
+                            _list_media_requirements(
+                                title, body, categories, list_items, promised_items,
+                                retained, coverage["missing"],
+                            )
                     except MediaInsertionError as exc:
                         item["media_assembly_error"] = {"error_code": exc.code, "reason": str(exc)}
         items.append(item)
@@ -171,6 +185,34 @@ def _bind_partial_editorial(
     ):
         raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
     editorial["cleaned_html"] = resume["body"]
+
+
+def _list_media_requirements(
+    title: str, html: str, categories: Any, list_items: list[ListItem],
+    promised_items: int, retained: list[dict[str, Any]], inline_deficit: int,
+    *, multi_game: bool = False,
+) -> tuple[list[ListItem], int]:
+    """Validate local list shape and the number of genuinely missing targets."""
+    if len(list_items) != promised_items:
+        raise MediaInsertionError(
+            "a contagem ou numeração dos itens não corresponde à lista prevista" if multi_game
+            else f"o título promete {promised_items} itens, mas o HTML contém {len(list_items)}",
+            code="multi_game_media_targets_unbound" if multi_game else "list_media_items_mismatch",
+        )
+    covered = {
+        str(asset["item_identity"])
+        for asset in list_item_media_assets(title, html, categories)
+        if asset.get("item_identity")
+    }
+    covered.update(row["item_identity"] for row in retained if row.get("item_identity"))
+    missing_items = [item for item in list_items if item.identity not in covered]
+    inline_target_count = max(inline_deficit, len(missing_items))
+    if inline_target_count > MEDIA_BATCH_MAX_INLINE_TARGETS:
+        raise MediaInsertionError(
+            f"a lista requer {inline_target_count} alvos inline; o limite seguro é {MEDIA_BATCH_MAX_INLINE_TARGETS}",
+            code="multi_game_media_slots_unavailable" if multi_game else "list_media_target_limit",
+        )
+    return missing_items, inline_target_count
 
 
 def _multi_game_media_targets(
@@ -329,36 +371,14 @@ def build_media_resolve_batch_input(
         list_items = extract_list_items(title, cleaned_html, categories)
         targets: list[dict[str, Any]] | None = None
         if promised_items is not None:
-            if len(list_items) != promised_items:
-                if len(game_names) > 1:
-                    blocked_posts.append({
-                        "post_id": post_id, "error_code": "multi_game_media_targets_unbound",
-                        "reason": "a contagem ou numeração dos itens não corresponde à lista prevista",
-                    })
-                    continue
-                raise BatchError(
-                    f"post {post_id} promete {promised_items} itens, mas o HTML contém {len(list_items)}"
+            try:
+                missing_items, inline_target_count = _list_media_requirements(
+                    title, cleaned_html, categories, list_items, promised_items,
+                    retained, inline_deficit, multi_game=len(game_names) > 1,
                 )
-            existing_assets = list_item_media_assets(title, cleaned_html, categories)
-            covered = {
-                str(asset.get("item_identity") or "")
-                for asset in existing_assets
-                if asset.get("item_identity")
-            }
-            covered.update(row["item_identity"] for row in retained if row.get("item_identity"))
-            missing_items = [item for item in list_items if item.identity not in covered]
-            inline_target_count = max(inline_deficit, len(missing_items))
-            if inline_target_count > MEDIA_BATCH_MAX_INLINE_TARGETS:
-                if len(game_names) > 1:
-                    blocked_posts.append({
-                        "post_id": post_id, "error_code": "multi_game_media_slots_unavailable",
-                        "reason": f"a lista excede o limite seguro de {MEDIA_BATCH_MAX_INLINE_TARGETS} alvos inline",
-                    })
-                    continue
-                raise BatchError(
-                    f"post {post_id} precisa de {inline_target_count} imagens inline; "
-                    f"o limite seguro é {MEDIA_BATCH_MAX_INLINE_TARGETS}"
-                )
+            except MediaInsertionError as exc:
+                blocked_posts.append({"post_id": post_id, "error_code": exc.code, "reason": str(exc)})
+                continue
             targets = []
             for item in missing_items:
                 targets.append({

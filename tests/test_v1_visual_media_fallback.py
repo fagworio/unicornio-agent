@@ -210,6 +210,8 @@ def _low_edge_cover_transport():
 def test_normalized_low_edge_cover_uses_role_vision_only_in_v1_credit_lane(
     tmp_path, monkeypatch, media_case, kind, legacy,
 ):
+    import hashlib
+    import json
     from dataclasses import replace
 
     from unicornio_editor.media.converter import image_is_mostly_flat, prepare_featured_webp
@@ -237,14 +239,18 @@ def test_normalized_low_edge_cover_uses_role_vision_only_in_v1_credit_lane(
     monkeypatch.setattr(vision_gate, "_call_vision", provider)
     monkeypatch.setattr("unicornio_editor.workflow.upload_image", upload)
     editorial = _generic_editorial(featured=True)
-    editorial["media_plan"][0]["direct_image_url"] = "https://gravatar.com/blog/videogame-cover.png"
+    editorial["media_plan"][0].update(
+        direct_image_url="https://gravatar.com/blog/videogame-cover.png?access=SECRET",
+        candidate_id="featured--low-edge", target_id="featured",
+    )
+    monkeypatch.setenv("UNICORNIO_BATCH_ID", "visual-audit-42")
     if legacy:
         config = replace(config, vision_enabled=False, vision_api_key="")
         # Isolate the legacy conversion guard after its unrelated textual
         # preflight has admitted a cover and Vision is not required.
         monkeypatch.setattr("unicornio_editor.workflow._media_item_rejection", lambda *_a, **_kw: None)
     rows, _, _ = _execute_media_plan(
-        editorial, config, object(), tmp_path, v1_visual_fallback=not legacy,
+        editorial, config, object(), tmp_path, post_id=42, v1_visual_fallback=not legacy,
     )
     row = rows[0]
     if legacy:
@@ -259,6 +265,50 @@ def test_normalized_low_edge_cover_uses_role_vision_only_in_v1_credit_lane(
         assert row["status"] == "accepted", row
         assert row["vision_evidence"]["visual_type"] == "key_art"
         assert row["rights_verified"] is False
+
+    if not legacy:
+        raw = (tmp_path / "work" / "telemetry.jsonl").read_text()
+        events = [json.loads(line) for line in raw.splitlines()]
+        tagged = [event for event in events if event.get("event") == "media_funnel"
+                  and event.get("candidate_id") == "featured--low-edge"]
+        stages = [event["stage"] for event in tagged]
+        verdict = next(event for event in tagged if event["stage"] == "featured_vision")
+        final = next(event for event in tagged if event["stage"] == "candidate_decision")
+        assert stages.index("conversion") < stages.index("featured_vision") < stages.index("candidate_decision")
+        if kind == "key_art":
+            assert stages.index("featured_vision") < stages.index("upload")
+        else:
+            assert "upload" not in stages
+        for event in (verdict, final):
+            assert (event["batch_id"], event["post_id"], event["target_id"]) == ("visual-audit-42", 42, "featured")
+            assert event["vision_decision_source"] == "vision_provider"
+            assert event["vision_image_sha256"] == hashlib.sha256(calls[0]).hexdigest()
+            assert event["vision_subject"] == row["vision_evidence"]["subject"]
+            assert event["vision_model_identity"] == row["vision_evidence"]["model_identity"]
+            assert event["vision_verdict"] == ("accept" if kind == "key_art" else "reject")
+        assert final["media_id"] == (90 if kind == "key_art" else None)
+        assert "access=SECRET" not in raw and "data:image" not in raw
+
+        if kind == "key_art":
+            # The same accepted evidence may be reused; it is not a new
+            # provider verdict. No second upload or model call is needed to
+            # prove this telemetry property, so stop at the upload boundary.
+            def stop_at_upload(*_a, **_kw):
+                raise OSError("controlled upload failure")
+
+            monkeypatch.setattr("unicornio_editor.workflow.upload_image", stop_at_upload)
+            replay, _, _ = _execute_media_plan(
+                editorial, config, object(), tmp_path, post_id=42, v1_visual_fallback=True,
+            )
+            assert replay[0]["reason_code"] == "media_upload_error"
+            assert len(calls) == 1 and len(uploads) == 1
+            after = (tmp_path / "work" / "telemetry.jsonl").read_text()[len(raw):]
+            cached = next(
+                event for line in after.splitlines()
+                if (event := json.loads(line)).get("stage") == "featured_vision"
+            )
+            assert cached["vision_decision_source"] == "cache_same_model_context_bytes"
+            assert cached["vision_image_sha256"] == verdict["vision_image_sha256"]
 
 
 def test_media_resolve_cli_filters_retained_targets_before_candidate_download(
