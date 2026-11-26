@@ -46,7 +46,14 @@ unicornio-editor apply-batch work/batches/BATCH_ID/editorial.output.json \
 final e os fatos preparados, grava `media.input.json` e informa
 `media_input.status`. Se for `required`, execute o caminho retornado por
 `media_input.path`; `needed` já inclui a featured somente quando uma nova featured
-é necessária. Se houver `vision_batch_file` no resultado da busca, execute
+é necessária. `media_input.blocked_posts` indica falta de alvos editoriais
+seguros só para os posts listados. Se `media_input.status=blocked`, não rode
+busca de mídia; aplique o output original com `apply-batch` para registrar
+o bloqueio individual e deixar os demais seguirem. Não reescreva a entrada
+ou invente títulos de seção para forçar a busca. Em `credit_only`, matérias
+com vários jogos e H2 próprios podem usar os parágrafos existentes como
+alvos de Vision, sem virar listas. A política estrita não é afrouxada.
+Se houver `vision_batch_file` no resultado da busca, execute
 `vision-batch` antes do `apply`. Candidatas `vision_pending` no V1
 (`MEDIA_SOURCE_POLICY=credit_only`) não entram nesse arquivo: o `apply-batch`
 confere os pixels obtidos do arquivo real antes do upload. No V1, MATCH a partir

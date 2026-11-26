@@ -25,10 +25,13 @@ from .language import detect_language, localization_required
 from .media.relevance import extract_entities
 from .media.inserter import (
     MediaInsertionError,
+    contains_media_subject,
     minimum_normal_article_paragraphs,
     normal_media_slot_capacity,
     normalize_normal_article_paragraphs,
+    ordinary_game_media_slots,
     plan_normal_media_insertions,
+    select_game_media_slots,
 )
 from .media.text import sanitize_title, split_game_names
 from .list_quality import detect_list_format, extract_list_items, list_item_media_assets
@@ -128,7 +131,31 @@ def resolve_batch_editorial_defaults(
                     }
                     items.append(item)
                     continue
-            item["editorial"] = resolve_editorial_defaults(editorial, post)
+            item["editorial"] = editorial = resolve_editorial_defaults(editorial, post)
+            game_names = split_game_names(editorial.get("game_name"))
+            if (len(game_names) > 1 and isinstance(relevance, dict) and relevance.get("decision") == "process"
+                    and post.get("status") == "pending"
+                    and resolve_post_eligibility(post, root).eligible_for_v1):
+                body = editorial["cleaned_html"]
+                title = sanitize_title(editorial.get("title") or _post_title(post))
+                categories = editorial.get("categories") or post.get("categories") or ()
+                promised_items = detect_list_format(title, body, categories)
+                retained = item.get("partial_resume") or []
+                entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
+                coverage, _ = _reconcile_partial_media(body, title, entities, retained)
+                featured_required = not (item.get("retained_cover") or post.get("featured_media"))
+                if promised_items is not None or coverage["missing"] or featured_required or editorial.get("media_plan"):
+                    try:
+                        _multi_game_media_targets(
+                            game_names, html=body, title=title,
+                            source_text=f"{_post_title(post)} {_post_content(post)}",
+                            list_items=extract_list_items(title, body, categories), promised_items=promised_items,
+                            categories=categories, retained=retained,
+                            inline_deficit=coverage["missing"], featured_required=featured_required,
+                            media_source_policy=str(getattr(config, "media_source_policy", "strict")),
+                        )
+                    except MediaInsertionError as exc:
+                        item["media_assembly_error"] = {"error_code": exc.code, "reason": str(exc)}
         items.append(item)
     return {**batch, "items": items}
 
@@ -146,8 +173,71 @@ def _bind_partial_editorial(
     editorial["cleaned_html"] = resume["body"]
 
 
+def _multi_game_media_targets(
+    game_names: list[str], *, html: str, title: str, source_text: str,
+    list_items: list, promised_items: int | None, inline_deficit: int,
+    featured_required: bool, categories: Any, retained: list[dict[str, Any]], media_source_policy: str,
+) -> list[dict[str, Any]] | None:
+    """Validate the existing list route or bind ordinary targets to real H2s."""
+    if promised_items is not None:
+        numbers = [item.number for item in list_items if item.number is not None]
+        expected_numbers = list(range(1, promised_items + 1))
+        if len(list_items) != promised_items or numbers and numbers not in (expected_numbers, expected_numbers[::-1]):
+            raise MediaInsertionError(
+                "a contagem ou numeração dos itens não corresponde à lista prevista",
+                code="multi_game_media_targets_unbound",
+            )
+        matched_item_ids: set[str] = set()
+        for name in game_names:
+            matches = [item for item in list_items if contains_media_subject(item.heading, name)]
+            if len(matches) != 1 or matches[0].identity in matched_item_ids:
+                raise MediaInsertionError(
+                    "cada jogo requer um item de lista próprio e inequívoco",
+                    code="multi_game_media_targets_unbound",
+                )
+            matched_item_ids.add(matches[0].identity)
+        covered = {
+            row.get("item_identity")
+            for row in [*list_item_media_assets(title, html, categories), *retained]
+        }
+        if max(inline_deficit, sum(item.identity not in covered for item in list_items)) > MEDIA_BATCH_MAX_INLINE_TARGETS:
+            raise MediaInsertionError(
+                f"a lista excede o limite seguro de {MEDIA_BATCH_MAX_INLINE_TARGETS} alvos inline",
+                code="multi_game_media_slots_unavailable",
+            )
+        return None  # The existing numbered-list planner remains authoritative.
+    if media_source_policy != "credit_only":
+        raise MediaInsertionError(
+            "múltiplos jogos exigem alvos editoriais explícitos nesta política",
+            code="multi_game_media_targets_unbound",
+        )
+    retained_slots = tuple(row["paragraph_index"] for row in retained)
+    slots = ordinary_game_media_slots(html, game_names, source_html=source_text, retained_slots=retained_slots)
+    layout = normal_media_slot_capacity(html, retained_slots=retained_slots)
+    targets = []
+    for slot in select_game_media_slots(slots, inline_deficit):
+        subject, heading = slots[slot]
+        targets.append({
+            "target_id": f"game-section-{slot}", "role": "inline",
+            "subject": subject, "query": f"{subject} {title}".strip(),
+            "paragraph_index": slot, "section_slot": slot,
+            "item_identity": f"game-section-{game_names.index(subject) + 1}",
+            "item_title": subject, "section_heading": heading,
+            "replacement_reserve": 1,
+            **({"placement": "after_editorial_body"}
+               if layout["body_end_available"] and slot == layout["last_slot"] else {}),
+        })
+    if featured_required:
+        subject = "; ".join(game_names)
+        targets.append({
+            "target_id": "featured", "role": "featured",
+            "subject": subject, "query": " ".join(game_names), "replacement_reserve": 1,
+        })
+    return targets
+
+
 def build_media_resolve_batch_input(
-    editorial_batch: dict[str, Any], root: Path | str,
+    editorial_batch: dict[str, Any], root: Path | str, *, media_source_policy: str = "strict",
 ) -> dict[str, Any]:
     """Build the V1 media request from final editorial content and prepared facts.
 
@@ -157,18 +247,6 @@ def build_media_resolve_batch_input(
     featured asset outside the inline-image quota without asking Hermes to do
     arithmetic or infer the role from a prose instruction.
     """
-    def identity_tokens(value: str) -> list[str]:
-        return re.findall(r"[^\W_]+", sanitize_title(value).casefold(), flags=re.UNICODE)
-
-    def heading_matches_game(game_name: str, heading: str) -> bool:
-        subject_tokens = identity_tokens(game_name)
-        heading_tokens = identity_tokens(heading)
-        width = len(subject_tokens)
-        return bool(width) and any(
-            heading_tokens[index:index + width] == subject_tokens
-            for index in range(len(heading_tokens) - width + 1)
-        )
-
     batch_id = validate_batch_id(str(editorial_batch.get("batch_id") or ""))
     results = editorial_batch.get("results")
     if not isinstance(results, list):
@@ -176,6 +254,7 @@ def build_media_resolve_batch_input(
     directory = batch_directory(root, batch_id)
     requests: list[dict[str, Any]] = []
     partial_blocked: list[dict[str, Any]] = []
+    blocked_posts: list[dict[str, Any]] = []
     seen: set[int] = set()
     for result in results:
         if not isinstance(result, dict) or result.get("status") != "ok":
@@ -251,6 +330,12 @@ def build_media_resolve_batch_input(
         targets: list[dict[str, Any]] | None = None
         if promised_items is not None:
             if len(list_items) != promised_items:
+                if len(game_names) > 1:
+                    blocked_posts.append({
+                        "post_id": post_id, "error_code": "multi_game_media_targets_unbound",
+                        "reason": "a contagem ou numeração dos itens não corresponde à lista prevista",
+                    })
+                    continue
                 raise BatchError(
                     f"post {post_id} promete {promised_items} itens, mas o HTML contém {len(list_items)}"
                 )
@@ -264,6 +349,12 @@ def build_media_resolve_batch_input(
             missing_items = [item for item in list_items if item.identity not in covered]
             inline_target_count = max(inline_deficit, len(missing_items))
             if inline_target_count > MEDIA_BATCH_MAX_INLINE_TARGETS:
+                if len(game_names) > 1:
+                    blocked_posts.append({
+                        "post_id": post_id, "error_code": "multi_game_media_slots_unavailable",
+                        "reason": f"a lista excede o limite seguro de {MEDIA_BATCH_MAX_INLINE_TARGETS} alvos inline",
+                    })
+                    continue
                 raise BatchError(
                     f"post {post_id} precisa de {inline_target_count} imagens inline; "
                     f"o limite seguro é {MEDIA_BATCH_MAX_INLINE_TARGETS}"
@@ -320,18 +411,20 @@ def build_media_resolve_batch_input(
         if needed <= 0:
             continue
         if len(game_names) > 1:
-            if promised_items is None:
-                raise BatchError(
-                    "multiple game_name subjects require explicit H2 media targets"
+            try:
+                ordinary_targets = _multi_game_media_targets(
+                    game_names, html=cleaned_html, title=title,
+                    source_text=f"{context.get('title') or ''} {context.get('source_content') or ''}",
+                    list_items=list_items, promised_items=promised_items, inline_deficit=inline_deficit,
+                    featured_required=featured_required, categories=categories, retained=retained,
+                    media_source_policy=media_source_policy,
                 )
-            matched_item_ids: set[str] = set()
-            for name in game_names:
-                matches = [item for item in list_items if heading_matches_game(name, item.heading)]
-                if len(matches) != 1 or matches[0].identity in matched_item_ids:
-                    raise BatchError(
-                        "multiple game_name subjects require one unique matching H2 per game"
-                    )
-                matched_item_ids.add(matches[0].identity)
+            except MediaInsertionError as exc:
+                blocked_posts.append({"post_id": post_id, "error_code": exc.code, "reason": str(exc)})
+                continue
+            if ordinary_targets is not None:
+                targets = ordinary_targets
+                needed = len(targets)
         if targets is None and needed > 7:
             raise BatchError(
                 f"post {post_id} precisa de {needed} imagens candidatas; "
@@ -366,8 +459,9 @@ def build_media_resolve_batch_input(
     if not requests:
         stale_input = directory / "media.input.json"
         stale_input.unlink(missing_ok=True)
-        return {"status": "not_required", "path": None, "count": 0, "posts": [],
-                **({"partial_blocked": partial_blocked} if partial_blocked else {})}
+        return {"status": "blocked" if blocked_posts else "not_required", "path": None, "count": 0, "posts": [],
+                **({"partial_blocked": partial_blocked} if partial_blocked else {}),
+                **({"blocked_posts": blocked_posts} if blocked_posts else {})}
     path = directory / "media.input.json"
     _write_json(path, {
         "schema_version": BATCH_SCHEMA_VERSION,
@@ -375,7 +469,8 @@ def build_media_resolve_batch_input(
         "posts": requests,
     })
     return {"status": "required", "path": str(path), "count": len(requests), "posts": requests,
-            **({"partial_blocked": partial_blocked} if partial_blocked else {})}
+            **({"partial_blocked": partial_blocked} if partial_blocked else {}),
+            **({"blocked_posts": blocked_posts} if blocked_posts else {})}
 
 
 def _media_manifest_candidate(candidate: dict[str, Any], *, subject: str, query: str,
@@ -1052,7 +1147,9 @@ def load_media_resolve_batch(path: Path | str) -> dict[str, Any]:
                     if not item_identity or not item_title or not section_heading:
                         raise BatchError(f"target inline {target_id} precisa identificar o item/H2")
                     placement = raw_target.get("placement")
-                    if placement not in {None, "after_list_item_description"}:
+                    if placement not in {None, "after_list_item_description"} and not (
+                        target_id.startswith("game-section-") and placement == "after_editorial_body"
+                    ):
                         raise BatchError(f"placement invalido em target {target_id}")
                     item_number = raw_target.get("item_number")
                     if item_number is not None and (

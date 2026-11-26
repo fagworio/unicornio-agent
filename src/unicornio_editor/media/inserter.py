@@ -8,8 +8,11 @@ from collections.abc import Mapping
 from html import escape
 from html import unescape
 from html.parser import HTMLParser
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
+
+from .text import plain_text
 
 
 class MediaInsertionError(ValueError):
@@ -583,24 +586,127 @@ def _split_paragraph_once(open_tag: str, body: str) -> tuple[str, int] | None:
     return f"{open_tag}{first}</p>{open_tag}{second}</p>", boundary
 
 
-def _v1_safe_paragraph_starts(html: str) -> set[int]:
-    """Locate real paragraph elements, excluding opaque/nested subdocuments."""
+def _v1_safe_block_starts(html: str, tags: tuple[str, ...] = ("p",)) -> dict[int, tuple[int, ...]]:
+    """Locate real block elements, excluding opaque/nested subdocuments."""
     line_starts = [0, *(match.end() for match in re.finditer("\n", html))]
-    offsets: set[int] = set()
+    offsets: dict[int, tuple[int, ...]] = {}
 
     class ArticleParser(_BalancedMediaHtmlParser):
+        container_offsets: list[int]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.container_offsets = []
+
         def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            if tag == "p" and all(parent in {"article", "div", "main", "section"} for parent in self.stack):
-                line, column = self.getpos()
-                offsets.add(line_starts[line - 1] + column)
+            line, column = self.getpos()
+            offset = line_starts[line - 1] + column
+            if tag in tags and all(parent in {"article", "div", "main", "section"} for parent in self.stack):
+                offsets[offset] = tuple(self.container_offsets)
+            depth = len(self.stack)
             super().handle_starttag(tag, attrs)
+            if len(self.stack) > depth:
+                self.container_offsets.append(offset)
+
+        def handle_endtag(self, tag: str) -> None:
+            super().handle_endtag(tag)
+            del self.container_offsets[len(self.stack):]
 
     parser = ArticleParser()
     parser.feed(html)
     parser.close()
     if not parser.valid or parser.stack:
-        return set()
+        return {}
     return offsets
+
+
+def contains_media_subject(value: str, subject: str) -> bool:
+    """Match a complete game name, not an arbitrary substring or partial alias."""
+    text = re.findall(r"[^\W_]+", plain_text(value).casefold())
+    tokens = re.findall(r"[^\W_]+", plain_text(subject).casefold())
+    return bool(tokens) and any(
+        text[index:index + len(tokens)] == tokens
+        for index in range(len(text) - len(tokens) + 1)
+    )
+
+
+def ordinary_game_media_slots(
+    html: str, game_names: list[str], *, source_html: str, retained_slots: tuple[int, ...] = (),
+) -> dict[int, tuple[str, str]]:
+    """Bind safe normal-article slots to their uniquely identified real H2."""
+    def invalid(reason: str) -> MediaInsertionError:
+        return MediaInsertionError(reason, code="multi_game_media_targets_unbound")
+
+    if not all(contains_media_subject(source_html, name) for name in game_names):
+        raise invalid("cada jogo precisa estar identificado no título ou corpo original")
+    if re.search(r"\[/?[a-z][\w-]*(?=[\s/\]])", html, re.IGNORECASE):
+        raise invalid("seções com shortcodes não oferecem alvos editoriais seguros")
+    safe_starts = _v1_safe_block_starts(html, ("h2", "p"))
+    headings = [
+        match for match in re.finditer(r"<h2\b[^>]*>([\s\S]*?)</h2>", html, re.IGNORECASE)
+        if match.start() in safe_starts
+    ]
+    sections: dict[int, str] = {}
+    for name in game_names:
+        matches = [index for index, heading in enumerate(headings) if contains_media_subject(heading[1], name)]
+        if len(matches) != 1 or matches[0] in sections:
+            raise invalid("cada jogo precisa de um H2 editorial próprio e inequívoco")
+        sections[matches[0]] = name
+    paragraphs = list(_EMPTY_PARAGRAPH_RE.finditer(html))
+    available = set(normal_media_slot_capacity(html, retained_slots=retained_slots)["available_slots"])
+    bound: dict[int, tuple[str, str]] = {}
+    for index, name in sections.items():
+        head = headings[index]
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(html)
+        in_section = [
+            slot for slot, paragraph in enumerate(paragraphs)
+            if head.end() <= paragraph.start() < end
+            and safe_starts.get(paragraph.start()) == safe_starts[head.start()]
+            and _plain_word_count(paragraph["body"]) >= 12
+            and not any(other != name and contains_media_subject(paragraph["body"], other) for other in game_names)
+        ]
+        if not in_section:
+            raise invalid("cada seção de jogo precisa de ao menos um parágrafo substantivo")
+        bound.update({slot: (name, plain_text(head[1])) for slot in in_section if slot in available})
+    return bound
+
+
+def select_game_media_slots(
+    slots: dict[int, tuple[str, str]], count: int, *, minimum_spacing: int = 3,
+    retained_counts: dict[str, int] | None = None,
+) -> tuple[int, ...]:
+    """Keep verified rows where possible, then prefer distinct game sections."""
+    ordered = sorted(slots)
+    retained_counts = retained_counts or {}
+
+    @lru_cache(maxsize=None)
+    def pick(start: int, remaining: int, previous_name: str, used: int) -> tuple[int, int, tuple[int, ...]] | None:
+        if not remaining:
+            return 0, 0, ()
+        best = None
+        for index in range(start, len(ordered) - remaining + 1):
+            slot = ordered[index]
+            subject = slots[slot][0]
+            same_section = subject == previous_name
+            count_here = used + 1 if same_section else 1
+            suffix = pick(bisect_right(ordered, slot + minimum_spacing - 1), remaining - 1, subject, count_here)
+            if suffix is not None:
+                candidate = (
+                    suffix[0] - (count_here <= retained_counts.get(subject, 0)),
+                    suffix[1] - (not same_section),
+                    (slot, *suffix[2]),
+                )
+                if best is None or candidate < best:
+                    best = candidate
+        return best
+
+    chosen = pick(0, count, "", 0)
+    if chosen is None:
+        raise MediaInsertionError(
+            "não há parágrafos seguros suficientes nas seções dos jogos",
+            code="multi_game_media_slots_unavailable",
+        )
+    return chosen[2]
 
 
 def normalize_normal_article_paragraphs(
@@ -633,7 +739,7 @@ def normalize_normal_article_paragraphs(
         audit["final_paragraphs"] = len(matches)
         return {"html": html, "audit": audit}
 
-    safe_starts = _v1_safe_paragraph_starts(html) if v1_safe_blocks_only else None
+    safe_starts = _v1_safe_block_starts(html) if v1_safe_blocks_only else None
     if safe_starts is not None and any(match.start() not in safe_starts for match in matches):
         audit["reason"] = "editorial_restructure_required: opaque_paragraph_block"
         audit["final_paragraphs"] = len(matches)

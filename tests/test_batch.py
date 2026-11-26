@@ -289,10 +289,11 @@ class BatchContextTests(unittest.TestCase):
                 }],
             }
 
-            with self.assertRaisesRegex(
-                BatchError, "multiple game_name subjects require explicit H2 media targets"
-            ):
-                build_media_resolve_batch_input(editorial, root)
+            result = build_media_resolve_batch_input(editorial, root)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["count"], 0)
+            self.assertEqual(result["blocked_posts"][0]["error_code"], "multi_game_media_targets_unbound")
+            self.assertFalse((batch_dir / "media.input.json").exists())
 
     def test_multi_game_listicle_media_targets_each_game_h2_separately(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -336,10 +337,10 @@ class BatchContextTests(unittest.TestCase):
             self.assertEqual(targets[-1]["query"], "2 jogos para aproveitar")
 
             editorial["results"][0]["editorial"]["game_name"] = "Game One; Unlisted Game"
-            with self.assertRaisesRegex(
-                BatchError, "multiple game_name subjects require one unique matching H2 per game"
-            ):
-                build_media_resolve_batch_input(editorial, root)
+            blocked = build_media_resolve_batch_input(editorial, root)
+            self.assertEqual(blocked["status"], "blocked")
+            self.assertEqual(blocked["blocked_posts"][0]["post_id"], 9)
+            self.assertFalse((batch_dir / "media.input.json").exists())
 
     def test_prepare_batch_reports_locked_post_and_continues_sibling(self):
         with tempfile.TemporaryDirectory() as directory:

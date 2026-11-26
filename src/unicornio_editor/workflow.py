@@ -46,7 +46,9 @@ from .media.converter import (
 from .media.downloader import MediaDownloadError, download_image
 from .media.diagnostics import diagnostic_url_domain
 from .media.inserter import (
-    MediaInsertionError, append_featured_credit, insert_media, plan_normal_media_insertions,
+    MediaInsertionError, append_featured_credit, insert_media, normal_media_slot_capacity,
+    ordinary_game_media_slots, plan_normal_media_insertions,
+    select_game_media_slots,
 )
 from .media.relevance import extract_entities, image_is_relevant, iter_content_images
 from .media.phash_policy import PHASH_DUPLICATE_MAX_DISTANCE
@@ -596,6 +598,15 @@ def place_v1_retained_media(
     existing_items = {
         row.get("item_identity") for row in list_item_media_assets(title, body, categories)
     } if is_list else set()
+    game_names = split_game_names(editorial.get("game_name"))
+    section_slots: dict[int, tuple[str, str]] = {}
+    if not is_list and len(game_names) > 1:
+        try:
+            section_slots = ordinary_game_media_slots(body, game_names, source_html=body)
+        except MediaInsertionError:
+            pass  # No persisted image may be moved to an unbound section.
+    section_layout = normal_media_slot_capacity(body) if section_slots else None
+    section_rows: dict[str, list[dict[str, Any]]] = {}
     retained = []
     featured = None
     for row in progress["rows"]:
@@ -617,9 +628,36 @@ def place_v1_retained_media(
             })
             # Multiple distinct roles within the same list item can be retained;
             # the list planner still checks that every position stays in that item.
+        elif len(game_names) > 1:
+            evidence = row.get("vision_evidence") or {}
+            subject = evidence.get("subject")
+            if subject in game_names and evidence.get("image_role") == "inline" and evidence.get("verdict") == "accept":
+                section_rows.setdefault(subject, []).append(row)
         elif not key:
             retained.append({**row, "placement": None})
-    if retained and not is_list:
+    if section_rows and section_layout is not None:
+        entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
+        deficit = _images_summary(body, title, entities)["missing"]
+        counts = {subject: len(rows) for subject, rows in section_rows.items()}
+        for count in range(deficit, 0, -1):
+            try:
+                slots = select_game_media_slots(section_slots, count, retained_counts=counts)
+            except MediaInsertionError:
+                continue
+            for slot in slots:
+                subject, heading = section_slots[slot]
+                if not section_rows.get(subject):
+                    continue
+                row = section_rows[subject].pop(0)
+                retained.append({
+                    **row, "paragraph_index": slot, "section_slot": slot,
+                    "section_heading": heading, "subject": subject,
+                    "target_id": f"game-section-{slot}",
+                    "placement": ("after_editorial_body" if section_layout["body_end_available"]
+                                  and slot == section_layout["last_slot"] else None),
+                })
+            break
+    if retained and not is_list and len(game_names) <= 1:
         entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
         required = _images_summary(body, title, entities)["missing"]
         retained = retained[:required]
@@ -1099,6 +1137,57 @@ def _apply_editorial_unlocked(
             if editorial.get("cleaned_html") not in (None, saved_body):
                 raise V1PartialResumeError("partial_resume_editorial_changed", post_id=post_id)
             editorial = {**editorial, "cleaned_html": saved_body}
+    ordinary_slots = None
+    game_names = split_game_names(editorial.get("game_name"))
+    if decision == "process" and config.media_source_policy == "credit_only" and len(game_names) > 1:
+        editorial = resolve_editorial_defaults(editorial, post)
+        body = editorial["cleaned_html"]
+        title = _post_title(post)
+        categories = editorial.get("categories") or post.get("categories") or ()
+        if not _v1_is_listicle(post, editorial, body):
+            retained = (
+                place_v1_retained_media(media_progress, editorial, title=title, categories=categories)[0]
+                if media_progress is not None else prior_media
+            )
+            entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
+            coverage, _ = _reconcile_partial_media(body, title, entities, retained)
+            plan = editorial["media_plan"]
+            if coverage["missing"] or not post.get("featured_media") or plan:
+                retained_slots = tuple(row["paragraph_index"] for row in retained)
+                try:
+                    ordinary_slots = ordinary_game_media_slots(
+                        body, game_names, source_html=f"{title} {_raw_content(post)}", retained_slots=retained_slots,
+                    )
+                    select_game_media_slots(ordinary_slots, coverage["missing"])
+                    layout = normal_media_slot_capacity(body, retained_slots=retained_slots)
+                    inline_slots = []
+                    for item in plan:
+                        if item.get("is_featured"):
+                            continue
+                        slot = item["paragraph_index"]
+                        expected = ordinary_slots.get(slot)
+                        placement = ("after_editorial_body"
+                                     if layout["body_end_available"] and slot == layout["last_slot"] else None)
+                        if (
+                            expected is None or item.get("subject") not in {None, "", expected[0]}
+                            or item.get("placement") != placement
+                            or (str(item.get("target_id") or "").startswith("game-section-") and (
+                                item.get("target_id") != f"game-section-{slot}"
+                                or item.get("section_heading") != expected[1]
+                            ))
+                            or any(abs(slot - previous) < 3 for previous in inline_slots)
+                        ):
+                            raise MediaInsertionError(
+                                "o alvo de mídia não corresponde à seção editorial atual",
+                                code="multi_game_media_targets_unbound",
+                            )
+                        item["subject"] = expected[0]
+                        inline_slots.append(slot)
+                except MediaInsertionError as exc:
+                    return {
+                        "post_id": post_id, "status": "preflight_blocked",
+                        "error_code": exc.code, "reason": str(exc), "wordpress_changed": False,
+                    }
     if on_work_started is not None:
         on_work_started()
     attempts_before = eligibility.attempts
@@ -1320,6 +1409,7 @@ def _apply_editorial_unlocked(
     media_results, featured_id, featured_credit = _execute_media_plan(
         editorial, config, client, root, preflight=media_preflight, post_id=post_id,
         v1_vision_deadline=v1_vision_deadline,
+        ordinary_game_slots=ordinary_slots,
         post_title=_post_title(post) or "",
         media_fallback_candidates=media_fallback_candidates,
         v1_visual_fallback=True,
@@ -2740,7 +2830,9 @@ def _revalidated_origin_page_relevance(
     return scored.get("verdict") == "deterministic_match"
 
 
-def _v1_visual_subject(item: dict[str, Any], editorial: dict[str, Any]) -> str:
+def _v1_visual_subject(
+    item: dict[str, Any], editorial: dict[str, Any], ordinary_game_slots: dict[int, tuple[str, str]] | None = None,
+) -> str:
     if not item.get("is_featured"):
         seo = editorial.get("seo") or {}
         if detect_list_format(
@@ -2748,6 +2840,8 @@ def _v1_visual_subject(item: dict[str, Any], editorial: dict[str, Any]) -> str:
             str(editorial.get("cleaned_html") or ""), editorial.get("categories") or (),
         ) is not None:
             return _expected_subject(item, editorial, v1_categories=True)
+        if len(split_game_names(editorial.get("game_name"))) > 1:
+            return (ordinary_game_slots or {}).get(item.get("paragraph_index"), ("", ""))[0]
     return featured_vision_subject(editorial)
 
 
@@ -3610,6 +3704,7 @@ def _execute_media_plan(
     v1_visual_fallback: bool = False,
     post_categories: Any = (),
     v1_vision_deadline: float | None = None,
+    ordinary_game_slots: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """Download, convert to WebP, upload and report the editorial media plan.
 
@@ -3670,6 +3765,8 @@ def _execute_media_plan(
     def _index_subject(item: dict[str, Any]) -> str:
         # Listicle assets belong to their own section. If the section cannot
         # be mapped, leave the index entry unbound instead of using item one.
+        if ordinary_game_slots is not None and not item.get("is_featured"):
+            return ordinary_game_slots.get(item.get("paragraph_index"), ("", ""))[0]
         expected = _expected_subject(item, vision_editorial)
         if expected:
             return expected
@@ -4166,7 +4263,7 @@ def _execute_media_plan(
                             "recoverable": False,
                         }
                 if needs_pixels:
-                    subject = _v1_visual_subject(item, vision_editorial)
+                    subject = _v1_visual_subject(item, vision_editorial, ordinary_game_slots)
                     stage = "featured_vision" if is_featured else "inline_vision"
                     if not subject:
                         detail = "posição de mídia sem assunto editorial verificável"

@@ -579,6 +579,7 @@ def _reuse_existing_editorial_output(
     input_sha256: str,
     root: Path | str | None,
     emit_media_input: bool,
+    media_source_policy: str,
 ) -> dict[str, Any] | None:
     if not destination.exists():
         return None
@@ -632,7 +633,7 @@ def _reuse_existing_editorial_output(
             "batch_id": batch_id,
             "results": validated_items,
         }
-        media_input = build_media_resolve_batch_input(media_payload, root)
+        media_input = build_media_resolve_batch_input(media_payload, root, media_source_policy=media_source_policy)
     if root is not None:
         try:
             from .observability import append_telemetry
@@ -722,6 +723,7 @@ def generate_editorial_batch(
         input_sha256=input_sha256,
         root=operation_root,
         emit_media_input=emit_media_input,
+        media_source_policy=media_source_policy,
     )
     if cached_result is not None:
         if not defer_backoff_clear:
@@ -924,7 +926,7 @@ def generate_editorial_batch(
     )
     media_input = None
     if emit_media_input:
-        media_input = build_media_resolve_batch_input(normalized, operation_root)
+        media_input = build_media_resolve_batch_input(normalized, operation_root, media_source_policy=media_source_policy)
     usage = body.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
