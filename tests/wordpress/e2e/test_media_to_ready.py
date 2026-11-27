@@ -2124,3 +2124,74 @@ def _v1_mixed_rework_resume(case, monkeypatch, *, fixture_prefix, required, reta
             "retained": retained, "first": first_result["status"], "sibling": sibling_result["status"],
             "needed": request["needed"], "uploads_in_retry": deficit, "inline_final": required, "ready": True, "replay": replay["status"],
         })
+
+
+def test_v1_three_to_four_ready_then_reconciles_divergent_publish_readback(
+    wordpress_e2e_case, monkeypatch,
+):
+    """Reuse three verified assets, then recover a real REST publish exactly once."""
+    from dataclasses import replace
+
+    from unicornio_editor import workflow
+
+    case = wordpress_e2e_case
+    scenario = "v1_three_to_four_publisher_reconciliation"
+    _v1_mixed_rework_resume(
+        case, monkeypatch, fixture_prefix=scenario, required=4, retained_inline=3,
+        paragraphs=24, observation=scenario,
+    )
+    post_id = case.post_id(f"{scenario}_first")
+    get_post = case.client.get_post
+    before = get_post(post_id)
+    assert before["status"] == "pending" and before["meta"]["_hermes_state"] == "ready"
+
+    first_publish_reads = []
+
+    def get_with_divergent_first_read(test_post_id, **kwargs):
+        observed = get_post(test_post_id, **kwargs)
+        if test_post_id == post_id and observed["status"] == "publish" and not first_publish_reads:
+            true_id = observed["meta"]["_ai_editor_publish_operation_id"]
+            assert true_id and true_id != "f" * 32
+            first_publish_reads.append(true_id)
+            return {**observed, "meta": {**observed["meta"], "_ai_editor_publish_operation_id": "f" * 32}}
+        return observed
+
+    def publish_requests():
+        audit = case._control(f"/wp-json/unicornio-e2e/v1/audit?post_id={post_id}")
+        return [
+            event for event in audit["events"]
+            if event.get("phase") == "request" and event.get("method") == "POST"
+            and event.get("requested_status") == "publish"
+        ]
+
+    prior_requests = publish_requests()
+    config = replace(case.client.config, publish_enabled=True, media_source_policy="credit_only")
+    monkeypatch.setattr(case.client, "get_post", get_with_divergent_first_read)
+    with pytest.raises(workflow.WorkflowError, match="publication operation identity"):
+        workflow.publish_post(case.client, config, case.root, post_id)
+
+    marker = case.root / "work" / "v2-publication-uncertain" / f"{post_id}.json"
+    assert len(first_publish_reads) == 1
+    assert json.loads(marker.read_text())["publication_operation_id"] == first_publish_reads[0]
+    assert len(publish_requests()) == len(prior_requests) + 1
+    assert get_post(post_id)["status"] == "publish"
+
+    recovered = workflow._reconcile_persisted_uncertain_publications(case.client, config, case.root)
+    assert len(recovered) == 1 and recovered[0]["post_id"] == post_id
+    assert recovered[0]["publication_kind"] == "reconciled"
+    assert not marker.exists()
+    assert workflow._reconcile_persisted_uncertain_publications(case.client, config, case.root) == []
+    assert len(publish_requests()) == len(prior_requests) + 1
+
+    after = get_post(post_id)
+    assert after["status"] == "publish" and after["meta"]["_hermes_state"] == "published"
+    for key in ("_hermes_ready_hash", "_hermes_ready_manifest"):
+        assert after["meta"][key] == before["meta"][key]
+    assert after["meta"]["_ai_editor_publish_operation_id"] == first_publish_reads[0]
+    assert after["content"]["raw"] == before["content"]["raw"]
+    assert after["featured_media"] == before["featured_media"]
+    case.observations[-1].update({
+        "publisher_first_read_divergent": True, "publisher_wordpress_status": after["status"],
+        "publisher_proof": "reconciled", "publisher_post_requests": 1,
+        "publisher_preserved_ready_manifest": True,
+    })

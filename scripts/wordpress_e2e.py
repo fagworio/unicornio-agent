@@ -52,8 +52,12 @@ SCENARIOS = (
     "test_v1_five_card_batch_lock_isolation_uses_real_wordpress_readbacks",
     "test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready",
     "test_v1_mixed_rework_retains_two_attachments_and_sibling_reaches_ready",
+    "test_v1_three_to_four_ready_then_reconciles_divergent_publish_readback",
 )
 SCENARIO_OPERATIONS = {
+    "v1_three_to_four_ready_then_reconciles_divergent_publish_readback": [
+        "v1_three_to_four_publisher_reconciliation",
+    ],
     "pending_transitions_to_awaiting_human_with_rest_readback": ["pending_transition"],
     "existing_awaiting_human_without_changes_avoids_post": ["noop"],
     "awaiting_human_metadata_divergence_is_written_and_confirmed": ["metadata_divergence"],
@@ -84,6 +88,8 @@ SCENARIO_OPERATIONS = {
     ],
 }
 POST_FIXTURES = {
+    "v1_three_to_four_publisher_reconciliation_first": ("pending", False),
+    "v1_three_to_four_publisher_reconciliation_sibling": ("pending", False),
     "v1_mixed_progress_first": ("pending", False),
     "v1_mixed_progress_sibling": ("pending", False),
     "v1_mixed_progress_four_first": ("pending", False),
