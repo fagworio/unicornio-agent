@@ -251,6 +251,37 @@ class TrailerDiscoveryTests(unittest.TestCase):
             ):
                 self.assertEqual(find_game_trailer_with_status("Hellraiser: Revival"), (None, "search_failed"))
 
+    def test_mixed_unrecognized_result_never_certifies_absence_or_hides_verified_match(self):
+        def page(title):
+            known = {"videoRenderer": {
+                "videoId": "abcDEF12345", "title": {"simpleText": title},
+                "ownerText": {"simpleText": "Boss Team Games"},
+            }}
+            return self._search_page([
+                {"itemSectionRenderer": {"contents": [known, {"newResultRenderer": {}}]}},
+                {"continuationItemRenderer": {}},
+            ])
+
+        with mock.patch(
+            "unicornio_editor.trailer.urlopen",
+            return_value=BytesIO(page("Entirely Different Movie - Official Trailer")),
+        ), mock.patch("unicornio_editor.trailer._fetch_oembed") as oembed:
+            # The unknown renderer can hide a result even when the one known
+            # result fills the explicitly bounded candidate window.
+            self.assertEqual(
+                find_game_trailer_with_status("Hellraiser: Revival", max_candidates=1),
+                (None, "unverified_candidates"),
+            )
+            oembed.assert_not_called()
+
+        with mock.patch(
+            "unicornio_editor.trailer.urlopen",
+            return_value=BytesIO(page("Hellraiser: Revival - Official Trailer")),
+        ), mock.patch("unicornio_editor.trailer._fetch_oembed", return_value=self._oembed()):
+            value, status = find_game_trailer_with_status("Hellraiser: Revival", max_candidates=1)
+        self.assertEqual(status, "found")
+        self.assertEqual(value["video_id"], "abcDEF12345")
+
     def test_structured_empty_search_is_proof_of_absence(self):
         for sections in ([], [{"itemSectionRenderer": {"contents": []}}]):
             with self.subTest(sections=sections), mock.patch(

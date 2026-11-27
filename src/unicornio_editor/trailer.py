@@ -37,6 +37,12 @@ class TrailerError(ValueError):
     """Raised when a trailer cannot be verified as official."""
 
 
+class _SearchCandidates(list[dict[str, str]]):
+    def __init__(self, videos: list[dict[str, str]], *, incomplete: bool) -> None:
+        super().__init__(videos)
+        self.incomplete = incomplete
+
+
 _ALLOWED_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
 _YT_SEARCH_URL = "https://www.youtube.com/results"
 _YT_OEMBED_URL = "https://www.youtube.com/oembed"
@@ -129,7 +135,7 @@ def find_game_trailer_with_status(
     candidates = _search_youtube(trailer_search_query(name), limit=max_candidates, timeout=timeout)
     if candidates is None:
         return None, "search_failed"
-    unverified_candidates = False
+    unverified_candidates = isinstance(candidates, _SearchCandidates) and candidates.incomplete
     for candidate in candidates:
         title = candidate.get("title") or ""
         if not title:
@@ -404,7 +410,10 @@ def _search_youtube(query: str, *, limit: int, timeout: float) -> list[dict[str,
         videos = _parse_video_ids_fallback(html)
         if not videos:
             return None
-    return videos[:limit]
+    return _SearchCandidates(
+        videos[:limit],
+        incomplete=isinstance(videos, _SearchCandidates) and videos.incomplete,
+    )
 
 
 def _parse_initial_data(html: str) -> list[dict[str, str]] | None:
@@ -426,7 +435,10 @@ def _parse_initial_data(html: str) -> list[dict[str, str]] | None:
     videos: list[dict[str, str]] = []
     saw_known_empty = False
     saw_unknown = False
+    navigation = {"continuationItemRenderer", "searchSubMenuRenderer"}
     for section in contents:
+        if isinstance(section, dict) and navigation.intersection(section):
+            continue
         item_section = section.get("itemSectionRenderer") if isinstance(section, dict) else None
         if not isinstance(item_section, dict) or not isinstance(item_section.get("contents"), list):
             saw_unknown = True
@@ -437,6 +449,8 @@ def _parse_initial_data(html: str) -> list[dict[str, str]] | None:
         for item in items:
             renderer = item.get("videoRenderer") if isinstance(item, dict) else None
             if not isinstance(renderer, dict):
+                if isinstance(item, dict) and navigation.intersection(item):
+                    continue
                 message = item.get("messageRenderer") if isinstance(item, dict) else None
                 if (
                     isinstance(message, dict)
@@ -455,7 +469,9 @@ def _parse_initial_data(html: str) -> list[dict[str, str]] | None:
                 "channel": _runs_text(renderer.get("ownerText")),
             })
     if videos:
-        return videos
+        # A verified official result can still succeed, but the known
+        # unrelated subset does not establish absence in a mixed response.
+        return _SearchCandidates(videos, incomplete=saw_unknown)
     return [] if saw_known_empty and not saw_unknown else None
 
 
