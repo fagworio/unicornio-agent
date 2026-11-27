@@ -31,12 +31,11 @@ from .media.vision_gate import (
     verify_image_subject_decision,
     vision_config_ready,
 )
-from .trailer import trailer_search_evidence_matches_cache
+from .trailer import has_youtube_embed, trailer_search_evidence_matches_cache
 from .wordpress import WordPressClient
 
 _CTA_MARKER = "Confira mais novidades em nosso Portal de"
 _IMG_RE = re.compile(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", re.IGNORECASE)
-_IFRAME_RE = re.compile(r"<iframe\b[^>]*youtube", re.IGNORECASE)
 _HEADING_RE = re.compile(r"<h([1-4])\b[^>]*>", re.IGNORECASE)
 
 
@@ -1060,10 +1059,10 @@ def run_pre_publish_checklist(
     else:
         check("dimensoes_imagens", True, "sem imagens para verificar", skipped=True)
 
-    # 9. Trailer: game content must carry a validated YouTube embed.
+    # 9. Trailer is optional enrichment; absence is not a READY blocker.
     game_name = editorial.get("game_name")
     if isinstance(game_name, str) and game_name.strip():
-        has_trailer = bool(_IFRAME_RE.search(content))
+        has_trailer = has_youtube_embed(content)
         unavailable = bool(editorial.get("trailer_unavailable"))
         evidence = editorial.get("trailer_search_evidence")
         audited_waiver = (
@@ -1085,7 +1084,7 @@ def run_pre_publish_checklist(
                 skipped=True,
             )
         else:
-            check("trailer_youtube", False, f"game_name={game_name!r}; embed AUSENTE e sem waiver auditado")
+            check("trailer_youtube", True, f"game_name={game_name!r}; trailer opcional ausente", skipped=True)
     else:
         check("trailer_youtube", True, "conteudo nao e de jogo; trailer nao exigido", skipped=True)
 

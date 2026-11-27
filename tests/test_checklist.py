@@ -696,9 +696,9 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(post=make_post(featured_media=0))
         self.assertEqual(self.statuses(result)["imagens_webp"], "skip")
 
-    def test_trailer_fails_when_game_name_without_embed(self):
+    def test_trailer_skips_when_game_name_without_embed(self):
         result = self._run_checklist(editorial=editorial_payload(game_name="Meu Jogo"))
-        self.assertEqual(self.statuses(result)["trailer_youtube"], "fail")
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
 
     def test_trailer_skips_for_non_game_content(self):
         result = self._run_checklist()
@@ -718,7 +718,7 @@ class ChecklistTests(unittest.TestCase):
         result = self._run_checklist(editorial=editorial, seed_negative_trailer_cache=True)
         self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
 
-    def test_trailer_waiver_rejects_recent_editorial_evidence_without_persisted_cache(self):
+    def test_trailer_waiver_does_not_trust_evidence_without_persisted_cache(self):
         editorial = editorial_payload(
             game_name="Meu Jogo",
             trailer_unavailable=True,
@@ -730,9 +730,10 @@ class ChecklistTests(unittest.TestCase):
             },
         )
         result = self._run_checklist(editorial=editorial)
-        self.assertEqual(self.statuses(result)["trailer_youtube"], "fail")
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
+        self.assertNotIn("waived", next(i["detail"] for i in result["items"] if i["name"] == "trailer_youtube"))
 
-    def test_trailer_waiver_fails_when_search_evidence_is_stale(self):
+    def test_trailer_waiver_does_not_trust_stale_evidence(self):
         editorial = editorial_payload(
             game_name="Meu Jogo",
             trailer_unavailable=True,
@@ -744,7 +745,8 @@ class ChecklistTests(unittest.TestCase):
             },
         )
         result = self._run_checklist(editorial=editorial)
-        self.assertEqual(self.statuses(result)["trailer_youtube"], "fail")
+        self.assertEqual(self.statuses(result)["trailer_youtube"], "skip")
+        self.assertNotIn("waived", next(i["detail"] for i in result["items"] if i["name"] == "trailer_youtube"))
 
     def test_cta_fails_when_missing(self):
         result = self._run_checklist(content="<p>Texto revisado sobre o jogo videogame.</p>")

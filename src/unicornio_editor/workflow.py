@@ -104,7 +104,7 @@ from .state import (
 from .trailer import (
     TrailerError, build_trailer_html, cached_game_trailer_checked_at,
     find_cached_game_trailer_with_status, find_game_trailer_with_status,
-    trailer_search_query,
+    has_youtube_embed, trailer_search_query, verify_proposed_game_trailer,
 )
 from .wordpress import SafetyError, WordPressClient, WordPressError
 from .pipeline_v2.quarantine import (
@@ -6914,6 +6914,11 @@ def _discover_trailer(
     game_names = split_game_names(editorial.get("game_name"))
     if not game_names:
         return None, "not_applicable"
+    proposed = verify_proposed_game_trailer(
+        editorial.get("trailer_url"), game_names, timeout=config.http_timeout
+    )
+    if proposed is not None:
+        return proposed, "found"
     statuses: list[str] = []
     first_verified: dict[str, str] | None = None
     for game_name in game_names:
@@ -6983,7 +6988,7 @@ def compose_final_content(
 ) -> tuple[str, dict[str, str] | None, str]:
     """Build the final content: cleaned HTML + optional trailer embed + canonical footer.
 
-    Returns ``(content, trailer)`` so callers can report what was embedded.
+    Returns content, selected trailer metadata, and the search status.
 
     Internal category links are added deterministically (no LLM) to the body
     HTML BEFORE the trailer/footer are appended, so the CTA/Fonte blocks and
@@ -7000,7 +7005,7 @@ def compose_final_content(
 
     html = dedupe_credit_figures(html)
     trailer, trailer_status = _discover_trailer(editorial, config, root=root)
-    if trailer is not None:
+    if trailer is not None and not has_youtube_embed(html, video_id=trailer["video_id"]):
         html = html.rstrip() + "\n\n" + build_trailer_html(trailer)
     return append_canonical_footer(html, original_link), trailer, trailer_status
 

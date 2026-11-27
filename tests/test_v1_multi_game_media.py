@@ -251,8 +251,8 @@ def test_ordinary_game_h2_targets_reach_real_vision_input_or_fail_closed_on_tamp
             assert [asset["subject"] for asset in inline_assets] == [ALPHA, BETA]
             assert [asset["vision_evidence"]["subject"] for asset in inline_assets] == [ALPHA, BETA]
             assert len(set(uploads)) == len(uploads) == 2
-            assert row["status"] == "needs_rework"
-            assert "trailer_youtube" in row["blocked_reasons"]
+            assert row["status"] == "partial"
+            assert "trailer_youtube" not in row.get("blocked_reasons", [])
             assert "fixture-90.webp" not in client.get_post(1)["content"]["raw"]
             assert "fixture-91.webp" not in client.get_post(1)["content"]["raw"]
             allowed = {"paragraph_index", "placement", "media_url", "alt_text", "credit_text", "width", "height"}

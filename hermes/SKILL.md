@@ -316,7 +316,7 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
 - PARTIAL = relevância aprovada, mas mídia/featured incompleta; reutilize o
   manifesto `editorial.partial.json` e busque somente o déficit. PARTIAL nunca
   publica e não altera o HTML do WordPress até checklist 100%.
-- BLOCKED = falha de texto, SEO, trailer ou outro gate corrigível; não use
+- BLOCKED = falha de texto, SEO ou outro gate corrigível; não use
   UNCERTAIN para falta de mídia.
 - UNCERTAIN = exclusivamente dúvida editorial sobre relevância. Fica fora da fila
   até `next_retry_at` vencer, aparece uma vez como
@@ -365,7 +365,7 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
   frames distintos reais, NUNCA repita para atingir a cota.
 - IMAGENS SÃO OBRIGATÓRIAS (2/4/6 sem waiver). Se a busca honesta não encontrar
   mídia, deixe o plano vazio e execute `apply`: falha exclusivamente de mídia é
-  `PARTIAL`, nunca `uncertain`. Jogo sem trailer oficial: nunca use fan-made.
+  `PARTIAL`, nunca `uncertain`. Trailer oficial é opcional: se não for verificável, não insira o vídeo e não bloqueie o post por isso.
 - NUNCA leia `src/**`, `pyproject.toml`, `.env` nem testes — o CLI é a interface.
   Não repita comandos; não re-prepare post já visto.
 

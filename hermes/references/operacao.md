@@ -102,7 +102,9 @@
   montar o plano (o apply exige que a URL esteja listada na página).
 - **`needs_trailer: true` exige `trailer_url` não-vazio** — senão o apply aborta
   com `trailer_url must be a non-empty string`. Sem trailer oficial real, use
-  `needs_trailer: false`.
+  `needs_trailer: false`. O campo indica uma proposta, não um gate de READY.
+  Se a verificação/busca falhar, o post segue sem trailer e sem dispensa inventada.
+  O embed não gera thumbnail nem substitui a imagem destacada do artigo.
 
 ## Pitfalls de visão, texto e fontes (2026-09-21)
 

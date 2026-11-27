@@ -1329,7 +1329,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("trailer_unavailable", audited)
         self.assertNotIn("trailer_search_evidence", audited)
 
-    def test_apply_does_not_waive_trailer_when_search_failed(self):
+    def test_apply_reaches_ready_without_trailer_when_search_failed(self):
         payload = editorial_payload()
         payload["game_name"] = "Jogo sem trailer"
         payload["cleaned_html"] = "<p>&nbsp;<br /></p>" + payload["cleaned_html"]
@@ -1337,12 +1337,12 @@ class WorkflowTests(unittest.TestCase):
             "unicornio_editor.workflow.find_game_trailer_with_status",
             return_value=(None, "search_failed"),
         ):
-            report = apply_editorial(
-                FakeClient(self.post()), self.config(False), Path(directory), 42, payload
-            )
-        self.assertEqual(report["status"], "needs_rework")
-        self.assertIn("trailer_youtube", report["blocked_reasons"])
-        self.assertNotIn("html_semantics", report["blocked_reasons"])
+            root = Path(directory)
+            report = apply_editorial(FakeClient(self.post()), self.config(False), root, 42, payload)
+            saved = json.loads((root / "backups/42/editorial.latest.json").read_text())
+        self.assertEqual(report["status"], "ready")
+        self.assertNotIn("trailer_unavailable", saved)
+        self.assertNotIn("trailer_search_evidence", saved)
         self.assertEqual(report["trailer_search_status"], "search_failed")
 
     def test_apply_dry_run_reports_trailer_in_preview(self):

@@ -128,7 +128,7 @@ Hermes cron (monitor: so acorda quando a assinatura da fila muda)
      -> normaliza tecnicamente (featured 1280x720 WebP; inline nao-WebP
         relevante convertida — sem LLM) -> monta conteudo (trailer + CTA + Fonte)
      -> checklist INTEIRO (backup, pending, relevancia, Fonte, 2/4/6, featured,
-        WebP, dimensoes, trailer/waiver auditado, CTA, qualidade de texto,
+        WebP, dimensoes, trailer oficial opcional (sem bloqueio por ausência), CTA, qualidade de texto,
         estrutura, schema)
      -> falha: needs_rework + estado blocked (backoff 30m/2h; 3a falha
         AWAITING_HUMAN) — nada e gravado

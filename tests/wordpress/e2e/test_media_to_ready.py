@@ -348,12 +348,14 @@ def _automatic_pipeline_config(
 def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch):
     monkeypatch.setattr(
         "unicornio_editor.workflow.find_game_trailer_with_status",
-        lambda *args, **kwargs: (None, "official_not_found"),
+        lambda *args, **kwargs: (None, "search_failed"),
     )
     case = wordpress_e2e_case
     with ControlledSource() as source:
         source_url = f"{source.base_url}/article"
         editorial = _automatic_pipeline_editorial()
+        editorial.pop("trailer_unavailable")
+        editorial.pop("trailer_search_evidence")
         post_id = _prepare_automatic_pipeline_case(case, "media_pipeline_ready", source_url, editorial)
         before = _snapshot(case.client.get_post(post_id))
         result = run_v2(
@@ -372,21 +374,37 @@ def test_automatic_media_pipeline_reaches_ready(wordpress_e2e_case, monkeypatch)
         assert after["status"] == "pending"
         assert after["featured_media"] > 0
         assert after["content_sha256"] != before["content_sha256"]
-        assert "wp-content/uploads" in str((after_post.get("content") or {}).get("raw") or "")
+        raw = str((after_post.get("content") or {}).get("raw") or "")
+        assert "wp-content/uploads" in raw and "<iframe" not in raw
 
 
 def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_e2e_case, monkeypatch):
     import unicornio_editor.media.search as search
 
-    monkeypatch.setattr(
-        "unicornio_editor.workflow.find_game_trailer_with_status",
-        lambda *args, **kwargs: (None, "official_not_found"),
-    )
+    from unicornio_editor import trailer
+
+    video_id = "abcDEF12345"
+    title = "Hollow Knight Silksong - Official Trailer"
+
+    def listing(query, **_kwargs):
+        assert query == video_id, "verified proposal should not run game-name search"
+        return [{"video_id": video_id, "title": title, "channel": "Team Cherry"}]
+
+    monkeypatch.setattr(trailer, "_search_youtube", listing)
+    monkeypatch.setattr(trailer, "_fetch_oembed", lambda identifier, **_kwargs: {
+        "title": title,
+        "author_name": "Team Cherry",
+        "author_url": "https://www.youtube.com/@TeamCherry",
+        "thumbnail_url": "https://i.ytimg.com/forbidden-thumbnail.jpg",
+    } if identifier == video_id else None)
     case = wordpress_e2e_case
     with ControlledSource() as source:
         source_url = f"{source.base_url}/article"
         post_id = case.post_id("v1_listicle_targets_ready")
         editorial = _automatic_pipeline_editorial()
+        editorial.pop("trailer_unavailable")
+        editorial.pop("trailer_search_evidence")
+        editorial.update(needs_trailer=True, trailer_url=f"https://youtu.be/{video_id}")
         editorial["seo"]["title"] = "2 jogos de Hollow Knight Silksong"
         editorial["seo"]["meta_description"] = (
             "Veja dois momentos de Hollow Knight Silksong em Pharloom, com exploração vertical, "
@@ -498,7 +516,17 @@ def test_v1_listicle_targets_manifest_apply_and_checklist_reach_ready(wordpress_
         assert snapshot["ready_state"] == "ready"
         assert snapshot["status"] == "pending"
         assert snapshot["featured_media"] > 0
-        assert raw.count("<img") == 2
+        assert raw.count("<img") == 2 and "forbidden-thumbnail" not in raw
+        assert raw.count("<iframe") == 1
+        assert f"https://www.youtube-nocookie.com/embed/{video_id}" in raw
+        assert title in raw and "Team Cherry" in raw
+        assert f"https://www.youtube.com/watch?v={video_id}" in raw
+        from unicornio_editor.manifest import manifest_matches, parse_manifest
+        ready = parse_manifest(post["meta"]["_hermes_ready_manifest"])
+        assert ready and manifest_matches(
+            post, ready, post["meta"]["_hermes_ready_hash"],
+            policy_version=config.policy_version,
+        )
         assert raw.index("screenshot-one") < raw.index("<h2>2.")
         assert raw.index("screenshot-two") > raw.index("<h2>2.")
         assert len([row for row in result["media_plan_results"] if row.get("status") == "accepted"]) == 3

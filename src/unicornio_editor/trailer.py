@@ -19,9 +19,10 @@ from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 from pathlib import Path
 from html import escape, unescape
+from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 from .media.text import plain_text, split_game_names
 
@@ -120,6 +121,91 @@ def find_game_trailer(
     return trailer
 
 
+def youtube_video_id(url: object) -> str | None:
+    """Extract a video identity without ever requesting the supplied URL."""
+    if not isinstance(url, str) or not url or any(c.isspace() or ord(c) < 32 for c in url):
+        return None
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.port is not None:
+            return None
+        if host == "youtu.be":
+            candidate = parsed.path.removeprefix("/")
+        elif host in {"youtube.com", "www.youtube.com", "m.youtube.com"} and parsed.path == "/watch":
+            values = parse_qs(parsed.query, keep_blank_values=True).get("v", [])
+            candidate = values[0] if len(values) == 1 else ""
+        elif host in {"youtube.com", "www.youtube.com", "m.youtube.com", "www.youtube-nocookie.com"} and parsed.path.startswith("/embed/"):
+            candidate = parsed.path.removeprefix("/embed/")
+        else:
+            return None
+    except ValueError:
+        return None
+    return candidate if VIDEO_ID_RE.fullmatch(candidate) else None
+
+
+def has_youtube_embed(html: str, *, video_id: str | None = None) -> bool:
+    class YoutubeFrames(HTMLParser):
+        matched = False
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            sources = [v for key, v in attrs if key == "src"]
+            if tag != "iframe" or len(sources) != 1:
+                return
+            src = sources[0]
+            identity = youtube_video_id(src)
+            if identity and isinstance(src, str) and urlparse(src).path.startswith("/embed/"):
+                self.matched |= video_id is None or identity == video_id
+
+    parser = YoutubeFrames()
+    parser.feed(html)
+    parser.close()
+    return parser.matched
+
+
+def verify_proposed_game_trailer(
+    url: object, game_names: list[str], *, timeout: float,
+) -> dict[str, str] | None:
+    """Verify the exact proposed ID with independent listing and oEmbed metadata."""
+    video_id = youtube_video_id(url)
+    if not video_id or not game_names:
+        return None
+    for candidate in _search_youtube(video_id, limit=5, timeout=timeout) or ():
+        if candidate.get("video_id") != video_id:
+            continue
+        return _verified_trailer_candidate(candidate, game_names, timeout=timeout)
+    return None
+
+
+def _verified_trailer_candidate(
+    candidate: dict[str, str], game_names: list[str], *, timeout: float,
+) -> dict[str, str] | None:
+    title = candidate.get("title") or ""
+    video_id = candidate.get("video_id") or ""
+    channel = candidate.get("channel") or ""
+    matching_games = [name for name in game_names if _matches_game(title, name)]
+    if not VIDEO_ID_RE.fullmatch(video_id) or not channel or not matching_games or not _looks_like_trailer(title):
+        return None
+    meta = _fetch_oembed(video_id, timeout=timeout)
+    meta_title = (meta or {}).get("title") or ""
+    if (
+        not meta or not _looks_like_trailer(meta_title)
+        or not any(_matches_game(meta_title, name) for name in matching_games)
+        or not _official_channel_consistent(title, channel, meta)
+    ):
+        return None
+    return {
+        "video_id": video_id,
+        "title": meta_title,
+        "author_name": meta["author_name"],
+        "author_url": meta["author_url"],
+        "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+        "embed_url": f"https://www.youtube-nocookie.com/embed/{video_id}",
+        "thumbnail_url": meta.get("thumbnail_url") or "",
+        "matched_title": title,
+    }
+
+
 def find_game_trailer_with_status(
     game_name: str,
     *,
@@ -149,33 +235,10 @@ def find_game_trailer_with_status(
             if "trailer" in title.casefold():
                 unverified_candidates = True
             continue
-        video_id = candidate.get("video_id") or ""
-        channel = candidate.get("channel") or ""
-        if not channel:
-            unverified_candidates = True
-            continue
-        meta = _fetch_oembed(video_id, timeout=timeout)
-        meta_title = (meta or {}).get("title") or ""
-        if (
-            not meta
-            or not _looks_like_trailer(meta_title)
-            or not _matches_game(meta_title, name)
-            or not _official_channel_consistent(title, channel, meta)
-        ):
-            unverified_candidates = True
-            continue
-        return {
-            "video_id": video_id,
-            "title": meta.get("title") or title,
-            "author_name": meta.get("author_name") or channel,
-            "author_url": meta.get("author_url") or (
-                f"https://www.youtube.com/@{quote(channel)}" if channel else ""
-            ),
-            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
-            "embed_url": f"https://www.youtube-nocookie.com/embed/{video_id}",
-            "thumbnail_url": meta.get("thumbnail_url") or "",
-            "matched_title": title,
-        }, "found"
+        trailer = _verified_trailer_candidate(candidate, [name], timeout=timeout)
+        if trailer is not None:
+            return trailer, "found"
+        unverified_candidates = True
     return None, "unverified_candidates" if unverified_candidates else "official_not_found"
 
 
