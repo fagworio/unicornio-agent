@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 from functools import wraps
@@ -30,6 +31,8 @@ from .batch import (
     validate_batch_id,
 )
 from .editorial_schema import EditorialValidationError, validate_editorial
+from .html_cleaner import clean_html
+from .media.text import plain_text
 from .retry_policy import (
     clear_expired_editorial_backoff,
     editorial_backoff_status,
@@ -283,6 +286,45 @@ def _verified_model_identity(usage: Any) -> str:
     return ""
 
 
+def _explicit_source_game(source: dict[str, Any] | None) -> str | None:
+    """Repair only from a game explicitly identified by the original article.
+
+    Require a headline with the full name as its subject and matching prose
+    that explicitly labels the marked-up name as a game. Tags in comments,
+    scripts or styles are not visible evidence; a model title, SEO keywords
+    or a trailer URL are never evidence here.
+    """
+    if not source or not isinstance(source.get("title"), str):
+        return None
+    body = source.get("source_content")
+    if not isinstance(body, str):
+        return None
+    body = clean_html(body)
+    mentions = re.finditer(
+        r"\b(?:o jogo|the (?:video )?game)(?:\s|&nbsp;)+"
+        r"<(?P<tag>em|i|strong|b)\b[^>]*>(?P<name>[^<>]{2,100})</(?P=tag)\s*>",
+        body,
+        flags=re.IGNORECASE,
+    )
+    names: dict[str, str] = {}
+    for mention in mentions:
+        name = plain_text(mention.group("name"))
+        if not name or ";" in name:
+            return None
+        names.setdefault(name.casefold(), name)
+        if len(names) > 1:
+            return None
+    if not names:
+        return None
+    key, name = next(iter(names.items()))
+    title = plain_text(source["title"]).casefold()
+    # A separator or exact title avoids accepting "Hades" from a headline
+    # whose actual subject is "Hades II" (or a different subtitle).
+    if re.match(rf"^{re.escape(key)}(?:$|\s*:|\s+[–—|]\s+|\s+-\s+)", title):
+        return name
+    return None
+
+
 def _normalize_output(
     payload: dict[str, Any],
     *,
@@ -291,6 +333,7 @@ def _normalize_output(
     min_confidence: float,
     relevance_policies: dict[int, set[str]] | None = None,
     localization_requirements: dict[int, bool] | None = None,
+    source_facts: dict[int, dict[str, Any]] | None = None,
     media_source_policy: str = "strict",
 ) -> dict[str, Any]:
     if set(payload) != {"batch_id", "results"}:
@@ -356,13 +399,38 @@ def _normalize_output(
                 seen.add(post_id)
                 continue
             normalizations: list[str] = []
+            relevance = editorial.get("site_relevance")
+            missing_game_for_trailer = (
+                isinstance(relevance, dict)
+                and relevance.get("decision") == "process"
+                and editorial.get("needs_trailer") is True
+                and "game_name" in editorial
+                and editorial["game_name"] is None
+            )
+            if missing_game_for_trailer:
+                game_name = _explicit_source_game((source_facts or {}).get(post_id))
+                if game_name is not None:
+                    # Keep the article, drop the unverified URL, and let the
+                    # deterministic stage discover a trailer for this identity.
+                    editorial = {
+                        **editorial,
+                        "game_name": game_name,
+                        "needs_trailer": False,
+                        "trailer_url": None,
+                    }
+                    normalizations.append("missing_game_name_from_explicit_source")
+                    missing_game_for_trailer = False
             # O trailer e descoberto de forma DETERMINISTICA pelo codigo (por
             # `game_name`, em compose_final_content): nao existe busca de
             # trailer nesta chamada sem ferramentas. Se o modelo sinalizou
             # needs_trailer sem uma URL verificada, o contrato rejeitaria o item
             # inteiro; normalizamos para false preservando game_name, e a
             # descoberta continua acontecendo no apply.
-            if editorial.get("needs_trailer") and not editorial.get("trailer_url"):
+            if (
+                editorial.get("needs_trailer") is True
+                and not editorial.get("trailer_url")
+                and not missing_game_for_trailer
+            ):
                 editorial = {**editorial, "needs_trailer": False, "trailer_url": None}
                 normalizations.append("needs_trailer_without_url_cleared")
             elif editorial.get("needs_trailer") is False and editorial.get("trailer_url") is not None:
@@ -402,6 +470,8 @@ def _normalize_output(
                 seen.add(post_id)
                 continue
             try:
+                if missing_game_for_trailer:
+                    raise EditorialValidationError("needs_trailer requires game_name")
                 checked = validate_editorial(
                     editorial,
                     min_confidence=min_confidence,
@@ -909,6 +979,7 @@ def generate_editorial_batch(
             int(item["post_id"]): bool((item.get("localization") or {}).get("required"))
             for item in posts
         },
+        source_facts={int(item["post_id"]): item for item in posts},
         media_source_policy=media_source_policy,
     )
     input_retry_modes = {

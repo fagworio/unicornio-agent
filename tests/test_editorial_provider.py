@@ -979,6 +979,78 @@ class EditorialProviderTests(unittest.TestCase):
         self.assertIn("semicolon-delimited game names", _SYSTEM_PROMPT)
         self.assertIn("game_name triggers deterministic trailer lookup", _SYSTEM_PROMPT)
 
+    def test_missing_game_identity_recovery_keeps_text_and_uses_only_original_facts(self):
+        source_post = {
+            "post_id": 1, "title": "Hades II: novo trailer oficial",
+            "source_content": "<p>O jogo <em>Hades II</em> recebeu um trailer.</p>",
+        }
+        body = "<p>O artigo revisado mantém os fatos e a estrutura.</p>"
+        editorial = {
+            **_EDITORIAL, "title": "Hades II: detalhes do trailer", "cleaned_html": body,
+            "site_relevance": {"decision": "process", "confidence": 1.0,
+                               "reason": "dentro da pauta", "matched_topics": ["games"]},
+            "needs_trailer": True, "trailer_url": "https://www.youtube.com/watch?v=abcDEF12345",
+        }
+        response = {
+            "batch_id": "trailer-repair",
+            "results": [{"post_id": 1, "status": "ok", "editorial": editorial},
+                        {"post_id": 2, "status": "ok", "editorial": _EDITORIAL}],
+        }
+        response_body = {"choices": [{"message": {"content": json.dumps(response)}}]}
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.editorial_provider.urlopen", return_value=BytesIO(json.dumps(response_body).encode())
+        ) as provider:
+            root = Path(directory)
+            source = root / "editorial.input.json"
+            source.write_text(json.dumps({"batch_id": "trailer-repair", "posts": [source_post, {"post_id": 2}]}))
+            result = generate_editorial_batch(
+                source, api_key="test", base_url="https://provider.example/v1", model="test", root=root,
+            )
+            provider.assert_called_once()
+            saved = json.loads(Path(result["output"]).read_text())
+            first, sibling = saved["results"]
+            self.assertEqual(first["status"], "ok")
+            self.assertEqual(first["editorial"], {
+                **editorial, "game_name": "Hades II", "needs_trailer": False, "trailer_url": None,
+            })
+            self.assertIn("missing_game_name_from_explicit_source", first["normalizations"])
+            self.assertEqual(sibling["editorial"], _EDITORIAL)
+
+    def test_ambiguous_or_unrelated_original_is_not_repaired_by_trailer_or_model_text(self):
+        editorial = {
+            **_EDITORIAL, "title": "Hades II: trailer",
+            "cleaned_html": "<p>O jogo <em>Hades II</em> recebeu um trailer.</p>",
+            "site_relevance": {"decision": "process", "confidence": 1.0,
+                               "reason": "dentro da pauta", "matched_topics": ["games"]},
+            "needs_trailer": True,
+        }
+        for title, original in (
+            ("Hades II: trailer", "<p>Não identifica um jogo específico.</p>"),
+            ("Hades II: trailer", "<!-- <p>O jogo <em>Hades II</em>.</p> -->"),
+            ("PS5: trailer de apresentação", "<p>O jogo <em>Hades II</em> é citado de passagem.</p>"),
+            ("Hades II: trailer", "<p>O jogo <em>Hades</em> antecedeu a sequência.</p>"),
+            ("Hades II: trailer", "<p>O jogo <em>Hades II</em> e o jogo <em>Silksong</em> apareceram.</p>"),
+        ):
+            with self.subTest(title=title, original=original):
+                result = _normalize_output(
+                    {"batch_id": "trailer-x", "results": [{"post_id": 1, "status": "ok", "editorial": editorial}]},
+                    batch_id="trailer-x", post_ids={1}, min_confidence=0.8,
+                    source_facts={1: {"title": title, "source_content": original}},
+                )["results"][0]
+                self.assertEqual(result["status"], "needs_retry")
+                self.assertIn("needs_trailer requires game_name", result["reason"])
+
+    def test_hardware_without_trailer_assertion_does_not_require_game_name(self):
+        editorial = {**_EDITORIAL, "site_relevance": {"decision": "process", "confidence": 1.0,
+                                                       "reason": "dentro da pauta", "matched_topics": ["hardware"]}}
+        row = _normalize_output(
+            {"batch_id": "hardware", "results": [{"post_id": 1, "status": "ok", "editorial": editorial}]},
+            batch_id="hardware", post_ids={1}, min_confidence=0.8,
+            source_facts={1: {"title": "Steam Deck: revisão do hardware", "source_content": "<p>Novo aparelho.</p>"}},
+        )["results"][0]
+        self.assertEqual(row["status"], "ok")
+        self.assertIsNone(row["editorial"]["game_name"])
+
     def test_trailer_without_url_is_normalized_instead_of_invalid(self):
         """Não há busca de trailer nesta chamada: needs_trailer sem URL é
         normalizado (a descoberta determinística continua no apply)."""
