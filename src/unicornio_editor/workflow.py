@@ -5876,6 +5876,15 @@ def _reconcile_uncertain_publication(
             "reason": "resultado anterior da publicação permanece incerto; status remoto não confirma publicação",
             "state": STATE_READY,
         }
+    if marker_data.get("published_observed") is not True:
+        # This may be the first positive status seen after a crash or an
+        # unavailable read. Keep that fact even if the identity below fails.
+        try:
+            atomic_write_text(
+                marker, json.dumps({**marker_data, "published_observed": True}, ensure_ascii=False, indent=2),
+            )
+        except OSError:
+            _append_publish_telemetry(root, "publish_fence_observation_write_failed", post_id=post_id)
     legacy_state = read_state(post).get("state")
     meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
     raw_mode = marker_data.get("rest_empty_v1")
@@ -6681,6 +6690,7 @@ def _publish_now(
             ready_hash=ready_hash, ready_manifest=ready_manifest,
             publication_operation_id=publication_operation_id,
             rest_empty_v1=rest_empty_v1,
+            published_observed=isinstance(result, dict) and result.get("status") == "publish",
         )
         try:
             _append_publish_telemetry(

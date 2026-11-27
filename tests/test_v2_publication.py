@@ -486,6 +486,49 @@ def test_known_publish_conflict_keeps_fence_on_later_pending_snapshot(tmp_path):
     assert not client.updates
 
 
+
+@pytest.mark.parametrize("source", ["post_response", "next_window"])
+def test_observed_publish_cannot_be_retried_after_pending_projection(tmp_path, source):
+    class ConflictingProjectionClient(FakePublicationClient):
+        projection = "pending"
+
+        def get_post(self, post_id):
+            return {**super().get_post(post_id), "status": self.projection}
+
+        def list_pending(self, page=1, per_page=100):
+            return [self.get_post(self.post["id"])] if self.projection == "pending" else []
+
+    post = _pending_ready_post()
+    client = ConflictingProjectionClient(post)
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    if source == "post_response":
+        with pytest.raises(WorkflowError, match="publish read-back mismatch"):
+            _publish_now(
+                client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+                ready_hash=post["meta"]["_hermes_ready_hash"],
+                ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+            )
+        assert len(client.publish_calls) == 1
+    else:
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({
+            "status": "intent", "publication_operation_id": "prior-authorized-operation",
+        }), encoding="utf-8")
+        client.projection = "publish"
+        client.post["meta"][META_PUBLISH_OPERATION_ID] = "unknown-operation"
+        first = publish_ready_posts(client, _config(), tmp_path)
+        assert [row["status"] for row in first] == ["retry"]
+
+    assert json.loads(marker.read_text())["published_observed"] is True
+    client.projection = "pending"
+    client.post["meta"]["_hermes_state"] = "ready"
+    outcome = publish_ready_posts(client, _config(), tmp_path)
+    assert [row["status"] for row in outcome] == ["retry"]
+    assert outcome[0]["uncertain"] is True
+    assert len(client.publish_calls) == (1 if source == "post_response" else 0)
+    assert marker.exists()
+
+
 def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path):
     class TimeoutAfterCommitClient(FakePublicationClient):
         def publish(self, post_id, **kwargs):
