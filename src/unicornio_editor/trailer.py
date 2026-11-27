@@ -57,6 +57,9 @@ _STOPWORDS = {
 _TRAILER_CACHE_FILENAME = "trailer_cache.json"
 _TRAILER_FOUND_TTL = timedelta(days=30)
 _TRAILER_ABSENT_TTL = timedelta(hours=6)
+# Legacy negatives could be written for incomplete search/metadata. They
+# must not authorize waivers, even if their old timestamp is still fresh.
+_TRAILER_ABSENCE_EVIDENCE_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -121,24 +124,38 @@ def find_game_trailer_with_status(
     if not isinstance(game_name, str) or not game_name.strip():
         raise TrailerError("game_name is required")
     name = " ".join(unescape(game_name).split())
+    if max_candidates < 1:
+        return None, "search_failed"
     candidates = _search_youtube(trailer_search_query(name), limit=max_candidates, timeout=timeout)
     if candidates is None:
         return None, "search_failed"
     unverified_candidates = False
     for candidate in candidates:
         title = candidate.get("title") or ""
+        if not title:
+            # A raw video ID is not a listing we can rule out, and oEmbed
+            # alone cannot supply the independent channel consistency check.
+            unverified_candidates = True
+            continue
+        if not _matches_game(title, name):
+            continue
         if not _looks_like_trailer(title):
             if "trailer" in title.casefold():
                 unverified_candidates = True
             continue
-        if not _matches_game(title, name):
-            continue
         video_id = candidate.get("video_id") or ""
-        meta = _fetch_oembed(video_id, timeout=timeout)
-        if not meta:
-            continue
         channel = candidate.get("channel") or ""
-        if not _official_channel_consistent(title, channel, meta):
+        if not channel:
+            unverified_candidates = True
+            continue
+        meta = _fetch_oembed(video_id, timeout=timeout)
+        meta_title = (meta or {}).get("title") or ""
+        if (
+            not meta
+            or not _looks_like_trailer(meta_title)
+            or not _matches_game(meta_title, name)
+            or not _official_channel_consistent(title, channel, meta)
+        ):
             unverified_candidates = True
             continue
         return {
@@ -174,7 +191,7 @@ def find_cached_game_trailer_with_status(
     ):
         if entry.get("status") == "found" and isinstance(entry.get("trailer"), dict):
             return {str(k): str(v) for k, v in entry["trailer"].items()}, "found"
-        if entry.get("status") == "official_not_found":
+        if _negative_cache_checked_at(entry, game_name) is not None:
             return None, "official_not_found"
     trailer, status = discover(game_name, timeout=timeout, max_candidates=max_candidates)
     if status in {"found", "official_not_found"}:
@@ -184,6 +201,8 @@ def find_cached_game_trailer_with_status(
             "provider": "youtube",
             "query": trailer_search_query(game_name),
             "trailer": trailer,
+            **({"absence_evidence_version": _TRAILER_ABSENCE_EVIDENCE_VERSION}
+               if status == "official_not_found" else {}),
         }
         _write_trailer_cache(root, cache)
     return trailer, status
@@ -225,43 +244,47 @@ def _write_trailer_cache(root: Path, cache: dict[str, object]) -> None:
         pass
 
 
-def _cache_fresh(entry: dict) -> bool:
+def _parse_cache_timestamp(entry: dict[str, Any]) -> datetime | None:
     try:
         checked = datetime.fromisoformat(str(entry.get("checked_at") or "").replace("Z", "+00:00"))
     except ValueError:
-        return False
-    if checked.tzinfo is None:
-        return False
+        return None
+    return checked.astimezone(timezone.utc) if checked.tzinfo is not None else None
+
+
+def _cache_fresh(entry: dict[str, Any]) -> bool:
+    checked = _parse_cache_timestamp(entry)
     ttl = _TRAILER_FOUND_TTL if entry.get("status") == "found" else _TRAILER_ABSENT_TTL
-    return checked + ttl > datetime.now(timezone.utc)
+    return checked is not None and timedelta(0) <= datetime.now(timezone.utc) - checked <= ttl
+
+
+def _negative_cache_checked_at(entry: Any, game_name: str, *, now: datetime | None = None) -> datetime | None:
+    if (
+        not _cache_entry_matches_game(entry, game_name)
+        or entry.get("status") != "official_not_found"
+        or entry.get("absence_evidence_version") != _TRAILER_ABSENCE_EVIDENCE_VERSION
+    ):
+        return None
+    checked = _parse_cache_timestamp(entry)
+    current = now or datetime.now(timezone.utc)
+    if checked is None or current.tzinfo is None:
+        return None
+    return checked if timedelta(0) <= current.astimezone(timezone.utc) - checked <= _TRAILER_ABSENT_TTL else None
 
 
 def cached_game_trailer_checked_at(root: Path | None, game_name: str) -> str | None:
-    """Return the persisted timestamp for the current negative search record."""
+    """Return the oldest timestamp across the current negative search records."""
     if root is None or not isinstance(game_name, str) or not game_name.strip():
         return None
     cache = _read_trailer_cache(Path(root))
     checked_times: list[datetime] = []
+    now = datetime.now(timezone.utc)
     for name in split_game_names(game_name):
-        entry = cache.get(_cache_key(name))
-        if (
-            not isinstance(entry, dict)
-            or not _cache_entry_matches_game(entry, name)
-            or entry.get("status") != "official_not_found"
-        ):
+        checked = _negative_cache_checked_at(cache.get(_cache_key(name)), name, now=now)
+        if checked is None:
             return None
-        try:
-            checked = datetime.fromisoformat(
-                str(entry.get("checked_at") or "").replace("Z", "+00:00")
-            )
-        except (TypeError, ValueError):
-            return None
-        if checked.tzinfo is None:
-            return None
-        checked_times.append(checked.astimezone(timezone.utc))
-    if not checked_times:
-        return None
-    return min(checked_times).isoformat(timespec="seconds")
+        checked_times.append(checked)
+    return min(checked_times).isoformat(timespec="seconds") if checked_times else None
 
 
 def trailer_search_evidence_is_recent(
@@ -320,24 +343,8 @@ def trailer_search_evidence_matches_cache(
         return False
     checked_times: list[datetime] = []
     for name in names:
-        entry = cache.get(_cache_key(name))
-        if (
-            not isinstance(entry, dict)
-            or not _cache_entry_matches_game(entry, name)
-            or entry.get("status") != "official_not_found"
-        ):
-            return False
-        try:
-            checked = datetime.fromisoformat(
-                str(entry.get("checked_at") or "").replace("Z", "+00:00")
-            )
-        except (TypeError, ValueError):
-            return False
-        if checked.tzinfo is None:
-            return False
-        checked = checked.astimezone(timezone.utc)
-        age = current.astimezone(timezone.utc) - checked
-        if not timedelta(0) <= age <= _TRAILER_ABSENT_TTL:
+        checked = _negative_cache_checked_at(cache.get(_cache_key(name)), name, now=current)
+        if checked is None:
             return False
         checked_times.append(checked)
     try:
@@ -392,53 +399,69 @@ def _search_youtube(query: str, *, limit: int, timeout: float) -> list[dict[str,
     )):
         return None
     videos = _parse_initial_data(html)
-    if not videos:
+    if videos is None:
+        # Recovered IDs are explicitly unverified, not an empty search.
         videos = _parse_video_ids_fallback(html)
-        # A changed/blocked search page is not evidence that no official
-        # trailer exists; only cache absence after a parseable search response.
-        if not videos and "ytinitialdata" not in lowered:
+        if not videos:
             return None
     return videos[:limit]
 
 
-def _parse_initial_data(html: str) -> list[dict[str, str]]:
-    match = re.search(r"ytInitialData\s*=\s*(\{.+?\});\s*</script>", html, re.DOTALL)
+def _parse_initial_data(html: str) -> list[dict[str, str]] | None:
+    """Return an understood result set (possibly empty), or an unknown page."""
+    match = re.search(r"ytInitialData\s*=\s*(\{.*?\})\s*;\s*</script>", html, re.DOTALL)
     if not match:
-        return []
+        return None
     try:
         data = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return []
-    try:
         contents = data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"][
             "sectionListRenderer"
         ]["contents"]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(contents, list):
+        return None
+    if not contents:
         return []
     videos: list[dict[str, str]] = []
+    saw_known_empty = False
+    saw_unknown = False
     for section in contents:
-        items = section.get("itemSectionRenderer", {}).get("contents", [])
+        item_section = section.get("itemSectionRenderer") if isinstance(section, dict) else None
+        if not isinstance(item_section, dict) or not isinstance(item_section.get("contents"), list):
+            saw_unknown = True
+            continue
+        items = item_section["contents"]
+        if not items:
+            saw_known_empty = True
         for item in items:
-            renderer = item.get("videoRenderer")
-            if not renderer:
+            renderer = item.get("videoRenderer") if isinstance(item, dict) else None
+            if not isinstance(renderer, dict):
+                message = item.get("messageRenderer") if isinstance(item, dict) else None
+                if (
+                    isinstance(message, dict)
+                    and _runs_text(message.get("text")).casefold().rstrip(".") in {
+                        "no results found", "no results found for your search",
+                    }
+                ):
+                    saw_known_empty = True
+                else:
+                    saw_unknown = True
                 continue
             video_id = renderer.get("videoId")
-            title = _runs_text(renderer.get("title"))
-            if not video_id or not title:
-                continue
-            videos.append(
-                {
-                    "video_id": str(video_id),
-                    "title": title,
-                    "channel": _runs_text(renderer.get("ownerText")),
-                }
-            )
-    return videos
+            videos.append({
+                "video_id": video_id if isinstance(video_id, str) else "",
+                "title": _runs_text(renderer.get("title")),
+                "channel": _runs_text(renderer.get("ownerText")),
+            })
+    if videos:
+        return videos
+    return [] if saw_known_empty and not saw_unknown else None
 
 
 def _parse_video_ids_fallback(html: str) -> list[dict[str, str]]:
     seen: dict[str, str] = {}
-    for video_id in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html):
+    for video_id in re.findall(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', html):
         seen.setdefault(video_id, video_id)
     return [{"video_id": vid, "title": "", "channel": ""} for vid in seen]
 
@@ -497,10 +520,14 @@ def _official_channel_consistent(title: str, candidate_channel: str, meta: dict[
     if not _looks_like_trailer(title) or not candidate_channel.strip():
         return False
     author = str(meta.get("author_name") or "").strip()
-    author_url = urlparse(str(meta.get("author_url") or ""))
-    if author_url.scheme != "https" or (author_url.hostname or "").casefold() not in {
-        "youtube.com", "www.youtube.com", "m.youtube.com",
-    }:
+    try:
+        author_url = urlparse(str(meta.get("author_url") or ""))
+        youtube_url = author_url.scheme == "https" and (author_url.hostname or "").casefold() in {
+            "youtube.com", "www.youtube.com", "m.youtube.com",
+        }
+    except ValueError:
+        return False
+    if not youtube_url:
         return False
     candidate_tokens = _normalize(candidate_channel)
     author_tokens = _normalize(author)

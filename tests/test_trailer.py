@@ -1,8 +1,11 @@
 import datetime
+import json
 import unittest
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
+from urllib.error import HTTPError
 
 from unicornio_editor.trailer import (
     TrailerError,
@@ -12,6 +15,7 @@ from unicornio_editor.trailer import (
     find_cached_game_trailer_with_status,
     cached_game_trailer_checked_at,
     trailer_search_evidence_is_recent,
+    trailer_search_evidence_matches_cache,
     trailer_search_query,
     validate_trailer,
 )
@@ -227,6 +231,102 @@ class TrailerDiscoveryTests(unittest.TestCase):
             self.assertIsNone(__import__("unicornio_editor.trailer", fromlist=["_search_youtube"])._search_youtube(
                 "example trailer", limit=5, timeout=1
             ))
+
+    def _search_page(self, contents):
+        data = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {
+            "sectionListRenderer": {"contents": contents},
+        }}}}
+        return f"<script>var ytInitialData = {json.dumps(data)};</script>".encode()
+
+    def test_malformed_or_unrecognized_search_data_is_not_proof_of_absence(self):
+        for body in (
+            b"<script>var ytInitialData = {broken};</script>",
+            b'<script>var ytInitialData = {"responseContext": {}};</script>',
+            self._search_page(["bad section"]),
+            self._search_page([{"itemSectionRenderer": {"contents": {"invalid": "shape"}}}]),
+            self._search_page([{"itemSectionRenderer": {"contents": [{"newRenderer": {}}]}}]),
+        ):
+            with self.subTest(body=body), mock.patch(
+                "unicornio_editor.trailer.urlopen", return_value=BytesIO(body)
+            ):
+                self.assertEqual(find_game_trailer_with_status("Hellraiser: Revival"), (None, "search_failed"))
+
+    def test_structured_empty_search_is_proof_of_absence(self):
+        for sections in ([], [{"itemSectionRenderer": {"contents": []}}]):
+            with self.subTest(sections=sections), mock.patch(
+                "unicornio_editor.trailer.urlopen", return_value=BytesIO(self._search_page(sections))
+            ):
+                self.assertEqual(find_game_trailer_with_status("Hellraiser: Revival"), (None, "official_not_found"))
+
+    def test_fallback_video_ids_are_unverified_and_not_cached(self):
+        with TemporaryDirectory() as directory, mock.patch(
+            "unicornio_editor.trailer.urlopen",
+            side_effect=lambda *_args, **_kwargs: BytesIO(b'<div>{"videoId": "abcDEF12345"}</div>'),
+        ) as transport:
+            kwargs = {"root": Path(directory)}
+            for _ in range(2):
+                self.assertEqual(
+                    find_cached_game_trailer_with_status("Hellraiser: Revival", **kwargs),
+                    (None, "unverified_candidates"),
+                )
+            self.assertIsNone(cached_game_trailer_checked_at(Path(directory), "Hellraiser: Revival"))
+        self.assertEqual(transport.call_count, 2, "one search per call; no oEmbed without trustworthy channel")
+
+    def test_search_transport_and_interstitial_are_failures(self):
+        for error in (TimeoutError(), HTTPError("https://www.youtube.com/results", 429, "", {}, None)):
+            with self.subTest(error=error), mock.patch(
+                "unicornio_editor.trailer.urlopen", side_effect=error
+            ):
+                self.assertEqual(find_game_trailer_with_status("Hellraiser: Revival"), (None, "search_failed"))
+        for body in (b"Before you continue to YouTube", b"captcha"):
+            with self.subTest(body=body), mock.patch(
+                "unicornio_editor.trailer.urlopen", return_value=BytesIO(body)
+            ):
+                self.assertEqual(find_game_trailer_with_status("Hellraiser: Revival"), (None, "search_failed"))
+
+    def test_matching_candidates_with_missing_or_inconsistent_metadata_are_not_absence(self):
+        correct = self._oembed()
+        for meta in (
+            None, {}, {**correct, "title": "Entirely Different Game - Official Trailer"},
+            {**correct, "title": "Hellraiser: Revival - Fan Trailer"},
+            {**correct, "author_name": "Other channel"},
+        ):
+            with self.subTest(meta=meta), mock.patch(
+                "unicornio_editor.trailer._search_youtube", return_value=[self._candidate()]
+            ), mock.patch("unicornio_editor.trailer._fetch_oembed", return_value=meta):
+                self.assertEqual(
+                    find_game_trailer_with_status("Hellraiser: Revival"), (None, "unverified_candidates")
+                )
+
+    def test_expired_or_legacy_negative_never_produces_current_waiver(self):
+        game = "Hellraiser: Revival"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            discover = mock.Mock(return_value=(None, "official_not_found"))
+            find_cached_game_trailer_with_status(game, root=root, discover=discover)
+            find_cached_game_trailer_with_status(game, root=root, discover=discover)
+            discover.assert_called_once()
+            path = root / "work/trailer_cache.json"
+            cache = json.loads(path.read_text())
+            key, current = next(iter(cache.items()))
+            proof = {
+                "query": trailer_search_query(game), "provider": "youtube",
+                "searched_at": current["checked_at"], "result": "official_not_found",
+            }
+            self.assertTrue(trailer_search_evidence_matches_cache(proof, game, root))
+            legacy = {k: current[k] for k in ("query", "provider", "status", "checked_at", "trailer")}
+            path.write_text(json.dumps({key: legacy}))
+            self.assertIsNone(cached_game_trailer_checked_at(root, game))
+            self.assertFalse(trailer_search_evidence_matches_cache(proof, game, root))
+            unavailable = mock.Mock(return_value=(None, "search_failed"))
+            self.assertEqual(find_cached_game_trailer_with_status(game, root=root, discover=unavailable)[1], "search_failed")
+            unavailable.assert_called_once()
+            expired = {**current, "checked_at": "2000-01-01T00:00:00+00:00"}
+            path.write_text(json.dumps({key: expired}))
+            self.assertIsNone(cached_game_trailer_checked_at(root, game))
+            self.assertFalse(trailer_search_evidence_matches_cache({**proof, "searched_at": expired["checked_at"]}, game, root))
+            find_cached_game_trailer_with_status(game, root=root, discover=unavailable)
+            self.assertEqual(unavailable.call_count, 2)
 
     def test_rejects_empty_game_name(self):
         with self.assertRaises(TrailerError):
