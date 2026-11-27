@@ -508,3 +508,106 @@ def test_wrong_wordpress_post_identity_stops_prepare_and_apply(tmp_path, configu
     })
     assert apply["stopped"] == "wordpress_integrity" and apply["remaining_post_ids"] == [1, 2]
     assert session_budget.status(tmp_path, configure)["posts_touched"] == []
+
+
+class DeepQueueClient(Client):
+    def __init__(self, posts):
+        super().__init__(posts)
+        self.pages = []
+        self.hydrated = []
+
+    def list_pending_card_candidates(self, **options):
+        assert options["per_page"] == 100
+        self.pages.append(options["page"])
+        return [
+            {k: row[k] for k in ("id", "status", "modified_gmt", "meta") if k in row}
+            for row in self.list_pending(**options)
+        ]
+
+    def get_post(self, post_id):
+        self.hydrated.append(post_id)
+        return super().get_post(post_id)
+
+
+@pytest.mark.parametrize(("head_state", "tail_state", "selected"), [
+    ("blocked", "new", [1, 201]),
+    ("new", "partial", [201, 1]),
+])
+def test_next_session_discovers_missing_lane_beyond_two_full_pages(
+    tmp_path, configure, monkeypatch, head_state, tail_state, selected,
+):
+    posts = {i: make(i, head_state if i <= 200 else tail_state) for i in range(1, 202)}
+    first = DeepQueueClient(posts)
+    monkeypatch.setenv("HERMES_SESSION_ID", "discover-rework-first")
+    assert ids(first, configure, tmp_path) == [1, 2]
+    assert first.pages == [1, 2]
+    assert first.hydrated == [1, 2]
+
+    second = DeepQueueClient(posts)
+    monkeypatch.setenv("HERMES_SESSION_ID", "discover-new-next")
+    report = build_cards(second, configure, tmp_path, per_page=2)
+    assert [card["id"] for card in report["cards"]] == selected
+    assert second.pages == [3, 1]
+    assert second.hydrated == selected
+    assert report["has_more_pending"]
+    assert not report["pending_scan_complete"]  # Page 2 was not checked this call.
+
+
+def test_partial_only_discovery_remains_bounded_and_wraps_on_queue_end(tmp_path, configure):
+    client = DeepQueueClient({i: make(i, "partial") for i in range(1, 302)})
+    for expected_pages in ([1, 2], [3, 1], [4, 1], [1, 2]):
+        client.pages.clear()
+        report = build_cards(client, configure, tmp_path, per_page=2)
+        assert [card["state"] for card in report["cards"]] == ["partial", "partial"]
+        assert client.pages == expected_pages
+
+
+def test_interrupted_page_keeps_last_completed_discovery_cursor(tmp_path, configure, monkeypatch):
+    from dataclasses import replace
+    from unicornio_editor.workflow import CardsSelectionTimeout
+
+    client = DeepQueueClient({i: make(i, "blocked" if i <= 300 else "new") for i in range(1, 402)})
+    ids(client, configure, tmp_path)  # Eligible fallback; next search starts at page 3.
+    original = client.list_pending_card_candidates
+    monotonic = [10.0]
+    monkeypatch.setattr("unicornio_editor.workflow.time.monotonic", lambda: monotonic[0])
+
+    def timeout_at_head(**kwargs):
+        rows = original(**kwargs)
+        if kwargs["page"] == 1:
+            monotonic[0] = 12.0
+        return rows
+
+    client.list_pending_card_candidates = timeout_at_head
+    with pytest.raises(CardsSelectionTimeout):
+        ids(client, replace(configure, cards_selection_timeout_seconds=1), tmp_path)
+    assert client.pages[-2:] == [3, 1]
+
+    client.list_pending_card_candidates = original
+    client.pages.clear()
+    assert ids(client, configure, tmp_path) == [1, 301]
+    assert client.pages == [4, 1]
+
+
+def test_cards_cli_continues_past_terminal_pages_without_hydrating_them(
+    tmp_path, configure, capsys, monkeypatch,
+):
+    import json
+    from unicornio_editor import cli
+
+    posts = {i: make(i, "blocked" if i <= 2 else "ready") for i in range(1, 402)}
+    posts[401] = make(401)
+    client = DeepQueueClient(posts)
+    monkeypatch.setattr(cli, "load_config", lambda **_kwargs: configure)
+    monkeypatch.setattr(cli, "WordPressClient", lambda _options: client)
+    for index, expected_pages in enumerate(([1, 2], [3, 1], [4, 1], [5, 1])):
+        client.pages.clear()
+        client.hydrated.clear()
+        monkeypatch.setenv("HERMES_SESSION_ID", f"discover-after-terminal-{index}")
+        assert cli.main(["cards", "--compact", "--root", str(tmp_path), "--limit", "2"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        expected = [1, 401] if index == 3 else [1, 2]
+        assert [row["id"] for row in result["cards"]] == expected
+        assert client.pages == expected_pages
+        assert client.hydrated == expected
+        assert result["has_more_pending"] and not result["pending_scan_complete"]

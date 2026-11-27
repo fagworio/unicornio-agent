@@ -56,10 +56,17 @@ restante, sem alterar `EDITOR_HTTP_TIMEOUT`. Um timeout retorna erro JSON com
 `error_code` (`cards_selection_timeout`, `wordpress_timeout` ou
 `ledger_lock_timeout`), nunca uma fila vazia.
 
-Em `cards --compact`, `pending_scan_complete=true` indica que a paginação chegou
-a uma página menor que o limite; `false` com `has_more_pending=true` indica que
-o limite de 100 páginas foi atingido e ainda pode haver candidatos. Falhas REST
-continuam sendo erros explícitos. Tempos por página, hidratação, featured,
+Se a descoberta parar cedo (por volume suficiente ou pelo orçamento), o próximo
+`cards` retoma da primeira página não lida e também revisita o início quando
+houver tempo. O cursor local `work/v1-cards-scan.json` é apenas uma indicação
+de paginação, é reiniciado ao chegar ao fim e não altera elegibilidade nem
+rotação de preparação. O limite de 100 páginas consultadas por chamada permanece.
+
+Em `cards --compact`, `pending_scan_complete=true` exige uma varredura
+contínua desde a primeira página que encontrou o fim. `false` com
+`has_more_pending=true` indica que ainda pode haver candidatos fora da seleção
+amostrada, inclusive após uma retomada. Falhas REST continuam sendo erros
+explícitos. Tempos por página, hidratação, featured,
 filtragem e lock/leitura do ledger são registrados em `work/telemetry.jsonl`,
 sem conteúdo de post ou identificadores de owner.
 

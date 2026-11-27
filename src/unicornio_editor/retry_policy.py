@@ -196,14 +196,14 @@ def editorial_provider_request_lock(root: Path | str):
 
 
 @contextmanager
-def _editorial_lock(root: Path | str, suffix: str):
+def _editorial_lock(root: Path | str, suffix: str, *, blocking: bool = True):
     path = editorial_backoff_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f"{path.name}{suffix}")
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -268,6 +268,47 @@ def record_v1_prepared(root: Path, lane: str | None, post_id: int, batch_id: str
         turn = 1 + max((row["turn"] for row in state.values()), default=0)
         state[lane] = {"post_id": post_id, "turn": turn, "batch_id": batch_id}
         _atomic_write_json(_v1_rotation_path(root), state)
+
+
+# Advisory pagination only: never grants eligibility or changes the preparation
+# rotation, and never makes the selector wait for another process.
+V1_CARDS_MAX_REST_PAGE = 10_000
+
+
+def _v1_cards_cursor_path(root: Path) -> Path:
+    return root / "work" / "v1-cards-scan.json"
+
+
+def v1_cards_scan_cursor(root: Path) -> tuple[int, bool]:
+    """Return next page and whether only the rework lane was missing."""
+    try:
+        data = json.loads(_v1_cards_cursor_path(root).read_text(encoding="utf-8"))
+        page = data.get("next_page") if isinstance(data, dict) else None
+        missing_rework = data.get("missing_rework_only") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return 1, False
+    if (
+        type(page) is int and 1 <= page <= V1_CARDS_MAX_REST_PAGE
+        and type(missing_rework) is bool
+    ):
+        return page, missing_rework
+    return 1, False
+
+
+def checkpoint_v1_cards_scan(
+    root: Path, *, previous: tuple[int, bool], cursor: tuple[int, bool],
+) -> None:
+    if previous == cursor:
+        return
+    try:
+        with _editorial_lock(root, ".v1-cards-scan.lock", blocking=False):
+            if v1_cards_scan_cursor(root) == previous:
+                _atomic_write_json(_v1_cards_cursor_path(root), {
+                    "next_page": cursor[0], "missing_rework_only": cursor[1],
+                })
+    except OSError:
+        # An unavailable discovery hint must not suppress otherwise safe cards.
+        pass
 
 
 def _v1_defer_path(root: Path, post_id: int) -> Path:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from itertools import chain, islice
 from threading import Lock
 
 import datetime
@@ -7440,7 +7441,10 @@ def build_cards(
     READY, adiamentos ativos e locks já observados nesta sessão não geram card.
     """
     from . import session_budget
-    from .retry_policy import potential_v1_deferral, v1_deferral, v1_lane, v1_rotation
+    from .retry_policy import (
+        V1_CARDS_MAX_REST_PAGE, checkpoint_v1_cards_scan, potential_v1_deferral,
+        v1_cards_scan_cursor, v1_deferral, v1_lane, v1_rotation,
+    )
     from .content_quality import word_count
     from .html_cleaner import clean_html
     from .media.relevance import extract_entities
@@ -7593,64 +7597,99 @@ def build_cards(
         # não conseguia enxergar quando os primeiros pending já eram READY.
         page_size = 100 if lightweight_candidates else max(remaining * 5, 20)
         pending_scan_complete = False
-        for page in range(1, 101):
-            if (
-                page > 1 and len(provisional["new"]) + available_rework() >= per_page
-                and time.monotonic() >= selection_started_at + selection_timeout * 0.6
-            ):
-                break  # keep the remaining budget for selected detail + featured reads
-            page_timeout = _remaining_timeout("pending_candidates")
-            page_started_at = time.monotonic()
-            try:
-                chunk = _list_candidates(
-                    page=page, per_page=page_size, timeout=page_timeout
-                )
-            except WordPressError as exc:
+        # Keep the fast first pass and its 100-request ceiling. On later calls,
+        # visit the saved page before the head so a slow head cannot consume
+        # the entire discovery reserve every time. Still check page 1 for
+        # newly arrived posts and fallback slots. The cursor is only a hint:
+        # offset pagination can move, so wrap when the tail is reached.
+        fresh_goal = max(1, per_page - 2)
+        rework_goal = min(2, max(1, per_page - 1))
+        previous_cursor = v1_cards_scan_cursor(root) if lightweight_candidates else (1, False)
+        start_page, missing_rework_only = previous_cursor
+        if missing_rework_only and available_rework() >= rework_goal:
+            # The include query already found the missing lane; use the
+            # ordinary head fast path to combine it with NEW cards.
+            start_page = 1
+        cursor = previous_cursor
+        pages = range(start_page, V1_CARDS_MAX_REST_PAGE + 1)
+        if start_page > 1:
+            pages = chain((start_page, 1), range(start_page + 1, V1_CARDS_MAX_REST_PAGE + 1))
+        tail_complete = False
+        try:
+            for reads, page in enumerate(islice(pages, 100), 1):
+                if (
+                    reads > 1 and len(provisional["new"]) + available_rework() >= per_page
+                    and time.monotonic() >= selection_started_at + selection_timeout * 0.6
+                ):
+                    break  # keep the remaining budget for selected detail + featured reads
+                page_timeout = _remaining_timeout("pending_candidates")
+                page_started_at = time.monotonic()
+                try:
+                    chunk = _list_candidates(
+                        page=page, per_page=page_size, timeout=page_timeout
+                    )
+                except WordPressError as exc:
+                    try:
+                        append_telemetry(
+                            root,
+                            "cards_selection_rest_failed",
+                            stage="pending_candidates",
+                            page=page,
+                            error_code=exc.error_code,
+                            status_code=exc.status_code,
+                        )
+                    except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                        pass
+                    raise
+                pages_scanned += 1
+                page_elapsed = time.monotonic() - page_started_at
                 try:
                     append_telemetry(
                         root,
-                        "cards_selection_rest_failed",
+                        "cards_selection_rest",
                         stage="pending_candidates",
                         page=page,
-                        error_code=exc.error_code,
-                        status_code=exc.status_code,
+                        result_count=len(chunk),
+                        duration_ms=round(page_elapsed * 1000, 1),
+                        elapsed_ms=round((time.monotonic() - selection_started_at) * 1000, 1),
                     )
-                except Exception:  # noqa: BLE001 - metrics cannot mask provider error
+                except Exception:  # noqa: BLE001 - metrics cannot block card selection
                     pass
-                raise
-            pages_scanned += 1
-            page_elapsed = time.monotonic() - page_started_at
-            try:
-                append_telemetry(
-                    root,
-                    "cards_selection_rest",
-                    stage="pending_candidates",
-                    page=page,
-                    result_count=len(chunk),
-                    duration_ms=round(page_elapsed * 1000, 1),
-                    elapsed_ms=round((time.monotonic() - selection_started_at) * 1000, 1),
-                )
-            except Exception:  # noqa: BLE001 - metrics cannot block card selection
-                pass
-            _remaining_timeout("pending_candidates")
-            posts.extend(chunk)
-            sample(chunk)
-            if len(chunk) < page_size:
-                pending_scan_complete = True
-                break
-            rework_available = available_rework()
-            available = len(provisional["new"]) + rework_available
-            fresh_goal = max(1, per_page - 2)
-            rework_goal = min(2, max(1, per_page - 1))
-            balanced = (
-                len(provisional["new"]) >= fresh_goal
-                and rework_available >= rework_goal
-            )
-            if (balanced and available >= per_page + 2) or (page >= 2 and available >= per_page):
-                # Prefer two hydration alternatives when discovery is balanced.
-                # Once fallback can fill the batch, two pages of look-ahead
-                # suffice; don't sweep terminal backlog for a better mix.
-                break
+                _remaining_timeout("pending_candidates")
+                posts.extend(chunk)
+                sample(chunk)
+                if len(chunk) < page_size:
+                    cursor = (1, False)
+                    if start_page == 1:
+                        pending_scan_complete = True
+                        break
+                    if reads > 1:
+                        break
+                    # A short resumed page is not whole-queue exhaustion.
+                    # Still visit the head before deciding there is no work.
+                    tail_complete = True
+                    continue
+                if tail_complete:
+                    break
+                new_available = len(provisional["new"])
+                rework_available = available_rework()
+                available = new_available + rework_available
+                balanced = new_available >= fresh_goal and rework_available >= rework_goal
+                if page >= start_page:
+                    cursor = (
+                        (page + 1, new_available >= fresh_goal and rework_available < rework_goal)
+                        if page < V1_CARDS_MAX_REST_PAGE else (1, False)
+                    )
+                if (
+                    (start_page == 1 and balanced and available >= per_page + 2)
+                    or (reads >= 2 and available >= per_page)
+                ):
+                    # No unbounded sweep for a better mix: the next cards
+                    # invocation continues from the first unchecked page.
+                    break
+        finally:
+            if lightweight_candidates:
+                checkpoint_v1_cards_scan(root, previous=previous_cursor, cursor=cursor)
     candidate_filter_started_at = time.monotonic()
     posts = filter_quarantined_posts(root, posts)
     seen: set[int] = set()
