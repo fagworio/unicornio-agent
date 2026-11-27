@@ -1806,12 +1806,16 @@ def _apply_editorial_unlocked(
                 for item in failed_items
             )
             media_search_attempts = state_info.get("media_search_attempts", 0)
-            if media_failure:
+            # A separate editorial blocker (e.g. trailer) still consumes a
+            # rework attempt. It cannot turn a deferred visual check into an
+            # exhausted media search, even when the prior count is at its cap.
+            exhausted_media_round = media_failure and not any(
+                _is_deferred_media_verification(item) for item in media_results
+            )
+            if exhausted_media_round:
                 media_search_attempts += 1
-            # Falhas de SEO, texto ou trailer não contam como tentativas de
-            # mídia. O contador de apply é independente do contador de buscas.
             deterministic_exhausted = (
-                media_failure
+                exhausted_media_round
                 and media_search_attempts >= config.max_media_search_attempts
             )
             if deterministic_exhausted and detect_list_format(
@@ -2985,20 +2989,22 @@ def _media_item_rejection(
     return None
 
 
+def _is_deferred_media_verification(result: dict[str, Any]) -> bool:
+    return (
+        isinstance(result, dict) and result.get("status") == "deferred"
+        and result.get("reason_code") in {
+            "visual_identity_pending", "vision_provider_error", "vision_budget_exhausted",
+        }
+    )
+
+
 def _next_partial_no_progress(
     current: int, *, progress: bool, media_results: list[dict[str, Any]],
 ) -> int:
     """Do not exhaust media retries for a visual-comparison outage."""
     if progress:
         return 0
-    if any(
-        isinstance(item, dict)
-        and item.get("status") == "deferred"
-        and item.get("reason_code") in {
-            "visual_identity_pending", "vision_provider_error", "vision_budget_exhausted",
-        }
-        for item in media_results
-    ):
+    if any(_is_deferred_media_verification(item) for item in media_results):
         return max(0, int(current or 0))
     return max(0, int(current or 0)) + 1
 
@@ -4813,6 +4819,16 @@ def _execute_media_plan(
                         position,
                         str(fallback_result.get("reason_code") or fallback_result.get("detail") or "rejected"),
                     )
+                    if _is_deferred_media_verification(fallback_result):
+                        # The primary rejection is already audited. This slot
+                        # is not exhausted while a viable reserve still needs
+                        # verification; reporting the primary would burn retry.
+                        outcomes[position] = {
+                            **fallback_result,
+                            "fallback_for_candidate_id": primary_result.get("candidate_id") or slot.get("candidate_id"),
+                            "fallback_candidates_tried": tried,
+                        }
+                        break
                     if not _fallback_is_candidate_specific(fallback_result):
                         break
                 if tried and outcomes[position] is primary_result:

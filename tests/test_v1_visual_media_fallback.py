@@ -1125,6 +1125,126 @@ def test_v1_library_rejection_can_use_web_reserve_without_inheriting_attachment(
     assert rows[-1]["status"] == "accepted" and rows[-1]["candidate_id"] == "independent-web"
 
 
+@pytest.mark.parametrize(("reserve_outcome", "reason"), [
+    ("identity", "visual_identity_pending"),
+    ("provider", "vision_provider_error"),
+    ("budget", "vision_budget_exhausted"),
+    ("unrelated", "subject_mismatch"),
+])
+def test_v1_retry_propagates_reserve_vision_deferral_without_accepting_it(
+    tmp_path, monkeypatch, media_case, reserve_outcome, reason,
+):
+    from dataclasses import replace
+
+    from unicornio_editor import workflow as wf
+    from unicornio_editor.media.visual_identity import (
+        VisualIdentityDecision, fingerprint_path,
+    )
+
+    config, _ = media_case
+    if reserve_outcome == "budget":
+        config = replace(config, vision_max_low=0)
+    original_download = wf.download_image
+    original_provider = vision_gate._call_vision
+
+    def download(url, path, **kwargs):
+        if url == "https://cdn.example/asset-42.jpg":
+            raise wf.MediaDownloadError("HTTP 404")
+        assert url == "https://cdn.example/reserve.jpg"
+        return original_download(url, path, **kwargs)
+
+    def verify_identity(path, **kwargs):
+        assert kwargs["candidate_id"] == "reserve"
+        return fingerprint_path(path), VisualIdentityDecision(
+            "UNVERIFIED", False, reason="comparison temporarily unavailable",
+        )
+
+    def provider(**kwargs):
+        if reserve_outcome == "provider":
+            raise vision_gate.VisionGateError("Vision temporarily unavailable")
+        return {**original_provider(**kwargs), "status": "UNRELATED", "confidence": 0.95}
+
+    def no_upload(*args, **kwargs):
+        pytest.fail("an unverified or rejected reserve must not upload")
+
+    monkeypatch.setattr(wf, "download_image", download)
+    monkeypatch.setattr(wf, "upload_image", no_upload)
+    if reserve_outcome == "identity":
+        monkeypatch.setattr("unicornio_editor.media.visual_identity.verify_candidate_identity", verify_identity)
+    monkeypatch.setattr(vision_gate, "_call_vision", provider)
+    # Keep this apply-level regression on media-only state transitions. Real
+    # READY and the checklist are exercised in the isolated REST suite.
+    monkeypatch.setattr(wf, "run_pre_publish_checklist", lambda **kwargs: {
+        "items": [{"name": "imagens_no_corpo", "status": "fail", "detail": "faltam imagens"}],
+    })
+    post = workflow_fixture.WorkflowTests().post()
+    post["featured_media"] = 0
+    client = workflow_fixture.FakeClient(post)
+    editorial = _generic_editorial()
+    editorial["media_plan"][0]["candidate_id"] = "primary"
+    first = apply_editorial(client, config, tmp_path, 42, editorial)
+    assert first["state"] == "partial"
+    assert first["no_progress_attempts"] == 1
+    post["meta"]["_hermes_next_retry_at"] = "2000-01-01T00:00:00+00:00"
+    reserve = {
+        "candidate_id": "reserve", "direct_image_url": "https://cdn.example/reserve.jpg",
+        "provenance_mode": "credit_only", "credit_text": "Crédito ilustrativo",
+    }
+    second = apply_editorial(
+        client, config, tmp_path, 42, editorial, media_fallback_candidates=[reserve],
+    )
+    if reserve_outcome == "unrelated":
+        # Only a genuine negative result may consume the final no-progress
+        # attempt; leave the original output contract for definitive failures.
+        assert second["state"] == "awaiting_human"
+        assert second["no_progress_attempts"] == 2
+    else:
+        [outcome] = second["media_plan_results"]
+        assert outcome["status"] == "deferred"
+        assert outcome["reason_code"] == reason
+        assert outcome["candidate_id"] == "reserve"
+        assert outcome["fallback_for_candidate_id"] == "primary"
+        assert outcome["fallback_candidates_tried"] == 1
+        assert second["state"] == "partial"
+        assert second["no_progress_attempts"] == 1
+        assert not any(payload.get("status") == "awaiting_human" for _, payload in client.updated)
+    assert not post["meta"].get("_hermes_ready_hash")
+    assert post["content"]["raw"] == "<article><p>Original.</p></article>"
+
+
+@pytest.mark.parametrize("vision_deferred", [True, False])
+def test_v1_mixed_trailer_counts_its_attempt_independently_of_transient_media(
+    tmp_path, monkeypatch, media_case, vision_deferred,
+):
+    from unicornio_editor import workflow as wf
+
+    config, _ = media_case
+    post = workflow_fixture.WorkflowTests().post()
+    post["featured_media"] = 0
+    post["meta"].update(
+        _hermes_state="blocked",
+        _hermes_attempts="1",
+        _hermes_media_search_attempts="1",
+    )
+    client = workflow_fixture.FakeClient(post)
+    monkeypatch.setattr(wf, "_execute_media_plan", lambda *args, **kwargs: ([{
+        "status": "deferred" if vision_deferred else "rejected",
+        "reason_code": "vision_provider_error" if vision_deferred else "subject_mismatch",
+    }], None, None))
+    monkeypatch.setattr(wf, "run_pre_publish_checklist", lambda **kwargs: {
+        "items": [
+            {"name": "imagem_destaque", "status": "fail", "detail": "falta capa"},
+            {"name": "trailer_youtube", "status": "fail", "detail": "falta trailer"},
+        ],
+    })
+    result = apply_editorial(client, config, tmp_path, 42, _generic_editorial())
+    assert result["state"] == "blocked"
+    assert result["attempts"] == 2
+    expected_media_attempts = "1" if vision_deferred else "2"
+    assert post["meta"]["_hermes_media_search_attempts"] == expected_media_attempts
+    assert not post["meta"].get("_hermes_ready_hash")
+
+
 @pytest.mark.parametrize("outcome", ["visual_cap", "rest_429", "visual_unrelated", "corrupt", "unsafe_url", "asset_dns"])
 def test_automatic_v1_existing_cover_goes_through_pixels_and_shared_budget(tmp_path, monkeypatch, media_case, outcome):
     from dataclasses import replace
