@@ -40,11 +40,13 @@ Os testes usam WordPressClient e WordPressWriterV2 reais sobre REST autenticada.
     simula um identificador diferente; a janela seguinte confirma a identidade
     original, preserva o manifesto e reconcilia sem outro POST de publicação.
 
+24. Capa JPEG original e genérica no V1: conversão para WebP 1280×720 sem Vision da capa, duas imagens internas mantidas, manifesto e READY confirmados por REST e reaplicar sem outro upload.
+
 O relatório registra snapshots do WordPress antes/depois, eventos REST sanitizados, resumo dos journals, linhas relevantes do Registry, SHA completo, tree SHA, versão do WordPress, PHP, WP-CLI, imagens e resultado da suíte completa. Não inclui Application Password, senha do administrador ou credenciais do banco.
 
 ## Homologação e artefato
 
-O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os 23 cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
+O workflow publica wordpress-writer-v2-e2e-<run-id>-<attempt> por 90 dias. `E2E_HOMOLOGADO` exige todos os 24 cenários sem skip, suíte completa aprovada, compilação, SHA exato e remoção confirmada dos containers/volumes efêmeros. Qualquer falha, evidência incompleta ou limpeza não confirmada resulta em `E2E_NAO_HOMOLOGADO` e falha do job.
 
 Para executar manualmente, use a aba Actions e escolha WordPress Writer V2 E2E → Run workflow. O relatório é para o SHA indicado em tested_sha e tree_sha; não deve ser tratado como homologação de uma árvore diferente.
 

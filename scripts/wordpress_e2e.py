@@ -53,8 +53,10 @@ SCENARIOS = (
     "test_v1_mixed_rework_retains_three_attachments_and_sibling_reaches_ready",
     "test_v1_mixed_rework_retains_two_attachments_and_sibling_reaches_ready",
     "test_v1_three_to_four_ready_then_reconciles_divergent_publish_readback",
+    "test_v1_normalizes_only_original_cover_and_reaches_ready",
 )
 SCENARIO_OPERATIONS = {
+    "v1_normalizes_only_original_cover_and_reaches_ready": ["v1_original_cover_ready"],
     "v1_three_to_four_ready_then_reconciles_divergent_publish_readback": [
         "v1_three_to_four_publisher_reconciliation",
     ],
@@ -88,6 +90,7 @@ SCENARIO_OPERATIONS = {
     ],
 }
 POST_FIXTURES = {
+    "v1_original_cover_ready": ("pending", False),
     "v1_three_to_four_publisher_reconciliation_first": ("pending", False),
     "v1_three_to_four_publisher_reconciliation_sibling": ("pending", False),
     "v1_mixed_progress_first": ("pending", False),

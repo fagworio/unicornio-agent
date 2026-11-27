@@ -45,8 +45,9 @@ unicornio-editor apply-batch work/batches/BATCH_ID/editorial.output.json \
 `editorial-generate-batch` calcula o déficit de mídia usando o HTML editorial
 final e os fatos preparados, grava `media.input.json` e informa
 `media_input.status`. Se for `required`, execute o caminho retornado por
-`media_input.path`; `needed` já inclui a featured somente quando uma nova featured
-é necessária. `media_input.blocked_posts` indica uma falha local de layout,
+`media_input.path`; no V1 padrão `needed` inclui somente imagens internas.
+A capa original do WordPress é preservada e só normalizada para WebP 1280×720.
+Nunca busque ou envie candidata de capa; se ausente, o post requer capa manual. `media_input.blocked_posts` indica uma falha local de layout,
 como divergência na contagem de itens ou falta de alvos seguros. Os outros posts
 seguem normalmente. Se `media_input.status=blocked`, não rode
 busca de mídia; aplique o output original com `apply-batch` para registrar
@@ -230,8 +231,7 @@ Quando houver dois posts novos elegíveis, a antiga estratégia de microbatch er
    `vision-batch` uma vez; ele faz uma chamada low e escala somente os itens
    ambíguos para uma segunda chamada high, nunca o lote inteiro.
 
-Quando dois ou mais posts tiverem featured candidates já escolhidos, a visão
-também pode ser amortizada antes do `media-validate`:
+Use este comando apenas para candidatas de imagens internas no V1:
 
 ```bash
 unicornio-editor vision-batch vision-batch.json --root .
@@ -296,8 +296,9 @@ V1 não executa `v2-run` nem converte um post V2 em NEW; quando encontrar
    (manifest SHA-256). FAIL → `needs_rework` + `failed` + state/attempts; rascunho
    em editorial.draft.json.
 9. Normalização técnica (WebP/dimensões) e links internos SÃO DO CÓDIGO. Só
-   procure imagem nova quando o card pedir (`fix.find_inline_images > 0`,
-   `featured.action: replace|provide`). NÃO inclua links internos no JSON.
+   procure imagem interna quando o card pedir (`fix.find_inline_images > 0`).
+   Capa original não passa por Vision e não é substituída. NÃO inclua links
+   internos no JSON.
 10. NÃO rode `checklist` manualmente (o apply valida). `--dry-run` só sob demanda.
 11. `skip`/`uncertain`/`awaiting_human` nunca publicam nem marcam READY.
     Publicação: SÓ o cron. Nunca publique manualmente.
@@ -392,5 +393,5 @@ NEW | PROCESSING | BLOCKED | PARTIAL | READY | SKIPPED | UNCERTAIN | AWAITING_HU
   o cron quebrado).
 - H2s de listicle numerados (`1. Obra: descrição`); keyword no título E no corpo.
 - Revisão humana: `retry`, `discard`, `uncertain` — nenhum força READY.
-- Visão da featured é CACHEADA por (url + `seo.title`): a redação do título muda
-  o veredito; `media-validate` também grava a decisão no cache.
+- Visão de relevância no V1 se aplica a candidatas de imagens internas, não à
+  capa original associada ao WordPress.

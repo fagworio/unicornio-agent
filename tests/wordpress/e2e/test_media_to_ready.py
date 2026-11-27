@@ -2251,3 +2251,99 @@ def test_v1_three_to_four_ready_then_reconciles_divergent_publish_readback(
         "publisher_proof": "reconciled", "publisher_post_requests": 1,
         "publisher_preserved_ready_manifest": True,
     })
+
+
+def test_v1_normalizes_only_original_cover_and_reaches_ready(wordpress_e2e_case, monkeypatch):
+    from dataclasses import replace
+    from urllib.request import Request, urlopen
+
+    from unicornio_editor import workflow
+    from unicornio_editor.manifest import manifest_matches, parse_manifest
+    from unicornio_editor.media import downloader
+
+    case = wordpress_e2e_case
+    post_id = case.post_id("v1_original_cover_ready")
+    with ControlledSource() as source:
+        config = replace(
+            _automatic_pipeline_config(case, source, post_id, media_source_policy="credit_only"),
+            v1_original_cover_only=True,
+        )
+        editorial = _automatic_pipeline_editorial()
+        monkeypatch.setattr(workflow, "find_game_trailer_with_status", lambda *args, **kwargs: (None, "search_failed"))
+        monkeypatch.setattr(
+            workflow, "_validate_featured_candidate_vision",
+            lambda *args, **kwargs: pytest.fail("an original cover must never reach semantic Vision"),
+        )
+        case.client.update_post(post_id, {
+            "title": editorial["seo"]["title"],
+            "meta": {"original_link": f"{source.base_url}/article", "_hermes_state": "new"},
+        })
+        cover_file = case.root / "generic-imported-cover.jpg"
+        Image.open(io.BytesIO(_artwork(1))).save(cover_file, "JPEG")
+        # Seed an imported JPEG in the disposable instance, outside the
+        # application's intentional WebP-only uploader.
+        assert case.url.startswith("http://127.0.0.1:")
+        request = Request(
+            f"{case.url}/wp-json/wp/v2/media",
+            data=cover_file.read_bytes(),
+            headers={
+                **case._auth_headers(),
+                "Content-Type": "image/jpeg",
+                "Content-Disposition": f'attachment; filename="{cover_file.name}"',
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=20) as response:
+            cover = json.load(response)
+        case.client.update_post(post_id, {"featured_media": cover["id"]})
+
+        inline = []
+        for index in (2, 3):
+            path = case.root / f"original-cover-test-inline-{index}.webp"
+            with Image.open(io.BytesIO(_artwork(index))) as image:
+                image.resize((800, 450)).save(path, "WEBP")
+            media = case.client.upload_media(str(path), filename=path.name, title="Hollow Knight Silksong",
+                                            alt_text="Hollow Knight Silksong")
+            inline.append(media["source_url"])
+        editorial["cleaned_html"] += "".join(
+            f'<figure><img src="{url}" width="800" height="450" alt="Hollow Knight Silksong" />'
+            '<figcaption>Crédito: Imagem ilustrativa.</figcaption></figure>' for url in inline
+        )
+        observed = []
+        allowed = {cover["source_url"]}
+        original_transport = downloader.urlopen_remote
+        original_upload = case.client.upload_media
+
+        def transport(request, *, mode, **kwargs):
+            if request.full_url in allowed:
+                return original_transport(request, mode="off", **kwargs)
+            return original_transport(request, mode=mode, **kwargs)
+
+        def upload(path, **kwargs):
+            media = original_upload(path, **kwargs)
+            allowed.add(media["source_url"])
+            observed.append(media["id"])
+            return media
+
+        monkeypatch.setattr(downloader, "urlopen_remote", transport)
+        monkeypatch.setattr(case.client, "upload_media", upload)
+        result = workflow.apply_editorial(case.client, config, case.root, post_id, editorial)
+        assert result["status"] == "ready", result
+        after = case.client.get_post(post_id)
+        normalized = case.client.get_media(after["featured_media"])
+        assert observed == [normalized["id"]] and normalized["id"] != cover["id"]
+        assert normalized["mime_type"] == "image/webp"
+        assert (normalized["media_details"]["width"], normalized["media_details"]["height"]) == (1280, 720)
+        assert case.client.get_media(cover["id"])["mime_type"] == "image/jpeg"
+        assert after["status"] == "pending" and after["meta"]["_hermes_state"] == "ready"
+        assert manifest_matches(after, parse_manifest(after["meta"]["_hermes_ready_manifest"]),
+                                after["meta"]["_hermes_ready_hash"], policy_version=config.policy_version)
+        assert all(url in after["content"]["raw"] for url in inline)
+        assert source.vision_pixel_hashes == []
+        assert workflow.apply_editorial(case.client, config, case.root, post_id, editorial)["status"] == "noop"
+        assert observed == [normalized["id"]]
+        case.observations.append({
+            "operation": "v1_original_cover_ready", "source_cover_id": cover["id"],
+            "normalized_cover_id": normalized["id"], "inline_count": len(inline),
+            "semantic_vision_calls": len(source.vision_pixel_hashes), "after": _snapshot(after),
+        })

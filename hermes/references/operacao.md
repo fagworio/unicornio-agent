@@ -70,8 +70,9 @@
 
 - H2s de listicle PRECISAM ser numerados (`1. Obra: descrição`).
 - Keyword: toda palavra significativa precisa aparecer no título E no corpo.
-- Imagens: mínimo 2/4/6 SEM waiver; featured = key art da obra citada; sem
-  imagem repetida no mesmo post; sem imagem transparente.
+- Imagens do corpo: mínimo 2/4/6 conforme checklist e sem repetição. No V1
+  padrão a capa é o anexo original do WordPress, normalizado para WebP 1280×720;
+  sem Vision de assunto ou busca de substituta.
 - Comandos de revisão humana: `retry POST_ID` (zera tentativas/cooldown),
   `discard POST_ID [--reason]` (sai da fila), `uncertain POST_ID --reason`
   (decisão do agente). Nenhum deles força READY.
@@ -89,11 +90,9 @@
 - **Largura mínima do inline = 640px de origem** (sem upscale). Imagens de
   arquivo da en.wikipedia (`File:*` não-livre) costumam vir em ~260-270px e
   falham com "inline image source is 269px wide (minimum 640px)".
-- **A featured do card diz `normalize`, mas o apply pode rejeitá-la**: o gate de
-  visão aceita (ex.: foto genérica de banco de imagens = UNRELATED) e há um gate
-  extra de "arte plana/card de texto" que só roda no apply. Se a featured
-  existente for foto de banco/card de manchete, TROQUE-a por uma key art/imagem
-  real da obra no `media_plan` (`is_featured: true`).
+- **Capa no card V1**: `ok` mantém o anexo; `normalize` converte a imagem original;
+  `manual` significa ausência que precisa ser corrigida no WordPress, nunca
+  pela busca editorial. Não entregue `is_featured: true` no plano do V1 padrão.
 - **Bing está envenenado para muitas queries** (devolve SERP de assunto
   completamente alheio — Gmail, computação quântica, bonecas). Yandex devolve as
   imagens certas mas com `source_page_url` VAZIO (inutilizável para origem).
@@ -108,18 +107,9 @@
 
 ## Pitfalls de visão, texto e fontes (2026-09-21)
 
-- **Visão da featured é CACHEADa** por `(sha256(url)[:12] + seo.title
-  normalizado[:48])` em `work/vision_cache.json`. Foto de pessoa/empresa costuma
-  sair `UNRELATED` e a rejeição cacheada vale para sempre naquele par. Cure
-  escolhendo uma imagem que o `seo.title` NOMEIE (arte do jogo/hardware do tema)
-  ou reaproveitando um par já `MATCH` (título com os mesmos 48 primeiros
-  caracteres normalizados). A REDAÇÃO do `seo.title` muda o veredito: a mesma
-  key art deu `text_banner` com um título e `MATCH 0.90 key_art` com outro.
-- **`media-validate` TAMBÉM grava a decisão (inclusive a rejeição) e o
-  `alt_text` do item entra no prompt**: faça um probe fiel antes de gastar a
-  chamada (`context`/`category="game_artwork"`/`alt` do item iguais aos do apply).
-- **Featured pode ser foto de produto da obra** (veredito `PARTIAL_MATCH`
-  passa); só arte plana/texto é rejeitada (`image_is_mostly_flat`).
+- **A decisão visual das imagens internas** é ligada aos bytes e ao contexto.
+  Não use aprovação do cache de outra imagem como evidência. A capa original
+  é avaliada tecnicamente, não pelo assunto.
 - **Travessão em/en é recusado pelo `qualidade_texto` em TODO o conteúdo**
   composto — inclusive no `alt_text`/`credit_text` que você escreve: normalize
   `–`/`—` para `-` no JSON inteiro.

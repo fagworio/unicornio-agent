@@ -574,6 +574,10 @@ def verified_v1_media_progress(
     for row in saved["rows"]:
         if not _v1_progress_record_valid(row):
             continue
+        if config.v1_original_cover_only and row.get("featured") and (
+            not post.get("featured_media") or row.get("original_featured_id") != post["featured_media"]
+        ):
+            continue
         if any(
             row[key] == other[key] for other in accepted for key in ("media_id", "media_url", "sha256", "phash")
         ):
@@ -1106,6 +1110,15 @@ def _apply_editorial_unlocked(
         min_confidence=config.min_relevance_confidence,
         media_source_policy=str(getattr(config, "media_source_policy", "strict")),
     )
+    technical_cover_only = config.v1_original_cover_only
+    if technical_cover_only:
+        editorial = {**editorial, "media_plan": [
+            row for row in editorial["media_plan"] if not row.get("is_featured")
+        ]}
+        media_fallback_candidates = [
+            row for row in (media_fallback_candidates or [])
+            if isinstance(row, dict) and not row.get("is_featured") and row.get("role") != "featured"
+        ]
     decision = editorial["site_relevance"]["decision"]
     confidence = float(editorial["site_relevance"].get("confidence") or 0.0)
     state_before = read_state(post)
@@ -1153,7 +1166,7 @@ def _apply_editorial_unlocked(
             entities = extract_entities(title=title, content_html=body, game_name=editorial.get("game_name"))
             coverage, _ = _reconcile_partial_media(body, title, entities, retained)
             plan = editorial["media_plan"]
-            if coverage["missing"] or not post.get("featured_media") or plan:
+            if coverage["missing"] or (not technical_cover_only and not post.get("featured_media")) or plan:
                 retained_slots = tuple(row["paragraph_index"] for row in retained)
                 try:
                     ordinary_slots = ordinary_game_media_slots(
@@ -1319,8 +1332,10 @@ def _apply_editorial_unlocked(
         {**progress_featured, "status": "valid"} if progress_featured
         else partial_manifest.get("featured") or {}
     )
+    if technical_cover_only and not progress_featured:
+        partial_featured = {}
     legacy_featured_vision = (
-        effective_kind == "featured_vision"
+        not technical_cover_only and effective_kind == "featured_vision"
         and partial_featured.get("status") == "valid"
     )
     if legacy_featured_vision:
@@ -1401,7 +1416,8 @@ def _apply_editorial_unlocked(
         post_categories=post.get("categories") or (),
         existing_featured_id=(
             None
-            if partial_featured_rejected
+            if technical_cover_only
+            or partial_featured_rejected
             or retain_credit_featured
             or progress_featured
             else int(post.get("featured_media") or 0) or None
@@ -1441,14 +1457,18 @@ def _apply_editorial_unlocked(
         featured_id, featured_credit = _recover_partial_featured(
             client, post_id, partial_manifest
         )
-    v1_original_cover = config.media_source_policy == "credit_only" and bool(post.get("featured_media"))
+    v1_original_cover = not technical_cover_only and config.media_source_policy == "credit_only" and bool(post.get("featured_media"))
     original_cover_receipt = None
     original_cover_check = next((
         row for row in media_preflight.get("featured_vision", [])
         if v1_original_cover and row.get("existing_featured_id") == post["featured_media"]
     ), {})
     if featured_id is None and not config.dry_run and not partial_featured_rejected:
-        if v1_original_cover:
+        if technical_cover_only:
+            featured_id = _normalize_existing_featured(
+                client, config, post, root=root, original_only=True, progress=progress_writes,
+            )
+        elif v1_original_cover:
             approved_sha = original_cover_check.get("image_sha256") if original_cover_check.get("status") == "passed" else None
             if approved_sha:
                 featured_id = _normalize_existing_featured(
@@ -1551,6 +1571,7 @@ def _apply_editorial_unlocked(
         attempts=attempts_before,
         media_context=checklist_media_context,
         v1_visual_featured=True,
+        technical_cover_only=technical_cover_only,
     )
     # GATE COMPLETO (politica verificar -> corrigir -> publicar): qualquer
     # item do checklist com falha impede READY — o apply NUNCA grava um post
@@ -1605,7 +1626,7 @@ def _apply_editorial_unlocked(
                     ),
                     None,
                 )
-                if not featured_vision_failure and checklist_featured_failure:
+                if not technical_cover_only and not featured_vision_failure and checklist_featured_failure:
                     featured_vision_failure = {
                         "reason": str(checklist_featured_failure.get("detail") or checklist_featured_failure.get("name") or "featured vision rejected"),
                         "index": None,
@@ -1616,6 +1637,12 @@ def _apply_editorial_unlocked(
                     and not any(row["name"] in {"destaque_1280x720", "imagem_destaque"} for row in failed_items)
                 )
                 original_cover_pending = original_cover_check.get("status") == "deferred"
+                if technical_cover_only and not featured_id:
+                    featured_manifest = {
+                        "status": "missing",
+                        "reason": "capa_original_indisponivel_ou_normalizacao_falhou" if post.get("featured_media")
+                        else "capa_original_ausente_definir_manualmente",
+                    }
                 if original_cover_pending:
                     featured_manifest = {"status": "missing", "reason": original_cover_check["reason"]}
                 elif retained_featured_needs_recheck:
@@ -1755,7 +1782,15 @@ def _apply_editorial_unlocked(
                 # Ordinary PARTIAL keeps its established stricter contract.
                 # Once a mixed rework is active, carry the independent journal
                 # over when that post has only media blockers left.
-                if media_progress is not None and progress_writes is not None and progress_writes.record["rows"]:
+                if progress_writes is not None and progress_writes.record["rows"] and (
+                    media_progress is not None or (
+                        technical_cover_only and any(
+                            row.get("original_featured_id") == post.get("featured_media")
+                            and row.get("original_featured_id")
+                            for row in progress_writes.record["rows"]
+                        )
+                    )
+                ):
                     manifest["v1_media_progress"] = progress_writes.record
                 _save_partial_manifest(root, post_id, manifest)
                 next_retry = partial_retry["next_retry_at"]
@@ -1891,7 +1926,9 @@ def _apply_editorial_unlocked(
                 # Se a featured era irrelevante ao editorial, ainda assim
                 # convertemos a imagem existente para WebP: a revisão humana
                 # decide depois se ela permanece ou é substituída.
-                if retained_featured or v1_original_cover:
+                if technical_cover_only:
+                    awaiting_featured_id = None  # do not overwrite a cover on a blocked apply
+                elif retained_featured or v1_original_cover:
                     # Human routing may proceed, but unconfirmed cover bytes
                     # must not be associated with the WordPress post as a cover.
                     cover_receipt = checklist.get("confirmed_v1_featured") or {}
@@ -4908,6 +4945,7 @@ def _normalize_existing_featured(
     root: Path | None = None,
     approved_sha: str | None = None,
     progress: _V1MediaProgress | None = None,
+    original_only: bool = False,
 ) -> int | None:
     """Re-prepare an existing featured image at exactly 1280x720 WebP.
 
@@ -4925,6 +4963,10 @@ def _normalize_existing_featured(
     post — a generic article header/wordmark (e.g. a "5 classic animes..."
     banner image) is NOT the subject and is not reused, leaving the post
     without a featured so the editorial flow must supply a real key art.
+
+    In original_only mode eligibility uses identity, MIME, format and
+    dimensions, never semantic relevance. A conversion is attached only
+    from the same original attachment and is tracked for deduplicated retry.
 
     Returns the (new) attachment id, or None when there is nothing to do.
     """
@@ -4955,19 +4997,19 @@ def _normalize_existing_featured(
     except Exception as exc:
         report("wordpress_read_failed", "read_attachment", outcome="retryable_failure", exc=exc)
         return None
-    if approved_sha and not isinstance(media, dict):
+    if (approved_sha or original_only) and not isinstance(media, dict):
         report("attachment_identity_changed", "read_attachment", outcome="rejected")
         return None
     details = media.get("media_details") or {}
     width, height = details.get("width"), details.get("height")
     source_url = (media.get("source_url") or "").strip()
-    if approved_sha:
+    if approved_sha or original_only:
         from .media.page_assets import is_noise_image_url
 
-        if media.get("id") != featured or is_noise_image_url(source_url):
+        if media.get("id") != featured or (approved_sha and is_noise_image_url(source_url)):
             report("attachment_identity_changed", "read_attachment", outcome="rejected")
             return None
-    if editorial is not None and not approved_sha:
+    if editorial is not None and not approved_sha and not original_only:
         entities = extract_entities(
             title=str((editorial.get("seo") or {}).get("title") or ""),
             content_html=str(editorial.get("cleaned_html") or ""),
@@ -4994,7 +5036,7 @@ def _normalize_existing_featured(
                 report("existing_featured_not_relevant", "source_relevance", outcome="rejected")
                 return None
     already_normalized = width == 1280 and height == 720 and source_url.lower().endswith(".webp")
-    if already_normalized and not approved_sha:
+    if already_normalized and not approved_sha and (not original_only or media.get("mime_type") == "image/webp"):
         report("already_normalized", "complete", outcome="reused")
         return featured
     if not source_url:
@@ -5019,7 +5061,7 @@ def _normalize_existing_featured(
                 source_url,
                 tmp / "featured_source.jpg",
                 max_attempts=config.max_source_retries + 1,
-                url_policy="enforce" if approved_sha else config.remote_url_policy,
+                url_policy="enforce" if approved_sha or original_only else config.remote_url_policy,
                 audit=(
                     lambda finding: append_telemetry(
                         root, "remote_url_audit", url_domain=diagnostic_url_domain(finding.url), reason=finding.reason
@@ -5033,8 +5075,12 @@ def _normalize_existing_featured(
             return None
         try:
             destination = tmp / "featured_1280x720.webp"
-            webp = (_existing_v1_featured_pixels(source, destination) if approved_sha
-                    else prepare_featured_webp(source, destination))
+            if approved_sha:
+                webp = _existing_v1_featured_pixels(source, destination)
+            elif original_only:
+                webp = prepare_featured_webp(source, destination, preserve_portrait=True)
+            else:
+                webp = prepare_featured_webp(source, destination)
         except Exception as exc:
             report("featured_conversion_failed", "convert", outcome="rejected", exc=exc)
             return None
@@ -5061,9 +5107,23 @@ def _normalize_existing_featured(
                         **retained_row, "media_id": featured, "media_url": source_url,
                     })
                 return featured
-            if webp == source:
-                destination.write_bytes(source.read_bytes())
-                webp = destination
+        if original_only and progress is not None:
+            from .media.visual_hash import phash_from_path
+
+            phash = phash_from_path(str(webp))
+            if not phash:
+                report("featured_fingerprint_failed", "convert", outcome="rejected")
+                return None
+            retained_row = {
+                "status": "accepted", "featured": True, "width": 1280, "height": 720,
+                "original_featured_id": featured, "alt_text": alt, "credit_text": caption,
+                "sha256": hashlib.sha256(webp.read_bytes()).hexdigest(), "phash": phash,
+                "direct_image_url": source_url,
+                "visual_verification": {"decision": "INITIAL", "reason": "original cover normalized; no semantic verdict"},
+            }
+        if webp == source:
+            destination.write_bytes(source.read_bytes())
+            webp = destination
         token = progress.begin(retained_row) if retained_row and progress else None
         try:
             new_media = client.upload_media(
@@ -6364,6 +6424,7 @@ def _publish_post_unlocked(
         config=config,
         client=client,
         media_context=checklist_media_context,
+        technical_cover_only=config.v1_original_cover_only and v2_state is None,
     )
     if checklist["failed"]:
         retryable_errors = [
@@ -7900,7 +7961,8 @@ def build_cards(
         featured_started_at = time.monotonic()
         try:
             wordpress_featured = _featured_diagnosis(
-                client, post, entities, timeout=featured_timeout, strict_lookup=True
+                client, post, entities, timeout=featured_timeout, strict_lookup=True,
+                technical_only=config.v1_original_cover_only,
             )
         except WordPressError as exc:
             try:
@@ -7938,7 +8000,7 @@ def build_cards(
                 timeout=featured_timeout,
                 wordpress_fallback=wordpress_featured,
             )
-            if state == STATE_PARTIAL
+            if state == STATE_PARTIAL and not config.v1_original_cover_only
             else wordpress_featured
         )
         if state == STATE_PARTIAL:
@@ -8078,6 +8140,7 @@ def _featured_diagnosis(
     *,
     timeout: float | None = None,
     strict_lookup: bool = False,
+    technical_only: bool = False,
 ) -> dict[str, Any]:
     """Diagnóstico determinístico da featured atual (Fase 4.2).
 
@@ -8098,7 +8161,7 @@ def _featured_diagnosis(
             "webp": None,
             "dimensions": None,
             "valid": False,
-            "action": "provide",
+            "action": "manual" if technical_only else "provide",
         }
     featured_id = featured_raw
     webp: bool | None = None
@@ -8118,7 +8181,9 @@ def _featured_diagnosis(
         dimensions = f"{width or '?'}x{height or '?'}"
         source_url = (media.get("source_url") or "").strip()
         webp = source_url.lower().split("?", 1)[0].endswith(".webp")
-        if entities:
+        if technical_only:
+            webp = webp and media.get("id") == featured_id and media.get("mime_type") == "image/webp"
+        elif entities:
             evidence = " ".join(
                 part
                 for part in (
@@ -8137,7 +8202,7 @@ def _featured_diagnosis(
                 raise
             return {
                 "exists": False, "relevant": None, "webp": None, "dimensions": None,
-                "valid": False, "action": "provide", "diagnostic_error_code": "media_not_found",
+                "valid": False, "action": "manual" if technical_only else "provide", "diagnostic_error_code": "media_not_found",
             }
         if exc.error_code == "wordpress_timeout":
             raise
@@ -8146,7 +8211,7 @@ def _featured_diagnosis(
         if strict_lookup:
             raise
         diagnostic_error_code = "media_lookup_failed"
-    valid = bool(relevant and webp and dimensions == "1280x720")
+    valid = bool((technical_only or relevant) and webp and dimensions == "1280x720")
     if valid:
         action = "ok"
     elif relevant is False:

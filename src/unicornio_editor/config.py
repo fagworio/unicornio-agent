@@ -133,6 +133,8 @@ class Config:
     # production loader explicitly defaults to the site's credit-only policy.
     media_source_policy: str = "strict"
     cards_selection_timeout_seconds: float = 150.0
+    # Explicit for direct API clients; the site CLI enables it by default.
+    v1_original_cover_only: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -436,6 +438,7 @@ def load_config() -> Config:
         v2_cycle_max_stagnant_rounds=_int("EDITOR_V2_CYCLE_MAX_STAGNANT_ROUNDS", 3, 1, 100),
         v2_cycle_max_drain_rounds=_int("EDITOR_V2_CYCLE_MAX_DRAIN_ROUNDS", 3, 1, 100),
         v2_cycle_max_duration_seconds=_float("EDITOR_V2_CYCLE_MAX_DURATION_SECONDS", 3600.0, 1.0, 86400.0),
+        v1_original_cover_only=_bool("EDITOR_V1_ORIGINAL_COVER_ONLY", True),
         media_source_policy=_choice("MEDIA_SOURCE_POLICY", "credit_only", {"strict", "credit_only"}),
     )
 

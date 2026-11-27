@@ -141,6 +141,7 @@ def run_pre_publish_checklist(
     attempts: int = 0,
     media_context: Mapping[str, Any] | None = None,
     v1_visual_featured: bool = False,
+    technical_cover_only: bool = False,
 ) -> dict[str, Any]:
     """Run every policy rule in sequence and report the result per item."""
     if not isinstance(post, Mapping):
@@ -741,11 +742,15 @@ def run_pre_publish_checklist(
     check(
         "imagem_destaque",
         featured_ok,
-        f"featured_media={featured_raw or 'vazio'} — obrigatoria para publicar",
+        (
+            "capa original ausente: definir manualmente no WordPress"
+            if technical_cover_only and not featured_ok
+            else f"featured_media={featured_raw or 'vazio'} — obrigatoria para publicar"
+        ),
     )
 
     v1_credit_only_featured = bool(
-        v1_visual_featured and config.media_source_policy == "credit_only" and featured_ok
+        not technical_cover_only and v1_visual_featured and config.media_source_policy == "credit_only" and featured_ok
     )
     featured_receipt = (media_context or {}).get("featured") if v1_credit_only_featured else None
     retained_featured = bool(
@@ -797,7 +802,7 @@ def run_pre_publish_checklist(
         if isinstance(item, Mapping) and bool(item.get("is_featured"))
     ]
     featured_source_relevant: bool | None = None
-    if featured_ok and client is not None:
+    if not technical_cover_only and featured_ok and client is not None:
         try:
             media = read_featured_attachment()
             mtitle = str((media.get("title") or {}).get("rendered") or "")
@@ -812,7 +817,7 @@ def run_pre_publish_checklist(
             )
         except Exception:
             featured_source_relevant = None
-    if featured_source_relevant is None and featured_plan_items:
+    if not technical_cover_only and featured_source_relevant is None and featured_plan_items:
         featured_item = featured_plan_items[0]
         featured_source_relevant = image_is_relevant(
             alt_text="",
@@ -840,7 +845,9 @@ def run_pre_publish_checklist(
     )
     featured_pixels_confirmed = False
     confirmed_v1_featured = None
-    if verify_featured_pixels_for_relevance:
+    if technical_cover_only:
+        check("destaque_relevancia", True, "capa original: apenas validação técnica", skipped=True)
+    elif verify_featured_pixels_for_relevance:
         # Do not add an early textual failure: that would skip the actual
         # attachment read and Vision further down the checklist.
         pass
@@ -1015,6 +1022,15 @@ def run_pre_publish_checklist(
         except Exception:
             pass  # media lookup failure is reported by the item below
     non_webp = [url for url in image_urls if not url.lower().endswith(".webp")]
+    if technical_cover_only and featured_ok:
+        try:
+            actual_cover = read_featured_attachment() if client is not None else {}
+            cover_format_ok = (actual_cover.get("id") == featured
+                               and actual_cover.get("mime_type") == "image/webp"
+                               and featured_url.lower().endswith(".webp"))
+        except Exception:
+            cover_format_ok = False
+        check("destaque_formato", cover_format_ok, "anexo original deve ter identidade confirmada e formato WebP")
     non_webp_inline = [url for url in img_urls if not url.lower().endswith(".webp")]
     if image_urls:
         check(
@@ -1171,7 +1187,9 @@ def run_pre_publish_checklist(
         and all(item.get("name") == "imagens_no_corpo" for item in prior_failures)
     )
     retained_featured_recheck_pending = retained_featured and not vision_ready
-    if config.vision_enabled and not vision_ready:
+    if technical_cover_only:
+        check("imagens_visao", True, "capa não usa Vision; imagens novas do corpo verificadas no apply", skipped=True)
+    elif config.vision_enabled and not vision_ready:
         check(
             "imagens_visao",
             False,
@@ -1523,6 +1541,7 @@ def run_pre_publish_checklist(
     featured_gate_names = {
         "imagem_destaque",
         "destaque_1280x720",
+        "destaque_formato",
         "imagens_visao",
         "visual_identity_verified",
         "visual_identity_matches_current_media",

@@ -397,3 +397,13 @@ Reconciliar um lock só atualiza seu registro administrativo; não confirma o
 estado do ciclo, do WordPress ou do MediaRegistry, não remove quarentena e não
 autoriza replay. Esta documentação não implica nem executa operação em
 produção.
+
+### Capa original no Editorial V1
+
+O CLI adota `EDITOR_V1_ORIGINAL_COVER_ONLY=true` por padrão. O resolver só
+busca imagens para o corpo e continua usando a visão nesse fluxo. A capa é
+o anexo indicado pelo WordPress: se já estiver em WebP 1280×720, mantém o
+ID; se não, converte o mesmo arquivo e reaproveita a conversão verificada
+nas próximas tentativas. A capa não é avaliada semanticamente e o resolver
+não procura substitutas. Se não houver capa, o post fica fora de READY até
+a inclusão manual no WordPress. A política do V2 não muda.

@@ -445,10 +445,17 @@ def test_same_pixels_at_two_urls_cannot_fill_two_slots(tmp_path, media_case):
     assert rows[1]["reason_code"] == "duplicate_existing_frame"
 
 
-def test_v1_batch_assembles_then_accepts_pending_candidate_and_reaches_ready(tmp_path, monkeypatch, media_case):
+@pytest.mark.parametrize("original_cover_only", (False, True))
+def test_v1_batch_assembles_then_accepts_pending_candidate_and_reaches_ready(
+    tmp_path, monkeypatch, media_case, original_cover_only,
+):
     from unicornio_editor.batch import merge_media_manifest_into_editorial
 
     config, calls = media_case
+    if original_cover_only:
+        from dataclasses import replace
+
+        config = replace(config, v1_original_cover_only=True)
     original_assets = downloader.urlopen_remote
 
     def cover_aware_assets(request, **kwargs):
@@ -495,7 +502,11 @@ def test_v1_batch_assembles_then_accepts_pending_candidate_and_reaches_ready(tmp
     prepared = merged["items"][0]["editorial"]
     assert prepared["media_plan"][0]["evidence_verdict"] == "vision_pending"
     post = workflow_fixture.WorkflowTests().post()
-    client = workflow_fixture.FakeClient(post)
+    class Client(workflow_fixture.FakeClient):
+        def get_media(self, media_id):
+            return {**super().get_media(media_id), "mime_type": "image/webp"}
+
+    client = Client(post)
     result = apply_editorial(client, config, tmp_path, 42, prepared)
     assert result["status"] == "ready", result
     assert client.post["meta"]["_hermes_state"] == "ready"
@@ -503,6 +514,8 @@ def test_v1_batch_assembles_then_accepts_pending_candidate_and_reaches_ready(tmp
     assert "https://wp.test/videogame-90.webp" in client.post["content"]["raw"]
     assert client.post["status"] == "pending"
     assert calls
+    if original_cover_only:
+        assert len(calls) == 1  # the new inline only, not the original cover
 
 
 def test_all_new_credit_only_candidates_require_pixels_and_are_not_preflight_verified(tmp_path, media_case):

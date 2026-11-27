@@ -109,6 +109,8 @@ def resolve_batch_editorial_defaults(
             ):
                 item["fresh_layout_source_signature"] = _post_write_guard_signature(post)
             editorial = dict(item.get("editorial") or {})
+            if getattr(config, "v1_original_cover_only", False):
+                editorial["media_plan"] = [row for row in editorial.get("media_plan") or [] if not (isinstance(row, dict) and row.get("is_featured"))]
             relevance = editorial.get("site_relevance") or {}
             if root is not None and isinstance(relevance, dict) and relevance.get("decision") == "process":
                 try:
@@ -148,7 +150,8 @@ def resolve_batch_editorial_defaults(
                         _reconcile_partial_media(body, title, entities, retained)[0]
                         if retained or len(game_names) > 1 else _images_summary(body, title, entities)
                     )
-                    featured_required = not (item.get("retained_cover") or post.get("featured_media"))
+                    featured_required = not (getattr(config, "v1_original_cover_only", False)
+                                             or item.get("retained_cover") or post.get("featured_media"))
                     list_items = extract_list_items(title, body, categories)
                     try:
                         if len(game_names) > 1 and (
@@ -365,7 +368,7 @@ def build_media_resolve_batch_input(
         featured_action = str(
             featured.get("action") if isinstance(featured, dict) else "provide"
         ).strip().casefold()
-        featured_required = not retained_cover and featured_action not in {"ok", "normalize", "recheck"}
+        featured_required = not retained_cover and featured_action not in {"ok", "normalize", "recheck", "preserve", "manual"}
         categories = editorial.get("categories") or context.get("categories") or ()
         promised_items = detect_list_format(title, cleaned_html, categories)
         list_items = extract_list_items(title, cleaned_html, categories)
@@ -1299,7 +1302,12 @@ def _context_for_post(
         _load_partial_manifest(root, post["id"]).get("featured")
         if progress is None and media_policy == "credit_only" and state.get("state") == STATE_PARTIAL else None
     )
-    if (
+    if getattr(config, "v1_original_cover_only", False):
+        original_id = post.get("featured_media")
+        exists = type(original_id) is int and original_id > 0
+        featured = {"exists": exists, "valid": False, "action": "preserve" if exists else "manual",
+                    "media_id": original_id if exists else None, "source": "wordpress_attachment"}
+    elif (
         isinstance(retained_featured, dict) and retained_featured.get("status") in {"valid", "verification_pending"}
         and type(retained_featured.get("media_id")) is int and retained_featured["media_id"] > 0
         and not (retained_featured["status"] == "valid" and _effective_partial_kind(state) == "featured_vision")
@@ -1346,7 +1354,7 @@ def _context_for_post(
             "required_inline_images": required_image_count(
                 words, title=title, content=cleaned_html
             ),
-            "featured_required": featured["action"] != "recheck",
+            "featured_required": featured["action"] not in {"recheck", "preserve", "manual"},
             "source_page_required_for_new_media": media_policy != "credit_only",
             "credit_required": True,
             "credit_generation": (

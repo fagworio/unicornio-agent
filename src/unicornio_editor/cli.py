@@ -2835,6 +2835,16 @@ def _resolve_media_batch_dispatch(
     full: bool = False,
 ) -> dict[str, Any]:
     """Route listicle target envelopes through item-scoped discovery."""
+    if getattr(config, "v1_original_cover_only", False):
+        outdated = [
+            str(post["post_id"]) for post in batch.get("posts") or []
+            if post.get("featured_required") or post.get("role") == "featured"
+            or any(target.get("role") == "featured" for target in post.get("targets") or [])
+        ]
+        if outdated:
+            raise WorkflowError(
+                "stale_media_plan_requests_featured: regenerate media input for " + ", ".join(outdated)
+            )
     resolver = (
         _resolve_media_targets_batch
         if any(post.get("targets") for post in batch.get("posts") or [])
@@ -4750,6 +4760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if media_assembly is not None:
                 result["media_plan_assembly"] = media_assembly
         elif args.command == "checklist":
+            from .eligibility import resolve_post_eligibility
+
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             editorial = validate_editorial(
                 payload,
@@ -4774,6 +4786,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config=config,
                 client=client,
                 v1_visual_featured=True,
+                technical_cover_only=(
+                    config.v1_original_cover_only
+                    and not resolve_post_eligibility(post, args.root).is_v2
+                ),
             )
             result["trailer"] = trailer
             result["trailer_search_status"] = trailer_status
@@ -5345,10 +5361,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 result = get_cleaned_content(client, args.root, args.post_id)
         elif args.command == "media-validate":
+            from .eligibility import resolve_post_eligibility
+
             payload = json.loads(args.editorial_file.read_text(encoding="utf-8"))
             post_title = ""
             existing_featured_id = None
             post_categories = ()
+            technical_cover_only = config.v1_original_cover_only
             if args.post_id:
                 post = client.get_post(args.post_id)
                 title_value = post.get("title") or {}
@@ -5357,6 +5376,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 existing_featured_id = int(post.get("featured_media") or 0) or None
                 post_categories = post.get("categories") or ()
+                technical_cover_only = technical_cover_only and not resolve_post_eligibility(post, args.root).is_v2
+            if technical_cover_only:
+                existing_featured_id = None
+                if isinstance(payload, dict) and isinstance(payload.get("media_plan"), list):
+                    payload["media_plan"] = [
+                        row for row in payload["media_plan"]
+                        if not (isinstance(row, dict) and row.get("is_featured"))
+                    ]
             result = validate_media_plan(
                 client,
                 payload,

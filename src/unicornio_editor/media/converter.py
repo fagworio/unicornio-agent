@@ -304,7 +304,9 @@ def convert_to_webp(source: Path, destination: Path | None = None) -> Path:
     return destination
 
 
-def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path:
+def prepare_featured_webp(
+    source: Path, destination: Path | None = None, *, preserve_portrait: bool = False,
+) -> Path:
     """Center-crop and resize to exactly 1280x720 (16:9) and save as WebP.
 
     Featured images must always obey the portal's 1280x720 ratio, so the
@@ -315,7 +317,8 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
     otherwise be published lying down) and PORTRAIT sources are rejected:
     cover-cropping a portrait into 16:9 destroys more than half the frame, so
     a portrait featured image is a wrong image — the agent must pick a
-    landscape key art instead (fail-closed policy).
+    landscape key art instead (fail-closed policy). Original-cover mode
+    instead pads a portrait to retain the original composition.
     """
     source = Path(source)
     destination = destination or source.with_name(source.stem + "_featured.webp")
@@ -333,7 +336,7 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
                     stage=stage,
                     diagnostics=_conversion_diagnostics(image, stage=stage),
                 )
-            if image.width < image.height:
+            if image.width < image.height and not preserve_portrait:
                 raise MediaConversionError(
                     f"featured source is portrait ({image.width}x{image.height} after EXIF transpose); "
                     "a 1280x720 featured image requires a landscape source — pick landscape key art",
@@ -350,7 +353,9 @@ def prepare_featured_webp(source: Path, destination: Path | None = None) -> Path
             target_ratio = FEATURED_WIDTH / FEATURED_HEIGHT
             width, height = work.size
             current_ratio = width / height
-            if current_ratio > target_ratio:
+            if preserve_portrait and width < height:
+                work = ImageOps.pad(work, (FEATURED_WIDTH, FEATURED_HEIGHT), Image.Resampling.LANCZOS, color="white")
+            elif current_ratio > target_ratio:
                 new_width = int(height * target_ratio)
                 left = (width - new_width) // 2
                 work = work.crop((left, 0, left + new_width, height))
