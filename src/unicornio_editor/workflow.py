@@ -5595,6 +5595,10 @@ def _persist_publish_intent(
             os.close(parent_fd)
 
 
+class _PublishedReadbackConflict(WorkflowError):
+    """An authenticated GET confirmed publish, but not our operation."""
+
+
 def _mark_uncertain_publication(
     root: Path,
     post_id: int,
@@ -5604,6 +5608,7 @@ def _mark_uncertain_publication(
     ready_manifest: str | None = None,
     publication_operation_id: str = "",
     rest_empty_v1: bool | None = None,
+    published_observed: bool = False,
 ) -> None:
     """Persist a local fence after a publish request with unknown outcome.
 
@@ -5626,6 +5631,11 @@ def _mark_uncertain_publication(
                         ready_manifest.encode("utf-8")
                     ).hexdigest() if ready_manifest is not None else "",
                     "publication_operation_id": str(publication_operation_id or ""),
+                    **(
+                        {"published_observed": True}
+                        if published_observed or isinstance(error, _PublishedReadbackConflict)
+                        else {}
+                    ),
                     **({"rest_empty_v1": rest_empty_v1} if rest_empty_v1 is not None else {}),
                 },
                 ensure_ascii=False,
@@ -5655,6 +5665,30 @@ def _append_publish_telemetry(root: str | Path, event: str, **fields: Any) -> No
         )
 
 
+def _publication_operation_outcome(observed: Any, expected: str) -> str:
+    if observed == expected:
+        return "matched"
+    if observed is None or (isinstance(observed, str) and not observed.strip()):
+        return "operation_id_missing"
+    return "operation_id_mismatch"
+
+
+def _publication_id_fingerprint(value: Any) -> str | None:
+    # WordPress meta is not trusted log data. Only report a fingerprint of the
+    # exact lowercase hexadecimal shape produced by uuid4().hex, never raw meta.
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+        return hashlib.sha256(value.encode("ascii")).hexdigest()
+    return None
+
+
+def _transient_publish_read_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    return isinstance(exc, WordPressError) and (
+        exc.error_code == "wordpress_timeout" or exc.status_code in {408, 500, 502, 503, 504}
+    )
+
+
 def _sync_published_readback(
     client: WordPressClient,
     config: Config,
@@ -5665,6 +5699,7 @@ def _sync_published_readback(
     ready_manifest: str | None,
     expected_operation_id: str = "",
     rest_empty_v1: bool | None = None,
+    initial_post: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Synchronize V2 state and verify an already-published WordPress post."""
     from dataclasses import replace as _replace
@@ -5687,12 +5722,64 @@ def _sync_published_readback(
             raise WorkflowError("V2 publish reconciliation requires READY or PUBLISHED state")
         return WorkState.from_dict(raw)
 
-    v2_post = client.get_post(post_id)
-    if v2_post.get("status") != "publish":
-        raise WorkflowError("WordPress publish read-back mismatch")
+    def checked_snapshot(
+        phase: str, first_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # One additional authenticated GET is allowed only at the first
+        # confirmation boundary. A contradictory identity is not transient.
+        max_reads = 2 if phase == "initial" else 1
+        publish_seen = phase != "initial"
+        for attempt in range(1, max_reads + 1):
+            try:
+                post = (
+                    first_snapshot if attempt == 1 and first_snapshot is not None
+                    else client.get_post(post_id)
+                )
+            except (WordPressError, OSError) as exc:
+                transient = _transient_publish_read_error(exc)
+                http_status = exc.status_code if isinstance(exc, WordPressError) else None
+                _append_publish_telemetry(
+                    root or Path("."), "publish_readback", post_id=post_id, phase=phase,
+                    attempt=attempt, outcome="transient_read_error" if transient else "read_error",
+                    http_status=http_status if type(http_status) is int and 100 <= http_status <= 599 else None,
+                )
+                if transient and attempt < max_reads:
+                    continue
+                error_type = _PublishedReadbackConflict if publish_seen else WorkflowError
+                raise error_type("WordPress publish read-back unavailable") from exc
+            if post.get("status") != "publish":
+                _append_publish_telemetry(
+                    root or Path("."), "publish_readback", post_id=post_id, phase=phase,
+                    attempt=attempt, outcome="status_mismatch", wordpress_published=False,
+                )
+                error_type = _PublishedReadbackConflict if publish_seen else WorkflowError
+                raise error_type("WordPress publish read-back mismatch")
+            publish_seen = True
+            if not expected_operation_id:
+                return post
+            meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
+            observed = meta.get(META_PUBLISH_OPERATION_ID)
+            outcome = _publication_operation_outcome(observed, expected_operation_id)
+            if phase == "initial" or outcome != "matched":
+                _append_publish_telemetry(
+                    root or Path("."), "publish_readback", post_id=post_id, phase=phase,
+                    attempt=attempt, outcome=outcome, wordpress_published=True,
+                    expected_operation_id_sha256=_publication_id_fingerprint(expected_operation_id),
+                    observed_operation_id_sha256=_publication_id_fingerprint(observed),
+                )
+            if outcome == "matched":
+                return post
+            if outcome == "operation_id_mismatch":
+                raise _PublishedReadbackConflict(
+                    "publication operation identity read-back mismatch" if phase == "initial"
+                    else "publication operation identity changed during read-back"
+                )
+            if attempt == max_reads:
+                raise _PublishedReadbackConflict("publication operation identity missing in read-back")
+        raise AssertionError("bounded publish read-back exhausted without outcome")
+
+    v2_post = checked_snapshot("initial", initial_post)
     initial_meta = v2_post.get("meta") if isinstance(v2_post.get("meta"), dict) else {}
-    if expected_operation_id and initial_meta.get(META_PUBLISH_OPERATION_ID) != expected_operation_id:
-        raise WorkflowError("publication operation identity read-back mismatch")
     v2_current = observed_v2(v2_post)
     if rest_empty_v1 is not None:
         if ready_hash and initial_meta.get(META_READY_HASH) != ready_hash:
@@ -5708,11 +5795,8 @@ def _sync_published_readback(
         if legacy_state not in (None, STATE_READY):
             raise WorkflowError("legacy publish read-back mismatch")
         client.update_post(post_id, {"meta": {"_hermes_state": STATE_PUBLISHED}})
-        v2_post = client.get_post(post_id)
-        if (
-            v2_post.get("status") != "publish"
-            or read_state(v2_post).get("state") != STATE_PUBLISHED
-        ):
+        v2_post = checked_snapshot("legacy_sync")
+        if read_state(v2_post).get("state") != STATE_PUBLISHED:
             raise WorkflowError("legacy publish state reconciliation read-back mismatch")
         v2_current = observed_v2(v2_post)
     if v2_current is not None:
@@ -5720,9 +5804,9 @@ def _sync_published_readback(
             post_id,
             _replace(v2_current, state=_LifecycleState.PUBLISHED, phase=_Phase.PUBLISH, blocker=None),
         )
-    verified_post = client.get_post(post_id)
-    verified_meta = verified_post.get("meta", {}) if isinstance(verified_post, dict) else {}
-    if verified_post.get("status") != "publish" or read_state(verified_post).get("state") != STATE_PUBLISHED:
+    verified_post = checked_snapshot("final")
+    verified_meta = verified_post.get("meta") if isinstance(verified_post.get("meta"), dict) else {}
+    if read_state(verified_post).get("state") != STATE_PUBLISHED:
         raise WorkflowError("publication read-back mismatch")
     v2_verified = observed_v2(verified_post)
     if v2_current is not None and (
@@ -5735,8 +5819,6 @@ def _sync_published_readback(
         raise WorkflowError("ready hash read-back mismatch after publish")
     if ready_manifest is not None and verified_meta.get(META_READY_MANIFEST) != ready_manifest:
         raise WorkflowError("ready manifest read-back mismatch after publish")
-    if expected_operation_id and verified_meta.get(META_PUBLISH_OPERATION_ID) != expected_operation_id:
-        raise WorkflowError("publication operation identity changed during read-back")
     return verified_post
 
 
@@ -5772,6 +5854,17 @@ def _reconcile_uncertain_publication(
     if not isinstance(marker_data, dict):
         marker_data = {}
     if post.get("status") == "pending":
+        if marker_data.get("published_observed") is True:
+            # A pending projection cannot disprove a publication that an
+            # authenticated read already observed. Keep the original fence.
+            return {
+                "post_id": post_id,
+                "wordpress_changed": False,
+                "status": "retry",
+                "reason": "status pending diverge de publicação anteriormente observada",
+                "state": STATE_READY,
+                "uncertain": True,
+            }
         _clear_uncertain_publication(root, post_id)
         return None
     if post.get("status") != "publish":
@@ -5800,7 +5893,9 @@ def _reconcile_uncertain_publication(
             "state": STATE_READY,
             "uncertain": True,
         }
-    operation_identity_matches = meta.get(META_PUBLISH_OPERATION_ID) == publication_operation_id
+    observed_operation = meta.get(META_PUBLISH_OPERATION_ID)
+    operation_outcome = _publication_operation_outcome(observed_operation, publication_operation_id)
+    operation_identity_matches = operation_outcome == "matched"
     identity_matches = bool(
         marker_data.get("ready_hash")
         and marker_data.get("ready_hash") == ready_hash
@@ -5820,12 +5915,21 @@ def _reconcile_uncertain_publication(
     # only an already-confirmed PUBLISHED projection is accepted. New markers
     # may reconcile READY/absent projections only when the exact READY payload
     # that preceded the ambiguous request still matches remotely.
-    if publication_operation_id and not operation_identity_matches:
+    if not operation_identity_matches:
+        _append_publish_telemetry(
+            root, "publish_readback", post_id=post_id, phase="reconcile_fence", attempt=1,
+            outcome=operation_outcome, wordpress_published=True,
+            expected_operation_id_sha256=_publication_id_fingerprint(publication_operation_id),
+            observed_operation_id_sha256=_publication_id_fingerprint(observed_operation),
+        )
+        reason = "operação remota não corresponde ao identificador de publicação autorizado"
+        if operation_outcome == "operation_id_missing":
+            reason += " (identificador ausente na leitura)"
         return {
             "post_id": post_id,
             "wordpress_changed": False,
             "status": "retry",
-            "reason": "operação remota não corresponde ao identificador de publicação autorizado",
+            "reason": reason,
             "state": STATE_READY,
             "uncertain": True,
         }
@@ -5871,6 +5975,7 @@ def _reconcile_uncertain_publication(
             root, post_id, exc, ready_hash=ready_hash, ready_manifest=ready_manifest,
             publication_operation_id=publication_operation_id,
             rest_empty_v1=rest_empty_v1,
+            published_observed=True,
         )
         return {
             "post_id": post_id,
@@ -6515,6 +6620,7 @@ def _publish_now(
                 ready_manifest=ready_manifest,
                 expected_operation_id=publication_operation_id,
                 rest_empty_v1=rest_empty_v1,
+                initial_post=observed,
             )
         except Exception as sync_exc:  # noqa: BLE001 - do not retry blindly
             _mark_uncertain_publication(
@@ -6522,6 +6628,7 @@ def _publish_now(
                 ready_hash=ready_hash, ready_manifest=ready_manifest,
                 publication_operation_id=publication_operation_id,
                 rest_empty_v1=rest_empty_v1,
+                published_observed=observed.get("status") == "publish",
             )
             _append_publish_telemetry(
                 root or Path("."),
@@ -6620,6 +6727,9 @@ def publish_ready_posts(
     outcomes: list[dict[str, Any]] = _reconcile_persisted_uncertain_publications(
         client, config, root,
     )
+    # The same ID can reappear in a contradictory pending projection. Its
+    # unresolved fence is already counted above; do not offer it again here.
+    still_uncertain = {outcome["post_id"] for outcome in outcomes if outcome.get("uncertain")}
     # Paginacao completa: a fila pode ter mais que 100 pending, e um post READY
     # alem da pagina 1 nao pode ficar invisivel na janela de publicacao.
     posts: list[dict[str, Any]] = []
@@ -6636,7 +6746,7 @@ def publish_ready_posts(
         page += 1
     for candidate in posts:
         candidate_id = candidate.get("id")
-        if not isinstance(candidate_id, int):
+        if not isinstance(candidate_id, int) or candidate_id in still_uncertain:
             continue
         if protection.is_protected(candidate_id):
             outcomes.append({"post_id": candidate_id, "wordpress_changed": False, "status": "blocked", "reason": "epoch_protected_transaction", "epoch_protected": True})

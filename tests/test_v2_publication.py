@@ -32,7 +32,7 @@ from unicornio_editor.workflow import (
     _reconcile_persisted_uncertain_publications,
     publish_ready_posts,
 )
-from unicornio_editor.wordpress import WordPressClient
+from unicornio_editor.wordpress import WordPressClient, WordPressError
 
 
 def _ready_post(post_id=114840):
@@ -324,6 +324,166 @@ def _pending_ready_post():
     post["meta"]["_hermes_state"] = "ready"
     post["meta"]["_hermes_work_state"] = json.dumps(state, separators=(",", ":"))
     return post
+
+
+@pytest.mark.parametrize("first_read", ["missing", "blank", "transport_timeout", "http_503"])
+def test_publish_rechecks_one_transient_initial_read_without_a_second_post(tmp_path, first_read):
+    class FirstReadClient(FakePublicationClient):
+        reads_after_post = 0
+
+        def get_post(self, post_id):
+            snapshot = super().get_post(post_id)
+            if self.publish_calls:
+                self.reads_after_post += 1
+                if self.reads_after_post == 1:
+                    if first_read == "missing":
+                        del snapshot["meta"][META_PUBLISH_OPERATION_ID]
+                    elif first_read == "blank":
+                        snapshot["meta"][META_PUBLISH_OPERATION_ID] = ""
+                    elif first_read == "transport_timeout":
+                        raise TimeoutError("untrusted response body")
+                    else:
+                        raise WordPressError("untrusted response body", status_code=503)
+            return snapshot
+
+    post = _pending_ready_post()
+    client = FirstReadClient(post)
+    result = _publish_now(
+        client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+    )
+
+    assert result["publication_kind"] == "new"
+    assert len(client.publish_calls) == 1
+    assert json.loads(client.post["meta"]["_hermes_work_state"])["state"] == "published"
+    assert not (tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json").exists()
+    rows = (tmp_path / "work" / "telemetry.jsonl").read_text().splitlines()
+    attempts = [row for line in rows if (row := json.loads(line))["event"] == "publish_readback"]
+    expected = "operation_id_missing" if first_read in {"missing", "blank"} else "transient_read_error"
+    assert [(row["attempt"], row["outcome"]) for row in attempts] == [(1, expected), (2, "matched")]
+    matched = attempts[-1]
+    op_id = client.post["meta"][META_PUBLISH_OPERATION_ID]
+    fingerprint = hashlib.sha256(op_id.encode()).hexdigest()
+    assert matched["expected_operation_id_sha256"] == fingerprint
+    assert matched["observed_operation_id_sha256"] == fingerprint
+    assert "untrusted response body" not in "\n".join(rows)
+
+
+@pytest.mark.parametrize(("outcomes", "recheck_count", "raises"), [
+    (["mismatch"], 1, "identity read-back mismatch"),
+    (["missing", "mismatch"], 2, "identity read-back mismatch"),
+    (["missing", "missing"], 2, "identity missing"),
+    (["timeout", "timeout"], 2, "publish read-back unavailable"),
+    (["forbidden"], 1, "publish read-back unavailable"),
+])
+def test_publish_readback_defects_preserve_fence_without_replaying_post(
+    tmp_path, outcomes, recheck_count, raises,
+):
+    class NonmatchingMetadataClient(FakePublicationClient):
+        reads_after_post = 0
+
+        def get_post(self, post_id):
+            snapshot = super().get_post(post_id)
+            if self.publish_calls:
+                self.reads_after_post += 1
+                outcome = outcomes[min(self.reads_after_post - 1, len(outcomes) - 1)]
+                if outcome == "missing":
+                    del snapshot["meta"][META_PUBLISH_OPERATION_ID]
+                elif outcome == "timeout":
+                    raise WordPressError("secret response", error_code="wordpress_timeout")
+                elif outcome == "forbidden":
+                    raise WordPressError("secret response", status_code=403)
+                else:
+                    snapshot["meta"][META_PUBLISH_OPERATION_ID] = "private arbitrary remote meta"
+            return snapshot
+
+    post = _pending_ready_post()
+    client = NonmatchingMetadataClient(post)
+    with pytest.raises(WorkflowError, match=raises):
+        _publish_now(
+            client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+        )
+
+    assert client.reads_after_post == recheck_count
+    assert len(client.publish_calls) == 1
+    assert client.updates == []
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    assert json.loads(marker.read_text())["publication_operation_id"] == client.post["meta"][META_PUBLISH_OPERATION_ID]
+    events = (tmp_path / "work" / "telemetry.jsonl").read_text()
+    assert "private arbitrary remote meta" not in events
+    assert "secret response" not in events
+    assert "private arbitrary remote meta" not in marker.read_text()
+    assert "secret response" not in marker.read_text()
+
+
+def test_publish_ambiguous_post_does_not_ignore_first_divergent_operation(tmp_path):
+    class AmbiguousWriteClient(FakePublicationClient):
+        reads_after_post = 0
+
+        def publish(self, post_id, **kwargs):
+            super().publish(post_id, **kwargs)
+            raise TimeoutError("publish response unavailable")
+
+        def get_post(self, post_id):
+            snapshot = super().get_post(post_id)
+            if self.publish_calls:
+                self.reads_after_post += 1
+                if self.reads_after_post == 1:
+                    snapshot["meta"][META_PUBLISH_OPERATION_ID] = "different-operation"
+            return snapshot
+
+    post = _pending_ready_post()
+    client = AmbiguousWriteClient(post)
+    result = _publish_now(
+        client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+        ready_hash=post["meta"]["_hermes_ready_hash"],
+        ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+    )
+
+    assert result["status"] == "retry"
+    assert result["uncertain"] is True
+    assert client.reads_after_post == 1
+    assert len(client.publish_calls) == 1
+    assert client.updates == []
+    assert (tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json").exists()
+
+
+def test_known_publish_conflict_keeps_fence_on_later_pending_snapshot(tmp_path):
+    class ReadbackConflictClient(FakePublicationClient):
+        def get_post(self, post_id):
+            snapshot = super().get_post(post_id)
+            if snapshot["status"] == "publish":
+                snapshot["meta"][META_PUBLISH_OPERATION_ID] = "another-operation"
+            return snapshot
+
+        def list_pending(self, page=1, per_page=100):
+            return [self.get_post(self.post["id"])] if self.post["status"] == "pending" else []
+
+    post = _pending_ready_post()
+    client = ReadbackConflictClient(post)
+    with pytest.raises(WorkflowError, match="publication operation identity"):
+        _publish_now(
+            client, _config(), post["id"], root=tmp_path, integrity="manifest_match",
+            ready_hash=post["meta"]["_hermes_ready_hash"],
+            ready_manifest=post["meta"]["_hermes_ready_manifest"], expected_post=post,
+        )
+    marker = tmp_path / "work" / "v2-publication-uncertain" / f"{post['id']}.json"
+    fence_before = marker.read_bytes()
+    assert json.loads(fence_before)["published_observed"] is True
+
+    # A later pending snapshot supplies contradictory status, not proof that
+    # the originally observed publication never happened.
+    client.post["status"] = "pending"
+    client.post["meta"]["_hermes_state"] = "ready"
+    outcomes = publish_ready_posts(client, _config(), tmp_path)
+    assert [row["status"] for row in outcomes] == ["retry"]
+    assert outcomes[0]["uncertain"] is True
+    assert marker.read_bytes() == fence_before
+    assert len(client.publish_calls) == 1
+    assert not client.updates
 
 
 def test_publish_timeout_after_commit_reconciles_without_second_publish(tmp_path):

@@ -34,6 +34,14 @@
   `retry_safe=true` + `write_started=false`; exit code, mensagens ou stdout
   vazio nunca autorizam replay. Preserve `work/publish-windows/` em backups,
   snapshots e deploys.
+- A confirmação inicial permite **uma nova leitura GET**, sem reenviar o POST,
+  se o post já estiver publicado mas sem identificador de operação na resposta,
+  ou se a leitura falhar transitoriamente. Um ID diferente não autoriza essa
+  releitura. O evento `publish_readback` separa ausência, divergência e falha
+  HTTP/transporte, sem gravar o corpo da resposta nem o metadado bruto. Se a
+  confirmação não passar, o marcador durável continua protegendo a operação.
+  Se uma leitura já confirmou `publish`, uma projeção posterior `pending` não
+  libera o marcador nem autoriza uma segunda publicação.
 
 ## Estados e fila
 

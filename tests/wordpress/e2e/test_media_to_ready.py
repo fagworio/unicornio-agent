@@ -909,8 +909,35 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
         publish_config = replace(config, publish_enabled=True, publish_limit=3)
         monkeypatch.setattr("unicornio_editor.cli.load_config", lambda: publish_config)
         cli_args = ["publish-ready", "--root", str(case.root)]
+        # All GETs and the single publication POST use real authenticated REST.
+        # Project only the first published response as temporarily missing the
+        # metadata, keeping WordPress state and the write itself intact.
+        original_get_post = client_type.get_post
+        published_readbacks = 0
+
+        def first_publish_readback_without_operation(real_client, fixture_post_id, **kwargs):
+            nonlocal published_readbacks
+            snapshot = original_get_post(real_client, fixture_post_id, **kwargs)
+            if fixture_post_id == post_id and snapshot["status"] == "publish":
+                published_readbacks += 1
+                if published_readbacks == 1:
+                    meta = dict(snapshot["meta"])
+                    assert meta.pop("_ai_editor_publish_operation_id")
+                    return {**snapshot, "meta": meta}
+            return snapshot
+
         capsys.readouterr()
-        assert run_cli(cli_args) == 0
+        with monkeypatch.context() as readback_fault:
+            readback_fault.setattr(client_type, "get_post", first_publish_readback_without_operation)
+            assert run_cli(cli_args) == 0
+        assert published_readbacks == 3  # incomplete initial GET, limited recheck, final verification
+        readback_events = [
+            row for line in (case.root / "work" / "telemetry.jsonl").read_text().splitlines()
+            if (row := json.loads(line)).get("event") == "publish_readback" and row.get("post_id") == post_id
+        ]
+        assert [(row["attempt"], row["outcome"]) for row in readback_events] == [
+            (1, "operation_id_missing"), (2, "matched"),
+        ]
         first_window = json.loads(capsys.readouterr().out)
         assert first_window["published_new"] == 1
         assert first_window["published_reconciled"] == 0
@@ -980,6 +1007,7 @@ def test_credit_only_media_manifest_to_ready_and_idempotent(wordpress_e2e_case, 
             "publisher_cli_first_window_new": first_window["published_new"],
             "publisher_cli_second_window_published": second_window["published"],
             "publisher_operation_readback_confirmed": True,
+            "publisher_missing_operation_readback_recovered": True,
             "publisher_first_window_writes": len(positive_writes) - len(prior_writes[post_id]),
             "publisher_second_window_writes": 0,
             "publisher_negative_fixture_ids": sorted(negative_before),
