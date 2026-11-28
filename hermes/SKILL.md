@@ -49,7 +49,10 @@ final e os fatos preparados, grava `media.input.json` e informa
 A capa original do WordPress é preservada e só normalizada para WebP 1280×720.
 Nunca busque ou envie candidata de capa; se ausente, o post requer capa manual. `media_input.blocked_posts` indica uma falha local de layout,
 como divergência na contagem de itens ou falta de alvos seguros. Os outros posts
-seguem normalmente. Se `media_input.status=blocked`, não rode
+seguem normalmente. `media_input.partial_blocked` identifica posts com
+retomada não verificável; não regenere nem descarte o checkpoint para contornar
+o bloqueio. A retomada só de mídia reutiliza HTML e jogo do rascunho verificado.
+Se `media_input.status=blocked`, não rode
 busca de mídia; aplique o output original com `apply-batch` para registrar
 o bloqueio individual e deixar os demais seguirem. Não reescreva a entrada
 ou invente títulos de seção para forçar a busca. Em `credit_only`, matérias

@@ -211,7 +211,13 @@ and seo (title, meta_description and focus_keyword) must be populated and may
 not be null. Preserve official names, links, credits, embeds and factual
 uncertainty. When localization.required is false, keep the token-economy
 contract: those fields may be null and valid existing Portuguese fields may be
-preserved by the pipeline."""
+preserved by the pipeline.
+
+Exception for media_only_resume: the application has already verified the
+saved editorial body. Return cleaned_html=null and keep game_name from
+media_only_resume exactly, even if localization.required is true. Do not
+rewrite the body or ask to retry translation; the application will restore
+the verified body. Other title, SEO and relevance requirements still apply."""
 
 def _read_input(path: Path | str) -> tuple[str, list[dict[str, Any]], str]:
     source = Path(path)
@@ -400,6 +406,24 @@ def _normalize_output(
                 continue
             normalizations: list[str] = []
             relevance = editorial.get("site_relevance")
+            source = (source_facts or {}).get(post_id) or {}
+            media_resume = source.get("media_only_resume")
+            saved_html = source.get("cleaned_html")
+            preserve_media_resume = (
+                isinstance(relevance, dict)
+                and relevance.get("decision") == "process"
+                and isinstance(media_resume, dict)
+                and "game_name" in media_resume
+                and (media_resume["game_name"] is None or isinstance(media_resume["game_name"], str))
+                and isinstance(saved_html, str)
+                and bool(saved_html.strip())
+            )
+            if preserve_media_resume:
+                # Do not trust the model to reproduce byte-exact editorial
+                # fields. The media stage and apply independently recheck the
+                # binding on the full prepared envelope / live post.
+                editorial = {**editorial, "cleaned_html": saved_html, "game_name": media_resume["game_name"]}
+                normalizations.append("verified_media_resume_preserved")
             missing_game_for_trailer = (
                 isinstance(relevance, dict)
                 and relevance.get("decision") == "process"
@@ -407,8 +431,8 @@ def _normalize_output(
                 and "game_name" in editorial
                 and editorial["game_name"] is None
             )
-            if missing_game_for_trailer:
-                game_name = _explicit_source_game((source_facts or {}).get(post_id))
+            if missing_game_for_trailer and not preserve_media_resume:
+                game_name = _explicit_source_game(source)
                 if game_name is not None:
                     # Keep the article, drop the unverified URL, and let the
                     # deterministic stage discover a trailer for this identity.

@@ -185,6 +185,31 @@ class EditorialProviderTests(unittest.TestCase):
         assert result["results"][0]["retryable"] is True
         assert "localizacao_pt_br_incompleta" in result["results"][0]["reason"]
 
+    def test_english_media_only_resume_restores_verified_html_without_weakening_fresh_localization(self):
+        body = "<p>Rascunho em português já validado.</p>"
+        editorial = {
+            **_EDITORIAL,
+            "site_relevance": {"decision": "process", "confidence": 1.0, "reason": "dentro da pauta",
+                               "matched_topics": ["games"]},
+            "title": "O novo jogo",
+            "cleaned_html": None,
+            "seo": {"title": "O novo jogo", "meta_description": "a" * 130, "focus_keyword": "novo jogo"},
+            "game_name": "Different Game",
+        }
+        result = _normalize_output({
+            "batch_id": "batch-en",
+            "results": [{"post_id": i, "status": "ok", "editorial": editorial} for i in (1, 2)],
+        }, batch_id="batch-en", post_ids={1, 2}, min_confidence=0.8,
+            localization_requirements={1: True, 2: True},
+            source_facts={1: {"cleaned_html": body, "media_only_resume": {"game_name": None}}})
+        resume, fresh = result["results"]
+        self.assertEqual(resume["status"], "ok")
+        self.assertEqual(resume["editorial"]["cleaned_html"], body)
+        self.assertIsNone(resume["editorial"]["game_name"])
+        self.assertIn("verified_media_resume_preserved", resume["normalizations"])
+        self.assertEqual(fresh["status"], "needs_retry")
+        self.assertIn("localizacao_pt_br_incompleta: cleaned_html", fresh["reason"])
+
     def _run(self, root, retry_mode="", **kwargs):
         source = root / "editorial.input.json"
         source.write_text(json.dumps({

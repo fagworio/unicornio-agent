@@ -2565,6 +2565,7 @@ class WorkflowTests(unittest.TestCase):
             prepare_batch, resolve_batch_editorial_defaults,
         )
         from unicornio_editor.cli import _apply_editorial_batch
+        from unicornio_editor.editorial_provider import generate_editorial_batch
 
         paragraph = (
             "A notícia sobre videogame descreve detalhes do lançamento e novidades nos jogos. " * 5
@@ -2603,6 +2604,7 @@ class WorkflowTests(unittest.TestCase):
             post["content"]["raw"] = body
             client = Client(post)
             payload["cleaned_html"] = body
+            payload["game_name"] = "Videogame"
             existing = [accepted(1, 101), accepted(7, 102)]
             with mock.patch("unicornio_editor.workflow._execute_media_plan",
                             return_value=(existing, None, "")):
@@ -2647,11 +2649,59 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual(ledger_path.read_text(), old_ledger)
             prepared = prepare_batch(client, config, root, [42], batch_id="resume-workflow")
             self.assertEqual(prepared["prepared"], 1, prepared["items"])
-            editorial = {**payload, "cleaned_html": None}
-            request = build_media_resolve_batch_input({
+            source = Path(prepared["editorial_input"])
+            model_row = json.loads(source.read_text())["posts"][0]
+            self.assertEqual(model_row["media_only_resume"], {"game_name": "Videogame"})
+            self.assertNotIn("partial_resume", model_row)
+
+            # A manual/stale payload remains blocked and no stale media envelope survives.
+            proposed = {**payload, "cleaned_html": body + "\n", "game_name": "Different Game"}
+            incompatible = {
                 "batch_id": "resume-workflow",
-                "results": [{"post_id": 42, "status": "ok", "editorial": editorial}],
-            }, root)["posts"][0]
+                "results": [{"post_id": 42, "status": "ok", "editorial": proposed}],
+            }
+            stale = source.with_name("media.input.json")
+            stale.write_text("{}")
+            blocked = build_media_resolve_batch_input(incompatible, root)
+            self.assertEqual((blocked["status"], blocked["count"], blocked["path"]), ("blocked", 0, None))
+            self.assertEqual(blocked["partial_blocked"][0]["error_code"], "partial_resume_editorial_changed")
+            self.assertFalse(stale.exists())
+
+            other_context = {**model_row, "post_id": 43, "featured": {"action": "preserve"}}
+            other_context.pop("media_only_resume")
+            source.with_name("post-43.json").write_text(json.dumps(other_context))
+            mixed = build_media_resolve_batch_input({**incompatible, "results": [
+                *incompatible["results"], {"post_id": 43, "status": "ok", "editorial": payload},
+            ]}, root)
+            self.assertEqual(mixed["status"], "required")
+            self.assertEqual([row["post_id"] for row in mixed["posts"]], [43])
+            self.assertEqual(mixed["partial_blocked"], blocked["partial_blocked"])
+
+            model_response = json.dumps({"choices": [{
+                "message": {"content": json.dumps(incompatible)},
+            }]}).encode()
+            from io import BytesIO
+            with mock.patch("unicornio_editor.editorial_provider.urlopen", return_value=BytesIO(model_response)):
+                generated = generate_editorial_batch(
+                    source, api_key="local-fixture", base_url="https://unused.test/v1",
+                    model="fixture", root=root, emit_media_input=True,
+                )
+            editorial = json.loads(Path(generated["output"]).read_text())["results"][0]["editorial"]
+            self.assertEqual((editorial["cleaned_html"], editorial["game_name"]), (body, "Videogame"))
+            self.assertNotIn("partial_blocked", generated["media_input"])
+            request = generated["media_input"]["posts"][0]
+
+            # A WordPress change between prepare/generate and apply still invalidates the binding.
+            client.post["content"]["raw"] = body + "<p>Alteração real da fonte.</p>"
+            changed = resolve_batch_editorial_defaults(client, {
+                "schema_version": 1, "batch_id": "resume-workflow",
+                "items": [{"post_id": 42, "editorial": editorial}],
+            }, root=root, config=config)
+            self.assertEqual(changed["items"][0]["media_assembly_error"]["error_code"],
+                             "partial_resume_source_changed")
+            self.assertEqual(client.updated, before)
+            self.assertEqual(ledger_path.read_text(), old_ledger)
+            client.post["content"]["raw"] = body
 
             self.assertEqual(request["inline_deficit"], 2)
             self.assertEqual(request["needed"], 2)

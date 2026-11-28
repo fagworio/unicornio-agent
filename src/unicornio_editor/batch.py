@@ -482,7 +482,8 @@ def build_media_resolve_batch_input(
     if not requests:
         stale_input = directory / "media.input.json"
         stale_input.unlink(missing_ok=True)
-        return {"status": "blocked" if blocked_posts else "not_required", "path": None, "count": 0, "posts": [],
+        return {"status": "blocked" if blocked_posts or partial_blocked else "not_required",
+                "path": None, "count": 0, "posts": [],
                 **({"partial_blocked": partial_blocked} if partial_blocked else {}),
                 **({"blocked_posts": blocked_posts} if blocked_posts else {})}
     path = directory / "media.input.json"
@@ -1438,6 +1439,11 @@ def _model_facing_context(envelope: dict[str, Any]) -> dict[str, Any]:
     media stage.
     """
     context = {key: envelope[key] for key in _MODEL_FACING_KEYS if key in envelope}
+    # The prepared body is already projected above. Expose only its locked
+    # game identity, not the checkpoint, hashes or retained attachment rows.
+    resume = envelope.get("partial_resume")
+    if resume is not None:
+        context["media_only_resume"] = {"game_name": resume["binding"]["game_name"] or None}
     requirements = envelope.get("requirements") or {}
     media_stage = requirements.get("media_stage") or {}
     context["requirements"] = {
